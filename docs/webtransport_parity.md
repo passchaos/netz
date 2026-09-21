@@ -325,7 +325,15 @@ cancelled stream's MAX_STREAM_DATA window, and clear any stale pending stream
 credit. Every incremental, targeted, and whole-stream poll first sweeps all
 registered stopped receive directions, so an application waiting only on a
 sibling cannot leave connection credit trapped behind cancelled in-flight
-DATA. A terminal FIN marks the peer half closed and requests transport stream
+DATA. If the ACK carried beside STOP_SENDING is lost, an older associated-
+stream prefix can be retransmitted after that sweep has advanced QUIC's
+receive cursor. HTTP/3 request and response routing now retain that prefix with
+the detached WebTransport owner instead of reclassifying it as a fresh QPACK
+or unknown unidirectional stream and attempting to commit an older absolute
+offset. Deterministic router regressions cover both endpoint roles, while the
+real-handshake DATAGRAM waiter drops the first STOP_SENDING packet and
+completes only after recovery. A terminal FIN marks the peer half closed and
+requests transport stream
 retirement, while RESET_STREAM remains observable exactly once before
 reclamation. Because QUIC charges RESET_STREAM's complete final size even when
 reassembly still has gaps, that case settles the whole abandoned direction's

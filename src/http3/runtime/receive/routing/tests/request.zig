@@ -624,7 +624,7 @@ test "HTTP/3 request router retires drained unknown uni stream" {
     );
 }
 
-test "HTTP/3 request router preserves reordered WebTransport uni prefix" {
+test "HTTP/3 request router preserves reordered and consumed WebTransport uni prefix" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -719,6 +719,43 @@ test "HTTP/3 request router preserves reordered WebTransport uni prefix" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), stats.bytes_read);
     try std.testing.expectEqual(bytes.len, stats.available_bytes);
+
+    try connection.commitReceivedThrough(2, bytes.len);
+    const retransmitted = quic.Frame{ .stream = .{
+        .stream_id = 2,
+        .data = bytes[0..3],
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        2,
+        &.{retransmitted},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{retransmitted},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        .{ .slice = &.{} },
+        null,
+        &detached,
+    )) == null);
+    const retransmit_stats = connection.recvStreamStats(2) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, bytes.len), retransmit_stats.bytes_read);
+    try std.testing.expectEqual(@as(usize, 0), retransmit_stats.available_bytes);
+    try std.testing.expect(
+        qpack_decode.classifiedPeerUniStreamType(2) == null,
+    );
 }
 
 test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {

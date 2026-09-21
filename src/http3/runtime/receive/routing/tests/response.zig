@@ -605,7 +605,7 @@ test "HTTP/3 response router retires drained unknown uni stream" {
     );
 }
 
-test "HTTP/3 response router preserves reordered WebTransport uni prefix" {
+test "HTTP/3 response router preserves reordered and consumed WebTransport uni prefix" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -690,6 +690,35 @@ test "HTTP/3 response router preserves reordered WebTransport uni prefix" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), stats.bytes_read);
     try std.testing.expectEqual(bytes.len, stats.available_bytes);
+
+    // The detached WebTransport owner consumes the stream, then a lost ACK
+    // makes an older prefix arrive again. QUIC accepts the retransmission, and
+    // HTTP/3 must not reclassify it as a fresh unknown unidirectional stream or
+    // try to commit an absolute offset behind the receive cursor.
+    try connection.commitReceivedThrough(3, bytes.len);
+    const retransmitted = quic.Frame{ .stream = .{
+        .stream_id = 3,
+        .data = bytes[0..3],
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        2,
+        &.{retransmitted},
+        null,
+        .not_ect,
+    );
+    _ = try response_routing.routePacket(
+        &state,
+        endpoint.address(),
+        &.{retransmitted},
+    );
+    const retransmit_stats = connection.recvStreamStats(3) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, bytes.len), retransmit_stats.bytes_read);
+    try std.testing.expectEqual(@as(usize, 0), retransmit_stats.available_bytes);
+    try std.testing.expect(
+        qpack_decode.classifiedPeerUniStreamType(3) == null,
+    );
 }
 
 test "HTTP/3 response router preserves reset WebTransport uni stream" {

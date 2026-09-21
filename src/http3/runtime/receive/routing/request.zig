@@ -238,6 +238,7 @@ pub fn applyServerRequestPacketFrames(
         if (hasDetachedAssociation(detached_stream_id, detached_streams) and
             shouldPreserveDetachedUniStream(
                 request_id_validator,
+                qpack_decode,
                 frame.stream,
             ))
         {
@@ -484,6 +485,7 @@ fn shouldPreserveDetachedUniReset(
 
 fn shouldPreserveDetachedUniStream(
     request_id_validator: ServerRequestIdValidator,
+    qpack_decode: *QpackDecodeState,
     stream: quic.StreamFrame,
 ) bool {
     if ((stream.stream_id & 0x02) == 0) return false;
@@ -491,6 +493,16 @@ fn shouldPreserveDetachedUniStream(
         .connection => |value| value,
         .static_limit => return false,
     };
+    if (qpack_decode.classifiedPeerUniStreamType(stream.stream_id) != null) {
+        return false;
+    }
+    const stats = connection.recvStreamStats(stream.stream_id) orelse
+        return false;
+    // The WebTransport owner can have consumed this stream before a lost ACK
+    // causes an older STREAM range to be visited again. A nonzero transport
+    // cursor without a QPACK classification is durable ownership evidence;
+    // leave that retransmission with the detached session.
+    if (stats.bytes_read != 0) return true;
     const available = connection.availableReceivedStream(
         stream.stream_id,
     ) orelse return false;

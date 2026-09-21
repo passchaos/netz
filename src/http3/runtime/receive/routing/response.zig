@@ -142,6 +142,7 @@ pub fn routePacket(
             state.connection != null and
             shouldPreserveDetachedStream(
                 state.connection.?,
+                state.qpack_decode,
                 frame.reset_stream.stream_id,
                 state.request_lifecycle,
             ))
@@ -200,6 +201,7 @@ pub fn routePacket(
         if (hasDetachedAssociation(state.*) and state.connection != null and
             shouldPreserveDetachedStream(
                 state.connection.?,
+                state.qpack_decode,
                 frame.stream.stream_id,
                 state.request_lifecycle,
             ))
@@ -474,6 +476,7 @@ fn shouldPreserveDetachedUniReset(
 }
 fn shouldPreserveDetachedStream(
     connection: *quic.one_rtt.Connection,
+    qpack_decode: *QpackDecodeState,
     stream_id: u64,
     request_lifecycle: ?*const ClientRequestLifecycle,
 ) bool {
@@ -484,6 +487,18 @@ fn shouldPreserveDetachedStream(
         return !lifecycle.contains(bidi_stream_id) and
             !lifecycle.isFinished(bidi_stream_id);
     }
+    // A detached WebTransport owner can advance QUIC's receive cursor without
+    // ever registering this stream with QPACK. If an ACK carrying that
+    // progress is lost, a shorter retransmitted STREAM range is still visible
+    // to the packet visitor even though transport reassembly correctly retains
+    // no bytes below the cursor. Keep that duplicate with the detached owner:
+    // classifying it as a fresh unknown HTTP/3 uni stream would attempt to
+    // commit an older absolute offset and pollute QPACK stream state.
+    if (qpack_decode.classifiedPeerUniStreamType(stream_id) != null) {
+        return false;
+    }
+    const stats = connection.recvStreamStats(stream_id) orelse return false;
+    if (stats.bytes_read != 0) return true;
     const available = connection.availableReceivedStream(
         stream_id,
     ) orelse return false;
