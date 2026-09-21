@@ -106,6 +106,21 @@ pub const EnqueueOptions = struct {
     now: std.Io.Timestamp,
 };
 
+pub fn validatePublishForSession(
+    topic: []const u8,
+    payload: []const u8,
+    properties: []const mqtt.Property,
+) Error!void {
+    try mqtt.validateTopicName(topic);
+    try mqtt.validatePublishProperties(properties);
+    try validateQueuedPayload(properties, payload);
+    if (mqtt.topicAlias(properties) != null) {
+        // Alias mappings are scoped to a Network Connection and cannot be
+        // replayed from persistent Session State.
+        return error.InvalidProperty;
+    }
+}
+
 pub const PublishTransmission = struct {
     topic: []const u8,
     payload: []const u8,
@@ -1523,14 +1538,7 @@ pub const Store = struct {
         snapshot_changed: *bool,
     ) Error!EnqueueResult {
         snapshot_changed.* = false;
-        try mqtt.validateTopicName(topic);
-        try mqtt.validatePublishProperties(options.properties);
-        try validateQueuedPayload(options.properties, payload);
-        if (mqtt.topicAlias(options.properties) != null) {
-            // Alias mappings are scoped to a Network Connection and cannot be
-            // replayed from persistent Session State.
-            return error.InvalidProperty;
-        }
+        try validatePublishForSession(topic, payload, options.properties);
         const session = try self.getSession(handle);
         // Admission uses the current queue size, as Mosquitto does: the message
         // that reaches/crosses the threshold is retained, while later messages
@@ -1598,6 +1606,93 @@ pub const Store = struct {
         publish = undefined;
         snapshot_changed.* = true;
         return .queued;
+    }
+
+    /// Own one QoS 1/2 Application Message for immediate transmission and
+    /// return the exact Packet Identifier assigned to this call. Unlike the
+    /// general queue drain, this never selects an older replay or leaves the
+    /// new message hidden in the queue when the peer's Receive Maximum is
+    /// exhausted.
+    pub fn beginImmediatePublish(
+        self: *Store,
+        handle: Handle,
+        topic: []const u8,
+        payload: []const u8,
+        options: EnqueueOptions,
+        receive_maximum: u16,
+    ) Error!PublishTransmission {
+        if (options.qos == .at_most_once or receive_maximum == 0) {
+            return error.InvalidProperty;
+        }
+        try validatePublishForSession(topic, payload, options.properties);
+        const session = try self.getSession(handle);
+        _ = self.pruneExpiredPublishes(session, options.now.nanoseconds);
+        if (session.pending_qos0 != null or session.queued_count != 0) {
+            return error.InflightFull;
+        }
+        for (session.inflight.items) |maybe_inflight| {
+            const inflight = maybe_inflight orelse continue;
+            if (inflight.needs_send) return error.InflightFull;
+        }
+        if (countSentPublishInflight(session.*) >= receive_maximum or
+            session.inflight_count >= self.options.max_inflight_per_session or
+            inflightPayloadLimitReached(
+                self.options,
+                session.inflight_payload_bytes,
+            ))
+        {
+            return error.InflightFull;
+        }
+
+        var publish = try clonePublish(
+            self.allocator,
+            topic,
+            payload,
+            options.qos,
+            options.retain,
+            options.properties,
+            options.now.nanoseconds,
+        );
+        errdefer publish.deinit(self.allocator);
+        try self.ensureBytes(session, publish.allocation_bytes);
+        try session.packet_index.ensureUnusedCapacity(self.allocator, 1);
+        const append_needed: usize = @intFromBool(
+            countNullSlots(Inflight, session.inflight.items) == 0,
+        );
+        try session.inflight.ensureUnusedCapacity(
+            self.allocator,
+            append_needed,
+        );
+
+        const packet_id = try reservePacketId(session);
+        const inflight_index = appendOrReuseAssumeCapacity(
+            Inflight,
+            &session.inflight,
+            .{
+                .publish = publish,
+                .packet_id = packet_id,
+                .state = switch (options.qos) {
+                    .at_least_once => .await_puback,
+                    .exactly_once => .await_pubrec,
+                    .at_most_once => unreachable,
+                },
+                .needs_send = false,
+                .retransmission = false,
+            },
+        );
+        session.packet_index.putAssumeCapacityNoClobber(
+            packet_id,
+            inflight_index,
+        );
+        session.inflight_count += 1;
+        session.inflight_payload_bytes += publish.payload.len;
+        session.allocation_bytes += publish.allocation_bytes;
+        self.total_bytes += publish.allocation_bytes;
+        publish = undefined;
+        return publishTransmission(
+            session.inflight.items[inflight_index].?,
+            options.now.nanoseconds,
+        );
     }
 
     /// Emit all pending retransmissions that fit `out`, then move unsent

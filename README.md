@@ -747,7 +747,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   conditional Response Information, Request Problem Information filtering for server ACK/AUTH diagnostics, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   adaptive connection-local Packet Identifier tracking with independent
   incoming/outgoing sparse maps and bounded dense fallback for unusually large
-  inflight windows, and
+  inflight windows, plus reconnecting one-attempt publishes whose returned
+  Packet Identifier is transactionally bound to the submitted message without
+  hidden queue insertion when Receive Maximum is exhausted, and
   MQTT 5 Server Reference validation plus opt-in bounded, loop-detecting
   CONNACK redirects for TCP/TLS/WS/WSS with per-hop authorization and fresh
   TLS authority verification, and

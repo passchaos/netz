@@ -1975,7 +1975,17 @@ pub const Client = struct {
             });
             return .{ .packet_id = null };
         }
-        _ = try self.outgoing.enqueuePublish(
+        try session.validatePublishForSession(
+            topic,
+            payload,
+            options.properties,
+        );
+        // Drain older replay/queue work before this call takes ownership. The
+        // immediate Session operation below either reserves this exact message
+        // or leaves it unowned, so an unavailable Receive Maximum cannot leave
+        // an unreported duplicate queued behind the caller.
+        try self.replayPending();
+        const transmission = try self.outgoing.beginImmediatePublish(
             self.outgoing_handle,
             topic,
             payload,
@@ -1985,24 +1995,16 @@ pub const Client = struct {
                 .properties = options.properties,
                 .now = std.Io.Clock.awake.now(self.io),
             },
-        );
-        var transmission: [1]session.Transmission = undefined;
-        const selected = try self.outgoing.drainInto(
-            self.outgoing_handle,
-            std.Io.Clock.awake.now(self.io),
             active.max_outgoing_inflight,
-            &transmission,
         );
-        if (selected.len == 0 or selected[0] != .publish) {
-            return error.InflightFull;
-        }
-        const publish_value = selected[0].publish;
-        active.writeClientSessionTransmission(selected[0]) catch |err| {
+        const publish_value = transmission;
+        active.writeClientSessionTransmission(.{ .publish = transmission }) catch |err| {
             if (!retryableConnectError(err)) {
-                try self.outgoing.retryUnsentPublish(
+                const dropped = try self.outgoing.dropOutgoingPublish(
                     self.outgoing_handle,
                     publish_value.packet_id,
                 );
+                std.debug.assert(dropped == .dropped);
                 return err;
             }
             // The store already owns this packet. Disconnect marks the

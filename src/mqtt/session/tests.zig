@@ -1258,6 +1258,101 @@ test "session unsent publish retry remains first delivery" {
     try std.testing.expect(after_reconnect[0].publish.dup);
 }
 
+test "session immediate publish preserves caller identity transactionally" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{ .max_inflight_per_session = 2 });
+    defer store.deinit();
+    const opened = try store.open("immediate", false, 60, .zero);
+
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "older",
+        "queued",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    try std.testing.expectError(
+        error.InflightFull,
+        store.beginImmediatePublish(
+            opened.handle,
+            "new",
+            "message",
+            .{ .qos = .at_least_once, .now = .zero },
+            2,
+        ),
+    );
+    var stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 1), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 0), stats.inflight_count);
+
+    var output: [1]Transmission = undefined;
+    const older = try store.drainInto(opened.handle, .zero, 2, &output);
+    try std.testing.expectEqualStrings("older", older[0].publish.topic);
+    const immediate = try store.beginImmediatePublish(
+        opened.handle,
+        "new",
+        "message",
+        .{ .qos = .exactly_once, .now = .zero },
+        2,
+    );
+    try std.testing.expectEqualStrings("new", immediate.topic);
+    try std.testing.expectEqualStrings("message", immediate.payload);
+    try std.testing.expectEqual(mqtt.QoS.exactly_once, immediate.qos);
+    try std.testing.expectEqual(@as(?u32, null), immediate.message_expiry_interval);
+    try std.testing.expect(immediate.packet_id != older[0].publish.packet_id);
+    stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.inflight_count);
+
+    try std.testing.expectError(
+        error.InflightFull,
+        store.beginImmediatePublish(
+            opened.handle,
+            "blocked",
+            "not-owned",
+            .{ .qos = .at_least_once, .now = .zero },
+            2,
+        ),
+    );
+    stats = try store.stats(opened.handle);
+    try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
+    try std.testing.expectEqual(@as(usize, 2), stats.inflight_count);
+
+    _ = try store.handleAck(
+        opened.handle,
+        .puback,
+        older[0].publish.packet_id,
+        0,
+    );
+    _ = try store.handleAck(
+        opened.handle,
+        .pubrec,
+        immediate.packet_id,
+        0x80,
+    );
+    const expires_immediately = try store.beginImmediatePublish(
+        opened.handle,
+        "expires-now",
+        "wire-visible",
+        .{
+            .qos = .at_least_once,
+            .properties = &.{.{ .four_byte = .{
+                .id = .message_expiry_interval,
+                .value = 0,
+            } }},
+            .now = .zero,
+        },
+        2,
+    );
+    try std.testing.expectEqualStrings(
+        "expires-now",
+        expires_immediately.topic,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, 0),
+        expires_immediately.message_expiry_interval,
+    );
+}
+
 test "session limits preserve existing state" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{
@@ -1523,6 +1618,53 @@ test "session allocation failures leak nothing" {
         testSessionAllocationFailures,
         .{},
     );
+}
+
+test "session immediate publish allocation failures change no state" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testImmediatePublishAllocationFailures,
+        .{},
+    );
+}
+
+fn testImmediatePublishAllocationFailures(
+    allocator: std.mem.Allocator,
+) !void {
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("immediate-allocated", false, 60, .zero);
+    const result = store.beginImmediatePublish(
+        opened.handle,
+        "allocated/topic",
+        "payload",
+        .{
+            .qos = .exactly_once,
+            .properties = &.{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "key",
+                .value = "value",
+            } }},
+            .now = .zero,
+        },
+        2,
+    );
+    if (result) |transmission| {
+        try std.testing.expectEqualStrings(
+            "allocated/topic",
+            transmission.topic,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1),
+            (try store.stats(opened.handle)).inflight_count,
+        );
+    } else |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        const stats = try store.stats(opened.handle);
+        try std.testing.expectEqual(@as(usize, 0), stats.queued_count);
+        try std.testing.expectEqual(@as(usize, 0), stats.inflight_count);
+        return err;
+    }
 }
 
 fn testSessionAllocationFailures(allocator: std.mem.Allocator) !void {
