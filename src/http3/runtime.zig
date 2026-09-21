@@ -395,6 +395,16 @@ const sendProtectedHttp3Close =
 const messageStreamErrorCode = runtime_error.messageStreamErrorCode;
 const messageUsesDynamicQpack = buffered_common.messageUsesDynamicQpack;
 
+/// Close a stateful QUIC connection using the canonical RFC 9114/9204 mapping
+/// for a peer-originated HTTP/3 protocol failure. Local implementation and
+/// transport errors are deliberately ignored by the mapper.
+pub fn closeConnectionForProtocolError(
+    connection: *quic.one_rtt.Connection,
+    err: anyerror,
+) Error!void {
+    return closeConnectionForHttp3Error(connection, err);
+}
+
 fn sendProtectedFrames(
     endpoint: *quic.runtime.Endpoint,
     to: net.IpAddress,

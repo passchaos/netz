@@ -1671,6 +1671,69 @@ test "WebTransport session control parses split framed capsules and skips unknow
     }
 }
 
+test "WebTransport CONNECT control accepts DATA and skips unknown HTTP/3 frames" {
+    const control_module = @import("session_control.zig");
+    var drain_storage: [16]u8 = undefined;
+    const drain = try control_module.writeDrainInto(&drain_storage);
+    var encoded: [64]u8 = undefined;
+    var len: usize = 0;
+
+    const extension_type = try quic.varint.encodeInto(encoded[len..], 0x21);
+    len += extension_type.len;
+    const extension_length = try quic.varint.encodeInto(encoded[len..], 2);
+    len += extension_length.len;
+    encoded[len..][0..2].* = .{ 0xff, 0xff };
+    len += 2;
+    const data_type = try quic.varint.encodeInto(
+        encoded[len..],
+        http3.FrameType.data,
+    );
+    len += data_type.len;
+    const data_length = try quic.varint.encodeInto(encoded[len..], drain.len);
+    len += data_length.len;
+    @memcpy(encoded[len..][0..drain.len], drain);
+    len += drain.len;
+
+    var control = try control_module.Control.init(.init(0));
+    const event = (try control.feed(encoded[0..len])).?;
+    try std.testing.expect(event == .draining);
+}
+
+test "WebTransport CONNECT control rejects forbidden HTTP/3 frame types" {
+    const control_module = @import("session_control.zig");
+    const forbidden = [_]u64{
+        http3.FrameType.headers,
+        http3.FrameType.cancel_push,
+        http3.FrameType.settings,
+        http3.FrameType.push_promise,
+        http3.FrameType.goaway,
+        http3.FrameType.origin,
+        http3.FrameType.max_push_id,
+        http3.FrameType.priority_update_request,
+        http3.FrameType.priority_update_push,
+        http3.FrameType.webtransport_stream,
+        0x02,
+        0x06,
+        0x08,
+        0x09,
+    };
+
+    for (forbidden) |frame_type| {
+        var encoded: [8]u8 = undefined;
+        const frame = try quic.varint.encodeInto(&encoded, frame_type);
+        var control = try control_module.Control.init(.init(0));
+        if (frame.len > 1) {
+            try std.testing.expect(
+                (try control.feed(frame[0 .. frame.len - 1])) == null,
+            );
+        }
+        try std.testing.expectError(
+            error.UnexpectedFrame,
+            control.feed(frame[frame.len - 1 ..]),
+        );
+    }
+}
+
 test "Protected session control retains close after drain event" {
     const protected =
         @import("protected_session_control.zig");

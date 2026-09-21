@@ -199,3 +199,125 @@ test "WebTransport peer connection close can be polled after packet dispatch" {
         .transport => return error.UnexpectedConnectionClose,
     }
 }
+
+test "WebTransport forbidden CONNECT frame closes the HTTP/3 connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xc8} ** quic.protection.secret_len,
+    );
+    var transport_parameters = quic.practical_transport_parameters;
+    transport_parameters.max_datagram_frame_size = 1200;
+    const settings = webtransport.defaultSettings(.{});
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server_endpoint.deinit();
+    var peer_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer peer_endpoint.deinit();
+    var h3 = try http3.runtime.HandshakeServerSession.initPreconfigured(
+        &server_endpoint,
+        peer_endpoint.address(),
+        .{ .local_settings = settings },
+        .{
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "wt-frame-server",
+            .peer_connection_id = "wt-frame-client",
+            .local_transport_parameters = transport_parameters,
+            .peer_transport_parameters = transport_parameters,
+            .one_rtt = .{ .enable_pacing = false },
+        },
+    );
+    var h3_owned = true;
+    defer if (h3_owned) h3.deinit();
+    h3.control.settings.markSent(settings);
+    h3.control.settings.markReceived(settings);
+    try h3.connect_datagrams.register(0);
+    var streams = try handshake_stream.initRegistry(
+        allocator,
+        .init(0),
+        .server,
+        settings,
+        settings,
+        8,
+        null,
+        null,
+    );
+    var streams_owned = true;
+    defer if (streams_owned) streams.deinit();
+    var session = runtime.AcceptedHandshakeSession{
+        .h3 = h3,
+        .request = undefined,
+        .session_id = .init(0),
+        .streams = streams,
+        .control = try session_control.Control.init(.init(0)),
+    };
+    h3_owned = false;
+    streams_owned = false;
+    defer {
+        session.streams.deinit();
+        session.h3.deinit();
+    }
+    var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
+        .peer = server_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-frame-client",
+        .peer_connection_id = "wt-frame-server",
+        .enable_pacing = false,
+    });
+    defer peer.deinit();
+
+    // HEADERS is forbidden after a successful Extended CONNECT. Inject its
+    // zero-length HTTP/3 frame on the detached request stream.
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &session.h3.established.connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = &.{ http3.FrameType.headers, 0 },
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expectError(
+        error.UnexpectedFrame,
+        session.pollSessionEvent(),
+    );
+
+    var close_packet = try peer.receivePacketTimeout(.{
+        .duration = .{
+            .clock = .awake,
+            .raw = .fromSeconds(1),
+        },
+    });
+    defer close_packet.deinit(allocator);
+    var saw_close = false;
+    for (close_packet.frames) |frame| switch (frame) {
+        .application_close => |close| {
+            try std.testing.expectEqual(
+                @as(u64, http3.ApplicationErrorCode.frame_unexpected),
+                close.error_code,
+            );
+            try std.testing.expectEqualStrings(
+                "http3-frame-unexpected",
+                close.reason_phrase,
+            );
+            saw_close = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(saw_close);
+}

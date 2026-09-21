@@ -133,7 +133,7 @@ WebTransport DATAGRAM round trip and transport statistics.
 | DATAGRAM | Dev, protected, real-handshake, batch receive, payload budget/stats | Codec/session counters | Production send/receive |
 | Bidirectional streams | Real-handshake and stateful preconfigured-key open/send, reverse direction, whole-FIN compatibility receive plus caller-buffer incremental and stream-ID-targeted reads, reset/stop, lifecycle/limits and per-send-stream priority; the cleartext development runtime also supports both initiators, reverse-direction data, fragmented modern `0x41` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone stateful sessions expose timeout/deadline-bounded opens, sends, packet writes, FIN, RESET_STREAM, and STOP_SENDING backed by QUIC credit/recovery; bounded batch writes select higher-priority streams first with stable equal-priority order; a concurrent sibling survives cancellation loss in external interop | Session registry and old-draft prefix codec | Production async bidi streams with read/reset/stop and Quinn-backed send priority; interoperates with netz while another stream is being cancelled |
 | Unidirectional streams | Real-handshake and stateful preconfigured-key operation in both directions, incremental and stream-ID-targeted reads, mapped reset/stop, lifecycle/limits and send priority; the cleartext development runtime supports both initiators, fragmented `0x54` association, coordinated IDs, per-session limits, and timeout/deadline-bounded whole-FIN receive; standalone stateful sessions expose bounded open/send/write/FIN/reset/stop operations; a deterministic preconfigured-key regression drops the first associated-stream datagram and requires cross-stream reorder plus exact recovery, while external interop drops netz's first STOP_SENDING and requires exact-code peer observation | Session registry and header codec | Production async uni streams with read/reset/stop and send priority; exact mapped codes are verified against netz |
-| Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; real-handshake SESSION_GONE stream cleanup; Chrome consumes netz DRAIN before an exactly validated WebTransport CLOSE, while native wtransport consumes DRAIN before a separately validated QUIC application close | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN before the following terminal event |
+| Close/drain capsule codec | Real-handshake and protected runtime send/receive, split frame/capsule parsing, clean-FIN close and UTF-8/1024-byte validation; detached successful CONNECT streams accept DATA and unknown extension frames but reject known forbidden and HTTP/2-reserved frame types with connection-level H3_FRAME_UNEXPECTED; real-handshake SESSION_GONE stream cleanup; Chrome consumes netz DRAIN before an exactly validated WebTransport CLOSE, while native wtransport consumes DRAIN before a separately validated QUIC application close | Close codec/state; audited session helper handles close/drain but accepts bare capsule fallback | Session close lifecycle; current driver has no DRAIN API/event, but its unknown-capsule path interoperably skips netz DRAIN before the following terminal event |
 | Stream association wire format | Modern `0x41` frame type + Session ID; uni `0x54` + Session ID | Audited code writes only Session ID for bidi streams | Modern `0x41` + Session ID and `0x54` + Session ID |
 
 The cleartext development client/server now keep the Extended CONNECT request
@@ -157,9 +157,14 @@ both the first association prefix plus payload and later payload-only writes.
 An ambiguous visible-prefix failure retires only that stream in the
 WebTransport registry, leaving sibling streams usable; zero-attempt timeout
 leaves the prefix flag, byte count, and FIN state unchanged. Partial HTTP/3
-frames and partial capsules remain resumable
-after timeout, malformed control capsules cancel the CONNECT stream with
-H3_MESSAGE_ERROR, and server receive routing includes the peer address so two
+frames and partial capsules remain resumable after timeout. Malformed control
+capsules cancel the CONNECT stream with H3_MESSAGE_ERROR, while a known
+non-DATA frame after successful CONNECT closes the connection with
+H3_FRAME_UNEXPECTED. Unknown extension/grease frames are still skipped as
+required by HTTP/3. Parser tests cover every known forbidden type and all four
+HTTP/2-reserved code points; a stateful QUIC regression also observes the exact
+application close code and reason on the peer. Server receive routing includes
+the peer address so two
 development clients may independently use request stream zero. Associated
 bidirectional and unidirectional streams now use the same packet pump, modern
 `0x41 + Session ID` / `0x54 + Session ID` prefixes, peer-and-session routing,

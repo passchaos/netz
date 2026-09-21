@@ -3332,7 +3332,13 @@ pub const EndpointServer = struct {
                 error.CongestionLimited,
                 error.FlowControlBlocked,
                 => return null,
-                else => return err,
+                else => {
+                    try http3.runtime.closeConnectionForProtocolError(
+                        &target.h3.established.connection,
+                        err,
+                    );
+                    return err;
+                },
             };
             if (control_event) |event| {
                 try finishEndpointSessionEvent(target, event);
@@ -5911,7 +5917,13 @@ pub const AcceptedHandshakeSession = struct {
                     );
                     return err;
                 },
-                else => return err,
+                else => {
+                    try http3.runtime.closeConnectionForProtocolError(
+                        &self.h3.established.connection,
+                        err,
+                    );
+                    return err;
+                },
             };
         }
         const event = self.pending_session_event orelse return null;
@@ -6273,7 +6285,13 @@ pub const AcceptedHandshakeSession = struct {
                     );
                     return err;
                 },
-                else => return err,
+                else => {
+                    try http3.runtime.closeConnectionForProtocolError(
+                        &self.h3.established.connection,
+                        err,
+                    );
+                    return err;
+                },
             };
         }
         const event = self.pending_session_event orelse return null;
@@ -9776,7 +9794,13 @@ pub const HandshakeClientSession = struct {
                         );
                         return err;
                     },
-                    else => return err,
+                    else => {
+                        try http3.runtime.closeConnectionForProtocolError(
+                            &self.h3.established.connection,
+                            err,
+                        );
+                        return err;
+                    },
                 };
             }
             const event = self.pending_session_event orelse return null;
@@ -9838,7 +9862,13 @@ pub const HandshakeClientSession = struct {
                     );
                     return err;
                 },
-                else => return err,
+                else => {
+                    try http3.runtime.closeConnectionForProtocolError(
+                        &self.h3.established.connection,
+                        err,
+                    );
+                    return err;
+                },
             };
         }
         const event = self.pending_session_event orelse return null;
@@ -9942,7 +9972,13 @@ pub const HandshakeClientSession = struct {
                     };
                     return err;
                 },
-                else => return err,
+                else => {
+                    try http3.runtime.closeConnectionForProtocolError(
+                        &self.h3.established.connection,
+                        err,
+                    );
+                    return err;
+                },
             };
             if (event) |value| {
                 if (value == .closed and !self.control.local_close_sent) {

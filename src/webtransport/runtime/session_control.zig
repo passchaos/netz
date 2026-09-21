@@ -262,6 +262,9 @@ pub const Control = struct {
                 .frame_type => {
                     const frame_type = self.h3_varint.feed(byte) orelse
                         continue;
+                    if (forbiddenConnectStreamFrame(frame_type)) {
+                        return error.UnexpectedFrame;
+                    }
                     self.h3_frame_type = frame_type;
                     self.h3_stage = .frame_length;
                 },
@@ -450,6 +453,31 @@ pub const Control = struct {
             self.capsule_varint.len == 0;
     }
 };
+
+/// A successful Extended CONNECT remains an HTTP/3 request stream. RFC 9114
+/// permits DATA plus extension frames explicitly allowed for that stream; all
+/// other known HTTP/3 frame types, and the reserved HTTP/2 code points, are a
+/// connection error. Unknown extension/grease frames remain ignorable.
+fn forbiddenConnectStreamFrame(frame_type: u64) bool {
+    return switch (frame_type) {
+        http3.FrameType.headers,
+        http3.FrameType.cancel_push,
+        http3.FrameType.settings,
+        http3.FrameType.push_promise,
+        http3.FrameType.goaway,
+        http3.FrameType.origin,
+        http3.FrameType.max_push_id,
+        http3.FrameType.priority_update_request,
+        http3.FrameType.priority_update_push,
+        http3.FrameType.webtransport_stream,
+        0x02,
+        0x06,
+        0x08,
+        0x09,
+        => true,
+        else => false,
+    };
+}
 
 pub fn writeDrainInto(out: []u8) Error![]u8 {
     return http3.capsule.writeInto(
