@@ -826,35 +826,43 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
         0x00,
         0x00,
     };
-    const request = quic.Frame{ .stream = .{
+    const request_suffix = quic.Frame{ .stream = .{
         .stream_id = 8,
-        .data = &request_bytes,
+        .offset = 1,
+        .data = request_bytes[1..],
         .fin = true,
     } };
-    try quic.one_rtt.testing.applyReceivedFrames(
-        &connection,
-        2,
-        &.{request},
-        null,
-        .not_ect,
-    );
-    try std.testing.expect((try request_routing
-        .applyServerRequestPacketFrames(
-        endpoint.address(),
-        &.{request},
-        allocator,
-        &control,
-        &qpack_decode,
-        &qpack_encode,
-        0,
-        &buffered,
-        &streaming,
-        &lifecycle,
-        .{ .connection = &connection },
-        .{ .slice = &.{} },
-        null,
-        &detached,
-    )) == null);
+    const request_first = quic.Frame{ .stream = .{
+        .stream_id = 8,
+        .data = request_bytes[0..1],
+    } };
+    for ([_]quic.Frame{ request_suffix, request_first }, 2..) |frame, packet_number| {
+        try quic.one_rtt.testing.applyReceivedFrames(
+            &connection,
+            packet_number,
+            &.{frame},
+            null,
+            .not_ect,
+        );
+        try std.testing.expect((try request_routing
+            .applyServerRequestPacketFrames(
+            endpoint.address(),
+            &.{frame},
+            allocator,
+            &control,
+            &qpack_decode,
+            &qpack_encode,
+            0,
+            &buffered,
+            &streaming,
+            &lifecycle,
+            .{ .connection = &connection },
+            .{ .slice = &.{} },
+            null,
+            &detached,
+        )) == null);
+        try std.testing.expectEqual(packet_number == 3, buffered.contains(8));
+    }
     try std.testing.expect(buffered.contains(8));
 }
 
