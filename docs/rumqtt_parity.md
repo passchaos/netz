@@ -1486,7 +1486,20 @@ awake-clock absolute deadline while still shortening individual waits for
 Keep Alive and shutdown checks; neither mechanism renews the application
 budget. Partial TCP/TLS/WebSocket packets and packets queued during PING remain
 resumable after timeout; TLS packet transports now retain their own fixed-header
-and payload progress instead of relying on stack-local framing state. Every
+and payload progress instead of relying on stack-local framing state.
+Reconnect clients can also encode and transactionally restore an identity-
+bound Session snapshot while no Network Connection is active. The versioned
+CRC envelope binds protocol and Client ID, deducts wall-clock downtime from
+Message Expiry, restores outgoing QoS 1/2 at the exact PUBLISH/PUBREL stage,
+and preserves deferred inbound QoS 2 `await_pubrel`/`release_pending` markers.
+Decode uses a temporary one-Session store and swaps only after full validation;
+online clients, transient CONNECT configurations, non-empty destination state,
+foreign identities, trailing bytes, and corrupt checksums fail without
+changing the current Session. Durable file replacement remains a higher-level
+coordinator responsibility so an outbound bridge can atomically compose both
+broker legs with its own transaction record. Cross-broker QoS 2 remains gated
+until that coordinator is implemented rather than being mislabeled exactly-once.
+Every
 public MQTT connection-level absolute-deadline entry point validates the
 awake-clock domain before sending PINGREQ, consuming a queued event, or reading
 transport bytes, so a mismatched timestamp cannot mutate protocol state. Current

@@ -15,6 +15,7 @@ const command_queue = @import("reconnect/command_queue.zig");
 const event_queue = @import("reconnect/event_queue.zig");
 const delivery_queue = @import("reconnect/delivery_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
+const session_snapshot = @import("reconnect/snapshot.zig");
 const reconnect_target = @import("reconnect/target.zig");
 
 const net = std.Io.net;
@@ -38,6 +39,12 @@ pub const Error = runtime.Error || session.Error || error{
     SubscriptionRefused,
     OwnedPropertyLimitExceeded,
     ManualAcknowledgementsDisabled,
+};
+
+pub const SessionSnapshotError = session_snapshot.Error || error{
+    SnapshotBusy,
+    SessionPersistenceDisabled,
+    SessionStateNotEmpty,
 };
 
 const OptionsError = mqtt.Error || std.mem.Allocator.Error ||
@@ -1373,11 +1380,10 @@ pub const Client = struct {
         if (options.client_id.len == 0) return error.InvalidClientId;
         var owned_options = try OwnedConnectOptions.init(allocator, options);
         errdefer owned_options.deinit(allocator);
-        var outgoing = session.Store.init(allocator, .{
-            .max_sessions = 1,
-            .max_queued_per_session = std.math.maxInt(u16),
-            .max_inflight_per_session = std.math.maxInt(u16),
-        });
+        var outgoing = session.Store.init(
+            allocator,
+            reconnectSessionOptions(),
+        );
         errdefer outgoing.deinit();
         const opened = try outgoing.open(
             owned_options.value.client_id,
@@ -1615,6 +1621,91 @@ pub const Client = struct {
 
     pub fn outgoingStats(self: *Client) Error!session.Stats {
         return self.outgoing.stats(self.outgoing_handle);
+    }
+
+    /// Append an identity-bound snapshot of this client's durable MQTT Session
+    /// state. The reconnect transport must be offline so no concurrent ACK or
+    /// socket write can race the snapshot. File replacement, fsync, and atomic
+    /// composition with higher-level coordinator state remain caller policy.
+    pub fn writeSessionSnapshot(
+        self: *Client,
+        out: *std.ArrayList(u8),
+    ) SessionSnapshotError!void {
+        return self.writeSessionSnapshotAt(
+            out,
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
+        );
+    }
+
+    pub fn writeSessionSnapshotAt(
+        self: *Client,
+        out: *std.ArrayList(u8),
+        monotonic_now: std.Io.Timestamp,
+        realtime_now: std.Io.Timestamp,
+    ) SessionSnapshotError!void {
+        if (self.connection_state != null) return error.SnapshotBusy;
+        if (!configuredPersistentSession(self.options.value)) {
+            return error.SessionPersistenceDisabled;
+        }
+        return session_snapshot.encode(
+            &self.outgoing,
+            self.outgoing_handle,
+            self.options.value.protocol,
+            self.options.value.client_id,
+            out,
+            self.allocator,
+            monotonic_now,
+            realtime_now,
+        );
+    }
+
+    /// Transactionally replace an empty offline reconnect Session from a
+    /// snapshot written by `writeSessionSnapshot`. Protocol and Client ID are
+    /// validated by the envelope before the temporary Store is swapped in.
+    /// The next successful CONNACK must report Session Present before any
+    /// restored Packet Identifier can be replayed; a fresh Session discards it
+    /// through the existing reconnect path.
+    pub fn restoreSessionSnapshot(
+        self: *Client,
+        bytes: []const u8,
+    ) SessionSnapshotError!void {
+        return self.restoreSessionSnapshotAt(
+            bytes,
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
+        );
+    }
+
+    pub fn restoreSessionSnapshotAt(
+        self: *Client,
+        bytes: []const u8,
+        monotonic_now: std.Io.Timestamp,
+        realtime_now: std.Io.Timestamp,
+    ) SessionSnapshotError!void {
+        if (self.connection_state != null) return error.SnapshotBusy;
+        if (!configuredPersistentSession(self.options.value)) {
+            return error.SessionPersistenceDisabled;
+        }
+        const current = try self.outgoing.stats(self.outgoing_handle);
+        if (current.subscription_count != 0 or current.queued_count != 0 or
+            current.inflight_count != 0 or current.incoming_qos2_count != 0)
+        {
+            return error.SessionStateNotEmpty;
+        }
+        var restored = try session_snapshot.decode(
+            self.allocator,
+            bytes,
+            reconnectSessionOptions(),
+            self.options.value.protocol,
+            self.options.value.client_id,
+            monotonic_now,
+            realtime_now,
+        );
+        defer restored.deinit();
+        self.outgoing.swap(&restored.store);
+        self.outgoing_handle = restored.handle;
+        self.outgoing_open = false;
     }
 
     pub fn subscriptionCount(self: *const Client) usize {
@@ -2463,11 +2554,10 @@ pub const Client = struct {
 
     fn resetOutgoingState(self: *Client) Error!void {
         self.outgoing.deinit();
-        self.outgoing = session.Store.init(self.allocator, .{
-            .max_sessions = 1,
-            .max_queued_per_session = std.math.maxInt(u16),
-            .max_inflight_per_session = std.math.maxInt(u16),
-        });
+        self.outgoing = session.Store.init(
+            self.allocator,
+            reconnectSessionOptions(),
+        );
         const opened = try self.outgoing.open(
             self.options.value.client_id,
             false,
@@ -3019,6 +3109,22 @@ pub const Client = struct {
         removed.deinit(self.allocator);
     }
 };
+
+fn reconnectSessionOptions() session.Options {
+    return .{
+        .max_sessions = 1,
+        .max_queued_per_session = std.math.maxInt(u16),
+        .max_inflight_per_session = std.math.maxInt(u16),
+    };
+}
+
+fn configuredPersistentSession(options: runtime.ConnectOptions) bool {
+    if (options.clean_start) return false;
+    return switch (options.protocol) {
+        .v3_1_1 => true,
+        .v5 => (mqtt.sessionExpiryInterval(options.properties) orelse 0) != 0,
+    };
+}
 
 fn firstSubscriptionIndex(
     subscriptions: []const mqtt.Subscription,

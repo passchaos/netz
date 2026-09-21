@@ -2154,6 +2154,96 @@ pub const Store = struct {
         return session.incoming_qos2.get(packet_id);
     }
 
+    /// Encode reconnect-client inbound QoS 2 protocol markers separately from
+    /// the broker Session snapshot. Broker persistence owns the corresponding
+    /// Application Messages in its dedicated pending-QoS2 store; standalone
+    /// reconnect clients need only these compact receive phases.
+    pub fn writeIncomingQoS2Snapshot(
+        self: *Store,
+        handle: Handle,
+        out: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+    ) (Error || persistence.Error)!void {
+        const target = try self.getSession(handle);
+        const transaction_count = target.incoming_qos2.count();
+        if (transaction_count > std.math.maxInt(u32)) {
+            return error.SnapshotLimitExceeded;
+        }
+        try persistence.appendInt(
+            out,
+            allocator,
+            u32,
+            @intCast(transaction_count),
+        );
+        const Transaction = struct {
+            packet_id: u16,
+            state: IncomingQoS2State,
+
+            fn lessThan(_: void, left: @This(), right: @This()) bool {
+                return left.packet_id < right.packet_id;
+            }
+        };
+        const transactions = try allocator.alloc(Transaction, transaction_count);
+        defer allocator.free(transactions);
+        var index: usize = 0;
+        var iterator = target.incoming_qos2.iterator();
+        while (iterator.next()) |entry| {
+            transactions[index] = .{
+                .packet_id = entry.key_ptr.*,
+                .state = entry.value_ptr.*,
+            };
+            index += 1;
+        }
+        std.mem.sort(Transaction, transactions, {}, Transaction.lessThan);
+        for (transactions) |transaction| {
+            try persistence.appendInt(
+                out,
+                allocator,
+                u16,
+                transaction.packet_id,
+            );
+            try persistence.appendInt(
+                out,
+                allocator,
+                u8,
+                @intFromEnum(transaction.state),
+            );
+        }
+    }
+
+    /// Restore a complete reconnect-client inbound QoS 2 marker section. The
+    /// caller decodes into a temporary Store, so a later error can discard the
+    /// partially built map without mutating live reconnect state.
+    pub fn restoreIncomingQoS2Snapshot(
+        self: *Store,
+        handle: Handle,
+        cursor: *persistence.Cursor,
+    ) (Error || persistence.Error)!void {
+        const target = try self.getSession(handle);
+        const transaction_count = try cursor.readInt(u32);
+        if (transaction_count > self.options.max_incoming_qos2_per_session) {
+            return error.IncomingQoS2Full;
+        }
+        try target.incoming_qos2.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(transaction_count),
+        );
+        for (0..transaction_count) |_| {
+            const packet_id = try cursor.readInt(u16);
+            if (packet_id == 0 or target.incoming_qos2.contains(packet_id)) {
+                return error.CorruptSnapshot;
+            }
+            const state = std.enums.fromInt(
+                IncomingQoS2State,
+                try cursor.readInt(u8),
+            ) orelse return error.CorruptSnapshot;
+            target.incoming_qos2.putAssumeCapacityNoClobber(
+                packet_id,
+                state,
+            );
+        }
+    }
+
     /// Mark that PUBREL has authorized application release. Repeated PUBREL
     /// keeps the same phase so a failed idempotent release can be retried by a
     /// later event without creating a second protocol transaction.
