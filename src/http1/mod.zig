@@ -882,6 +882,35 @@ pub fn parseTrailerFields(
     };
 }
 
+/// Validate a trailer field block without retaining its fields. This is used
+/// by borrowed aggregate paths that must enforce the same syntax, count, and
+/// forbidden-name policy without allocating descriptor or unfolded-value
+/// storage.
+pub fn validateTrailerFields(
+    bytes: []const u8,
+    options: ParseOptions,
+) Error!void {
+    var count: usize = 0;
+    var lines = std.mem.splitSequence(u8, bytes, "\r\n");
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (line[0] == ' ' or line[0] == '\t') {
+            if (!options.allow_obs_fold or count == 0) {
+                return error.MalformedHeader;
+            }
+            const continuation = wire.trimOws(line);
+            try validateHeaderValue(continuation);
+            continue;
+        }
+        const trailer = try parseHeaderLine(line, false);
+        if (count >= options.max_headers) return error.TooManyHeaders;
+        if (!validTrailerFieldName(trailer.name)) {
+            return error.InvalidTrailer;
+        }
+        count += 1;
+    }
+}
+
 fn parseHeaderLinesNoFold(
     allocator: std.mem.Allocator,
     lines: std.mem.SplitIterator(u8, .sequence),

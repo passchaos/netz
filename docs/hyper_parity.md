@@ -170,8 +170,13 @@ benchmark response:
   automatic `100 Continue`; pooled leases therefore discard failed sockets.
   Deterministic tests expose four-byte socket-visible prefixes before failure,
   while invalid Content-Length preflight remains retryable without any write;
-- `Connection.readRequestBatchInto` parses request heads and bodies into caller
-  storage, borrows one receive buffer and consumes its prefix once per batch;
+- `Connection.readRequestBatchInto` parses request heads and fixed or chunked
+  bodies into caller storage, borrows one receive buffer and consumes its
+  prefix once per batch. It validates the complete batch before mutation, then
+  strips chunk framing in place and compacts the pipelined suffix without a
+  body allocation. Trailer syntax/count/forbidden-name rules are enforced,
+  while the intentionally trailer-less borrowed result discards trailer
+  metadata;
 - borrowed head parsing scans CRLF-delimited lines once instead of first
   scanning for CRLFCRLF and then rescanning every header line.
 - strict header-line parsing now combines colon discovery with RFC token
@@ -294,9 +299,17 @@ incremental check; the unbuffered adapter retains one-byte reads until it
 discovers the exact message boundary. Pure decoding, aggregate framing, and
 streaming-reader regressions cover the complete-line case.
 
-The batch read path intentionally rejects chunked bodies because their complete
-wire boundary requires body parsing; existing owned request APIs remain the
-general path.
+The batch read path uses the same chunk wire scanner as aggregate reads, then
+decodes only after every requested message and trailer block validates. Mixed
+fixed/chunked pipelines, empty chunked bodies, extensions, trailers, TE+CL
+terminal-request handling, and pipelined-suffix preservation are covered. Its
+returned `consumed` length names the compacted prefix rather than the original
+wire length, so the existing one-call `consumeRequestBatch` contract remains
+valid. Because this borrowed API has no trailer output storage, valid trailer
+fields are checked and discarded; callers that need them use the owned or
+streaming request APIs. Aggregate chunk scanning also caps retained wire
+framing relative to the decoded body budget, preventing many legal-size chunk
+lines from amplifying a small body limit into unbounded buffering.
 
 The pipeline benchmark accepts `--large-body` (16 × 64 KiB responses) to cover
 the borrowed-body branch. Three CPU-0-pinned ReleaseFast runs completed at

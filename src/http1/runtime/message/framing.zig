@@ -31,12 +31,12 @@ pub fn messageTargetLength(
     switch (try transferEncodingState(head)) {
         .none => {},
         .chunked => {
-            const wire_len = try chunkedWireLength(
+            const layout = try chunkedBodyLayout(
                 bytes[body_start..],
                 max_head_bytes,
                 max_body_bytes,
             );
-            return std.math.add(usize, body_start, wire_len) catch
+            return std.math.add(usize, body_start, layout.wire_len) catch
                 return error.BodyTooLarge;
         },
         .non_chunked => {
@@ -229,14 +229,48 @@ fn requestHeadHasBody(head: []const u8) bool {
     return false;
 }
 
-fn chunkedWireLength(
+pub const ChunkedBodyLayout = struct {
+    wire_len: usize,
+    decoded_len: usize,
+    trailer_start: usize,
+    trailer_fields_len: usize,
+};
+
+/// Maximum aggregate wire bytes retained for a chunk-coded body. A peer may
+/// encode every payload byte as a one-byte chunk (six wire bytes including
+/// framing); one shared line allowance covers extensions, leading zeroes, and
+/// LWS, while trailers retain their independent head-sized budget.
+pub fn maxChunkedWireBytes(
+    max_head_bytes: usize,
+    max_body_bytes: usize,
+) usize {
+    const chunk_bytes = std.math.mul(usize, max_body_bytes, 6) catch
+        return std.math.maxInt(usize);
+    const with_line_allowance = std.math.add(
+        usize,
+        chunk_bytes,
+        http1.max_chunk_size_line_bytes + 3,
+    ) catch return std.math.maxInt(usize);
+    return std.math.add(usize, with_line_allowance, max_head_bytes) catch
+        std.math.maxInt(usize);
+}
+
+/// Validate one chunk-coded body and report the wire and decoded boundaries.
+/// Trailer field syntax is deliberately left to the message parser because
+/// its compatibility policy is supplied separately from framing limits.
+pub fn chunkedBodyLayout(
     body: []const u8,
     max_head_bytes: usize,
     max_body_bytes: usize,
-) Error!usize {
+) Error!ChunkedBodyLayout {
+    const max_wire_bytes = maxChunkedWireBytes(
+        max_head_bytes,
+        max_body_bytes,
+    );
     var pos: usize = 0;
     var decoded_total: usize = 0;
     var extension_bytes: usize = 0;
+    var line_overhead_bytes: usize = 0;
     while (true) {
         const remaining = body[pos..];
         const line_end = std.mem.indexOf(u8, remaining, "\r\n") orelse {
@@ -253,6 +287,7 @@ fn chunkedWireLength(
             return error.ChunkSizeOverflow;
         const next_pos = std.math.add(usize, pos, line_wire_len) catch
             return error.ChunkSizeOverflow;
+        if (next_pos > max_wire_bytes) return error.BodyTooLarge;
         const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
         if (semi != line.len) {
             extension_bytes = std.math.add(
@@ -266,27 +301,74 @@ fn chunkedWireLength(
             try validateChunkExtension(line[semi + 1 ..]);
         }
         const size = try http1.parseChunkSize(try chunkSizePart(line[0..semi]));
+        line_overhead_bytes = std.math.add(
+            usize,
+            line_overhead_bytes,
+            line.len - 1,
+        ) catch return error.BodyTooLarge;
+        if (line_overhead_bytes > http1.max_chunk_size_line_bytes) {
+            return error.BodyTooLarge;
+        }
         decoded_total = std.math.add(usize, decoded_total, size) catch
             return error.BodyTooLarge;
         if (decoded_total > max_body_bytes) return error.BodyTooLarge;
         pos = next_pos;
         if (size == 0) {
-            const trailer_len = try chunkedTrailerWireLength(
+            const trailer = try chunkedTrailerLayout(
                 body[pos..],
                 max_head_bytes,
             );
-            return std.math.add(usize, pos, trailer_len) catch
+            const wire_len = std.math.add(usize, pos, trailer.wire_len) catch
                 return error.HeadersTooLarge;
+            if (wire_len > max_wire_bytes) return error.BodyTooLarge;
+            return .{
+                .wire_len = wire_len,
+                .decoded_len = decoded_total,
+                .trailer_start = pos,
+                .trailer_fields_len = trailer.fields_len,
+            };
         }
         const data_end = std.math.add(usize, pos, size) catch
             return error.ChunkSizeOverflow;
         const required_end = std.math.add(usize, data_end, 2) catch
             return error.ChunkSizeOverflow;
+        if (required_end > max_wire_bytes) return error.BodyTooLarge;
         if (body.len < required_end) return error.BufferTooShort;
         if (!std.mem.eql(u8, body[data_end..required_end], "\r\n")) {
             return error.InvalidChunk;
         }
         pos = required_end;
+    }
+}
+
+/// Copy the payload bytes from a previously validated chunk-coded body. The
+/// destination must start at or before the source so unread chunk metadata is
+/// never overwritten; this is the shape used by HTTP/1 pipeline compaction.
+pub fn copyChunkedPayloadForwards(
+    body: []const u8,
+    destination: []u8,
+) void {
+    std.debug.assert(destination.len == 0 or
+        @intFromPtr(destination.ptr) <= @intFromPtr(body.ptr));
+    var pos: usize = 0;
+    var out_pos: usize = 0;
+    while (true) {
+        const line_end = std.mem.indexOf(u8, body[pos..], "\r\n") orelse
+            unreachable;
+        const line = body[pos .. pos + line_end];
+        pos += line_end + 2;
+        const semi = std.mem.indexOfScalar(u8, line, ';') orelse line.len;
+        const size = http1.parseChunkSize(
+            chunkSizePart(line[0..semi]) catch unreachable,
+        ) catch unreachable;
+        if (size == 0) {
+            std.debug.assert(out_pos == destination.len);
+            return;
+        }
+        const data_end = pos + size;
+        @memmove(destination[out_pos..][0..size], body[pos..data_end]);
+        out_pos += size;
+        pos = data_end + 2;
     }
 }
 
@@ -307,19 +389,24 @@ fn validateChunkExtension(extension: []const u8) Error!void {
     }
 }
 
-fn chunkedTrailerWireLength(
+const ChunkedTrailerLayout = struct {
+    wire_len: usize,
+    fields_len: usize,
+};
+
+fn chunkedTrailerLayout(
     trailers: []const u8,
     max_head_bytes: usize,
-) Error!usize {
+) Error!ChunkedTrailerLayout {
     if (std.mem.startsWith(u8, trailers, "\r\n")) {
         if (2 > max_head_bytes) return error.HeadersTooLarge;
-        return 2;
+        return .{ .wire_len = 2, .fields_len = 0 };
     }
     if (std.mem.indexOf(u8, trailers, "\r\n\r\n")) |end| {
         const len = std.math.add(usize, end, 4) catch
             return error.HeadersTooLarge;
         if (len > max_head_bytes) return error.HeadersTooLarge;
-        return len;
+        return .{ .wire_len = len, .fields_len = end };
     }
     if (trailers.len >= max_head_bytes) return error.HeadersTooLarge;
     return error.BufferTooShort;

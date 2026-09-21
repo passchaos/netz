@@ -5,6 +5,7 @@ const runtime_write = @import("runtime/write.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
+const request_batch = @import("runtime/message/batch.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const accept_deadline = @import("../internal/accept.zig");
@@ -4179,13 +4180,13 @@ pub const Connection = struct {
         );
     }
 
-    /// Read and parse an exact batch of pipelined request heads without
-    /// per-request allocation.
+    /// Read and parse an exact batch of pipelined requests without per-request
+    /// allocation. Chunk framing is removed in place after the complete batch
+    /// validates; trailer fields are validated but are not exposed by this
+    /// borrowed API.
     ///
     /// `heads`, every head's header slice, and `bodies` borrow `self.inbuf`.
     /// They remain valid only until the next read or `consumeRequestBatch`.
-    /// Chunked requests have no statically known message boundary and return
-    /// `InvalidResponse`; callers can use `readRequest` for those.
     pub fn readRequestBatchInto(
         self: *Connection,
         heads: []http1.RequestHead,
@@ -4218,7 +4219,7 @@ pub const Connection = struct {
             heads.len,
             self.limits.max_body_bytes,
         ) catch return error.BodyTooLarge;
-        const max_batch_bytes = std.math.add(
+        _ = std.math.add(
             usize,
             max_batch_head_bytes,
             max_batch_body_bytes,
@@ -4228,6 +4229,8 @@ pub const Connection = struct {
         while (true) {
             var offset: usize = 0;
             var complete = true;
+            var has_chunked = false;
+            var read_limit: ?usize = null;
             for (heads, bodies, 0..) |*head, *body, index| {
                 const headers = header_storage[index * options.max_headers ..][0..options.max_headers];
                 head.* = http1.parseRequestHead(
@@ -4253,6 +4256,11 @@ pub const Connection = struct {
                             self.inbuf.items[offset..],
                             self.limits.max_head_bytes,
                         );
+                        read_limit = std.math.add(
+                            usize,
+                            offset,
+                            self.limits.max_head_bytes,
+                        ) catch return error.BodyTooLarge;
                         complete = false;
                         break;
                     },
@@ -4268,22 +4276,65 @@ pub const Connection = struct {
                 if (head.head_len > self.limits.max_head_bytes) {
                     return error.HeadersTooLarge;
                 }
-                const message_len = (try head.messageLength()) orelse
-                    return error.InvalidResponse;
-                if (message_len < head.head_len) {
+                if (head.must_close and index + 1 != heads.len) {
+                    // A TE+CL request is parseable only so an application can
+                    // answer it before retiring the connection. Never treat a
+                    // following wire prefix as another request in this batch.
                     return error.InvalidResponse;
                 }
-                if (message_len - head.head_len >
-                    self.limits.max_body_bytes)
-                {
-                    return error.BodyTooLarge;
-                }
+                const message_len = if (head.body_framing == .chunked) blk: {
+                    has_chunked = true;
+                    const layout = message_framing.chunkedBodyLayout(
+                        self.inbuf.items[offset + head.head_len ..],
+                        self.limits.max_head_bytes,
+                        self.limits.max_body_bytes,
+                    ) catch |err| switch (err) {
+                        error.BufferTooShort => {
+                            const max_chunk_wire_bytes =
+                                message_framing.maxChunkedWireBytes(
+                                    self.limits.max_head_bytes,
+                                    self.limits.max_body_bytes,
+                                );
+                            read_limit = std.math.add(
+                                usize,
+                                offset + head.head_len,
+                                max_chunk_wire_bytes,
+                            ) catch return error.BodyTooLarge;
+                            complete = false;
+                            break;
+                        },
+                        else => |e| return e,
+                    };
+                    const body_start = offset + head.head_len;
+                    try http1.validateTrailerFields(
+                        self.inbuf.items[body_start + layout.trailer_start .. body_start + layout.trailer_start + layout.trailer_fields_len],
+                        options,
+                    );
+                    break :blk std.math.add(
+                        usize,
+                        head.head_len,
+                        layout.wire_len,
+                    ) catch return error.BodyTooLarge;
+                } else blk: {
+                    const known_len = (try head.messageLength()) orelse
+                        return error.InvalidResponse;
+                    if (known_len < head.head_len) {
+                        return error.InvalidResponse;
+                    }
+                    if (known_len - head.head_len >
+                        self.limits.max_body_bytes)
+                    {
+                        return error.BodyTooLarge;
+                    }
+                    break :blk known_len;
+                };
                 const next_offset = std.math.add(
                     usize,
                     offset,
                     message_len,
                 ) catch return error.BodyTooLarge;
                 if (next_offset > self.inbuf.items.len) {
+                    read_limit = next_offset;
                     complete = false;
                     break;
                 }
@@ -4292,18 +4343,27 @@ pub const Connection = struct {
             }
             if (complete) {
                 self.request_head_deadline = null;
-                return offset;
+                if (!has_chunked) return offset;
+                return request_batch.compactValidatedRequests(
+                    &self.inbuf,
+                    heads,
+                    header_storage,
+                    bodies,
+                    options,
+                    offset,
+                    self.limits.max_head_bytes,
+                    self.limits.max_body_bytes,
+                );
             }
 
-            // Do not over-read merely to discover that the batch cannot fit.
-            // A complete batch may coexist with a larger already-buffered
-            // suffix, but an incomplete final request has no later message
-            // boundary yet, so all current bytes belong to this batch.
-            if (self.inbuf.items.len >= max_batch_bytes) {
+            // Bound only the currently incomplete member. Complete batches may
+            // coexist with an arbitrarily large already-buffered suffix.
+            const current_read_limit = read_limit orelse unreachable;
+            if (self.inbuf.items.len >= current_read_limit) {
                 return error.BodyTooLarge;
             }
             var read_buffer: [16 * 1024]u8 = undefined;
-            const remaining = max_batch_bytes - self.inbuf.items.len;
+            const remaining = current_read_limit - self.inbuf.items.len;
             const destination =
                 read_buffer[0..@min(remaining, read_buffer.len)];
             const count = connectionReadHeadSome(self, destination) catch |read_err|
@@ -7240,6 +7300,243 @@ test "HTTP/1 borrowed pipeline batch preserves bodies until consume" {
             connection.inbuf.items.len + 1,
         ),
     );
+}
+
+test "HTTP/1 borrowed pipeline batch decodes chunked bodies in place" {
+    const allocator = std.testing.allocator;
+    const chunked_head =
+        "POST /chunked HTTP/1.1\r\n" ++
+        "Host: example\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n";
+    const empty_head =
+        "POST /empty HTTP/1.1\r\n" ++
+        "Host: example\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n";
+    const fixed =
+        "POST /fixed HTTP/1.1\r\n" ++
+        "Host: example\r\n" ++
+        "Content-Length: 3\r\n\r\nabc";
+    const suffix = "GET /next HTTP/1.1\r\nHost: example\r\n\r\n";
+    const pipeline = chunked_head ++
+        "2;foo=bar\r\nhe\r\n3\r\nllo\r\n" ++
+        "0\r\nDigest: sha-256=demo\r\n\r\n" ++
+        empty_head ++ "0\r\n\r\n" ++ fixed ++ suffix;
+    const compacted = chunked_head ++ "hello" ++ empty_head ++ fixed;
+
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 5 },
+    };
+    defer {
+        connection.inbuf.deinit(allocator);
+        connection.write_scratch.deinit(allocator);
+    }
+    try connection.inbuf.appendSlice(allocator, pipeline);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    connection.allocator = no_alloc.allocator();
+
+    var heads: [3]http1.RequestHead = undefined;
+    var headers: [12]http1.Header = undefined;
+    var bodies: [3][]const u8 = undefined;
+    const consumed = try connection.readRequestBatchInto(
+        &heads,
+        &headers,
+        &bodies,
+        .{ .max_headers = 4 },
+    );
+
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("/chunked", heads[0].target);
+    try std.testing.expectEqual(http1.BodyFraming.chunked, heads[0].body_framing);
+    try std.testing.expect(!heads[0].must_close);
+    try std.testing.expect(heads[0].header("content-length") == null);
+    try std.testing.expectEqualStrings("hello", bodies[0]);
+    try std.testing.expectEqualStrings("/empty", heads[1].target);
+    try std.testing.expectEqual(http1.BodyFraming.chunked, heads[1].body_framing);
+    try std.testing.expectEqual(@as(usize, 0), bodies[1].len);
+    try std.testing.expectEqualStrings("/fixed", heads[2].target);
+    try std.testing.expectEqual(http1.BodyFraming.content_length, heads[2].body_framing);
+    try std.testing.expectEqualStrings("abc", bodies[2]);
+    try std.testing.expectEqual(compacted.len, consumed);
+    try std.testing.expectEqualStrings(
+        compacted ++ suffix,
+        connection.inbuf.items,
+    );
+
+    try connection.consumeRequestBatch(consumed);
+    try std.testing.expectEqualStrings(suffix, connection.inbuf.items);
+}
+
+test "HTTP/1 borrowed chunked batch validation is transactional" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 16 },
+    };
+    defer {
+        connection.inbuf.deinit(allocator);
+        connection.write_scratch.deinit(allocator);
+    }
+    const invalid =
+        "POST /first HTTP/1.1\r\nHost: example\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "1\r\nx\r\n0\r\n\r\n" ++
+        "POST /second HTTP/1.1\r\nHost: example\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "1\r\ny\r\n0\r\nContent-Length: 1\r\n\r\n";
+    try connection.inbuf.appendSlice(allocator, invalid);
+
+    var heads: [2]http1.RequestHead = undefined;
+    var headers: [8]http1.Header = undefined;
+    var bodies: [2][]const u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        connection.readRequestBatchInto(
+            &heads,
+            &headers,
+            &bodies,
+            .{ .max_headers = 4 },
+        ),
+    );
+    try std.testing.expectEqualStrings(invalid, connection.inbuf.items);
+
+    connection.inbuf.clearRetainingCapacity();
+    const ambiguous =
+        "POST /first HTTP/1.1\r\nHost: example\r\n" ++
+        "Content-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "1\r\nx\r\n0\r\n\r\n" ++
+        "GET /second HTTP/1.1\r\nHost: example\r\n\r\n";
+    try connection.inbuf.appendSlice(allocator, ambiguous);
+    try std.testing.expectError(
+        error.InvalidResponse,
+        connection.readRequestBatchInto(
+            &heads,
+            &headers,
+            &bodies,
+            .{ .max_headers = 4 },
+        ),
+    );
+    try std.testing.expectEqualStrings(ambiguous, connection.inbuf.items);
+
+    connection.inbuf.clearRetainingCapacity();
+    const terminal_ambiguous =
+        "POST /terminal HTTP/1.1\r\nHost: example\r\n" ++
+        "Content-Length: 99\r\nTransfer-Encoding: chunked\r\n\r\n" ++
+        "1\r\nz\r\n0\r\n\r\n";
+    try connection.inbuf.appendSlice(allocator, terminal_ambiguous);
+    const terminal_consumed = try connection.readRequestBatchInto(
+        heads[0..1],
+        headers[0..4],
+        bodies[0..1],
+        .{ .max_headers = 4 },
+    );
+    try std.testing.expect(heads[0].must_close);
+    try std.testing.expect(heads[0].header("content-length") == null);
+    try std.testing.expectEqualStrings("z", bodies[0]);
+    try connection.consumeRequestBatch(terminal_consumed);
+
+    connection.inbuf.clearRetainingCapacity();
+    const folded =
+        "POST /folded HTTP/1.1\r\nHost: example\r\n" ++
+        "Transfer-Encoding: chunked\r\n\r\n" ++
+        "0\r\nX-Trace: one\r\n two\r\n\r\n";
+    try connection.inbuf.appendSlice(allocator, folded);
+    try std.testing.expectError(
+        error.MalformedHeader,
+        connection.readRequestBatchInto(
+            heads[0..1],
+            headers[0..4],
+            bodies[0..1],
+            .{ .max_headers = 4 },
+        ),
+    );
+    const consumed = try connection.readRequestBatchInto(
+        heads[0..1],
+        headers[0..4],
+        bodies[0..1],
+        .{ .max_headers = 4, .allow_obs_fold = true },
+    );
+    try std.testing.expectEqualStrings("", bodies[0]);
+    try connection.consumeRequestBatch(consumed);
+    try std.testing.expectEqual(@as(usize, 0), connection.inbuf.items.len);
+}
+
+test "HTTP/1 borrowed chunked batch reads fragmented transport" {
+    const allocator = std.testing.allocator;
+    var backend = try @import("../runtime.zig").Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 1024, .max_body_bytes = 5 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var heads: [2]http1.RequestHead = undefined;
+            var headers: [8]http1.Header = undefined;
+            var bodies: [2][]const u8 = undefined;
+            const consumed = try connection.readRequestBatchInto(
+                &heads,
+                &headers,
+                &bodies,
+                .{ .max_headers = 4 },
+            );
+            try std.testing.expectEqualStrings("/chunked", heads[0].target);
+            try std.testing.expectEqualStrings("hello", bodies[0]);
+            try std.testing.expectEqualStrings("/fixed", heads[1].target);
+            try std.testing.expectEqualStrings("x", bodies[1]);
+            try connection.consumeRequestBatch(consumed);
+
+            var suffix = try connection.readRequest(.{});
+            defer suffix.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/suffix", suffix.request.target);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
+
+    const client = try server.address().connect(io, .{ .mode = .stream });
+    defer client.close(io);
+    try writeAllToStream(
+        io,
+        client,
+        "POST /chunked HTTP/1.1\r\nHost: example\r\n" ++
+            "Transfer-Encoding: chunked\r\n\r\n2\r\nh",
+    );
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    try writeAllToStream(
+        io,
+        client,
+        "e\r\n3\r\nllo\r\n0\r\nDigest: ok\r\n\r\n" ++
+            "POST /fixed HTTP/1.1\r\nHost: example\r\n" ++
+            "Content-Length: 1\r\n\r\nx" ++
+            "GET /suffix HTTP/1.1\r\nHost: example\r\n\r\n",
+    );
+
+    server_task.await(io);
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 borrowed pipeline batch enforces limits before I/O" {
@@ -11648,6 +11945,7 @@ test "HTTP/1 native nonblocking peek distinguishes idle data and EOF" {
 }
 
 test {
+    _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/http09_tests.zig");

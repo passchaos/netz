@@ -111,6 +111,28 @@ test "HTTP/1 message framing bounds chunk extensions and trailers independently"
     );
 }
 
+test "HTTP/1 aggregate framing bounds cumulative chunk wire overhead" {
+    const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try encoded.appendSlice(std.testing.allocator, head);
+    for (0..2) |_| {
+        try encoded.append(std.testing.allocator, '1');
+        try encoded.appendNTimes(
+            std.testing.allocator,
+            ' ',
+            http1.max_chunk_size_line_bytes - 2,
+        );
+        try encoded.appendSlice(std.testing.allocator, "\r\nx\r\n");
+    }
+    try encoded.appendSlice(std.testing.allocator, "0\r\n\r\n");
+
+    try std.testing.expectError(
+        error.BodyTooLarge,
+        targetLength(encoded.items, 64, 2, null),
+    );
+}
+
 test "HTTP/1 message framing enforces exact head limits" {
     const exact = "GET / HTTP/1.1\r\nHost: example\r\n\r\n";
     try std.testing.expectEqual(
