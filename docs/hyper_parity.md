@@ -1475,7 +1475,11 @@ Client aggregate and streaming response readers now apply the symmetric rule:
 malformed response fields, status, or Content-Length reset only the affected
 stream with `PROTOCOL_ERROR`; configured response-size overflow uses
 `ENHANCE_YOUR_CALM`; malformed HPACK or a broken CONTINUATION chain remains a
-connection-level GOAWAY. Batch readers send the precise reset for the offending
+connection-level GOAWAY. RFC 9412 ORIGIN and the registered WebTransport stream
+frame type are rejected when misplaced on request/response message streams by
+both aggregate and incremental readers; the runtime emits
+`H3_FRAME_UNEXPECTED`, while genuinely unknown extension frames remain
+ignorable. Batch readers send the precise reset for the offending
 member and `CANCEL` for other unfinished members in one write, while completed
 and peer-reset members are left untouched. Too many informational responses
 use `ENHANCE_YOUR_CALM`; an unterminated continuation flood is likewise a

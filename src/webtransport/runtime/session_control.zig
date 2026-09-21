@@ -461,21 +461,9 @@ pub const Control = struct {
 fn forbiddenConnectStreamFrame(frame_type: u64) bool {
     return switch (frame_type) {
         http3.FrameType.headers,
-        http3.FrameType.cancel_push,
-        http3.FrameType.settings,
         http3.FrameType.push_promise,
-        http3.FrameType.goaway,
-        http3.FrameType.origin,
-        http3.FrameType.max_push_id,
-        http3.FrameType.priority_update_request,
-        http3.FrameType.priority_update_push,
-        http3.FrameType.webtransport_stream,
-        0x02,
-        0x06,
-        0x08,
-        0x09,
         => true,
-        else => false,
+        else => http3.messageStreamForbiddenFrame(frame_type),
     };
 }
 

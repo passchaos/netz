@@ -3913,7 +3913,7 @@ fn firstResponseHeadersFrame(
                 promise.request.qpack_section_acknowledgments;
             promise.deinit(allocator);
         } else if (frame.frame_type == FrameType.data or
-            requestStreamForbiddenFrame(frame.frame_type))
+            messageStreamForbiddenFrame(frame.frame_type))
         {
             return error.ExpectedHeadersFrame;
         }
@@ -3936,7 +3936,7 @@ fn firstHeadersFrame(
             if (kind == .request) return error.ExpectedHeadersFrame;
             _ = try parsePushPromisePayload(frame.payload);
         } else if (frame.frame_type == FrameType.data or
-            requestStreamForbiddenFrame(frame.frame_type))
+            messageStreamForbiddenFrame(frame.frame_type))
         {
             return error.ExpectedHeadersFrame;
         }
@@ -4460,14 +4460,23 @@ fn qpackShouldIndex(field: Qpack.HeaderField) bool {
     return true;
 }
 
-fn requestStreamForbiddenFrame(frame_type: u64) bool {
+/// Return whether a frame type is defined for another HTTP/3 stream context
+/// and therefore cannot be ignored as an unknown extension on a request,
+/// response, or push stream.
+pub fn messageStreamForbiddenFrame(frame_type: u64) bool {
     return switch (frame_type) {
         FrameType.cancel_push,
         FrameType.settings,
         FrameType.goaway,
+        FrameType.origin,
         FrameType.max_push_id,
         FrameType.priority_update_request,
         FrameType.priority_update_push,
+        FrameType.webtransport_stream,
+        0x02,
+        0x06,
+        0x08,
+        0x09,
         => true,
         else => false,
     };
@@ -4507,7 +4516,7 @@ fn decodeResponseMessage(
     while (true) {
         const frame = try Frame.parse(bytes[offset..]);
         if (frame.frame_type != FrameType.headers) {
-            if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
+            if (frame.frame_type == FrameType.data or messageStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
             if (frame.frame_type == FrameType.push_promise) {
                 var promise = try decodePushPromiseWithFieldDecoder(
                     allocator,
@@ -4607,7 +4616,7 @@ fn decodeMessage(
             if (offset >= bytes.len) return error.ExpectedHeadersFrame;
             continue;
         }
-        if (frame.frame_type == FrameType.data or requestStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
+        if (frame.frame_type == FrameType.data or messageStreamForbiddenFrame(frame.frame_type)) return error.ExpectedHeadersFrame;
         // RFC 9114 allows unknown extension frames on request streams.  Like
         // tquic's request-stream state machine, ignore them before the first
         // HEADERS rather than treating every non-HEADERS frame as fatal.
@@ -4717,7 +4726,7 @@ fn decodeMessageAfterHeaders(
                     promise.request.qpack_section_acknowledgments;
                 promise.deinit(allocator);
             },
-            else => if (requestStreamForbiddenFrame(frame.frame_type)) return error.UnexpectedFrame,
+            else => if (messageStreamForbiddenFrame(frame.frame_type)) return error.UnexpectedFrame,
         }
     }
 
@@ -7678,11 +7687,28 @@ test "HTTP/3 message rejects bad frame order and content length" {
     try (Frame{ .frame_type = FrameType.data, .payload = "late", .consumed = 0 }).write(&bad_order, allocator);
     try std.testing.expectError(error.UnexpectedFrame, decodeResponse(allocator, bad_order.items));
 
-    var forbidden: std.ArrayList(u8) = .empty;
-    defer forbidden.deinit(allocator);
-    try (Frame{ .frame_type = FrameType.headers, .payload = header_block.items, .consumed = 0 }).write(&forbidden, allocator);
-    try (Frame{ .frame_type = FrameType.settings, .payload = &.{}, .consumed = 0 }).write(&forbidden, allocator);
-    try std.testing.expectError(error.UnexpectedFrame, decodeResponse(allocator, forbidden.items));
+    inline for ([_]u64{
+        FrameType.settings,
+        FrameType.origin,
+        FrameType.webtransport_stream,
+    }) |frame_type| {
+        var forbidden: std.ArrayList(u8) = .empty;
+        defer forbidden.deinit(allocator);
+        try (Frame{
+            .frame_type = FrameType.headers,
+            .payload = header_block.items,
+            .consumed = 0,
+        }).write(&forbidden, allocator);
+        try (Frame{
+            .frame_type = frame_type,
+            .payload = &.{},
+            .consumed = 0,
+        }).write(&forbidden, allocator);
+        try std.testing.expectError(
+            error.UnexpectedFrame,
+            decodeResponse(allocator, forbidden.items),
+        );
+    }
 }
 
 test "HTTP/3 validates pseudo headers and connection-specific fields" {

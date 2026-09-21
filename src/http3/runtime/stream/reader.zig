@@ -365,7 +365,9 @@ pub const Reader = struct {
                     return .data_available;
                 },
                 else => {
-                    if (streamingForbiddenFrame(header.frame_type)) {
+                    if (http3.messageStreamForbiddenFrame(
+                        header.frame_type,
+                    )) {
                         return error.UnexpectedFrame;
                     }
                     const remaining =
@@ -755,17 +757,4 @@ fn frameFieldSectionBlocked(
         else => return error.QpackDecompressionFailed,
     };
     return prefix.required_insert_count > table.insert_count;
-}
-
-fn streamingForbiddenFrame(frame_type: u64) bool {
-    return switch (frame_type) {
-        http3.FrameType.cancel_push,
-        http3.FrameType.settings,
-        http3.FrameType.goaway,
-        http3.FrameType.max_push_id,
-        http3.FrameType.priority_update_request,
-        http3.FrameType.priority_update_push,
-        => true,
-        else => false,
-    };
 }

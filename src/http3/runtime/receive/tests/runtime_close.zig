@@ -212,3 +212,86 @@ test "HTTP/3 protected server closes on unpromised CANCEL_PUSH" {
         close_packet.frames[0].application_close.error_code,
     );
 }
+
+test "HTTP/3 protected server closes on ORIGIN request frame" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_cid = [_]u8{ 0xa5, 0x10, 0x20, 0x30 };
+    const server_cid = [_]u8{ 0xa6, 0x10, 0x20, 0x30 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa7} ** quic.protection.secret_len,
+    );
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa8} ** quic.protection.secret_len,
+    );
+    var peer = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer peer.deinit();
+    var server = try runtime.ProtectedServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .receive_keys = client_keys,
+            .send_keys = server_keys,
+            .local_connection_id = &server_cid,
+            .peer_connection_id = &client_cid,
+        },
+    );
+    defer server.deinit();
+
+    var control_bytes: std.ArrayList(u8) = .empty;
+    defer control_bytes.deinit(allocator);
+    try http3.writeControlStreamPrefix(&control_bytes, allocator);
+    try http3.writeSettingsFrame(&control_bytes, allocator, .{});
+    var request_bytes: std.ArrayList(u8) = .empty;
+    defer request_bytes.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.origin,
+        .payload = &.{},
+        .consumed = 0,
+    }).write(&request_bytes, allocator);
+    try quic.one_rtt.sendFrames(
+        &peer,
+        server.address(),
+        client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 0,
+            .frames = &.{
+                .{ .stream = .{
+                    .stream_id = 2,
+                    .data = control_bytes.items,
+                } },
+                .{ .stream = .{
+                    .stream_id = 0,
+                    .data = request_bytes.items,
+                    .fin = true,
+                } },
+            },
+        },
+    );
+
+    try std.testing.expectError(error.ExpectedHeadersFrame, server.receiveRequest());
+    var close_packet = try quic.one_rtt.receive(
+        &peer,
+        server_keys,
+        client_cid.len,
+        0,
+        1,
+    );
+    defer close_packet.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), close_packet.frames.len);
+    try std.testing.expect(close_packet.frames[0] == .application_close);
+    try std.testing.expectEqual(
+        @as(u64, http3.ApplicationErrorCode.frame_unexpected),
+        close_packet.frames[0].application_close.error_code,
+    );
+}

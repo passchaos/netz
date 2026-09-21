@@ -22924,16 +22924,10 @@ fn requestEndedBeforeHeaders(bytes: []const u8) bool {
         const frame = http3.Frame.parse(bytes[offset..]) catch return false;
         if (frame.frame_type == http3.FrameType.headers) return false;
         if (frame.frame_type == http3.FrameType.data) return false;
-        switch (frame.frame_type) {
-            http3.FrameType.cancel_push,
-            http3.FrameType.settings,
-            http3.FrameType.goaway,
-            http3.FrameType.max_push_id,
-            http3.FrameType.priority_update_request,
-            http3.FrameType.priority_update_push,
-            http3.FrameType.push_promise,
-            => return false,
-            else => {},
+        if (frame.frame_type == http3.FrameType.push_promise or
+            http3.messageStreamForbiddenFrame(frame.frame_type))
+        {
+            return false;
         }
         offset += frame.consumed;
     }

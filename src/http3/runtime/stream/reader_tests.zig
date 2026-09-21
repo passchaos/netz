@@ -235,6 +235,98 @@ test "HTTP/3 incremental request reader distinguishes missing head and truncated
     );
 }
 
+test "HTTP/3 incremental message reader rejects misplaced registered frames" {
+    const allocator = std.testing.allocator;
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http3.Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+    });
+    inline for ([_]u64{
+        http3.FrameType.origin,
+        http3.FrameType.webtransport_stream,
+        0x02,
+    }) |frame_type| {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+        try (http3.Frame{
+            .frame_type = http3.FrameType.headers,
+            .payload = block.items,
+            .consumed = 0,
+        }).write(&bytes, allocator);
+        // Reserved HTTP/2 code points cannot use Frame.write because that
+        // generic encoder correctly rejects them at its own boundary.
+        if (frame_type == 0x02) {
+            try quic.varint.encode(&bytes, allocator, frame_type);
+            try quic.varint.encode(&bytes, allocator, 0);
+        } else {
+            try (http3.Frame{
+                .frame_type = frame_type,
+                .payload = &.{},
+                .consumed = 0,
+            }).write(&bytes, allocator);
+        }
+
+        var reader = Reader.initResponse(allocator, 0, 128, .{});
+        defer reader.deinit();
+        try reader.insert(.{
+            .stream_id = 0,
+            .data = bytes.items,
+            .fin = true,
+        });
+        var head = (try reader.next(table)) orelse
+            return error.TestUnexpectedResult;
+        defer head.deinit(allocator);
+        try std.testing.expect(head == .head);
+        try std.testing.expectError(
+            error.UnexpectedFrame,
+            reader.next(table),
+        );
+    }
+}
+
+test "HTTP/3 incremental message reader skips unknown extension frames" {
+    const allocator = std.testing.allocator;
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try http3.Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "0" },
+    });
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+    try (http3.Frame{
+        .frame_type = 0x21,
+        .payload = "ignored",
+        .consumed = 0,
+    }).write(&bytes, allocator);
+
+    var reader = Reader.initResponse(allocator, 0, 128, .{});
+    defer reader.deinit();
+    try reader.insert(.{
+        .stream_id = 0,
+        .data = bytes.items,
+        .fin = true,
+    });
+    var head = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .head);
+    var finished = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .finished);
+}
+
 test "HTTP/3 incremental response reader owns dynamic PUSH_PROMISE before final head" {
     const allocator = std.testing.allocator;
     var table = http3.Qpack.DynamicTable.init(allocator, 256);
