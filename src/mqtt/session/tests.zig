@@ -1287,6 +1287,26 @@ test "session immediate publish preserves caller identity transactionally" {
     var output: [1]Transmission = undefined;
     const older = try store.drainInto(opened.handle, .zero, 2, &output);
     try std.testing.expectEqualStrings("older", older[0].publish.topic);
+    try store.retryUnsentPublish(
+        opened.handle,
+        older[0].publish.packet_id,
+    );
+    try std.testing.expectError(
+        error.InflightFull,
+        store.beginImmediatePublish(
+            opened.handle,
+            "new",
+            "message",
+            .{ .qos = .exactly_once, .now = .zero },
+            2,
+        ),
+    );
+    const replay = try store.drainInto(opened.handle, .zero, 2, &output);
+    try std.testing.expectEqual(
+        older[0].publish.packet_id,
+        replay[0].publish.packet_id,
+    );
+    try std.testing.expectEqualStrings("older", replay[0].publish.topic);
     const immediate = try store.beginImmediatePublish(
         opened.handle,
         "new",

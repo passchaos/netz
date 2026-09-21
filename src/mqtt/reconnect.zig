@@ -1980,11 +1980,9 @@ pub const Client = struct {
             payload,
             options.properties,
         );
-        // Drain older replay/queue work before this call takes ownership. The
-        // immediate Session operation below either reserves this exact message
-        // or leaves it unowned, so an unavailable Receive Maximum cannot leave
-        // an unreported duplicate queued behind the caller.
-        try self.replayPending();
+        // This either reserves the exact submitted message or leaves it
+        // unowned. Existing replay/queue work must be driven explicitly, so a
+        // one-attempt call can never send an older packet and return its ID.
         const transmission = try self.outgoing.beginImmediatePublish(
             self.outgoing_handle,
             topic,

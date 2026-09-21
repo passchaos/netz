@@ -1529,13 +1529,13 @@ side has already failed.
 coordinators: on a retryable QoS 1/2 write failure it returns immediately with
 the retained Packet Identifier and leaves reconnect/replay to later `pollWith*`
 calls, while the original `publish` convenience retains automatic reconnect.
-Before taking ownership it drains older replay work, then atomically assigns
-the returned Packet Identifier to that call's exact Application Message. A
-full Receive Maximum returns `InflightFull` without silently queueing the new
-message, local pre-wire failures remove its state, and transport failures alone
-retain it for DUP replay. An online MQTT 5 publish with Message Expiry zero is
-still emitted once on the current connection instead of being mistaken for an
-already-expired offline queue entry.
+It refuses while older replay/queue work is pending, then atomically assigns the
+returned Packet Identifier to that call's exact Application Message. A full
+Receive Maximum returns `InflightFull` without sending an older packet or
+silently queueing the new message, local pre-wire failures remove its state,
+and transport failures alone retain it for DUP replay. An online MQTT 5 publish
+with Message Expiry zero is still emitted once on the current connection
+instead of being mistaken for an already-expired offline queue entry.
 This covers both rumqttc-style `try_*` and waiting send behavior without
 introducing another network reader.
 
