@@ -16,6 +16,7 @@ const tls_stream = @import("../tls/mod.zig").stream;
 const socket_options = @import("../internal/socket_options.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const network_endpoint = @import("runtime/network_endpoint.zig");
+const protocol_error = @import("runtime/protocol_error.zig");
 
 const net = std.Io.net;
 
@@ -50,6 +51,9 @@ pub const Error = packet_transport.Error || error{
     net.HostName.ValidateError || net.HostName.ConnectError ||
     net.Server.AcceptError || net.Stream.Reader.Error ||
     net.Stream.Writer.Error || std.Thread.SpawnError;
+
+pub const disconnectReasonForProtocolViolation =
+    protocol_error.disconnectReason;
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,

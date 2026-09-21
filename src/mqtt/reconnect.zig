@@ -2122,22 +2122,37 @@ pub const Client = struct {
                 read_deadline.withClock(.awake),
             ) catch |err| {
                 if (err == error.Timeout) continue;
-                self.retireUnusableConnection();
-                if (!retryableConnectError(err)) return err;
+                if (self.disconnectForPeerProtocolViolation(err)) return err;
+                if (!retryableConnectError(err)) {
+                    self.disconnectTransport();
+                    return err;
+                }
                 self.disconnectTransport();
                 return try self.connectEventBefore(call_deadline);
             };
             var packet_owned = true;
             defer if (packet_owned) packet_event.deinit(self.allocator);
             const client_event = self.applyPacketEvent(&packet_event) catch |err| {
-                const deferred_pubrel_error = err == error.UnexpectedPacket and
-                    packet_event == .pubrel and
-                    self.client_options.inbound_qos2_release_policy ==
-                        .deferred;
-                if (deferred_pubrel_error) {
+                // A complete packet has already been consumed. Peer protocol
+                // faults receive an MQTT 5 diagnostic; local state/allocation
+                // and authentication callback failures close silently because
+                // this API has no token with which to replay that packet. A
+                // valid negative publish acknowledgement is the sole terminal
+                // application result and leaves the connection usable.
+                const valid_publish_refusal = err == error.PublishRefused and
+                    (packet_event == .puback or
+                        packet_event == .pubrec or
+                        packet_event == .pubcomp);
+                if (packet_event == .auth) {
+                    // Authentication peer-state errors were diagnosed by the
+                    // runtime before this callback boundary. Callback/local
+                    // response errors are not peer violations, but the
+                    // consumed challenge still prevents safe reuse.
                     self.disconnectTransport();
-                } else {
-                    self.retireUnusableConnection();
+                } else if (!valid_publish_refusal and
+                    !self.disconnectForPeerProtocolViolation(err))
+                {
+                    self.disconnectTransport();
                 }
                 return err;
             };
@@ -2690,9 +2705,14 @@ pub const Client = struct {
                 break :blk .{ .disconnect = owned };
             },
             .auth => |owned| blk: {
-                const complete = try active.applyAuthenticationEvent(
+                const complete = active.applyAuthenticationEvent(
                     owned.auth,
-                );
+                ) catch |err| {
+                    // The runtime has already attempted the required protocol
+                    // diagnostic for authentication state violations.
+                    self.disconnectTransport();
+                    return err;
+                };
                 if (!complete) {
                     const handler = self.options.value.authentication orelse
                         return error.AuthenticationNotConfigured;
@@ -2700,10 +2720,13 @@ pub const Client = struct {
                         handler.context,
                         owned.auth,
                     );
-                    try active.continueReauthenticationWithProperties(
+                    active.continueReauthenticationWithProperties(
                         0x18,
                         response,
-                    );
+                    ) catch |err| {
+                        self.retireUnusableConnection();
+                        return err;
+                    };
                     self.noteControlSent();
                 }
                 break :blk .{ .auth = owned };
@@ -2931,6 +2954,25 @@ pub const Client = struct {
         } else {
             self.retireUnusableConnection();
         }
+    }
+
+    /// Report a peer-originated MQTT violation when this is an established
+    /// MQTT 5 connection, then retire the connection for every protocol
+    /// version. The original parse/state error remains the caller-visible
+    /// result; inability to write the diagnostic is deliberately secondary.
+    fn disconnectForPeerProtocolViolation(
+        self: *Client,
+        err: anyerror,
+    ) bool {
+        const reason_code =
+            runtime.disconnectReasonForProtocolViolation(err, .client) orelse
+            return false;
+        const active = self.connection() orelse return true;
+        if (active.protocol == .v5) {
+            active.writeDisconnectWithProperties(reason_code, &.{}) catch {};
+        }
+        self.disconnectTransport();
+        return true;
     }
 
     fn keepAliveDeadline(self: *const Client) ?std.Io.Timestamp {

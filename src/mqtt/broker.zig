@@ -6181,38 +6181,7 @@ fn waitForListenerEvent(
 }
 
 fn disconnectReasonForReadViolation(err: anyerror) ?u8 {
-    return switch (err) {
-        error.QoSNotSupported => 0x9b,
-        error.RetainNotSupported => 0x9a,
-        error.TopicAliasInvalid => 0x94,
-        error.ReceiveMaximumExceeded => 0x93,
-        error.SharedSubscriptionsNotSupported => 0x9e,
-        error.SubscriptionIdentifiersNotSupported => 0xa1,
-        error.WildcardSubscriptionsNotSupported => 0xa2,
-        error.InvalidPacketDirection,
-        error.ReservedPacketType,
-        error.InvalidProperty,
-        error.InvalidReasonCode,
-        error.InvalidTopic,
-        error.InvalidSubscription,
-        error.InvalidPacketIdentifier,
-        error.InvalidAcknowledgement,
-        error.UnexpectedPacket,
-        => 0x82,
-        error.InvalidPacketType,
-        error.InvalidFlags,
-        error.InvalidQoS,
-        error.InvalidPropertyIdentifier,
-        error.MalformedPropertyContext,
-        error.MalformedSubscriptionOptions,
-        error.BufferTooShort,
-        error.MalformedRemainingLength,
-        error.RemainingLengthTooLarge,
-        error.InvalidUtf8,
-        => 0x81,
-        error.PacketTooLarge => 0x95,
-        else => null,
-    };
+    return runtime.disconnectReasonForProtocolViolation(err, .server);
 }
 
 test "broker maps negotiated capability violations to DISCONNECT reasons" {

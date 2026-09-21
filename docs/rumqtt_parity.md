@@ -2151,8 +2151,16 @@ The owning reconnect client also retires this unusable handle immediately
 across publish, subscribe, unsubscribe, manual acknowledgement, keep-alive,
 authentication, and graceful-disconnect paths. The decision uses the runtime's
 transport-origin marker rather than matching error names, so purely local
-validation, allocation, and application-callback errors leave the established
+validation and allocation errors before wire interaction leave the established
 connection available for correction.
+The reconnect poller also maps peer-originated parse/direction violations to
+the same audited reason table used by the broker. MQTT 5 clients make a
+best-effort DISCONNECT before retiring the connection (with server-only reason
+codes reduced to Protocol Error); MQTT 3.1.1 clients close directly. Once an
+event has been consumed, state/allocation or authentication-callback failure
+also retires the connection silently because the event cannot be replayed. A
+valid negative PUBACK/PUBREC/PUBCOMP remains an application result and leaves
+the connection usable.
 An unnegotiated live AUTH now follows the same diagnostic boundary, and normal
 or failing AUTH handlers share the connection's writer mutex with fanout so
 their packets cannot interleave. Finally,

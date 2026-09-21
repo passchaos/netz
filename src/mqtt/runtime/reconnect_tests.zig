@@ -10,6 +10,134 @@ fn sessionExpiryProperty(seconds: u32) mqtt.Property {
     } };
 }
 
+test "MQTT reconnect client reports server violations and retires connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const cases = [_]struct {
+                protocol: mqtt.ProtocolVersion,
+                packet: [2]u8,
+                expected_reason: ?u8,
+            }{
+                .{
+                    .protocol = .v5,
+                    .packet = .{ 0xd1, 0x00 },
+                    .expected_reason = 0x81,
+                },
+                .{
+                    .protocol = .v5,
+                    .packet = .{ 0xc0, 0x00 },
+                    .expected_reason = 0x82,
+                },
+                .{
+                    .protocol = .v3_1_1,
+                    .packet = .{ 0xc0, 0x00 },
+                    .expected_reason = null,
+                },
+            };
+            for (cases) |case| {
+                var accepted = try self.server.accept(.{
+                    .protocol = case.protocol,
+                });
+                defer accepted.deinit(self.server.allocator);
+                var packet = case.packet;
+                try accepted.connection.transport.writePacket(&packet);
+                const expected_reason = case.expected_reason orelse {
+                    if (accepted.connection.readDisconnect()) |disconnect_value| {
+                        var disconnect = disconnect_value;
+                        disconnect.deinit(self.server.allocator);
+                        return error.TestUnexpectedResult;
+                    } else |err| switch (err) {
+                        error.ConnectionClosed,
+                        error.ConnectionResetByPeer,
+                        error.SocketUnconnected,
+                        => continue,
+                        else => return err,
+                    }
+                };
+                var disconnect = try accepted.connection.readDisconnect();
+                defer disconnect.deinit(self.server.allocator);
+                try std.testing.expectEqual(
+                    expected_reason,
+                    disconnect.disconnect.reason_code,
+                );
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    const cases = [_]struct {
+        protocol: mqtt.ProtocolVersion,
+        expected_error: anyerror,
+    }{
+        .{ .protocol = .v5, .expected_error = error.InvalidFlags },
+        .{ .protocol = .v5, .expected_error = error.InvalidPacketDirection },
+        .{
+            .protocol = .v3_1_1,
+            .expected_error = error.InvalidPacketDirection,
+        },
+    };
+    for (cases, 0..) |case, index| {
+        var client = try reconnect.Client.init(
+            allocator,
+            io,
+            server.address(),
+            .{
+                .protocol = case.protocol,
+                .client_id = switch (index) {
+                    0 => "malformed-server-packet",
+                    1 => "illegal-server-packet",
+                    else => "illegal-v311-server-packet",
+                },
+            },
+            .{},
+            &shutdown,
+        );
+        defer client.deinit();
+        _ = try client.connect();
+        if (client.pollWithTimeout(.fromSeconds(1))) |maybe_event| {
+            if (maybe_event) |event_value| {
+                var event = event_value;
+                event.deinit(allocator);
+            }
+            return error.TestUnexpectedResult;
+        } else |err| {
+            try std.testing.expectEqual(case.expected_error, err);
+        }
+        try std.testing.expect(client.connection() == null);
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect client retries TCP and resumes QoS1 with DUP" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -591,6 +719,8 @@ test "MQTT reconnect reports rejected QoS2 delivery at PUBREC" {
     try std.testing.expectEqual(@as(usize, 1), delivery.calls);
     try std.testing.expectEqual(@as(u8, 0x80), delivery.reason_code);
     try std.testing.expect(delivery.reason_seen);
+    try std.testing.expect(client.connection() != null);
+    try std.testing.expect(client.connection().?.isUsable());
 
     server_thread.join();
     joined = true;
@@ -1770,6 +1900,7 @@ test "MQTT reconnect poll requires a reauthentication handler" {
         error.AuthenticationNotConfigured,
         client.pollWithTimeout(.fromSeconds(1)),
     );
+    try std.testing.expect(client.connection() == null);
 
     thread.join();
     joined = true;
