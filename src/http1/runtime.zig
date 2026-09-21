@@ -5760,7 +5760,13 @@ pub fn readRequestFromStream(
     limits: Limits,
     options: http1.ParseOptions,
 ) Error!OwnedRequest {
-    const bytes = try readRequestMessageBytes(allocator, io, stream, limits);
+    const bytes = try readRequestMessageBytes(
+        allocator,
+        io,
+        stream,
+        limits,
+        options,
+    );
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
@@ -5786,6 +5792,7 @@ pub fn readRequestFromStreamWithDeadline(
         limits,
         null,
         true,
+        options,
         false,
         false,
         deadline,
@@ -5978,6 +5985,7 @@ pub fn readResponseFromStreamObserved(
             limits,
             null,
             false,
+            null,
             true,
             options.allow_http_0_9_responses,
             response_head_deadline,
@@ -6147,6 +6155,7 @@ fn readResponseFromStreamForRequestObservedUntil(
             limits,
             request_method,
             false,
+            null,
             true,
             options.allow_http_0_9_responses,
             effective_head_deadline,
@@ -6754,7 +6763,13 @@ fn requestOptionsKeepAlive(request: RequestOptions) bool {
     return http1.headersKeepAlive(request.version, request.headers);
 }
 
-fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net.Stream, limits: Limits) Error![]u8 {
+fn readRequestMessageBytes(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    limits: Limits,
+    options: http1.ParseOptions,
+) Error![]u8 {
     const transport = RuntimeTransport{ .tcp = .{ .io = io, .stream = stream } };
     return readMessageBytesWithContext(
         allocator,
@@ -6762,6 +6777,7 @@ fn readRequestMessageBytes(allocator: std.mem.Allocator, io: std.Io, stream: net
         limits,
         null,
         true,
+        options,
         false,
         false,
         if (limits.request_head_timeout) |timeout|
@@ -6778,6 +6794,7 @@ fn readMessageBytesWithContext(
     limits: Limits,
     request_method: ?http1.Method,
     auto_continue: bool,
+    request_options: ?http1.ParseOptions,
     close_delimited_when_unknown: bool,
     allow_http_0_9_response: bool,
     head_deadline: ?std.Io.Clock.Timestamp,
@@ -6828,7 +6845,26 @@ fn readMessageBytesWithContext(
         }
         try bytes.appendSlice(allocator, scratch[0..n]);
     }
-    try maybeWriteContinue(transport, bytes.items[0..head_end.?], bytes.items.len - (head_end.? + 4), auto_continue);
+    if (auto_continue) {
+        const options = request_options orelse return error.InvalidResponse;
+        const head = bytes.items[0..head_end.?];
+        if (requestShouldSendContinue(head)) {
+            try http1.validateRequestHead(allocator, bytes.items, options);
+            if (try message_framing.transferEncodingState(head) == .none) {
+                if (try message_framing.contentLengthFromHead(head)) |len| {
+                    if (len > limits.max_body_bytes) {
+                        return error.BodyTooLarge;
+                    }
+                }
+            }
+            try maybeWriteContinue(
+                transport,
+                head,
+                bytes.items.len - (head_end.? + 4),
+                true,
+            );
+        }
+    }
 
     if (close_delimited_when_unknown and responseHeadUsesCloseDelimitedBody(bytes.items[0..head_end.?], request_method)) {
         const body_start = head_end.? + 4;
@@ -9488,6 +9524,98 @@ test "HTTP/1 server suppresses 100 Continue for invalid request head" {
         "Content-Length: 4\r\n" ++
         "\r\n";
     try std.testing.expect(!requestShouldSendContinue(mixed_expect));
+}
+
+test "HTTP/1 unbuffered server validates full head before 100 Continue" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+        const Expected = struct { request: []const u8, err: anyerror };
+        const cases = [_]Expected{
+            .{
+                .request = "POST /malformed HTTP/1.1\r\n" ++
+                    "Host: localhost\r\n" ++
+                    "Malformed Header\r\n" ++
+                    "Expect: 100-continue\r\n" ++
+                    "Content-Length: 4\r\n\r\n",
+                .err = error.MalformedHeader,
+            },
+            .{
+                .request = "POST /conflict HTTP/1.1\r\n" ++
+                    "Host: localhost\r\n" ++
+                    "Expect: 100-continue\r\n" ++
+                    "Content-Length: 4\r\n" ++
+                    "Content-Length: 5\r\n\r\n",
+                .err = error.ConflictingContentLength,
+            },
+            .{
+                .request = "POST /duplicate-chunked HTTP/1.1\r\n" ++
+                    "Host: localhost\r\n" ++
+                    "Expect: 100-continue\r\n" ++
+                    "Transfer-Encoding: chunked, chunked\r\n\r\n",
+                .err = error.InvalidTransferEncoding,
+            },
+            .{
+                .request = "POST /oversized HTTP/1.1\r\n" ++
+                    "Host: localhost\r\n" ++
+                    "Expect: 100-continue\r\n" ++
+                    "Content-Length: 4097\r\n\r\n",
+                .err = error.BodyTooLarge,
+            },
+        };
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (@This().cases) |case| {
+                const stream = try self.server.listener.accept(self.server.io);
+                defer stream.close(self.server.io);
+                const result = readRequestFromStream(
+                    self.server.allocator,
+                    self.server.io,
+                    stream,
+                    self.server.limits,
+                    .{},
+                );
+                try std.testing.expectError(case.err, result);
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for (Shared.cases) |case| {
+        const stream = try server.address().connect(io, .{ .mode = .stream });
+        defer stream.close(io);
+        try writeAllToStream(io, stream, case.request);
+        var received: [25]u8 = undefined;
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            try readSome(io, stream, &received),
+        );
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "HTTP/1 server sends 100 Continue even when body was pre-read" {

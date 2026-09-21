@@ -652,6 +652,42 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     };
 }
 
+/// Validate a complete request head with the allocating parser's exact
+/// compatibility policy, without requiring any body bytes. Servers use this
+/// before emitting 100 Continue so a malformed request cannot receive an
+/// interim success response merely because its Host/Expect/length fields look
+/// plausible to a lightweight framing scan.
+pub fn validateRequestHead(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    options: ParseOptions,
+) Error!void {
+    const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse
+        return error.BufferTooShort;
+    var lines = std.mem.splitSequence(u8, bytes[0..head_end], "\r\n");
+    const request_line = lines.next() orelse return error.MalformedStartLine;
+    const parts = try parseRequestLine(
+        request_line,
+        options.allow_multiple_spaces_in_request_line_delimiters,
+    );
+    if (parts.target.len > options.max_request_target_bytes) {
+        return error.UriTooLong;
+    }
+    const method = try Method.parse(parts.method);
+    try validateRequestTargetForMethod(method, parts.target);
+    const version = try Version.parse(parts.version);
+    var parsed = try parseHeaderLines(
+        allocator,
+        &lines,
+        options,
+        .{ .ignore_invalid = options.ignore_invalid_headers_in_requests },
+    );
+    defer parsed.deinit(allocator);
+    try validateTransferEncodingForVersion(version, parsed.headers);
+    try validateRequestHostParts(version, parts.target, parsed.headers);
+    _ = try requestFraming(parsed.headers);
+}
+
 pub fn parseResponse(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Response {
     return parseResponseWithContext(allocator, bytes, options, .{});
 }
