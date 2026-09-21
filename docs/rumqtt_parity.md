@@ -2137,6 +2137,10 @@ SUBSCRIBE, and UNSUBSCRIBE semantic failures now pass through the broker's MQTT
 client-originated Subscription Identifier is rejected by the shared connection
 runtime before Topic Alias or QoS state can change and is independently
 verified as `0x82`; server-originated delivery identifiers remain valid.
+Inbound PUBLISH admission is transactional across connection-scoped Topic
+Alias and QoS Packet Identifier state: semantic rejection cannot replace an
+alias, and an alias-allocation failure rolls back a newly reserved inflight
+slot.
 An unnegotiated live AUTH now follows the same diagnostic boundary, and normal
 or failing AUTH handlers share the connection's writer mutex with fanout so
 their packets cannot interleave. Finally,
