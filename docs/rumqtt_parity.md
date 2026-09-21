@@ -32,7 +32,7 @@ and equal-wire broker results are kept separate.
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback; unnegotiated/mismatched live AUTH receives Protocol Error before close | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
-| Broker persistence | Atomic versioned snapshots plus opt-in interval- or durable-change-count-driven live checkpoints, and a separate opt-in fsynced append journal, for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages; Mosquitto can interpret its autosave threshold as elapsed seconds or persistence changes |
+| Broker persistence | Atomic versioned snapshots plus opt-in interval- or durable-change-count-driven live checkpoints, with both the replacement file and its parent directory synced on supported POSIX targets; and a separate opt-in fsynced append journal with the same directory-durable initialization/compaction, for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages; Mosquitto can interpret its autosave threshold as elapsed seconds or persistence changes |
 | Observability | `Broker.stats()` takes one allocation-free, state-locked snapshot of uptime, admitted CONNECT count, live connections, the process high-water connection count, cumulative expired Sessions, complete MQTT Control Packet/message and MQTT-byte counters, inbound/outbound/dropped PUBLISH counters and payload-byte counters, connected/offline Sessions, ordinary/shared subscriptions, retained state, live queues, durable queues/inflight, inbound QoS 2 and scheduled Wills, including owned byte gauges. State-backed gauges form one coherent instant; lock-free wire counters include each complete transport operation after its caller returns, so callers that need an exact asynchronous boundary use a same-connection acknowledgement or PING barrier and observe the counter afterward. `publishSystemStats()` and `system_stats_interval` publish the snapshot as retained QoS 0 `$SYS` messages through normal routing and ACL checks, including Mosquitto-compatible `$SYS/broker/uptime`, cumulative message/byte/client/PUBLISH topics, and 1/5/15-minute EWMA connection, message, PUBLISH, drop, and byte rates. Wire counters are shared atomics below the broker state lock, span TCP/TLS/WS/WSS, count CONNECT before admission and successful CONNACK/control writes, and exclude lower-transport framing. Drops count per destination rejected by a live or durable queue bound or negotiated Maximum Packet Size; ordinary no-match, ACL denial, and expiry are distinct outcomes. Like Mosquitto, `$SYS` updates actually written to subscribers contribute to the following sent-PUBLISH and total-message/byte snapshots | Mosquitto periodically publishes a broad counter/gauge and rolling-load set through `$SYS`; rumqttd exposes metrics through its server architecture |
 
 ## One-way inbound broker bridge
@@ -271,8 +271,12 @@ and the reconnect decision explicit.
 The live broker now follows the durability shape audited in Mosquitto
 `persist_write.c` and `mosquitto_write_file`: serialize a coherent in-memory
 view, write a restricted temporary file, `fsync` it, then atomically replace
-the destination. Netz uses Zig 0.16 `std.Io.File.Atomic` rather than hand-written
-temporary-name logic.
+the destination. Netz additionally syncs the containing directory after the
+rename on supported POSIX targets, so a successful checkpoint also makes its
+new directory entry crash-durable rather than only its file contents. Directory
+sync failures propagate after the atomic replacement and do not falsely
+acknowledge a durable generation. Netz uses Zig 0.16 `std.Io.File.Atomic` rather
+than hand-written temporary-name logic.
 
 The versioned binary format has whole-file and per-section CRC32 checks and
 persists:
@@ -344,8 +348,10 @@ accepts and truncates only an incomplete final record, while bad magic,
 sequence, header CRC, payload CRC, or footer is rejected instead of silently
 hiding committed corruption. Compaction writes a new one-record generation
 through `std.Io.File.Atomic` and replaces the old history only after the
-temporary file has been synced; append automatically takes this path before a
-configured journal-size bound would be exceeded.
+temporary file has been synced, then syncs the parent directory before
+reporting success; append automatically takes this path before a configured
+journal-size bound would be exceeded. The initial journal creation follows the
+same file-sync, rename, and directory-sync sequence.
 
 When `--commit-log=PATH` is enabled in the production example, the broker records
 protocol-visible durable boundaries before CONNACK, SUBACK, UNSUBACK,

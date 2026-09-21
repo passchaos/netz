@@ -690,8 +690,10 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   Store with full subscription restoration, Session Expiry, offline QoS 1/2
   queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
   out-of-order ACKs and incoming QoS 2 deduplication, atomic versioned broker
-  snapshots, and an opt-in fsynced append journal with CRC/sequence/footer
-  validation, torn-tail recovery, atomic compaction, and protocol-visible
+  snapshots whose file contents and, on supported POSIX targets, replacement
+  directory entry are synced, and an opt-in fsynced append journal with
+  CRC/sequence/footer validation,
+  torn-tail recovery, directory-synced atomic compaction, and protocol-visible
   durability boundaries, plus coherent allocation-free broker statistics for
   connection, Session, subscription, retained, queue, inflight, QoS 2 and Will
   state and retained `$SYS` gauge publication through the normal routing/ACL

@@ -8,6 +8,7 @@
 //! changing the torn-tail and sequence guarantees implemented here.
 
 const std = @import("std");
+const durability = @import("durability.zig");
 
 const file_magic = "netz-mqtt-journal\x00\x01";
 const version: u32 = 1;
@@ -25,9 +26,8 @@ pub const Error = std.mem.Allocator.Error ||
     std.Io.Dir.ReadFileAllocError || std.Io.File.OpenError ||
     std.Io.File.LengthError || std.Io.File.SetLengthError ||
     std.Io.File.Writer.Error || std.Io.File.Writer.SeekError ||
-    std.Io.Writer.Error || std.Io.File.Atomic.ReplaceError ||
-    std.Io.Dir.CreateFileAtomicError ||
-    std.Io.File.SyncError || error{
+    std.Io.Writer.Error || durability.Error ||
+    std.Io.Dir.CreateFileAtomicError || error{
     CommitLogNotFound,
     EmptyCommitLog,
     CorruptCommitLog,
@@ -81,7 +81,7 @@ pub const Log = struct {
         defer atomic.deinit(io);
         try atomic.file.writeStreamingAll(io, fileHeader());
         try atomic.file.sync(io);
-        try atomic.replace(io);
+        try durability.replaceSynced(&atomic, io, dir);
         return .{
             .allocator = allocator,
             .io = io,
@@ -130,7 +130,7 @@ pub const Log = struct {
         try atomic.file.writeStreamingAll(io, snapshot);
         try atomic.file.writeStreamingAll(io, &footer);
         try atomic.file.sync(io);
-        try atomic.replace(io);
+        try durability.replaceSynced(&atomic, io, dir);
         return .{
             .allocator = allocator,
             .io = io,
@@ -315,6 +315,7 @@ pub const Log = struct {
         try atomic.replace(self.io);
         self.valid_len = total_len;
         self.next_sequence = 2;
+        try durability.syncDirectory(self.io, self.dir);
     }
 };
 

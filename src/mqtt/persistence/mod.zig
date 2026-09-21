@@ -11,6 +11,7 @@ const bridge_qos2 = @import("../broker/bridge_qos2.zig");
 const retained = @import("../retained/mod.zig");
 const session = @import("../session/mod.zig");
 const will = @import("../will/mod.zig");
+const durability = @import("durability.zig");
 pub const codec = @import("codec.zig");
 pub const commit_log = @import("commit_log.zig");
 
@@ -25,8 +26,8 @@ pub const Error = codec.Error || pending_qos2.Error || bridge_qos2.Error || reta
     SnapshotBusy,
     CorruptSnapshot,
 } || std.Io.Dir.CreateFileAtomicError ||
-    std.Io.File.Writer.Error || std.Io.File.SyncError ||
-    std.Io.File.Atomic.ReplaceError || std.Io.Dir.ReadFileAllocError;
+    std.Io.File.Writer.Error ||
+    durability.Error || std.Io.Dir.ReadFileAllocError;
 
 pub const State = struct {
     retained: *retained.Store,
@@ -89,7 +90,7 @@ pub fn saveEncodedAtomic(
     defer atomic.deinit(io);
     try atomic.file.writeStreamingAll(io, encoded);
     try atomic.file.sync(io);
-    try atomic.replace(io);
+    try durability.replaceSynced(&atomic, io, dir);
 }
 
 pub fn load(
