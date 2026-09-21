@@ -67,13 +67,13 @@ grep -Fq \
 
 cases='["*"]'
 expected_count_args=(
-  --expected-count=517
   --expected-cases="$(dirname "$0")/websocket_autobahn_cases_25_10_1.json"
 )
-if [[ $# -ne 0 ]]; then
+if [[ $# -eq 0 ]]; then
+  expected_count_args+=(--expected-count=517)
+else
   cases=$(printf '%s\n' "$@" | python3 -c \
     'import json, sys; print(json.dumps([line.rstrip("\n") for line in sys.stdin]))')
-  expected_count_args=()
 fi
 mkdir -p "$work/reports"
 cat >"$work/config.json" <<EOF

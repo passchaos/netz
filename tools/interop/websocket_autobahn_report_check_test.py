@@ -32,15 +32,17 @@ class AutobahnReportCheckTests(unittest.TestCase):
             json.dumps(value), encoding="utf-8"
         )
 
+    def complete_cases(self) -> dict[str, dict[str, str]]:
+        return {
+            case_id: {
+                "behavior": status[0],
+                "behaviorClose": status[1],
+            }
+            for case_id, status in self.expected_cases.items()
+        }
+
     def test_accepts_complete_report_and_documented_statuses(self) -> None:
-        cases = {
-            case_id: {"behavior": "OK", "behaviorClose": "OK"}
-            for case_id in self.expected_cases
-        }
-        cases["7.1.6"] = {
-            "behavior": "INFORMATIONAL",
-            "behaviorClose": "INFORMATIONAL",
-        }
+        cases = self.complete_cases()
         self.write({"netz": cases})
         behavior, close, non_ok = CHECK.validate(
             self.directory,
@@ -49,15 +51,19 @@ class AutobahnReportCheckTests(unittest.TestCase):
             expected_cases=self.expected_cases,
         )
         self.assertEqual(517, sum(behavior.values()))
-        self.assertEqual(1, behavior["INFORMATIONAL"])
-        self.assertEqual(1, close["INFORMATIONAL"])
-        self.assertEqual([("7.1.6", "INFORMATIONAL", "INFORMATIONAL")], non_ok)
+        self.assertEqual(3, behavior["INFORMATIONAL"])
+        self.assertEqual(3, close["INFORMATIONAL"])
+        self.assertEqual(3, len(non_ok))
 
     def test_manifest_is_the_pinned_25_10_1_case_set(self) -> None:
         self.assertEqual(517, len(self.expected_cases))
         self.assertIn("1.1.1", self.expected_cases)
         self.assertIn("6.22.34", self.expected_cases)
         self.assertIn("13.7.18", self.expected_cases)
+        self.assertEqual(
+            ("INFORMATIONAL", "INFORMATIONAL"),
+            self.expected_cases["7.13.2"],
+        )
 
     def test_rejects_manifest_with_a_stale_count_or_digest(self) -> None:
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -71,6 +77,25 @@ class AutobahnReportCheckTests(unittest.TestCase):
         manifest["case_ids_sha256"] = "0" * 64
         local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(CHECK.ReportError, "digest does not match"):
+            CHECK.load_case_manifest(local_manifest)
+
+    def test_rejects_manifest_status_for_unknown_case(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        local_manifest = self.directory / "case-manifest.json"
+        manifest["expected_non_ok"]["99.99.99"] = {
+            "behavior": "INFORMATIONAL",
+            "behaviorClose": "INFORMATIONAL",
+        }
+        local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(CHECK.ReportError, "status for unknown case"):
+            CHECK.load_case_manifest(local_manifest)
+
+    def test_rejects_manifest_invalid_expected_status(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        local_manifest = self.directory / "case-manifest.json"
+        manifest["expected_non_ok"]["7.1.6"]["behavior"] = "FAILED"
+        local_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(CHECK.ReportError, "invalid status"):
             CHECK.load_case_manifest(local_manifest)
 
     def test_rejects_same_count_with_missing_and_unknown_case(self) -> None:
@@ -95,6 +120,55 @@ class AutobahnReportCheckTests(unittest.TestCase):
         self.write({"netz": {"1.1.1": {"behavior": "OK", "behaviorClose": "OK"}}})
         with self.assertRaisesRegex(CHECK.ReportError, "contained 1 cases, expected 517"):
             CHECK.validate(self.directory, expected_agent="netz", expected_count=517)
+
+    def test_rejects_accepted_status_regression(self) -> None:
+        cases = self.complete_cases()
+        cases["1.1.1"]["behavior"] = "NON-STRICT"
+        self.write({"netz": cases})
+        with self.assertRaisesRegex(
+            CHECK.ReportError, r"unexpected status.*1\.1\.1"
+        ):
+            CHECK.validate(
+                self.directory,
+                expected_agent="netz",
+                expected_count=517,
+                expected_cases=self.expected_cases,
+            )
+
+    def test_filtered_report_uses_manifest_status_baseline(self) -> None:
+        self.write(
+            {
+                "netz": {
+                    "7.1.6": {
+                        "behavior": "INFORMATIONAL",
+                        "behaviorClose": "INFORMATIONAL",
+                    }
+                }
+            }
+        )
+        CHECK.validate(
+            self.directory,
+            expected_agent="netz",
+            expected_count=None,
+            expected_cases=self.expected_cases,
+        )
+        self.write(
+            {
+                "netz": {
+                    "1.1.1": {
+                        "behavior": "INFORMATIONAL",
+                        "behaviorClose": "OK",
+                    }
+                }
+            }
+        )
+        with self.assertRaisesRegex(CHECK.ReportError, "unexpected status"):
+            CHECK.validate(
+                self.directory,
+                expected_agent="netz",
+                expected_count=None,
+                expected_cases=self.expected_cases,
+            )
 
     def test_filtered_report_must_still_be_nonempty(self) -> None:
         self.write({"netz": {}})

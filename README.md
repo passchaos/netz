@@ -1002,7 +1002,8 @@ zig build interop-quic-quinn -Doptimize=ReleaseFast
 # Requires Docker and defaults to the digest-locked Autobahn Testsuite 25.10.1
 # image. Optional trailing arguments select individual case IDs; with none, the
 # report verifier requires the exact versioned set of all 517 cases from the
-# sole `netz` agent, rejecting count-preserving case substitutions. Pass
+# sole `netz` agent and the locked per-case status baseline, rejecting
+# count-preserving substitutions or accepted-but-regressed statuses. Pass
 # --tls before case IDs to run the same gate over native TLS 1.3 WSS.
 # The long-lived netz endpoint uses 64 reusable zio-backed std.Io workers.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast

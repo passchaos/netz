@@ -4,6 +4,20 @@
   "image_digest": "sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074",
   "case_count": 517,
   "case_ids_sha256": "d147aac39b1b991d29dea6bbe9d89ac0205a0432bcf1680eee837a42f0d7a43d",
+  "expected_non_ok": {
+    "7.1.6": {
+      "behavior": "INFORMATIONAL",
+      "behaviorClose": "INFORMATIONAL"
+    },
+    "7.13.1": {
+      "behavior": "INFORMATIONAL",
+      "behaviorClose": "INFORMATIONAL"
+    },
+    "7.13.2": {
+      "behavior": "INFORMATIONAL",
+      "behaviorClose": "INFORMATIONAL"
+    }
+  },
   "case_groups": {
     "1.1": 8,
     "1.2": 8,

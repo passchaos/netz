@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +63,11 @@ def load_report(directory: Path) -> dict[str, Any]:
     return value
 
 
-def load_case_manifest(path: Path) -> frozenset[str]:
+ExpectedStatus = tuple[str, str]
+ExpectedCases = Mapping[str, ExpectedStatus]
+
+
+def load_case_manifest(path: Path) -> dict[str, ExpectedStatus]:
     value = load_json(path)
     if not isinstance(value, dict):
         raise ReportError("Autobahn case manifest must be an object")
@@ -73,6 +77,7 @@ def load_case_manifest(path: Path) -> frozenset[str]:
         "image_digest",
         "case_count",
         "case_ids_sha256",
+        "expected_non_ok",
         "case_groups",
     }
     if set(value) != required:
@@ -126,7 +131,37 @@ def load_case_manifest(path: Path) -> frozenset[str]:
     canonical = "".join(f"{case_id}\n" for case_id in sorted(case_ids)).encode()
     if hashlib.sha256(canonical).hexdigest() != digest:
         raise ReportError("Autobahn case manifest case ID digest does not match")
-    return frozenset(case_ids)
+
+    expected_non_ok = value["expected_non_ok"]
+    if not isinstance(expected_non_ok, dict):
+        raise ReportError("Autobahn case manifest has invalid expected statuses")
+    expected = {case_id: ("OK", "OK") for case_id in case_ids}
+    for case_id, statuses in expected_non_ok.items():
+        if case_id not in case_ids:
+            raise ReportError(
+                f"Autobahn case manifest has status for unknown case {case_id!r}"
+            )
+        if not isinstance(statuses, dict) or set(statuses) != {
+            "behavior",
+            "behaviorClose",
+        }:
+            raise ReportError(
+                f"Autobahn case manifest has invalid status for {case_id}"
+            )
+        behavior = statuses["behavior"]
+        close_behavior = statuses["behaviorClose"]
+        if (
+            not isinstance(behavior, str)
+            or not isinstance(close_behavior, str)
+            or behavior not in ACCEPTED_BEHAVIORS
+            or close_behavior not in ACCEPTED_CLOSE_BEHAVIORS
+            or (behavior == "OK" and close_behavior == "OK")
+        ):
+            raise ReportError(
+                f"Autobahn case manifest has invalid status for {case_id}"
+            )
+        expected[case_id] = (behavior, close_behavior)
+    return expected
 
 
 def format_case_ids(case_ids: Collection[str]) -> str:
@@ -142,7 +177,7 @@ def validate(
     *,
     expected_agent: str,
     expected_count: int | None,
-    expected_cases: Collection[str] | None = None,
+    expected_cases: Collection[str] | ExpectedCases | None = None,
 ) -> tuple[Counter[str], Counter[str], list[tuple[str, str, str]]]:
     data = load_report(reports)
     if set(data) != {expected_agent}:
@@ -162,7 +197,7 @@ def validate(
     if expected_cases is not None:
         actual = set(cases)
         expected = set(expected_cases)
-        missing = expected - actual
+        missing = expected - actual if expected_count is not None else set()
         unexpected = actual - expected
         if missing or unexpected:
             details = []
@@ -176,6 +211,7 @@ def validate(
     close_counts: Counter[str] = Counter()
     non_ok: list[tuple[str, str, str]] = []
     rejected: list[tuple[str, str, str]] = []
+    unexpected_statuses: list[tuple[str, str, str, str, str]] = []
     for case_id, result in cases.items():
         if not isinstance(case_id, str) or not case_id:
             raise ReportError("Autobahn report contains an invalid case identifier")
@@ -195,6 +231,21 @@ def validate(
             or close_behavior not in ACCEPTED_CLOSE_BEHAVIORS
         ):
             rejected.append(item)
+        if isinstance(expected_cases, Mapping):
+            expected_behavior, expected_close = expected_cases[case_id]
+            if (behavior, close_behavior) != (
+                expected_behavior,
+                expected_close,
+            ):
+                unexpected_statuses.append(
+                    (
+                        case_id,
+                        behavior,
+                        close_behavior,
+                        expected_behavior,
+                        expected_close,
+                    )
+                )
 
     if rejected:
         details = "; ".join(
@@ -202,6 +253,14 @@ def validate(
             for case_id, behavior, close_behavior in rejected
         )
         raise ReportError(f"Autobahn rejected status: {details}")
+    if unexpected_statuses:
+        details = "; ".join(
+            f"{case_id} behavior={behavior} close={close_behavior} "
+            f"expected behavior={expected_behavior} close={expected_close}"
+            for case_id, behavior, close_behavior, expected_behavior, expected_close
+            in unexpected_statuses
+        )
+        raise ReportError(f"Autobahn unexpected status: {details}")
     return behavior_counts, close_counts, non_ok
 
 

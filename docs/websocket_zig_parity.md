@@ -1101,9 +1101,11 @@ applying TCP-only socket options.
    run that differs from the versioned 25.10.1 manifest's exact 517 case IDs,
    including a count-preserving missing/unknown substitution. The manifest
    records the upstream source revision, image digest, group boundaries, total,
-   and a canonical case-ID digest. Explicit case selections
-   retain the same strict status and agent checks while permitting a smaller
-   non-empty report. The 517-case results
+   canonical case-ID digest, and the exact expected non-OK statuses. Unlisted
+   cases must report `OK` for both behavior fields, so an arbitrary regression
+   to otherwise accepted `NON-STRICT` or `INFORMATIONAL` can no longer pass.
+   Explicit case selections remain a non-empty manifest subset and each
+   selected case must match the same status baseline. The 517-case results
    below predate that migration and remain historical Threaded evidence until
    the container suite is rerun on zio. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
@@ -1122,10 +1124,10 @@ applying TCP-only socket options.
    four fail-fast UTF-8 cases previously reported as `NON-STRICT` are also now
    `OK`: invalid text is rejected as soon as the decisive byte arrives, even
    before the current frame or a fragmented message has completed. The
-   runner accepts only the explicit `OK`, `NON-STRICT`, and `INFORMATIONAL`
-   behavior statuses and `OK` and `INFORMATIONAL` close statuses, reports every
-   non-OK case, and exits unsuccessfully for `UNIMPLEMENTED`, failure, missing,
-   or unknown statuses. Optional case IDs select a faster focused run. This is
+   runner accepts only the exact per-case baseline, reports every non-OK case,
+   and exits unsuccessfully for regressions, `UNIMPLEMENTED`, failures,
+   missing, or unknown statuses. Optional case IDs select a faster focused run
+   without weakening those expectations. This is
    external RFC 6455/RFC 7692 conformance evidence for both cleartext HTTP/1.1
    Upgrade and WSS. RFC 8441 now has the separate Hyper process gate described
    above, although it is a focused lifecycle check rather than the 517-case
