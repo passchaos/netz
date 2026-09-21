@@ -721,6 +721,143 @@ test "HTTP/3 request router preserves reordered WebTransport uni prefix" {
     try std.testing.expectEqual(bytes.len, stats.available_bytes);
 }
 
+test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcc} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-bidi-server",
+        .peer_connection_id = "wt-bidi-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_bidi = 3,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var buffered = RequestStreamSet.init(allocator, 1024, 2);
+    defer buffered.deinit();
+    var streaming = StreamingRequestSet.init(
+        allocator,
+        2,
+        1024,
+        .{},
+        .request,
+    );
+    defer streaming.deinit();
+    var lifecycle = ServerRequestLifecycle.init(allocator);
+    defer lifecycle.deinit();
+    var detached = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer detached.deinit();
+    try detached.register(0);
+
+    const bytes = [_]u8{ 0x40, 0x41, 0x00, 'w', 't' };
+    const suffix = quic.Frame{ .stream = .{
+        .stream_id = 4,
+        .offset = 1,
+        .data = bytes[1..],
+    } };
+    const first = quic.Frame{ .stream = .{
+        .stream_id = 4,
+        .data = bytes[0..1],
+    } };
+    for ([_]quic.Frame{ suffix, first }, 0..) |frame, packet_number| {
+        try quic.one_rtt.testing.applyReceivedFrames(
+            &connection,
+            packet_number,
+            &.{frame},
+            null,
+            .not_ect,
+        );
+        try std.testing.expect((try request_routing
+            .applyServerRequestPacketFrames(
+            endpoint.address(),
+            &.{frame},
+            allocator,
+            &control,
+            &qpack_decode,
+            &qpack_encode,
+            0,
+            &buffered,
+            &streaming,
+            &lifecycle,
+            .{ .connection = &connection },
+            .{ .slice = &.{} },
+            null,
+            &detached,
+        )) == null);
+        try std.testing.expect(!buffered.contains(4));
+    }
+    try std.testing.expect(!buffered.contains(4));
+    try std.testing.expect(!streaming.contains(4));
+    const stats = connection.recvStreamStats(4) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), stats.bytes_read);
+    try std.testing.expectEqual(bytes.len, stats.available_bytes);
+
+    const request_bytes = [_]u8{
+        http3.FrameType.headers,
+        0x02,
+        0x00,
+        0x00,
+    };
+    const request = quic.Frame{ .stream = .{
+        .stream_id = 8,
+        .data = &request_bytes,
+        .fin = true,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        2,
+        &.{request},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{request},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        .{ .slice = &.{} },
+        null,
+        &detached,
+    )) == null);
+    try std.testing.expect(buffered.contains(8));
+}
+
 test "HTTP/3 request router preserves reset WebTransport uni stream" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

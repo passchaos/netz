@@ -1052,8 +1052,7 @@ test "WebTransport endpoint server owns concurrent real sessions" {
         .inbox_capacity = 8,
         .handshake_timeout_ms = 2_000,
     });
-    var endpoint_owned = true;
-    defer if (endpoint_owned) endpoint.deinit();
+    defer endpoint.deinit();
     const dispatcher_address = @intFromPtr(endpoint.h3.dispatcher);
 
     const ClientTask = struct {
@@ -1107,7 +1106,9 @@ test "WebTransport endpoint server owns concurrent real sessions" {
                 },
             );
             try self.client.?.sendDatagram(self.datagram);
-            var response = try self.client.?.receiveDatagram();
+            var response = try self.client.?.receiveDatagramWithTimeout(
+                .fromSeconds(3),
+            );
             defer response.deinit(allocator);
             try std.testing.expectEqualStrings(
                 self.response_datagram,
@@ -1119,7 +1120,9 @@ test "WebTransport endpoint server owns concurrent real sessions" {
                 self.datagram,
                 true,
             );
-            var stream_response = try self.client.?.receiveStream();
+            var stream_response = try self.client.?.receiveStreamWithTimeout(
+                .fromSeconds(3),
+            );
             defer stream_response.deinit();
             try std.testing.expectEqualStrings(
                 self.response_datagram,
@@ -1158,10 +1161,6 @@ test "WebTransport endpoint server owns concurrent real sessions" {
     const second_thread = try std.Thread.spawn(.{}, ClientTask.run, .{&clients[1]});
     var joined = false;
     defer if (!joined) {
-        if (endpoint_owned) {
-            endpoint.deinit();
-            endpoint_owned = false;
-        }
         first_thread.join();
         second_thread.join();
         for (&clients) |*client| if (client.client) |*value| value.deinit();
@@ -1179,14 +1178,18 @@ test "WebTransport endpoint server owns concurrent real sessions" {
     var stream_one_bytes: usize = 0;
     var stream_two_bytes: usize = 0;
     var stream_buffer: [128]u8 = undefined;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(5),
+    });
     while (accepted_count < clients.len or
         received_datagrams < clients.len or
         received_streams < clients.len or
         received_closes < clients.len)
     {
-        var event = try endpoint.receive(
+        var event = try endpoint.receiveWithDeadline(
             &versions,
-            .{ .clock = .awake, .raw = .fromMilliseconds(5) },
+            deadline,
             &stream_buffer,
         );
         defer event.deinit(allocator);

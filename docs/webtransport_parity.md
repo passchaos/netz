@@ -199,6 +199,12 @@ or associated send entry—then removes those otherwise-unclassifiable prefixes
 and the peer stream-ID cursor. IDs therefore remain monotonic without reuse for
 the complete live-peer lifetime, while long-lived servers bound cursor and
 partial-prefix storage by active peers rather than historical address churn.
+The handshake-backed endpoint applies the same ownership boundary: while a
+CONNECT is detached, a client-initiated bidirectional stream with a fragmented
+modern `0x41` prefix remains in QUIC storage until WebTransport claims it,
+whereas an ordinary HEADERS-prefixed sibling remains routed as HTTP/3. A real
+two-connection endpoint regression exchanges DATAGRAMs, bidirectional streams,
+and close capsules on both sessions under bounded receive deadlines.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte

@@ -326,15 +326,29 @@ pub fn applyServerRequestPacketFrames(
             qpack_decode.commitPeerUniFrame(classified.frame);
             continue;
         }
-        if ((try messageStreamDisposition(
-            frame.stream.stream_id,
-        )) == .ignore) continue;
         const stream_id: u62 = @intCast(frame.stream.stream_id);
         const tracked = request_streams.contains(stream_id) or
             if (streaming_requests) |streaming|
                 streaming.contains(stream_id)
             else
                 false;
+        var request_frame = frame.stream;
+        if (hasDetachedAssociation(detached_stream_id, detached_streams) and
+            !tracked and
+            !request_lifecycle.contains(stream_id))
+        {
+            switch (try classifyDetachedBidiStream(
+                request_id_validator,
+                frame.stream,
+            )) {
+                .ordinary => {},
+                .preserve => continue,
+                .replay => |reassembled| request_frame = reassembled,
+            }
+        }
+        if ((try messageStreamDisposition(
+            request_frame.stream_id,
+        )) == .ignore) continue;
         if (!tracked and
             request_id_validator.requestReceptionStopped(stream_id))
         {
@@ -346,9 +360,9 @@ pub fn applyServerRequestPacketFrames(
             return error.RequestRejected;
         }
         if (streaming_requests) |streaming| {
-            try streaming.insertRequest(request_streams, from, frame.stream);
+            try streaming.insertRequest(request_streams, from, request_frame);
         } else {
-            try request_streams.insert(from, frame.stream);
+            try request_streams.insert(from, request_frame);
             const copied_through = request_streams.contiguousEnd(
                 stream_id,
             ) orelse return error.UnexpectedStream;
@@ -413,6 +427,49 @@ fn shouldPreserveDetachedUniStream(
     const prefix = quic.varint.decodeSlice(available) catch return false;
     return @as(http3.StreamType, @enumFromInt(prefix.value)) ==
         .webtransport_unidirectional;
+}
+
+const DetachedBidiRoute = union(enum) {
+    ordinary,
+    preserve,
+    replay: quic.StreamFrame,
+};
+
+fn classifyDetachedBidiStream(
+    request_id_validator: ServerRequestIdValidator,
+    frame: quic.StreamFrame,
+) Error!DetachedBidiRoute {
+    if ((frame.stream_id & 0x03) != 0) return .ordinary;
+    const connection = switch (request_id_validator) {
+        .connection => |value| value,
+        .static_limit => return .ordinary,
+    };
+    const available = connection.retainedReceivedStream(frame.stream_id) orelse
+        return .ordinary;
+    const prefix = quic.varint.decodeSlice(available) catch |err| switch (err) {
+        // Neither HTTP/3 nor WebTransport owns an ambiguous prefix yet. Keep
+        // it solely in QUIC storage so a later offset-zero fragment can make
+        // the classification without duplicating or consuming bytes.
+        error.BufferTooShort => return .preserve,
+        else => return err,
+    };
+    if (prefix.value == http3.FrameType.webtransport_stream) return .preserve;
+    const stats = connection.recvStreamStats(frame.stream_id) orelse
+        return error.UnexpectedStream;
+    const available_len = std.math.cast(u64, available.len) orelse
+        return error.InvalidStreamRange;
+    const available_end = std.math.add(
+        u64,
+        stats.bytes_read,
+        available_len,
+    ) catch return error.InvalidStreamRange;
+    return .{ .replay = .{
+        .stream_id = frame.stream_id,
+        .offset = stats.bytes_read,
+        .data = available,
+        .fin = stats.final_size != null and
+            stats.final_size.? == available_end,
+    } };
 }
 
 pub fn validateBlockedStreamBudget(
