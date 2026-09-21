@@ -68,7 +68,6 @@ pub fn validateBlockedStreamBudget(
     }
     if (count > limit) return error.QpackDecompressionFailed;
 }
-
 /// Route authenticated frames into response, push, control, and QPACK state.
 /// The return value tells the caller whether reset processing queued decoder
 /// feedback that should be flushed after the complete packet is accepted.
@@ -139,6 +138,17 @@ pub fn routePacket(
             continue;
         }
         if (frame == .reset_stream and
+            hasDetachedAssociation(state.*) and
+            state.connection != null and
+            shouldPreserveDetachedStream(
+                state.connection.?,
+                frame.reset_stream.stream_id,
+                state.request_lifecycle,
+            ))
+        {
+            continue;
+        }
+        if (frame == .reset_stream and
             (try messageStreamDisposition(
                 frame.reset_stream.stream_id,
             )) == .request_response)
@@ -190,7 +200,7 @@ pub fn routePacket(
         if (hasDetachedAssociation(state.*) and state.connection != null and
             shouldPreserveDetachedStream(
                 state.connection.?,
-                frame.stream,
+                frame.stream.stream_id,
                 state.request_lifecycle,
             ))
         {
@@ -462,20 +472,20 @@ fn shouldPreserveDetachedUniReset(
     return @as(http3.StreamType, @enumFromInt(prefix.value)) ==
         .webtransport_unidirectional;
 }
-
 fn shouldPreserveDetachedStream(
     connection: *quic.one_rtt.Connection,
-    stream: quic.StreamFrame,
+    stream_id: u64,
     request_lifecycle: ?*const ClientRequestLifecycle,
 ) bool {
-    if ((stream.stream_id & 0x02) == 0) {
-        const stream_id: u62 = @intCast(stream.stream_id);
+    if ((stream_id & 0x02) == 0) {
+        if ((stream_id & 0x03) == 0x01) return true;
+        const bidi_stream_id: u62 = @intCast(stream_id);
         const lifecycle = request_lifecycle orelse return false;
-        return !lifecycle.contains(stream_id) and
-            !lifecycle.isFinished(stream_id);
+        return !lifecycle.contains(bidi_stream_id) and
+            !lifecycle.isFinished(bidi_stream_id);
     }
     const available = connection.availableReceivedStream(
-        stream.stream_id,
+        stream_id,
     ) orelse return false;
     const prefix = quic.varint.decodeSlice(available) catch return false;
     return @as(http3.StreamType, @enumFromInt(prefix.value)) ==

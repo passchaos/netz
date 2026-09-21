@@ -742,7 +742,7 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
         .local_connection_id = "wt-bidi-server",
         .peer_connection_id = "wt-bidi-client",
         .local_endpoint = .server,
-        .initial_receive_max_streams_bidi = 3,
+        .initial_receive_max_streams_bidi = 6,
         .enable_pacing = false,
     });
     defer connection.deinit();
@@ -756,11 +756,11 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
         1024,
     );
     defer qpack_encode.deinit();
-    var buffered = RequestStreamSet.init(allocator, 1024, 2);
+    var buffered = RequestStreamSet.init(allocator, 1024, 3);
     defer buffered.deinit();
     var streaming = StreamingRequestSet.init(
         allocator,
-        2,
+        3,
         1024,
         .{},
         .request,
@@ -786,7 +786,14 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
         .stream_id = 4,
         .data = bytes[0..1],
     } };
-    for ([_]quic.Frame{ suffix, first }, 0..) |frame, packet_number| {
+    const reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 4,
+        .application_error_code = 7,
+        .final_size = bytes.len,
+    } };
+    // RESET_STREAM may arrive before the STREAM frames it terminates. The
+    // router cannot assign this stream to HTTP/3 until its prefix is known.
+    for ([_]quic.Frame{ reset, suffix, first }, 0..) |frame, packet_number| {
         try quic.one_rtt.testing.applyReceivedFrames(
             &connection,
             packet_number,
@@ -819,6 +826,51 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 0), stats.bytes_read);
     try std.testing.expectEqual(bytes.len, stats.available_bytes);
+    try std.testing.expectEqual(@as(u64, 7), stats.reset.?.application_error_code);
+
+    const continued = quic.Frame{ .stream = .{
+        .stream_id = 16,
+        .offset = 3,
+        .data = "payload",
+        .fin = true,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        3,
+        &.{.{ .stream = .{
+            .stream_id = 16,
+            .data = bytes[0..3],
+        } }},
+        null,
+        .not_ect,
+    );
+    try connection.releaseReceivedCapacity(16, 3);
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        4,
+        &.{continued},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{continued},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        .{ .slice = &.{} },
+        null,
+        &detached,
+    )) == null);
+    try std.testing.expect(!buffered.contains(16));
+    try std.testing.expectEqual(@as(u64, 3), connection.recvStreamStats(16).?.bytes_read);
 
     const request_bytes = [_]u8{
         http3.FrameType.headers,
@@ -836,7 +888,7 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
         .stream_id = 8,
         .data = request_bytes[0..1],
     } };
-    for ([_]quic.Frame{ request_suffix, request_first }, 2..) |frame, packet_number| {
+    for ([_]quic.Frame{ request_suffix, request_first }, 5..) |frame, packet_number| {
         try quic.one_rtt.testing.applyReceivedFrames(
             &connection,
             packet_number,
@@ -861,9 +913,76 @@ test "HTTP/3 request router preserves reordered WebTransport bidi prefix" {
             null,
             &detached,
         )) == null);
-        try std.testing.expectEqual(packet_number == 3, buffered.contains(8));
+        try std.testing.expectEqual(packet_number == 6, buffered.contains(8));
     }
     try std.testing.expect(buffered.contains(8));
+
+    const request_reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 12,
+        .application_error_code = http3.ApplicationErrorCode.request_cancelled,
+        .final_size = 0,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        7,
+        &.{request_reset},
+        null,
+        .not_ect,
+    );
+    const routed_reset = (try request_routing.applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{request_reset},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        .{ .slice = &.{} },
+        null,
+        &detached,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u62, 12), routed_reset.stream_id);
+    try std.testing.expectEqual(
+        http3.ApplicationErrorCode.request_cancelled,
+        routed_reset.application_error_code,
+    );
+    try std.testing.expect(!buffered.contains(12));
+    try std.testing.expectEqual(@as(usize, 1), streaming.resetCount());
+
+    const empty_webtransport_reset = quic.Frame{ .reset_stream = .{
+        .stream_id = 20,
+        .application_error_code = 0x52e4a40fa8db,
+        .final_size = 0,
+    } };
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        8,
+        &.{empty_webtransport_reset},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect((try request_routing
+        .applyServerRequestPacketFrames(
+        endpoint.address(),
+        &.{empty_webtransport_reset},
+        allocator,
+        &control,
+        &qpack_decode,
+        &qpack_encode,
+        0,
+        &buffered,
+        &streaming,
+        &lifecycle,
+        .{ .connection = &connection },
+        .{ .slice = &.{} },
+        null,
+        &detached,
+    )) == null);
+    try std.testing.expectEqual(@as(usize, 1), streaming.resetCount());
 }
 
 test "HTTP/3 request router preserves reset WebTransport uni stream" {

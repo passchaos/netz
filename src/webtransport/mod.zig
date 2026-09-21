@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const webtransport_error = @import("../internal/webtransport_error.zig");
 const quic = @import("../quic/mod.zig");
 const http3 = @import("../http3/mod.zig");
 
@@ -25,18 +26,13 @@ pub const CapsuleType = struct {
     pub const drain_webtransport_session: u64 = 0x78ae;
 };
 
-pub const ApplicationErrorCode = struct {
-    pub const session_gone: u64 = 0x170d7b68;
-    pub const buffered_stream_rejected: u64 = 0x3994bd84;
-    pub const mapped_base: u64 = 0x52e4a40fa8db;
-};
+pub const ApplicationErrorCode = webtransport_error.ApplicationErrorCode;
 
 /// WebTransport maps its 32-bit application stream errors into an HTTP/3
 /// varint range while skipping every reserved HTTP/3 error code of the form
 /// `0x1f * N + 0x21`.
 pub fn applicationErrorCodeToHttp3(application_code: u32) u64 {
-    const code: u64 = application_code;
-    return ApplicationErrorCode.mapped_base + code + code / 0x1e;
+    return webtransport_error.applicationToHttp3(application_code);
 }
 
 /// Recover a WebTransport application stream error from its HTTP/3 code.
@@ -44,19 +40,7 @@ pub fn applicationErrorCodeToHttp3(application_code: u32) u64 {
 /// Protocol-defined errors such as SESSION_GONE and arbitrary HTTP/3 errors
 /// intentionally return null; callers can still inspect `StreamError.http3_code`.
 pub fn http3ToApplicationErrorCode(http3_code: u64) ?u32 {
-    if (http3_code < ApplicationErrorCode.mapped_base) return null;
-    const difference = http3_code - ApplicationErrorCode.mapped_base;
-    const max_code: u64 = std.math.maxInt(u32);
-    const mapped_end = ApplicationErrorCode.mapped_base +
-        max_code + max_code / 0x1e;
-    if (http3_code > mapped_end) return null;
-    if ((http3_code - 0x21) % 0x1f == 0) return null;
-    const candidate = difference - difference / 0x1f;
-    const application_code = std.math.cast(u32, candidate) orelse return null;
-    if (applicationErrorCodeToHttp3(application_code) != http3_code) {
-        return null;
-    }
-    return application_code;
+    return webtransport_error.http3ToApplication(http3_code);
 }
 
 pub const StreamError = struct {

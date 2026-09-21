@@ -776,6 +776,102 @@ test "HTTP/3 response router preserves reset WebTransport uni stream" {
     try std.testing.expectEqual(@as(u64, 3), connection.recvStreamStats(3).?.available_bytes);
 }
 
+test "HTTP/3 response router preserves reordered WebTransport bidi reset" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcd} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-bidi-client",
+        .peer_connection_id = "wt-bidi-server",
+        .initial_receive_max_streams_bidi = 1,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    var control: http3.ControlState = .{};
+    defer control.deinit(allocator);
+    var qpack_decode = QpackDecodeState.init(allocator, 0, 1024);
+    defer qpack_decode.deinit();
+    var qpack_encode = QpackEncodeState.initAwaitingPeerSettings(
+        allocator,
+        1024,
+    );
+    defer qpack_encode.deinit();
+    var responses = ResponseStreamSet.init(allocator, 1024, 1);
+    defer responses.deinit();
+    var detached = connect_datagram.Registry.init(allocator, .{
+        .max_associations = 1,
+        .max_queued_per_association = 1,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer detached.deinit();
+    try detached.register(0);
+    var state: response_routing.State = .{
+        .allocator = allocator,
+        .connection = &connection,
+        .control = &control,
+        .qpack_decode = &qpack_decode,
+        .qpack_encode = &qpack_encode,
+        .max_blocked_streams = 0,
+        .response_streams = &responses,
+        .streaming_responses = null,
+        .push_streams = null,
+        .request_lifecycle = null,
+        .detached_streams = &detached,
+    };
+
+    const bytes = [_]u8{ 0x40, 0x41, 0x00, 'w', 't' };
+    const frames = [_]quic.Frame{
+        .{ .reset_stream = .{
+            .stream_id = 1,
+            .application_error_code = 9,
+            .final_size = bytes.len,
+        } },
+        .{ .stream = .{
+            .stream_id = 1,
+            .offset = 1,
+            .data = bytes[1..],
+        } },
+        .{ .stream = .{
+            .stream_id = 1,
+            .data = bytes[0..1],
+        } },
+    };
+    for (frames, 0..) |frame, packet_number| {
+        try quic.one_rtt.testing.applyReceivedFrames(
+            &connection,
+            packet_number,
+            &.{frame},
+            null,
+            .not_ect,
+        );
+        _ = try response_routing.routePacket(
+            &state,
+            endpoint.address(),
+            &.{frame},
+        );
+    }
+    try std.testing.expect(!connection.peerStreamClosed(1));
+    const stats = connection.recvStreamStats(1) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 0), stats.bytes_read);
+    try std.testing.expectEqual(bytes.len, stats.available_bytes);
+    try std.testing.expectEqual(@as(u64, 9), stats.reset.?.application_error_code);
+}
+
 test "HTTP/3 fragmented push prefix credits QUIC once and reset retires stream" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -204,7 +204,10 @@ CONNECT is detached, a client-initiated bidirectional stream with a fragmented
 modern `0x41` prefix remains in QUIC storage until WebTransport claims it,
 whereas an ordinary HEADERS-prefixed sibling remains routed as HTTP/3. A real
 two-connection endpoint regression exchanges DATAGRAMs, bidirectional streams,
-and close capsules on both sessions under bounded receive deadlines.
+and close capsules on both sessions under bounded receive deadlines. Both
+endpoint roles also preserve a RESET_STREAM that overtakes its fragmented
+association prefix, so the WebTransport layer reports the mapped terminal
+event instead of the generic HTTP/3 router consuming it.
 The development HTTP/3 pump is also the sole UDP reader for both CONNECT DATA
 and QUIC DATAGRAM traffic. It retains each DATAGRAM frame independently—even
 when a packet also advances a control stream—in configurable count and raw-byte

@@ -8,6 +8,7 @@ const qpack_state = @import("../../qpack/state.zig");
 const buffered_request = @import("../../stream/buffered/request.zig");
 const stream_lifecycle = @import("../../stream/lifecycle.zig");
 const streaming_set = @import("../../stream/set.zig");
+const webtransport_error = @import("../../../../internal/webtransport_error.zig");
 
 const net = std.Io.net;
 const Error = runtime_error.Error;
@@ -192,59 +193,31 @@ pub fn applyServerRequestPacketFrames(
                 else
                     false;
             if (!replaces_stream and
-                request_id_validator.requestReceptionStopped(stream_id))
+                !request_lifecycle.contains(stream_id) and
+                hasDetachedAssociation(detached_stream_id, detached_streams) and
+                try detachedBidiResetBelongsToWebTransport(
+                    request_id_validator,
+                    stream_id,
+                    frame.reset_stream.application_error_code,
+                    frame.reset_stream.final_size,
+                ))
             {
-                _ = try request_id_validator
-                    .requestCompletedPeerStreamRelease(stream_id);
+                // The WebTransport poller owns the terminal event once an
+                // unclaimed client bidi stream is (or may still become) an
+                // RFC 9297 association.
                 continue;
             }
-            var cancel_qpack = try request_streams
-                .requiresQpackCancellation(
-                stream_id,
-                qpack_decode.table,
-            );
-            if (streaming_requests) |streaming| {
-                cancel_qpack = cancel_qpack or
-                    try streaming.hasUnacknowledgedDynamicSection(
-                        stream_id,
-                        qpack_decode.table,
-                    );
-                // Reserve before mutating QPACK or destroying the reader. This
-                // makes reset routing transactional under allocator failure.
-                const new_reset = try streaming.prepareReset(
-                    from,
-                    stream_id,
-                    frame.reset_stream.application_error_code,
-                    request_streams.count(),
-                    replaces_stream,
-                );
-                if (!new_reset) continue;
-                // Reserve decoder feedback before retiring the reader. If the
-                // event queue has been reserved, all remaining operations are
-                // allocation-free and cannot strand one half of the state.
-                if (cancel_qpack) {
-                    try qpack_decode.recordStreamCancellation(stream_id);
-                    cancel_qpack = false;
-                }
-                streaming.recordPreparedNewResetAssumeCapacity(
-                    from,
-                    stream_id,
-                    frame.reset_stream.application_error_code,
-                );
-            }
-            if (cancel_qpack) {
-                try qpack_decode.recordStreamCancellation(stream_id);
-            }
-            request_streams.remove(stream_id);
-            finishServerRequest(control, request_lifecycle, stream_id);
-            _ = try request_id_validator
-                .requestCompletedPeerStreamRelease(stream_id);
-            if (first_reset == null) {
-                first_reset = .{
-                    .from = from,
-                    .stream_id = stream_id,
-                    .application_error_code = frame.reset_stream.application_error_code,
-                };
+            if (try applyServerRequestReset(
+                from,
+                frame.reset_stream,
+                control,
+                qpack_decode,
+                request_streams,
+                streaming_requests,
+                request_lifecycle,
+                request_id_validator,
+            )) |reset| {
+                if (first_reset == null) first_reset = reset;
             }
             continue;
         }
@@ -333,6 +306,7 @@ pub fn applyServerRequestPacketFrames(
             else
                 false;
         var request_frame = frame.stream;
+        var replayed = false;
         if (hasDetachedAssociation(detached_stream_id, detached_streams) and
             !tracked and
             !request_lifecycle.contains(stream_id))
@@ -343,7 +317,10 @@ pub fn applyServerRequestPacketFrames(
             )) {
                 .ordinary => {},
                 .preserve => continue,
-                .replay => |reassembled| request_frame = reassembled,
+                .replay => |reassembled| {
+                    request_frame = reassembled;
+                    replayed = true;
+                },
             }
         }
         if ((try messageStreamDisposition(
@@ -371,6 +348,32 @@ pub fn applyServerRequestPacketFrames(
                 copied_through,
             );
         }
+        if (replayed) {
+            const connection = switch (request_id_validator) {
+                .connection => |value| value,
+                .static_limit => unreachable,
+            };
+            const stats = connection.recvStreamStats(stream_id) orelse
+                return error.UnexpectedStream;
+            if (stats.reset) |reset| {
+                if (try applyServerRequestReset(
+                    from,
+                    .{
+                        .stream_id = stream_id,
+                        .application_error_code = reset.application_error_code,
+                        .final_size = reset.final_size,
+                    },
+                    control,
+                    qpack_decode,
+                    request_streams,
+                    streaming_requests,
+                    request_lifecycle,
+                    request_id_validator,
+                )) |routed_reset| {
+                    if (first_reset == null) first_reset = routed_reset;
+                }
+            }
+        }
     }
     try validateBlockedStreamBudget(
         max_blocked_streams,
@@ -379,6 +382,73 @@ pub fn applyServerRequestPacketFrames(
         streaming_requests,
     );
     return first_reset;
+}
+
+fn applyServerRequestReset(
+    from: net.IpAddress,
+    reset: quic.ResetStreamFrame,
+    control: *http3.ControlState,
+    qpack_decode: *QpackDecodeState,
+    request_streams: *RequestStreamSet,
+    streaming_requests: ?*StreamingRequestSet,
+    request_lifecycle: *ServerRequestLifecycle,
+    request_id_validator: ServerRequestIdValidator,
+) Error!?RequestStreamReset {
+    const stream_id: u62 = @intCast(reset.stream_id);
+    const replaces_stream = request_streams.contains(stream_id) or
+        if (streaming_requests) |streaming|
+            streaming.contains(stream_id)
+        else
+            false;
+    if (!replaces_stream and
+        request_id_validator.requestReceptionStopped(stream_id))
+    {
+        _ = try request_id_validator.requestCompletedPeerStreamRelease(stream_id);
+        return null;
+    }
+    var cancel_qpack = try request_streams.requiresQpackCancellation(
+        stream_id,
+        qpack_decode.table,
+    );
+    if (streaming_requests) |streaming| {
+        cancel_qpack = cancel_qpack or
+            try streaming.hasUnacknowledgedDynamicSection(
+                stream_id,
+                qpack_decode.table,
+            );
+        // Reserve before mutating QPACK or destroying the reader. This makes
+        // reset routing transactional under allocator failure.
+        const new_reset = try streaming.prepareReset(
+            from,
+            stream_id,
+            reset.application_error_code,
+            request_streams.count(),
+            replaces_stream,
+        );
+        if (!new_reset) return null;
+        // Once the event queue has been reserved, all remaining operations
+        // are allocation-free and cannot strand one half of the state.
+        if (cancel_qpack) {
+            try qpack_decode.recordStreamCancellation(stream_id);
+            cancel_qpack = false;
+        }
+        streaming.recordPreparedNewResetAssumeCapacity(
+            from,
+            stream_id,
+            reset.application_error_code,
+        );
+    }
+    if (cancel_qpack) {
+        try qpack_decode.recordStreamCancellation(stream_id);
+    }
+    request_streams.remove(stream_id);
+    finishServerRequest(control, request_lifecycle, stream_id);
+    _ = try request_id_validator.requestCompletedPeerStreamRelease(stream_id);
+    return .{
+        .from = from,
+        .stream_id = stream_id,
+        .application_error_code = reset.application_error_code,
+    };
 }
 
 fn hasDetachedAssociation(
@@ -444,18 +514,15 @@ fn classifyDetachedBidiStream(
         .connection => |value| value,
         .static_limit => return .ordinary,
     };
+    const stats = connection.recvStreamStats(frame.stream_id) orelse
+        return .ordinary;
+    if (stats.bytes_read != 0) return .preserve;
+    if (try detachedBidiPrefixMayBelongToWebTransport(
+        request_id_validator,
+        @intCast(frame.stream_id),
+    )) return .preserve;
     const available = connection.retainedReceivedStream(frame.stream_id) orelse
         return .ordinary;
-    const prefix = quic.varint.decodeSlice(available) catch |err| switch (err) {
-        // Neither HTTP/3 nor WebTransport owns an ambiguous prefix yet. Keep
-        // it solely in QUIC storage so a later offset-zero fragment can make
-        // the classification without duplicating or consuming bytes.
-        error.BufferTooShort => return .preserve,
-        else => return err,
-    };
-    if (prefix.value == http3.FrameType.webtransport_stream) return .preserve;
-    const stats = connection.recvStreamStats(frame.stream_id) orelse
-        return error.UnexpectedStream;
     const available_len = std.math.cast(u64, available.len) orelse
         return error.InvalidStreamRange;
     const available_end = std.math.add(
@@ -470,6 +537,60 @@ fn classifyDetachedBidiStream(
         .fin = stats.final_size != null and
             stats.final_size.? == available_end,
     } };
+}
+
+fn detachedBidiPrefixMayBelongToWebTransport(
+    request_id_validator: ServerRequestIdValidator,
+    stream_id: u62,
+) Error!bool {
+    const connection = switch (request_id_validator) {
+        .connection => |value| value,
+        .static_limit => return false,
+    };
+    const available = connection.retainedReceivedStream(stream_id) orelse
+        return false;
+    const prefix = quic.varint.decodeSlice(available) catch |err| switch (err) {
+        // Neither HTTP/3 nor WebTransport owns an ambiguous prefix yet. Keep
+        // it solely in QUIC storage so a later offset-zero fragment can make
+        // the classification without duplicating or consuming bytes.
+        error.BufferTooShort => return true,
+        else => return err,
+    };
+    return prefix.value == http3.FrameType.webtransport_stream;
+}
+
+fn detachedBidiResetBelongsToWebTransport(
+    request_id_validator: ServerRequestIdValidator,
+    stream_id: u62,
+    application_error_code: u64,
+    final_size: u64,
+) Error!bool {
+    const connection = switch (request_id_validator) {
+        .connection => |value| value,
+        .static_limit => return false,
+    };
+    const mapped_error = webtransport_error.isStreamError(
+        application_error_code,
+    );
+    const stats = connection.recvStreamStats(stream_id) orelse
+        return final_size != 0 or mapped_error;
+    if (stats.bytes_read != 0) return true;
+    const available = connection.retainedReceivedStream(stream_id) orelse
+        return final_size > stats.bytes_read or mapped_error;
+    const prefix = quic.varint.decodeSlice(available) catch |err| switch (err) {
+        error.BufferTooShort => {
+            const available_len = std.math.cast(u64, available.len) orelse
+                return error.InvalidStreamRange;
+            const available_end = std.math.add(
+                u64,
+                stats.bytes_read,
+                available_len,
+            ) catch return error.InvalidStreamRange;
+            return final_size > available_end or mapped_error;
+        },
+        else => return err,
+    };
+    return prefix.value == http3.FrameType.webtransport_stream;
 }
 
 pub fn validateBlockedStreamBudget(
