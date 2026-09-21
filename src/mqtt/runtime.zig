@@ -2276,6 +2276,11 @@ pub const Connection = struct {
     packet_identifiers: packet_identifiers.State = .{},
     incoming_topic_aliases: topic_alias.Table = .{},
     outgoing_topic_aliases: topic_alias.Table = .{},
+    /// A failed stream write has an unknowable wire prefix: the peer may have
+    /// received none, part, or all of the MQTT Control Packet. No later read
+    /// or write may reuse connection-scoped state (especially Topic Alias)
+    /// after that ambiguity. The owner must close this Network Connection.
+    transport_write_failed: std.atomic.Value(bool) = .init(false),
     assigned_client_id: ?[]u8 = null,
     authentication: auth_runtime.State = .{},
     /// Shared packet-output storage. MQTT writes are synchronous and a
@@ -2434,6 +2439,13 @@ pub const Connection = struct {
 
     pub fn trafficStats(self: *const Connection) TrafficStats {
         return self.traffic.stats();
+    }
+
+    /// Whether this Network Connection can still carry MQTT packets. A write
+    /// error retires it permanently because stream transports cannot prove
+    /// how much of the failed Control Packet reached the peer.
+    pub fn isUsable(self: *const Connection) bool {
+        return !self.transport_write_failed.load(.acquire);
     }
 
     /// Wake a concurrent TCP reader while retaining connection ownership.
@@ -3139,6 +3151,7 @@ pub const Connection = struct {
     }
 
     pub fn writePublish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!?u16 {
+        if (!self.isUsable()) return error.ConnectionClosed;
         try self.validatePublishPropertyDirection(options.properties, .outgoing);
         if (@intFromEnum(options.qos) > @intFromEnum(self.peer_maximum_qos)) return error.InvalidQoS;
         if (options.retain and !self.peer_retain_available) return error.InvalidProperty;
@@ -3172,7 +3185,7 @@ pub const Connection = struct {
         // are emitted, so rejected packets cannot mutate the alias table and
         // OOM cannot be reported after the peer has received the packet.
         try self.prepareOutgoingTopicAliasCommit(topic, options.properties);
-        try self.transport.writePacketParts(
+        try self.writeTransportPacketParts(
             self.write_scratch.items,
             payload,
         );
@@ -4853,6 +4866,7 @@ pub const Connection = struct {
     }
 
     fn writePacket(self: *Connection, bytes: []u8) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
         const fixed = try mqtt.FixedHeader.parse(bytes);
         try mqtt.validatePacketFlags(self.protocol, fixed);
         try self.validateOutgoingPacketType(fixed.packet_type);
@@ -4860,11 +4874,35 @@ pub const Connection = struct {
             fixed.packet_type,
         );
         if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
-        try self.transport.writePacket(bytes);
+        try self.writeTransportPacket(bytes);
         self.recordPacketSent(bytes.len);
     }
 
+    fn writeTransportPacket(
+        self: *Connection,
+        bytes: []u8,
+    ) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        self.transport.writePacket(bytes) catch |err| {
+            self.transport_write_failed.store(true, .release);
+            return err;
+        };
+    }
+
+    fn writeTransportPacketParts(
+        self: *Connection,
+        prefix: []const u8,
+        payload: []const u8,
+    ) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        self.transport.writePacketParts(prefix, payload) catch |err| {
+            self.transport_write_failed.store(true, .release);
+            return err;
+        };
+    }
+
     fn readPacket(self: *Connection) Error!OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
         if (self.popPendingPingPacket()) |packet| return packet;
         return self.readTransportPacket();
     }
@@ -4877,6 +4915,7 @@ pub const Connection = struct {
     fn readUnvalidatedTransportPacket(
         self: *Connection,
     ) Error!packet_transport.OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
         const packet = try self.transport.readPacket(
             self.allocator,
             self.limits.max_packet_size,
@@ -4889,6 +4928,7 @@ pub const Connection = struct {
         self: *Connection,
         timeout: std.Io.Clock.Duration,
     ) Error!OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
         if (self.popPendingPingPacket()) |packet| return packet;
         const packet = try self.transport.readPacketWithInactivityTimeout(
             self.allocator,
@@ -4903,6 +4943,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
         if (self.popPendingPingPacket()) |packet| return packet;
         return self.readTransportPacketWithDeadline(deadline);
     }
@@ -4921,6 +4962,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: std.Io.Clock.Timestamp,
     ) Error!packet_transport.OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
         const packet = try self.transport.readPacketWithDeadline(
             self.allocator,
             self.limits.max_packet_size,
@@ -6813,6 +6855,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
         @as(usize, 0),
         connection.packet_identifiers.count(.outgoing_qos1),
     );
+    try std.testing.expect(connection.isUsable());
 
     try connection.prepareOutgoingTopicAliasCommit(
         "existing/topic",
@@ -6836,6 +6879,7 @@ test "MQTT borrowed PUBLISH preserves preflight errors and inflight state" {
         @as(usize, 0),
         connection.packet_identifiers.count(.outgoing_qos1),
     );
+    try std.testing.expect(connection.isUsable());
 }
 
 test "MQTT publish encoding reuses connection scratch" {
@@ -7959,6 +8003,68 @@ test "MQTT connection automatically establishes and reuses outgoing aliases" {
     try std.testing.expectEqual(@as(?u16, 2), mqtt.topicAlias(
         second_properties.items,
     ));
+}
+
+test "MQTT transport write failure retires connection Topic Alias state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const server_stream = try listener.accept(io);
+    defer server_stream.close(io);
+
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .peer_topic_alias_maximum = 1,
+    };
+    defer connection.close();
+    const alias_property = [_]mqtt.Property{.{ .two_byte = .{
+        .id = .topic_alias,
+        .value = 1,
+    } }};
+
+    // A local full shutdown makes the first socket write fail deterministically.
+    // Alias ownership was prepared before that attempt, but its wire outcome
+    // is unknowable and therefore the connection may never use it again.
+    try connection.shutdown();
+    const first_failed = blk: {
+        _ = connection.writePublish(
+            "retired/alias",
+            "payload",
+            .{ .properties = &alias_property },
+        ) catch break :blk true;
+        break :blk false;
+    };
+    try std.testing.expect(first_failed);
+    try std.testing.expect(!connection.isUsable());
+    try std.testing.expectEqualStrings(
+        "retired/alias",
+        connection.outgoing_topic_aliases.get(1).?,
+    );
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.writePublish(
+            "",
+            "must not reach the wire",
+            .{ .properties = &alias_property },
+        ),
+    );
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        connection.readPingReq(),
+    );
 }
 
 test "MQTT connection supports aliases above the former fixed table" {

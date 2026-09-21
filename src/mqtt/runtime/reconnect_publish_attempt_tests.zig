@@ -80,6 +80,77 @@ test "MQTT reconnect publish one attempt returns with durable inflight" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect retires connection after QoS0 write failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{ .protocol = .v5 }) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer accepted.deinit(self.server.allocator);
+            self.release.waitUncancelable(self.server.io);
+        }
+    };
+    var release: std.Io.Event = .unset;
+    var shared = Shared{ .server = &server, .release = &release };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer {
+        release.set(io);
+        if (!joined) thread.join();
+    }
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "qos0-write-failure",
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    try client.connection().?.shutdown();
+
+    const publish_failed = blk: {
+        _ = client.publishOneAttempt(
+            "retired/qos0",
+            "payload",
+            .{ .qos = .at_most_once },
+        ) catch break :blk true;
+        break :blk false;
+    };
+    try std.testing.expect(publish_failed);
+    try std.testing.expect(client.connection() == null);
+
+    release.set(io);
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT reconnect publish one attempt does not queue past Receive Maximum" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

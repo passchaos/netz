@@ -1965,7 +1965,10 @@ pub const Client = struct {
             return error.InvalidProperty;
         }
         if (options.qos == .at_most_once) {
-            try active.publish(topic, payload, options);
+            active.publish(topic, payload, options) catch |err| {
+                if (!active.isUsable()) self.disconnectTransport();
+                return err;
+            };
             self.noteControlSent();
             self.finishPublishDelivery(.{
                 .packet_id = null,
@@ -1997,7 +2000,7 @@ pub const Client = struct {
         );
         const publish_value = transmission;
         active.writeClientSessionTransmission(.{ .publish = transmission }) catch |err| {
-            if (!retryableConnectError(err)) {
+            if (!retryableConnectError(err) and active.isUsable()) {
                 const dropped = try self.outgoing.dropOutgoingPublish(
                     self.outgoing_handle,
                     publish_value.packet_id,

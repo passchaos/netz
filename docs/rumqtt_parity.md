@@ -2141,6 +2141,12 @@ Inbound PUBLISH admission is transactional across connection-scoped Topic
 Alias and QoS Packet Identifier state: semantic rejection cannot replace an
 alias, and an alias-allocation failure rolls back a newly reserved inflight
 slot.
+Outgoing Topic Alias registration completes all fallible local allocation
+before transport I/O. Once a TCP, TLS, or WebSocket write is attempted, any
+error permanently retires that Network Connection: stream APIs cannot prove
+whether zero, some, or all bytes reached the peer, so neither alias mappings
+nor other connection-scoped state may be reused. Reconnect creates fresh alias
+tables while durable QoS retransmission remains Session-scoped.
 An unnegotiated live AUTH now follows the same diagnostic boundary, and normal
 or failing AUTH handlers share the connection's writer mutex with fanout so
 their packets cannot interleave. Finally,
