@@ -1402,6 +1402,7 @@ pub const ControlState = struct {
             FrameType.data,
             FrameType.headers,
             FrameType.push_promise,
+            FrameType.webtransport_stream,
             => true,
             else => false,
         };
@@ -1494,7 +1495,11 @@ pub const ControlState = struct {
                     try parsePriorityUpdatePayload(frame.payload),
                 );
             },
-            FrameType.data, FrameType.headers, FrameType.push_promise => return error.UnexpectedFrame,
+            FrameType.data,
+            FrameType.headers,
+            FrameType.push_promise,
+            FrameType.webtransport_stream,
+            => return error.UnexpectedFrame,
             else => {}, // Unknown extension frames on the control stream are ignored.
         }
     }
@@ -6260,6 +6265,11 @@ test "HTTP/3 control stream rejects request frames" {
     }));
     try std.testing.expectError(error.UnexpectedFrame, initialized.applyFrame(allocator, .{
         .frame_type = FrameType.push_promise,
+        .payload = &.{},
+        .consumed = 0,
+    }));
+    try std.testing.expectError(error.UnexpectedFrame, initialized.applyFrame(allocator, .{
+        .frame_type = FrameType.webtransport_stream,
         .payload = &.{},
         .consumed = 0,
     }));

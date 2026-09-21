@@ -104,6 +104,16 @@ test "HTTP/3 protected client closes on invalid SETTINGS" {
     }, error.InvalidSetting, http3.ApplicationErrorCode.settings_error);
 }
 
+test "HTTP/3 protected client closes on WebTransport frame on control stream" {
+    try expectProtectedClientProtocolClose(.{
+        .stream = .{
+            .stream_id = 3,
+            // Control prefix, empty SETTINGS, then a misplaced 0x41 frame.
+            .data = &.{ 0x00, 0x04, 0x00, 0x40, 0x41, 0x00 },
+        },
+    }, error.UnexpectedFrame, http3.ApplicationErrorCode.frame_unexpected);
+}
+
 test "HTTP/3 protected client closes on invalid QPACK encoder instruction" {
     try expectProtectedClientProtocolClose(
         .{
