@@ -52,13 +52,17 @@ test "broker reports post-parse PUBLISH property violations" {
         .client_id = "invalid-publish-property",
     });
     defer client.close();
-    _ = try client.writePublish("topic", "payload", .{
+    var invalid_publish: std.ArrayList(u8) = .empty;
+    defer invalid_publish.deinit(allocator);
+    try mqtt.writePublish(&invalid_publish, allocator, .v5, "topic", "payload", .{
         .qos = .at_least_once,
+        .packet_id = 1,
         .properties = &.{.{ .varint = .{
             .id = .subscription_identifier,
             .value = 1,
         } }},
     });
+    try client.transport.writePacket(invalid_publish.items);
 
     var event = try client.readClientPacketEvent();
     defer event.deinit(allocator);

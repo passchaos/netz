@@ -2134,7 +2134,9 @@ but before they enter persistent Session state, and does not restrict trusted
 `Broker.publishLocal` system metrics. Parsed PUBLISH,
 SUBSCRIBE, and UNSUBSCRIBE semantic failures now pass through the broker's MQTT
 5 DISCONNECT mapper instead of closing with unexplained EOF; an illegal
-client-originated Subscription Identifier is independently verified as `0x82`.
+client-originated Subscription Identifier is rejected by the shared connection
+runtime before Topic Alias or QoS state can change and is independently
+verified as `0x82`; server-originated delivery identifiers remain valid.
 An unnegotiated live AUTH now follows the same diagnostic boundary, and normal
 or failing AUTH handlers share the connection's writer mutex with fanout so
 their packets cannot interleave. Finally,

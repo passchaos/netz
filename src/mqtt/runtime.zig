@@ -3139,6 +3139,7 @@ pub const Connection = struct {
     }
 
     pub fn writePublish(self: *Connection, topic: []const u8, payload: []const u8, options: PublishOptions) Error!?u16 {
+        try self.validatePublishPropertyDirection(options.properties, .outgoing);
         if (@intFromEnum(options.qos) > @intFromEnum(self.peer_maximum_qos)) return error.InvalidQoS;
         if (options.retain and !self.peer_retain_available) return error.InvalidProperty;
         try self.validateOutgoingTopicAlias(topic, options.properties);
@@ -3280,6 +3281,10 @@ pub const Connection = struct {
         self: *Connection,
         value: @import("session/mod.zig").PublishTransmission,
     ) Error!void {
+        try self.validatePublishPropertyDirection(
+            value.properties,
+            .outgoing,
+        );
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
         if (self.protocol == .v5) {
@@ -4670,12 +4675,32 @@ pub const Connection = struct {
     }
 
     fn validateIncomingPublishCapabilities(self: Connection, publish_packet: mqtt.Publish) Error!void {
+        try self.validatePublishPropertyDirection(
+            publish_packet.properties,
+            .incoming,
+        );
         // Keep negotiated-capability failures distinct from malformed wire
         // values. The broker can then send the precise MQTT 5 DISCONNECT
         // reason without accidentally classifying every codec InvalidQoS or
         // InvalidProperty failure as an unsupported feature.
         if (@intFromEnum(publish_packet.qos) > @intFromEnum(self.local_maximum_qos)) return error.QoSNotSupported;
         if (publish_packet.retain and !self.local_retain_available) return error.RetainNotSupported;
+    }
+
+    const PublishDirection = enum { incoming, outgoing };
+
+    fn validatePublishPropertyDirection(
+        self: Connection,
+        properties: []const mqtt.Property,
+        direction: PublishDirection,
+    ) Error!void {
+        if (self.protocol != .v5 or
+            mqtt.subscriptionIdentifier(properties) == null) return;
+        const sender_is_client = switch (direction) {
+            .incoming => self.endpoint_role == .server,
+            .outgoing => self.endpoint_role == .client,
+        };
+        if (sender_is_client) return error.InvalidProperty;
     }
 
     fn validateIncomingPubRel(self: Connection, packet_id: u16) Error!void {
@@ -7932,6 +7957,79 @@ test "MQTT connection enforces peer publish capabilities" {
         .packet_id = null,
         .payload = "ok",
     });
+}
+
+test "MQTT connection enforces PUBLISH subscription identifier direction" {
+    const properties = [_]mqtt.Property{
+        .{ .varint = .{
+            .id = .subscription_identifier,
+            .value = 7,
+        } },
+        .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
+    };
+    const publish_packet = mqtt.Publish{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "direction/topic",
+        .packet_id = null,
+        .properties = @constCast(&properties),
+        .payload = "payload",
+    };
+
+    var server = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .server,
+        .incoming_topic_alias_maximum = 1,
+    };
+    defer server.incoming_topic_aliases.deinit(std.testing.allocator);
+    try std.testing.expectError(
+        error.InvalidProperty,
+        server.validateIncomingPublishCapabilities(publish_packet),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.incoming_topic_aliases.count(),
+    );
+    try std.testing.expectEqual(@as(u16, 0), server.incoming_inflight);
+    try server.validatePublishPropertyDirection(properties[0..], .outgoing);
+
+    var client = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .protocol = .v5,
+        .endpoint_role = .client,
+    };
+    try client.validateIncomingPublishCapabilities(publish_packet);
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.writePublish(
+            "direction/topic",
+            "payload",
+            .{ .properties = properties[0..] },
+        ),
+    );
+    try std.testing.expectEqual(@as(u16, 0), client.outgoing_inflight);
+    try std.testing.expectEqual(@as(usize, 0), client.write_scratch.items.len);
+    try std.testing.expectError(
+        error.InvalidProperty,
+        client.writeClientSessionTransmission(.{ .publish = .{
+            .topic = "direction/topic",
+            .payload = "payload",
+            .qos = .at_least_once,
+            .retain = false,
+            .dup = true,
+            .packet_id = 1,
+            .properties = properties[0..],
+            .message_expiry_interval = null,
+        } }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), client.write_scratch.items.len);
+
+    server.protocol = .v3_1_1;
+    try server.validatePublishPropertyDirection(properties[0..], .incoming);
 }
 
 test "MQTT client applies configured peer publish defaults" {
