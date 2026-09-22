@@ -189,7 +189,10 @@ before selection. Its opt-in deferred outbound QoS 2 release likewise surfaces
 PUBREC after moving durable state to `await_pubcomp`, but holds PUBREL until a
 snapshot succeeds and `flushPending` explicitly releases it. A reconnect in
 the same process cannot bypass that gate; restoring the committed snapshot can
-resume PUBREL directly. These are coordinator building blocks, not the
+resume PUBREL directly. On the source side, `stageIncomingQoS2` records an
+`await_pubrel` marker without writing PUBREC; it can be snapshotted with target
+state or safely discarded until `acknowledge` begins the PUBREC write. These
+are coordinator building blocks, not the
 coordinator:
 cross-broker QoS 2 remains rejected until one atomically connects both broker
 Sessions with its own transaction record. A bidirectional deployment must

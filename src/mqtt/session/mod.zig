@@ -278,6 +278,14 @@ pub const IncomingQoS2State = enum {
     release_pending,
 };
 
+const IncomingQoS2 = struct {
+    state: IncomingQoS2State,
+    /// False only for a locally staged marker that has never begun a PUBREC
+    /// write. Once output is attempted, rollback is unsafe even if the write
+    /// reports an error because the peer may have received the packet.
+    pubrec_may_be_visible: bool,
+};
+
 const Inflight = struct {
     publish: OwnedPublish,
     packet_id: u16,
@@ -324,10 +332,7 @@ const Session = struct {
     /// lets a failed write return the message to the durable queue.
     pending_qos0: ?PendingQoS0 = null,
     packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
-    incoming_qos2: std.AutoHashMapUnmanaged(
-        u16,
-        IncomingQoS2State,
-    ) = .empty,
+    incoming_qos2: std.AutoHashMapUnmanaged(u16, IncomingQoS2) = .empty,
     next_packet_id: u16 = 1,
     allocation_bytes: usize,
 
@@ -2209,6 +2214,23 @@ pub const Store = struct {
         handle: Handle,
         packet_id: u16,
     ) Error!bool {
+        return self.addIncomingQoS2(handle, packet_id, true);
+    }
+
+    pub fn stageIncomingQoS2(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!bool {
+        return self.addIncomingQoS2(handle, packet_id, false);
+    }
+
+    fn addIncomingQoS2(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+        pubrec_may_be_visible: bool,
+    ) Error!bool {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         const session = try self.getSession(handle);
         if (session.incoming_qos2.contains(packet_id)) return true;
@@ -2220,9 +2242,48 @@ pub const Store = struct {
         try session.incoming_qos2.put(
             self.allocator,
             packet_id,
-            .await_pubrel,
+            .{
+                .state = .await_pubrel,
+                .pubrec_may_be_visible = pubrec_may_be_visible,
+            },
         );
         return false;
+    }
+
+    /// Mark the point after all local PUBREC validation but before transport
+    /// output begins. An error after this call is ambiguous and cannot safely
+    /// make a staged transaction discardable again.
+    pub fn markIncomingQoS2PubRecStarted(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        const transaction = session.incoming_qos2.getPtr(packet_id) orelse
+            return error.InvalidPacketIdentifier;
+        if (transaction.state != .await_pubrel) {
+            return error.InvalidPacketIdentifier;
+        }
+        transaction.pubrec_may_be_visible = true;
+    }
+
+    /// Roll back a pre-wire inbound QoS 2 marker after an enclosing durable
+    /// transaction fails. Any PUBREC write attempt permanently closes this
+    /// escape hatch because the peer may already have advanced to PUBREL.
+    pub fn discardStagedIncomingQoS2(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        const transaction = session.incoming_qos2.get(packet_id) orelse
+            return error.InvalidPacketIdentifier;
+        if (transaction.state != .await_pubrel or
+            transaction.pubrec_may_be_visible)
+        {
+            return error.InvalidAcknowledgement;
+        }
+        _ = session.incoming_qos2.remove(packet_id);
     }
 
     pub fn completeIncomingQoS2(
@@ -2255,7 +2316,20 @@ pub const Store = struct {
         packet_id: u16,
     ) Error!?IncomingQoS2State {
         const session = try self.getSession(handle);
-        return session.incoming_qos2.get(packet_id);
+        const transaction = session.incoming_qos2.get(packet_id) orelse
+            return null;
+        return transaction.state;
+    }
+
+    pub fn incomingQoS2PubRecMayBeVisible(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!?bool {
+        const session = try self.getSession(handle);
+        const transaction = session.incoming_qos2.get(packet_id) orelse
+            return null;
+        return transaction.pubrec_may_be_visible;
     }
 
     /// Encode reconnect-client inbound QoS 2 protocol markers separately from
@@ -2294,7 +2368,7 @@ pub const Store = struct {
         while (iterator.next()) |entry| {
             transactions[index] = .{
                 .packet_id = entry.key_ptr.*,
-                .state = entry.value_ptr.*,
+                .state = entry.value_ptr.state,
             };
             index += 1;
         }
@@ -2343,7 +2417,10 @@ pub const Store = struct {
             ) orelse return error.CorruptSnapshot;
             target.incoming_qos2.putAssumeCapacityNoClobber(
                 packet_id,
-                state,
+                .{
+                    .state = state,
+                    .pubrec_may_be_visible = true,
+                },
             );
         }
     }
@@ -2357,9 +2434,10 @@ pub const Store = struct {
         packet_id: u16,
     ) Error!void {
         const session = try self.getSession(handle);
-        const state = session.incoming_qos2.getPtr(packet_id) orelse
+        const transaction = session.incoming_qos2.getPtr(packet_id) orelse
             return error.InvalidPacketIdentifier;
-        state.* = .release_pending;
+        transaction.state = .release_pending;
+        transaction.pubrec_may_be_visible = true;
     }
 
     fn getSession(self: *Store, handle: Handle) Error!*Session {

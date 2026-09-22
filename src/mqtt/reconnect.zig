@@ -1766,6 +1766,44 @@ pub const Client = struct {
         try self.subscriptions.append(self.allocator, owned);
     }
 
+    /// Stage the receive-side marker for one QoS 2 PUBLISH without emitting
+    /// PUBREC. A coordinator can now snapshot this source Session together
+    /// with a staged target PUBLISH before calling `acknowledge`.
+    pub fn stageIncomingQoS2(self: *Client, packet_id: u16) Error!void {
+        if (!self.client_options.manual_acknowledgements or
+            self.client_options.inbound_qos2_release_policy != .deferred)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        if (!active.hasPendingIncomingPublish(packet_id, .exactly_once)) {
+            return error.UnexpectedPacket;
+        }
+        if (try self.outgoing.stageIncomingQoS2(
+            self.outgoing_handle,
+            packet_id,
+        )) {
+            return error.InvalidAcknowledgement;
+        }
+    }
+
+    /// Roll back a staged receive marker while no PUBREC write has begun.
+    pub fn discardStagedIncomingQoS2(
+        self: *Client,
+        packet_id: u16,
+    ) Error!void {
+        if (!self.client_options.manual_acknowledgements or
+            self.client_options.inbound_qos2_release_policy != .deferred)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        return self.outgoing.discardStagedIncomingQoS2(
+            self.outgoing_handle,
+            packet_id,
+        );
+    }
+
     /// Acknowledge one inbound PUBLISH when manual acknowledgements are
     /// enabled. QoS 0 requires no wire response. QoS 1 emits PUBACK and QoS 2
     /// durably records the transaction before emitting PUBREC.
@@ -1800,6 +1838,16 @@ pub const Client = struct {
                 if (!active.hasPendingIncomingPublish(packet_id, qos)) {
                     return error.UnexpectedPacket;
                 }
+                const staged_pubrec_visibility = try self.outgoing
+                    .incomingQoS2PubRecMayBeVisible(
+                    self.outgoing_handle,
+                    packet_id,
+                );
+                if (options.reason_code >= 0x80 and
+                    staged_pubrec_visibility != null)
+                {
+                    return error.InvalidAcknowledgement;
+                }
                 // Validate and size the complete ACK before making the Session
                 // marker visible. Errors here are provably pre-wire, so a
                 // corrected acknowledgement can retry on this transport. The
@@ -1826,12 +1874,17 @@ pub const Client = struct {
                         packet_id,
                     );
                     if (duplicate and
+                        staged_pubrec_visibility.? and
                         !self.client_options
                             .surface_incoming_qos2_retransmissions)
                     {
                         return error.UnexpectedPacket;
                     }
                     recorded = true;
+                    try self.outgoing.markIncomingQoS2PubRecStarted(
+                        self.outgoing_handle,
+                        packet_id,
+                    );
                 }
                 active.writePubRecWithProperties(
                     packet_id,
@@ -2695,8 +2748,15 @@ pub const Client = struct {
                                     self.outgoing_handle,
                                     packet_id,
                                 )) {
-                                    if (!self.client_options
-                                        .surface_incoming_qos2_retransmissions)
+                                    const pubrec_may_be_visible =
+                                        (try self.outgoing
+                                            .incomingQoS2PubRecMayBeVisible(
+                                            self.outgoing_handle,
+                                            packet_id,
+                                        )).?;
+                                    if (pubrec_may_be_visible and
+                                        !self.client_options
+                                            .surface_incoming_qos2_retransmissions)
                                     {
                                         try active.writePubRec(packet_id, 0);
                                         self.noteControlSent();
