@@ -22,7 +22,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
-	"netz-http3-quic-go-interop/internal/testcert"
+	"netz-quic-go-interop/internal/testcert"
 )
 
 const mtu = 1280

@@ -3,7 +3,7 @@ set -euo pipefail
 
 server=${1:?netz HTTP/3 server executable path}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-fixture_dir="$repo_root/tools/interop/http3_quic_go_module"
+fixture_dir="$repo_root/tools/interop/quic_go_module"
 work=$(mktemp -d)
 server_pid=
 cleanup() {

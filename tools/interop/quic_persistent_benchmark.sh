@@ -4,7 +4,7 @@ set -euo pipefail
 netz_bench=${1:?netz persistent QUIC benchmark executable path}
 shift
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
-fixture_dir=${QUICZ_ROOT:-"$HOME/Work/quicz"}/examples/interop/go_echo_client
+fixture_dir="$repo_root/tools/interop/quic_go_module"
 
 modes=both
 samples=${NETZ_QUIC_PERSISTENT_SAMPLES:-5}
@@ -73,11 +73,18 @@ if [[ $server_topology == compare ]] &&
   exit 2
 fi
 if [[ $server_topology == independent && $netz_only != true ]]; then
-  if [[ ! -f $fixture_dir/go.mod ]]; then
-    echo "audited quic-go fixture not found under $fixture_dir" >&2
+  if [[ ! -f $fixture_dir/raw/main.go ]]; then
+    echo "repository-owned quic-go persistent fixture not found under $fixture_dir" >&2
     exit 127
   fi
-  if ! command -v go >/dev/null 2>&1; then
+  go_bin=${GO_BIN:-}
+  if [[ -z $go_bin ]]; then
+    go_bin=$(command -v go 2>/dev/null || true)
+  fi
+  if [[ -z $go_bin && -x /tmp/go/bin/go ]]; then
+    go_bin=/tmp/go/bin/go
+  fi
+  if [[ -z $go_bin || ! -x $go_bin ]]; then
     echo 'go not found' >&2
     exit 127
   fi
@@ -150,14 +157,9 @@ on_exit() {
 trap on_exit EXIT
 
 if [[ $server_topology == independent && $netz_only != true ]]; then
-  (cd "$fixture_dir" && go test -mod=readonly \
-    "$repo_root/tools/interop/quic_quic_go_bench.go" \
-    "$repo_root/tools/interop/quic_quic_go_churn.go" \
-    "$repo_root/tools/interop/quic_persistent_bench_test.go")
-  (cd "$fixture_dir" && go build -mod=readonly \
-    -o "$work/quic-go-persistent-bench" \
-    "$repo_root/tools/interop/quic_quic_go_bench.go" \
-    "$repo_root/tools/interop/quic_quic_go_churn.go")
+  (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly ./raw)
+  (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
+    -o "$work/quic-go-persistent-bench" ./raw)
 fi
 python3 "$repo_root/tools/interop/quic_persistent_benchmark_check_test.py"
 python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary_test.py"

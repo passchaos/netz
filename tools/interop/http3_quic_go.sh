@@ -11,7 +11,7 @@ if [[ $bench_mode == --bench ]]; then
   done
 fi
 netz_root=$(cd "$(dirname "$0")/../.." && pwd)
-fixture_dir="$netz_root/tools/interop/http3_quic_go_module"
+fixture_dir="$netz_root/tools/interop/quic_go_module"
 version=${NETZ_HTTP3_INTEROP_VERSION:-1}
 if [[ "$version" != 1 && "$version" != 2 ]]; then
   echo "invalid HTTP/3 QUIC version: $version" >&2
@@ -23,7 +23,7 @@ if [[ "$version" == 2 ]]; then
   go_version_args=(-v2-only)
   netz_version_args=(--version=2)
 fi
-if [[ $netz_only != true && ! -f "$fixture_dir/peer/main.go" ]]; then
+if [[ $netz_only != true && ! -f "$fixture_dir/http3_peer/main.go" ]]; then
   echo "repository-owned quic-go HTTP/3 fixture not found under $fixture_dir" >&2
   exit 127
 fi
@@ -98,9 +98,9 @@ PY
   server_cpu=${bench_cpus[1]}
   if [[ $netz_only != true ]]; then
     (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly \
-      ./bench)
+      ./http3_bench)
     (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
-      -o "$work/quic-go-http3-bench" ./bench)
+      -o "$work/quic-go-http3-bench" ./http3_bench)
   fi
   requested_modes=(upload download)
   common_args=()
@@ -340,9 +340,9 @@ fi
 
 (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly ./...)
 (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
-  -o "$work/quic-go-http3-peer" ./peer)
+  -o "$work/quic-go-http3-peer" ./http3_peer)
 (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
-  -o "$work/quic-go-http3-informational-peer" ./informational)
+  -o "$work/quic-go-http3-informational-peer" ./http3_informational)
 
 free_udp_port() {
   python3 - <<'PY'

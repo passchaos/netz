@@ -1332,9 +1332,10 @@ counters; the runner joins them per sample and retains teardown observation
 deltas. Netz processes use zio behind the `std.Io` protocol boundary. A strict
 checker independently recomputes every measured-round checksum and requires
 matching sender, receiver-completion, runtime, shape, and throughput records.
-Use `--netz-only` when the audited quic-go fixture is unavailable to exercise
-both netz sender directions without treating the run as a cross-library
-comparison. Results remain `same-application-shape`: the counters demonstrate that
+The quic-go v0.59.0 peer is built from the repository-owned, checksum-locked
+module under `tools/interop/quic_go_module`; `--netz-only` remains available
+for an all-netz control without treating it as a cross-library comparison.
+Results remain `same-application-shape`: the counters demonstrate that
 ACK/pacing, packetization, and application scheduling are not externally
 equalized, and kernel/interface capture is still required for an equal-wire
 claim. Add `--stats` to record whole-process peak RSS for both implementations,

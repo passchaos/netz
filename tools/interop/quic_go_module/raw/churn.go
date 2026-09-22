@@ -17,6 +17,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"netz-quic-go-interop/internal/testcert"
 )
 
 const (
@@ -475,7 +476,7 @@ func runRawChurnServer(address, caOut string, expected rawChurnConfig) {
 	if caOut == "" {
 		logFatalRawChurn(errors.New("-ca-out is required"))
 	}
-	cert, certPEM, err := localhostCertificate()
+	cert, certPEM, err := testcert.Localhost()
 	if err != nil {
 		logFatalRawChurn(err)
 	}

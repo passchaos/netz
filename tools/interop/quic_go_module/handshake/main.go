@@ -4,20 +4,14 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net"
 	"os"
 	"sort"
@@ -25,6 +19,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"netz-quic-go-interop/internal/testcert"
 )
 
 const (
@@ -98,7 +93,7 @@ func runHandshakeServer(address, caOut string, c handshakeConfig) {
 	if caOut == "" {
 		log.Fatal("-ca-out is required")
 	}
-	certificate, certPEM, err := handshakeCertificate()
+	certificate, certPEM, err := testcert.Localhost()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -317,48 +312,4 @@ func percentile(sorted []uint64, percent int) uint64 {
 		index = len(sorted) - 1
 	}
 	return sorted[index]
-}
-
-func handshakeCertificate() (tls.Certificate, []byte, error) {
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	now := time.Now()
-	caTemplate := &x509.Certificate{
-		SerialNumber: caSerial, Subject: pkix.Name{CommonName: "netz interop test CA"},
-		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
-		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true,
-		IsCA: true, MaxPathLenZero: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	leafSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	leafTemplate := &x509.Certificate{
-		SerialNumber: leafSerial, Subject: pkix.Name{CommonName: "localhost"},
-		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true, DNSNames: []string{"localhost"},
-		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
-	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	return tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: leafKey},
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), nil
 }

@@ -2834,7 +2834,8 @@ matching pinned netz probe was similarly scheduling-bound. The prior 1.36x and
 equivalent endpoint CPU layout, not merely a shared host and transfer size.
 
 The new `bench-quic-quic-go` process harness supplies that equivalent two-CPU
-layout against quic-go v0.59.0. It runs both client/server sender roles with a
+layout against quic-go v0.59.0 from the repository-owned, checksum-locked Go
+module. It runs both client/server sender roles with a
 fresh certificate-verified QUIC v1 connection per sample. An untimed fixed
 control stream exchanges CONFIG/READY before 1 or 4 unidirectional data streams
 transfer deterministic payloads; t1 occurs only after the receiver verifies
@@ -2854,7 +2855,7 @@ to the QUIC implementation. Config, sender result, receiver completion, socket
 traffic, and optional memory records carry `client_io` and `server_io`; the
 strict checkers reject missing or role-inconsistent backend identities and
 independently recompute each measured-round checksum. `--netz-only` provides a
-two-process zio functional gate when the audited quic-go fixture is absent. A
+two-process zio control without invoking quic-go. A
 2026-09-15 ReleaseFast smoke with one fresh connection per direction and a
 256-KiB payload verified checksum 33,423,360, exact bidirectional socket
 accounting, and completion exchange at 56.446 MiB/s client-send and 65.788
@@ -2939,9 +2940,8 @@ plus equalized GRO, ACK/pacing, packetization, and application scheduling.
 ### Raw QUIC persistent echo and multi-connection aggregate versus quic-go
 
 `bench-quic-persistent-external` fills the persistent echo and process-level
-multi-connection gaps in the raw QUIC matrix. It uses the audited quic-go
-v0.59.0 fixture from `~/Work/quicz` commit
-`9a0c204a47a2b87adf52afedb4f7e4cce4687742`, pins client/server processes to
+multi-connection gaps in the raw QUIC matrix. It uses the repository-owned,
+checksum-locked quic-go v0.59.0 module and pins client/server processes to
 separate CPUs, disables GSO on both peers, does not enable GRO, and performs a
 certificate-verified QUIC v1 handshake before timing. The runner exercises all
 four netz/quic-go client/server combinations in alternating order. Each result
@@ -3904,6 +3904,9 @@ phase counters, and cross-checks the client's cumulative counters against the
 proxy. Netz additionally checks RESET final size when it is the receiver;
 quic-go v0.59 exposes the exact remote stream ID and error code but not the
 peer's final size through its public `StreamError`.
+The raw benchmark/churn peer and its protocol tests are built from the same
+repository-owned, checksum-locked Go module as the HTTP/3 fixtures; the
+loss/reorder relay remains a separate process.
 
 The captured default 32-case two-run matrix completed every case. The 32-stream
 shape verified 16 FIN, 16 RESET, 266,240 application bytes, checksum
@@ -4025,10 +4028,17 @@ TLS_AES_128_GCM_SHA256, and verified localhost certificates. Only the client
 `connect`/`Dial` call is timed; endpoint creation, a round-indexed 16-byte
 echo, application close, and teardown remain outside. Accordingly the reported
 rate is explicitly `connects_per_second_from_timed_sum`, not whole-process
-connection throughput. The strict verifier reconstructs every total and
+connection throughput. The quic-go client/server executable and its tests live
+in the same repository-owned v0.59.0 module as the HTTP/3 and raw-stream peers.
+The strict verifier reconstructs every total and
 percentile from 100 sample records and requires a matching server completion
 record for all 110 connections, 3,520 echoed bytes, checksum 5,995, and peer
 close.
+This benchmark's quic-go executable and unit tests are also built from
+`tools/interop/quic_go_module` with `GOTOOLCHAIN=local` and
+`-mod=readonly`. The separate full lifecycle and handshake-fault gates still
+require their specialized external peer sources and are not implied by this
+benchmark migration.
 
 The pinned Quinn revision
 `d9c8c4c695fc64292d9b117844ea6924ca0d0815` now provides the same executable

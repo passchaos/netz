@@ -23,7 +23,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/quic-go/qlog"
 	"github.com/quic-go/quic-go/qlogwriter"
-	"netz-http3-quic-go-interop/internal/testcert"
+	"netz-quic-go-interop/internal/testcert"
 )
 
 const (

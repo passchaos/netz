@@ -4,7 +4,7 @@ set -euo pipefail
 client=${1:?netz RFC 9220 client executable path}
 server=${2:?netz RFC 9220 server executable path}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-fixture_dir="$repo_root/tools/interop/http3_quic_go_module"
+fixture_dir="$repo_root/tools/interop/quic_go_module"
 version=${NETZ_WEBSOCKET_H3_INTEROP_VERSION:-1}
 if [[ "$version" != 1 && "$version" != 2 ]]; then
   echo "invalid WebSocket-over-H3 QUIC version: $version" >&2
@@ -16,7 +16,7 @@ if [[ "$version" == 2 ]]; then
   go_version_args=(-v2-only)
   netz_version_args=(--version=2)
 fi
-if [[ ! -f "$fixture_dir/websocket/main.go" ]]; then
+if [[ ! -f "$fixture_dir/websocket_h3/main.go" ]]; then
   echo "repository-owned quic-go RFC 9220 fixture not found under $fixture_dir" >&2
   exit 127
 fi
@@ -57,9 +57,9 @@ trap on_exit EXIT
 
 # Build inside the repository-owned module so its pinned quic-go version
 # supplies the independent HTTP/3 implementation.
-(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly ./websocket)
+(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly ./websocket_h3)
 (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
-  -o "$work/quic-go-rfc9220-peer" ./websocket)
+  -o "$work/quic-go-rfc9220-peer" ./websocket_h3)
 
 free_udp_port() {
   python3 - <<'PY'
