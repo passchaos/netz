@@ -103,6 +103,7 @@ class _SessionProxy:
         self.target_port = target_port
         self.stop_requested = threading.Event()
         self.error: BaseException | None = None
+        self.accepted_connection_count = 0
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", listen_port))
@@ -116,6 +117,7 @@ class _SessionProxy:
             try:
                 client, _ = self.listener.accept()
                 client.settimeout(5)
+                self.accepted_connection_count += 1
                 return client
             except socket.timeout:
                 continue
@@ -351,10 +353,15 @@ class Qos2PubcompDropProxy(_SessionProxy):
 
 
 class TargetPublishDropProxy(_SessionProxy):
-    def __init__(self, listen_port: int, target_port: int, payload: bytes):
+    def __init__(
+        self, listen_port: int, target_port: int, payload: bytes, *,
+        recovery_session_present: bool = True,
+    ):
         self.payload = payload
+        self.recovery_session_present = recovery_session_present
         self.first_publish_dropped = threading.Event()
         self.ready_for_recovery = threading.Event()
+        self.recovery_connected = threading.Event()
         self.replay_complete = threading.Event()
         self.bridge_publish_count = 0
         self.forwarded_publish_count = 0
@@ -379,7 +386,13 @@ class TargetPublishDropProxy(_SessionProxy):
         self.ready_for_recovery.set()
 
         with self._accept() as resumed:
-            with self._connect_session(resumed, session_present=True) as target:
+            with self._connect_session(
+                resumed, session_present=self.recovery_session_present
+            ) as target:
+                self.recovery_connected.set()
+                if not self.recovery_session_present:
+                    self._expect_close_without_publish(resumed)
+                    return
                 publish = read_packet(resumed)
                 packet_id = assert_publish(
                     publish, 5, qos=2, retain=False, payload=self.payload
@@ -415,6 +428,17 @@ class TargetPublishDropProxy(_SessionProxy):
             except (AssertionError, ConnectionResetError, OSError):
                 return
 
+    def _expect_close_without_publish(self, client: socket.socket) -> None:
+        while not self.stop_requested.is_set():
+            try:
+                packet = read_packet(client)
+            except (AssertionError, ConnectionResetError, OSError):
+                return
+            if packet[0] >> 4 == 3:
+                raise AssertionError(
+                    "bridge published after target Session loss"
+                )
+
     def _forward_until_disconnect(
         self, client: socket.socket, target: socket.socket
     ) -> None:
@@ -431,6 +455,7 @@ class TargetPublishDropProxy(_SessionProxy):
     def _wake_waiters(self) -> None:
         self.first_publish_dropped.set()
         self.ready_for_recovery.set()
+        self.recovery_connected.set()
         self.replay_complete.set()
 
 

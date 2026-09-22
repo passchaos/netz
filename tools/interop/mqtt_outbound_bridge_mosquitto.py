@@ -29,6 +29,7 @@ from mqtt_outbound_bridge_support import (
     assert_publish,
     read_packet,
 )
+from mqtt_outbound_bridge_session_loss import run_session_loss_cases
 
 
 RUNTIME = (
@@ -826,6 +827,7 @@ def main() -> None:
     run_qos2_pre_target_wire_restart(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_source_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets)
+    run_session_loss_cases(args.bridge, args.mosquitto, mqtt_packets)
     print(
         "MQTT OutboundBridge two-Mosquitto interop passed: "
         "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, v5 QoS2, "
@@ -833,6 +835,7 @@ def main() -> None:
         "durable pre-target-wire restart with same-ID DUP PUBLISH, "
         "durable QoS2 PUBCOMP-loss process restart without target republish, "
         "durable source-PUBCOMP-loss restart after journal clear, "
+        "source/target Session-loss fail-closed recovery, "
         "delayed bridge ACK, topic remap "
         + RUNTIME
     )

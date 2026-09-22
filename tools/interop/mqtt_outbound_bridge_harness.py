@@ -68,6 +68,21 @@ class ManagedProcess:
         if not self.output.closed:
             self.output.close()
 
+    def wait_failure(self, expected: str) -> None:
+        try:
+            return_code = self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"{self.label} did not fail as expected"
+            ) from exc
+        if not self.output.closed:
+            self.output.close()
+        content = self.log.read_text(errors="replace")
+        if return_code == 0 or expected not in content:
+            raise RuntimeError(
+                f"{self.label} did not fail with {expected}: " + content
+            )
+
 
 def free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -163,7 +178,7 @@ def start_broker(
     return managed
 
 
-def start_bridge(
+def launch_bridge(
     executable: Path, source_port: int, target_port: int,
     control_port: int, case: Case, directory: Path,
     coordinator_mode: str | None = None,
@@ -180,7 +195,7 @@ def start_bridge(
     ]
     if coordinator_mode is not None:
         command.extend((str(directory), coordinator_mode))
-    managed = ManagedProcess(
+    return ManagedProcess(
         "bridge",
         subprocess.Popen(
             command,
@@ -189,6 +204,17 @@ def start_bridge(
         ),
         output,
         log,
+    )
+
+
+def start_bridge(
+    executable: Path, source_port: int, target_port: int,
+    control_port: int, case: Case, directory: Path,
+    coordinator_mode: str | None = None,
+) -> ManagedProcess:
+    managed = launch_bridge(
+        executable, source_port, target_port, control_port, case, directory,
+        coordinator_mode,
     )
     try:
         wait_for_log(

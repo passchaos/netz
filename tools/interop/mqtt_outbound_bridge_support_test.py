@@ -5,9 +5,15 @@ import socket
 import unittest
 
 import mqtt_outbound_bridge_support as support
+from mqtt_outbound_bridge_harness import Case
 
 
 class WireHelpersTests(unittest.TestCase):
+    def test_case_protocol_labels_are_cli_stable(self) -> None:
+        case = Case("case", 4, 5, 2, False)
+        self.assertEqual(case.source_label, "v311")
+        self.assertEqual(case.target_label, "v5")
+
     def test_read_packet_reassembles_fragmented_input(self) -> None:
         left, right = socket.socketpair()
         try:

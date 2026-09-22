@@ -276,8 +276,12 @@ PUBCOMP, confirms source Mosquitto has not observed that acknowledgement, and
 kills the Bridge after the journal clear. Restoring the now-empty coordinator
 requires both Sessions, accepts source Mosquitto's repeated PUBREL, and returns
 PUBCOMP without any second target PUBLISH or subscriber delivery. The
-in-process fault matrix continues to cover negative-PUBREC, identity, and
-Session-loss boundaries.
+external gate also restarts each broker independently after a durable pre-wire
+transaction. Losing the source Session makes the restored Bridge exit with
+`SourceSessionLost` before it reconnects to the target; losing the target
+Session makes it exit with `TargetSessionLost` immediately after the fresh
+CONNACK and before any PUBLISH. The in-process fault matrix continues to cover
+negative-PUBREC, identity mismatch, and malformed coordinator state.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

@@ -1026,7 +1026,8 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # kills and restores netz before the first target wire delivery, after a
 # dropped target PUBCOMP, and after a dropped source PUBCOMP. It verifies the
 # durable replay stage and final journal-clear boundary without duplicate
-# target Application Messages.
+# target Application Messages, plus source-first fail-closed recovery when
+# either broker loses the required persistent Session.
 zig build interop-mqtt-outbound-bridge-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast
