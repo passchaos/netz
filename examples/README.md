@@ -72,6 +72,48 @@ The finite `run-mqtt-broker` example enables this with
 configured connection batch exits. Pass `--no-restore` to replace an existing
 database with a fresh run.
 
+The same example accepts an exclusive `--config=PATH` mode backed by the public
+`mqtt.broker_config` parser. It implements a strict, fail-closed Mosquitto-style
+subset and starts every configured raw MQTT or MQTT-over-WebSocket listener on
+one shared Broker core. For example:
+
+```text
+queue_qos0_messages true
+persistence true
+persistence_location state
+persistence_file broker.db
+autosave_interval 30
+autosave_on_changes false
+
+listener 1883 127.0.0.1
+allow_anonymous true
+max_qos 1
+max_keepalive 60
+max_connections 16
+
+listener 8080 127.0.0.1
+protocol websockets
+mount_point tenant/
+allow_anonymous true
+max_connections 16
+```
+
+The accepted directives are exactly `listener`, `protocol`, `mount_point`,
+`allow_anonymous`, `max_qos`, `max_keepalive`,
+`use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
+`persistence`, `persistence_location`, `persistence_file`,
+`autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
+bad values, and listener options before the first listener are errors. This
+bounded example interprets each listener's `max_connections` as its finite
+accept count. It refuses `allow_anonymous false` because this subset does not
+yet provide a password-file or authentication-plugin directive; silently
+opening that listener would weaken the requested policy. TLS, ACL, include,
+reload, bridge, and full Mosquitto configuration remain outside this subset.
+When persistence is enabled, `autosave_on_changes true` treats
+`autosave_interval` as a durable-change threshold; otherwise it is a periodic
+seconds interval. Run the end-to-end gate with
+`zig build interop-mqtt-broker-config -Doptimize=ReleaseFast`.
+
 `--autosave-change-count=N` additionally writes a live snapshot after `N`
 broker operations that change snapshot-backed state, including durable Session,
 subscription, queued-delivery, acknowledgement, inbound QoS 2, retained-message,

@@ -20,6 +20,7 @@ and equal-wire broker results are kept separate.
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups. Network-client PUBLISH and Will writes to broker-owned `$SYS` and `$share` namespaces are denied by default, with Mosquitto's `$SYS/broker/connection/+/state` exception and an explicit opt-out; trusted local producers retain `$SYS` access | Both references provide production topic indexes; Mosquitto applies the same built-in `$SYS`/`$share` write protection before configured ACLs |
 | Listener topic namespaces and policy | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery. Each listener may override CONNECT/CONNACK policy and add CONNECT plus live publish/subscribe/unsubscribe/delivery authorization on top of mandatory broker-wide policy; its negotiated Maximum QoS controls subscription grants plus live and durable delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener; Maximum QoS, authentication and selected limits may be listener-scoped with `per_listener_settings` |
+| Broker configuration | Public `mqtt.broker_config` parses and deep-owns a strict Mosquitto-style subset for TCP/WebSocket listeners, mount points, anonymous policy, Maximum QoS/Keep Alive, username-derived Client IDs, connection bounds, offline QoS 0, and snapshot/autosave settings. Unknown, duplicate, misplaced, unsupported security/transport, and invalid directives fail closed. The production example's exclusive `--config=PATH` mode creates all listeners over one shared Broker; without a credential directive it refuses `allow_anonymous false` instead of weakening it | Mosquitto supports a substantially broader configuration language, includes/reload, password and ACL files, plugins, TLS, bridges, persistence, and many additional listener/global controls; rumqttd uses its own structured configuration |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route and durable commit before PUBACK; a self-matched PUBLISH is written first on the shared connection, while unrelated slow subscribers cannot delay PUBACK; MQTT 5 reason `0x10` when no subscription matches | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers. Original Client ID provenance is deep-owned and persisted so replay can recheck the publisher's current write authorization; this Mosquitto-compatible check is enabled by default and explicitly configurable | Both production brokers integrate retained delivery; Mosquitto defaults `check_retain_source` on to prevent revoked publishers' stored messages from replaying |
@@ -2306,8 +2307,9 @@ policy instead of pretending that Mosquitto's stricter choice is mandatory.
 This is
 deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
-broker CLI and many tests depend on Mosquitto config, logs, reload, persistence
-or plugins, so passing these vectors is not proxy evidence for the entire suite.
+broker CLI and many tests depend on configuration outside netz's strict subset,
+logs, reload, persistence details or plugins, so passing these vectors is not
+proxy evidence for the entire suite.
 
 1. **Completed for single-node crash durability:** `Broker.saveLiveSnapshot`
    checkpoints while clients remain connected. A persistence mutex serializes
@@ -2355,9 +2357,9 @@ or plugins, so passing these vectors is not proxy evidence for the entire suite.
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
 3. Expand the source-hash-locked gate beyond its current 1,774 upstream packet
-   sequences, or add a broker process adapter capable of preserving the
-   upstream harness's config/reload/persistence semantics. The 225 curated
-   scenarios, fourteen complete portable JSON files, audited 279/307
+   sequences, and extend the new strict broker configuration adapter toward the
+   upstream harness's remaining reload/security/persistence semantics. The 225
+   curated scenarios, fourteen complete portable JSON files, audited 279/307
    `CONNECT.json`, 145/146 `CONNACK.json`, 150/160 `PUBLISH.json`, 151/155
    `SUBSCRIBE.json`, and 100/108 `UNSUBSCRIBE.json` subsets still do not cover the full
    protocol/conformance suite.

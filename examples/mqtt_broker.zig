@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const broker_config_runner = @import("mqtt_broker_config.zig");
 
 const Config = struct {
     bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(1883) },
@@ -59,10 +60,14 @@ pub fn main(init: std.process.Init) !void {
     // arenas keep the same workload throughput while materially reducing RSS.
     // Library users still choose the allocator passed to Broker.listen.
     const allocator = std.heap.c_allocator;
-    const config = try parseArgs(init);
+    const config_path = try parseConfigPath(init);
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
+    if (config_path) |path| {
+        return broker_config_runner.run(allocator, io, path);
+    }
+    const config = try parseArgs(init);
 
     const Credentials = struct {
         username: []const u8,
@@ -369,6 +374,20 @@ pub fn main(init: std.process.Init) !void {
     } else if (config.persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
     }
+}
+
+fn parseConfigPath(init: std.process.Init) !?[]const u8 {
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var path: ?[]const u8 = null;
+    for (args[1..]) |arg| {
+        if (!std.mem.startsWith(u8, arg, "--config=")) continue;
+        if (path != null or arg.len == "--config=".len) {
+            return error.InvalidArgument;
+        }
+        path = arg["--config=".len..];
+    }
+    if (path != null and args.len != 2) return error.InvalidArgument;
+    return path;
 }
 
 fn parseArgs(
