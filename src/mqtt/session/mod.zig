@@ -273,6 +273,8 @@ const InflightState = enum {
     await_pubcomp,
 };
 
+pub const OutgoingQoSState = InflightState;
+
 pub const IncomingQoS2State = enum {
     await_pubrel,
     release_pending,
@@ -1767,6 +1769,17 @@ pub const Store = struct {
         self.removeInflight(target, index);
     }
 
+    pub fn outgoingQoSState(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!?OutgoingQoSState {
+        const session = try self.getSession(handle);
+        const index = session.packet_index.get(packet_id) orelse return null;
+        const inflight = session.inflight.items[index] orelse return null;
+        return inflight.state;
+    }
+
     /// Emit all pending retransmissions that fit `out`, then move unsent
     /// queued messages into the available Receive Maximum window.
     pub fn drainInto(
@@ -2284,6 +2297,20 @@ pub const Store = struct {
             return error.InvalidAcknowledgement;
         }
         _ = session.incoming_qos2.remove(packet_id);
+    }
+
+    pub fn restoreIncomingQoS2ReleasePending(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const duplicate = try self.addIncomingQoS2(
+            handle,
+            packet_id,
+            true,
+        );
+        if (duplicate) return error.InvalidAcknowledgement;
+        try self.markIncomingQoS2ReleasePending(handle, packet_id);
     }
 
     pub fn completeIncomingQoS2(

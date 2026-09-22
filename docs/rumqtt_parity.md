@@ -28,7 +28,7 @@ and equal-wire broker results are kept separate.
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
 | CONNECT and PING liveness | Raw TCP, MQTT-over-TLS, WS, and WSS clients expose address, hostname, and validated URI entry points as appropriate; secure address APIs accept an independent TLS identity. Client `network_connect_timeout` gives DNS resolution and every TCP address attempt one absolute budget across TCP, native TLS, WS and WSS; native TLS and WSS also apply their independent TLS handshake timeout on both vail and standard-library clients. Every transport exposes caller-owned absolute-deadline entry points spanning DNS/TCP setup, TLS and HTTP Upgrade where applicable, CONNECT, every enhanced-authentication round, and final CONNACK while retaining stricter configured phase limits. All four transports also expose matching relative-timeout wrappers that convert once at API entry. Partial MQTT bytes and unrelated protocol traffic cannot renew these deadlines. Clients also expose an absolute PINGREQ/PINGRESP round-trip timeout on all transports, preserving interleaved broker packets in a bounded ordered queue (plus one recoverable overflow packet already removed from the wire) | rumqttd exposes `connection_timeout_ms` around its initial packet read; rumqttc detects a PINGREQ that remains unacknowledged while continuing to dispatch other events; Mosquitto relies on its listener/event-loop timeout machinery |
 | Client reconnect | An owning reconnect client deep-copies CONNECT credentials/properties/Will plus raw hostname or canonical `mqtt://`/`tcp://` targets. Native-TLS reconnect connectors cover fixed addresses, DNS hostnames, and `mqtts://`/`ssl://` URIs, re-resolving names and deriving SNI on each attempt; WS/WSS connectors retain the same URI behavior. These encrypted connectors remain borrowed because they can reference caller-managed certificates and callbacks. The client retries with bounded fixed, linear, or exponential delay, optional unbiased full/equal jitter, and interruptible `std.Io.Event` backoff. Its single-owner bounded poll API continuously reconnects, negotiates Server Keep Alive, sends PINGREQ while idle, rejects a missing PINGRESP within a configurable deadline, preserves partially received TCP packets across poll timeouts, and exposes ordered connect/publish/QoS/ping/DISCONNECT/AUTH events; `serveUntil` provides a cancellation-aware callback driver with automatic event cleanup. A bounded multi-producer `CommandQueue` feeds publish/subscribe/unsubscribe/disconnect/manual-ack/flush/re-auth operations to `serveQueuedUntil`, retains the loop as sole socket owner, provides owned asynchronous PUBLISH/SUBSCRIBE/UNSUBSCRIBE/DISCONNECT/manual acknowledgements with correlated typed callbacks or a bounded blocking/nonblocking `CompletionQueue`, and bounds command work between network reads. Its PUBLISH producer offers immediate full-queue rejection and timeout-bounded capacity waiting. Completion-queue SUBACK/UNSUBACK reason codes and properties are deep-owned beyond the network callback. Queued graceful disconnect supports MQTT 5 reason codes/properties, emits MQTT 3.1.1's minimal packet, completes only after the write, and then stops instead of reconnecting. Inbound QoS 1/2 acknowledgement is automatic by default or application-controlled with MQTT 5 reason codes/properties; accepted manual QoS 2 transactions are persisted before PUBREC, suppress duplicate delivery, and resume through PUBREL/PUBCOMP. An opt-in deferred inbound-QoS2 release policy surfaces PUBREL without deleting the Session marker or sending PUBCOMP; `completeIncomingQoS2` emits PUBCOMP only after the application establishes its own release boundary, retains the marker across write failure, and then completes it after a successful write. The Bridge combines this with its broker-owned durable store for end-to-end inbound QoS 2. An optional publish-delivery observer reports QoS 0 after the socket write, QoS 1 at PUBACK, and QoS 2 only at PUBCOMP or a negative PUBREC, including borrowed MQTT 5 diagnostics; Mosquitto exposes an equivalent terminal publish callback while rumqtt exposes lower-level incoming/outgoing events. It applies outbound acknowledgements and drives arbitrary multi-step client-initiated, server-challenged MQTT 5 re-authentication through the CONNECT authentication callback while preserving its returned properties. It retains outgoing QoS 1/2 across transport loss, replays PUBLISH with DUP and its original Packet Identifier when Session Present is true, resumes outgoing QoS 2 directly at PUBREL after PUBREC, clears stale QoS state when the broker reports no Session, and replays only broker-accepted subscriptions into that fresh Session. | rumqttc continuously reconnects while polled and owns its hostname in `MqttOptions`; libmosquitto exposes hostname-based sync/async reconnect plus fixed/progressive reconnect delay control |
-| Broker bridges | `mqtt.bridge.Bridge` owns one reconnect client targeting a fixed address, re-resolved cleartext hostname, or caller-supplied connector such as native TLS, plus one or more non-overlapping remote subscription rules (QoS 0/1/2), and maps the complete remote Topic Name beneath its rule-specific local prefix. Remote QoS 1 is manually acknowledged only after `Broker.publishLocal` completes. QoS 2 requires an explicit stable bridge identity, persistent upstream Session and enabled local commit log; it durably stages before PUBREC, atomically injects at PUBREL, and retains a released tombstone until PUBCOMP is written. `mqtt.bridge.OutboundBridge` composes independent reconnect Sessions to subscribe on a source broker and publish to a target broker with Mosquitto-style local/remote prefix remapping. It supports QoS 0 and persistent-source QoS 1; a source delivery is acknowledged only after target PUBACK, target Session resume retransmits the original Packet Identifier with DUP, and target Session loss republishes from the still-owned source delivery. Both directions strip connection-scoped Topic Alias and Subscription Identifier metadata and add no unbounded intermediate queue. Instances remain explicitly one-way; deployments compose disjoint rules for bidirectional topologies. | Rumqttd's `BridgeLink` is likewise a one-way remote subscription feeding its local router; Mosquitto supports explicit in/out/both rules with local/remote prefix remapping |
+| Broker bridges | `mqtt.bridge.Bridge` owns one reconnect client targeting a fixed address, re-resolved cleartext hostname, or caller-supplied connector such as native TLS, plus one or more non-overlapping remote subscription rules (QoS 0/1/2), and maps the complete remote Topic Name beneath its rule-specific local prefix. Remote QoS 1 is manually acknowledged only after `Broker.publishLocal` completes. QoS 2 requires an explicit stable bridge identity, persistent upstream Session and enabled local commit log; it durably stages before PUBREC, atomically injects at PUBREL, and retains a released tombstone until PUBCOMP is written. `mqtt.bridge.OutboundBridge` composes independent reconnect Sessions to subscribe on a source broker and publish to a target broker with Mosquitto-style local/remote prefix remapping. It supports QoS 0, persistent-source QoS 1, and explicitly coordinated QoS 2. QoS 2 requires a stable bridge ID plus persistent source and target Sessions; its fsynced journal atomically binds both Session snapshots to one bounded bridge transaction, resumes the original target Packet Identifier and protocol stage after restart, and fails closed if either broker loses the required Session. Both directions strip connection-scoped Topic Alias and Subscription Identifier metadata and add no unbounded intermediate queue. Instances remain explicitly one-way; deployments compose disjoint rules for bidirectional topologies. | Rumqttd's `BridgeLink` is likewise a one-way remote subscription feeding its local router; Mosquitto supports explicit in/out/both rules with local/remote prefix remapping |
 | MQTT 5 Enhanced Authentication | Initial multi-step AUTH before CONNACK, owned method binding, re-authentication traffic gate and broker policy callback; unnegotiated/mismatched live AUTH receives Protocol Error before close | Mosquitto plugin start/continue callbacks and active re-authentication; rumqtt codec/runtime coverage is narrower |
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
@@ -166,10 +166,11 @@ Target MQTT 5 negative PUBACK reasons are propagated to the source Session.
 Message Expiry is never renewed: reconnect replay uses the target Session
 store's remaining lifetime, while a fresh target Session receives a newly
 published copy only if the source delivery still has time remaining.
-After target completion, one bounded in-memory fingerprint suppresses an
+After QoS 1 target completion, one bounded in-memory fingerprint suppresses an
 identical source DUP when its PUBACK was lost and rejects a changed retry; it is
 retired on fresh source Session or legal non-DUP identifier reuse. This narrows
-the live-process duplicate window but is not a cross-process QoS 2 guarantee.
+the live-process duplicate window for the intentionally at-least-once QoS 1
+path. QoS 2 uses the durable coordinator described below instead.
 
 The bridge serializes one source publication through the target acknowledgement
 boundary and has no unbounded intermediate queue. While waiting for the target,
@@ -191,16 +192,39 @@ snapshot succeeds and `flushPending` explicitly releases it. A reconnect in
 the same process cannot bypass that gate; restoring the committed snapshot can
 resume PUBREL directly. On the source side, `stageIncomingQoS2` records an
 `await_pubrel` marker without writing PUBREC; it can be snapshotted with target
-state or safely discarded until `acknowledge` begins the PUBREC write. These
-are coordinator building blocks, not the
-coordinator:
-cross-broker QoS 2 remains rejected until one atomically connects both broker
-Sessions with its own transaction record. A bidirectional deployment must
-use two instances with disjoint namespaces or another explicit loop-prevention
-policy. In-process wire tests cover MQTT 3.1.1/5 target reconnect with both
-resumed and fresh Sessions, both cross-version directions, exact DUP/Packet
-Identifier behavior, ACK ordering, property filtering, QoS 0, and a normal
-two-Broker route. An idle two-peer regression additionally advances both
+state or safely discarded until a PUBREC write begins.
+
+The outbound bridge's optional `CoordinatorOptions` supplies the atomic
+cross-broker boundary. It requires a stable 16-byte `bridge_id`, a journal
+directory/path, and persistent source and target CONNECT settings.
+`mode = .create` initializes the identity-bound journal; `mode = .restore`
+validates the bridge ID, protocols, Client IDs, rules, prefixes, requested QoS,
+and retain policy before restoring either Session. QoS 2 rules without this
+coordinator, or with either transient Session, fail during construction.
+
+The coordinator stores one bounded transaction with both reconnect snapshots
+and both Session epochs. It commits the source receive marker and target staged
+PUBLISH before either acknowledgement or target write; after fsync, the target
+PUBLISH may be sent. Target PUBREC is advanced durably to `await_pubcomp` before
+PUBREL, and target PUBCOMP is committed as `target_complete` before source
+PUBREC. When source PUBREL arrives, the source marker and coordinator
+transaction are removed and fsynced before source PUBCOMP. A crash before the
+first target write restores the same target Packet Identifier with DUP; a crash
+after the durable PUBREC transition resumes at PUBREL without another target
+PUBLISH; a crash after the final clear but before source PUBCOMP is resolved by
+idempotently acknowledging the source's repeated PUBREL. A negative target
+PUBREC is journaled and propagated as the source PUBREC reason without sending
+target PUBREL. If an active transaction reconnects with Session Present false
+on either leg, the bridge returns `SourceSessionLost` or `TargetSessionLost`
+instead of creating a second target Application Message.
+
+A bidirectional deployment must use two instances with disjoint namespaces or
+another explicit loop-prevention policy. In-process wire tests cover MQTT
+3.1.1/5 target reconnect with both resumed and fresh Sessions, both
+cross-version directions, exact DUP/Packet Identifier behavior, ACK ordering,
+property filtering, QoS 0, a normal two-Broker route, the QoS 2 durable
+boundaries above, negative PUBREC, and both Session-loss failures. An idle
+two-peer regression additionally advances both
 one-second Keep Alive state machines through alternating `step` calls and
 observes both PINGRESPs.
 `zig build interop-mqtt-outbound-bridge-mosquitto -Doptimize=ReleaseFast`
@@ -217,6 +241,9 @@ covered by the controlled disconnect tests above. Both external cases
 verify the exact `local/sensors/room` to `remote/sensors/room` mapping and
 payload. The runner stops the bridge through its own cancellation event and
 requires a clean exit instead of treating process termination as success.
+A QoS 2 external-Mosquitto bridge scenario is not yet part of this interop
+gate; the current external cases cover QoS 0/1, while the in-process dual-peer
+fault matrix enforces the QoS 2 crash ordering above.
 A third MQTT 5 case stops the target process after both Bridge Sessions are
 established, then publishes a retained QoS 1 message into the live source. The
 source Mosquitto log proves it has sent that delivery to the Bridge but has not
@@ -1511,11 +1538,11 @@ and preserves deferred inbound QoS 2 `await_pubrel`/`release_pending` markers.
 Decode uses a temporary one-Session store and swaps only after full validation;
 online restore attempts, transient CONNECT configurations, non-empty
 destination state, foreign identities, trailing bytes, and corrupt checksums
-fail without changing the current Session. Durable file replacement remains a
-higher-level coordinator responsibility so an outbound bridge can atomically
-compose both
-broker legs with its own transaction record. Cross-broker QoS 2 remains gated
-until that coordinator is implemented rather than being mislabeled exactly-once.
+fail without changing the current Session. Durable file replacement remains an
+application responsibility for standalone reconnect clients. `OutboundBridge`
+now supplies its own identity-bound commit-log coordinator to atomically
+compose both broker legs and its QoS 2 transaction; without that explicit
+coordinator the cross-broker QoS 2 path remains fail-closed.
 Every
 public MQTT connection-level absolute-deadline entry point validates the
 awake-clock domain before sending PINGREQ, consuming a queued event, or reading

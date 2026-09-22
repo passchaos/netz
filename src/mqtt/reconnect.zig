@@ -1633,6 +1633,26 @@ pub const Client = struct {
         return self.outgoing.stats(self.outgoing_handle);
     }
 
+    pub fn outgoingQoSState(
+        self: *Client,
+        packet_id: u16,
+    ) Error!?session.OutgoingQoSState {
+        return self.outgoing.outgoingQoSState(
+            self.outgoing_handle,
+            packet_id,
+        );
+    }
+
+    pub fn incomingQoS2State(
+        self: *Client,
+        packet_id: u16,
+    ) Error!?session.IncomingQoS2State {
+        return self.outgoing.incomingQoS2State(
+            self.outgoing_handle,
+            packet_id,
+        );
+    }
+
     /// Append an identity-bound snapshot of this client's durable MQTT Session
     /// state. The client is single-owner, so an online caller can stage state,
     /// append it to a larger durable record, and only then select network work.
@@ -1804,6 +1824,63 @@ pub const Client = struct {
         );
     }
 
+    /// Emit PUBREC for an already-staged durable inbound QoS 2 transaction.
+    /// This also supports restoration before the broker retransmits PUBLISH:
+    /// the persisted marker proves the peer transaction. Negative PUBREC
+    /// removes the marker after the write succeeds.
+    pub fn flushStagedIncomingQoS2(
+        self: *Client,
+        packet_id: u16,
+        options: runtime.AcknowledgeOptions,
+    ) Error!void {
+        if (!self.client_options.manual_acknowledgements or
+            self.client_options.inbound_qos2_release_policy != .deferred)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        const state = try self.outgoing.incomingQoS2State(
+            self.outgoing_handle,
+            packet_id,
+        ) orelse return error.UnexpectedPacket;
+        if (state != .await_pubrel) return error.UnexpectedPacket;
+        var validated_ack: std.ArrayList(u8) = .empty;
+        defer validated_ack.deinit(self.allocator);
+        try mqtt.AckPacket.write(
+            &validated_ack,
+            self.allocator,
+            active.protocol,
+            .pubrec,
+            packet_id,
+            options.reason_code,
+            options.properties,
+        );
+        if (validated_ack.items.len > active.peerMaximumPacketSize()) {
+            return error.OutgoingPacketTooLarge;
+        }
+        try self.outgoing.markIncomingQoS2PubRecStarted(
+            self.outgoing_handle,
+            packet_id,
+        );
+        try active.resumeIncomingQoS2(packet_id);
+        active.writePubRecWithProperties(
+            packet_id,
+            options.reason_code,
+            options.properties,
+        ) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
+        if (options.reason_code >= 0x80) {
+            try self.outgoing.completeIncomingQoS2(
+                self.outgoing_handle,
+                packet_id,
+            );
+        }
+        self.noteControlSent();
+    }
+
     /// Acknowledge one inbound PUBLISH when manual acknowledgements are
     /// enabled. QoS 0 requires no wire response. QoS 1 emits PUBACK and QoS 2
     /// durably records the transaction before emitting PUBREC.
@@ -1843,11 +1920,6 @@ pub const Client = struct {
                     self.outgoing_handle,
                     packet_id,
                 );
-                if (options.reason_code >= 0x80 and
-                    staged_pubrec_visibility != null)
-                {
-                    return error.InvalidAcknowledgement;
-                }
                 // Validate and size the complete ACK before making the Session
                 // marker visible. Errors here are provably pre-wire, so a
                 // corrected acknowledgement can retry on this transport. The
@@ -1908,6 +1980,14 @@ pub const Client = struct {
                     self.retireConnectionAfterOperationError(err);
                     return err;
                 };
+                if (options.reason_code >= 0x80 and
+                    staged_pubrec_visibility != null)
+                {
+                    try self.outgoing.completeIncomingQoS2(
+                        self.outgoing_handle,
+                        packet_id,
+                    );
+                }
             },
         }
         self.noteControlSent();
@@ -1998,6 +2078,83 @@ pub const Client = struct {
             self.outgoing_handle,
             packet_id,
         ) catch unreachable;
+        self.noteControlSent();
+    }
+
+    /// Remove a release-pending marker before an enclosing durable commit.
+    /// No transport state or bytes change; `writeStagedIncomingQoS2Completion`
+    /// performs the post-commit PUBCOMP and the discard method rolls back a
+    /// failed commit.
+    pub fn stageIncomingQoS2Completion(
+        self: *Client,
+        packet_id: u16,
+        options: runtime.AcknowledgeOptions,
+    ) Error!void {
+        if (!self.client_options.manual_acknowledgements or
+            self.client_options.inbound_qos2_release_policy != .deferred)
+        {
+            return error.ManualAcknowledgementsDisabled;
+        }
+        if (packet_id == 0) return error.InvalidPacketIdentifier;
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        var validated_ack: std.ArrayList(u8) = .empty;
+        defer validated_ack.deinit(self.allocator);
+        try mqtt.AckPacket.write(
+            &validated_ack,
+            self.allocator,
+            active.protocol,
+            .pubcomp,
+            packet_id,
+            options.reason_code,
+            options.properties,
+        );
+        if (validated_ack.items.len > active.peerMaximumPacketSize()) {
+            return error.OutgoingPacketTooLarge;
+        }
+        const state = try self.outgoing.incomingQoS2State(
+            self.outgoing_handle,
+            packet_id,
+        ) orelse return error.UnexpectedPacket;
+        if (state != .release_pending) return error.UnexpectedPacket;
+        try self.outgoing.completeIncomingQoS2(
+            self.outgoing_handle,
+            packet_id,
+        );
+    }
+
+    pub fn discardStagedIncomingQoS2Completion(
+        self: *Client,
+        packet_id: u16,
+    ) Error!void {
+        return self.outgoing.restoreIncomingQoS2ReleasePending(
+            self.outgoing_handle,
+            packet_id,
+        );
+    }
+
+    pub fn writeStagedIncomingQoS2Completion(
+        self: *Client,
+        packet_id: u16,
+        options: runtime.AcknowledgeOptions,
+    ) Error!void {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        if (try self.outgoing.containsIncomingQoS2(
+            self.outgoing_handle,
+            packet_id,
+        )) {
+            return error.UnexpectedPacket;
+        }
+        try active.resumeIncomingQoS2(packet_id);
+        active.writePubCompWithProperties(
+            packet_id,
+            options.reason_code,
+            options.properties,
+        ) catch |err| {
+            self.retireConnectionAfterOperationError(err);
+            return err;
+        };
         self.noteControlSent();
     }
 

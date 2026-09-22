@@ -967,13 +967,1550 @@ test "outbound bridge propagates MQTT5 target rejection to its source Session" {
     if (target_peer.err) |err| return err;
 }
 
+test "outbound bridge durably completes cross-broker QoS2" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    var target_pubrel_seen: std.Io.Event = .unset;
+    var allow_target_pubcomp: std.Io.Event = .unset;
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        target_pubrel_seen: *std.Io.Event,
+        allow_target_pubcomp: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.allow_target_pubcomp.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "local/sensors/+",
+                subscribe.subscribe.subscriptions[0].topic_filter,
+            );
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x02},
+                &.{},
+            );
+            const source_packet_id = (try accepted.connection.writePublish(
+                "local/sensors/room",
+                "exactly once",
+                .{ .qos = .exactly_once },
+            )).?;
+            try self.target_pubrel_seen.waitTimeout(
+                self.server.io,
+                .{ .duration = .{
+                    .raw = .fromSeconds(1),
+                    .clock = .awake,
+                } },
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.allow_target_pubcomp.set(self.server.io);
+            var pubrec = try accepted.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(source_packet_id, pubrec.ack.packet_id);
+            try accepted.connection.writePubRel(source_packet_id, 0);
+            var pubcomp = try accepted.connection.readPubComp();
+            defer pubcomp.deinit(self.server.allocator);
+            try std.testing.expectEqual(source_packet_id, pubcomp.ack.packet_id);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        target_pubrel_seen: *std.Io.Event,
+        allow_target_pubcomp: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.target_pubrel_seen.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expectEqual(mqtt.QoS.exactly_once, publish.publish.qos);
+            try std.testing.expect(!publish.publish.dup);
+            try std.testing.expectEqualStrings(
+                "remote/sensors/room",
+                publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "exactly once",
+                publish.publish.payload,
+            );
+            const target_packet_id = publish.publish.packet_id.?;
+            try accepted.connection.writePubRec(target_packet_id, 0);
+            var pubrel = try accepted.connection.readPubRel();
+            defer pubrel.deinit(self.server.allocator);
+            try std.testing.expectEqual(target_packet_id, pubrel.ack.packet_id);
+            self.target_pubrel_seen.set(self.server.io);
+            self.allow_target_pubcomp.waitUncancelable(self.server.io);
+            try accepted.connection.writePubComp(target_packet_id, 0);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+
+    var source_peer = SourcePeer{
+        .server = &source,
+        .target_pubrel_seen = &target_pubrel_seen,
+        .allow_target_pubcomp = &allow_target_pubcomp,
+    };
+    var target_peer = TargetPeer{
+        .server = &target,
+        .target_pubrel_seen = &target_pubrel_seen,
+        .allow_target_pubcomp = &allow_target_pubcomp,
+    };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer {
+        allow_target_pubcomp.set(io);
+        if (!source_joined) source_thread.join();
+    }
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer {
+        allow_target_pubcomp.set(io);
+        if (!target_joined) target_thread.join();
+    }
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "outbound-qos2-source",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "outbound-qos2-target",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .rule = .{
+                .filter = "sensors/+",
+                .qos = .exactly_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
+            },
+            .coordinator = .{
+                .bridge_id = [_]u8{0xa5} ** 16,
+                .dir = tmp.dir,
+                .sub_path = "outbound-qos2.log",
+                .mode = .create,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!bridge.hasPendingDurableQoS2());
+    try bridge.disconnect(0);
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge restores QoS2 staged before either wire boundary" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    var staged: std.Io.Event = .unset;
+    var source_first_closed: std.Io.Event = .unset;
+    var target_first_closed: std.Io.Event = .unset;
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const packet_id: u16 = 1;
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var subscribe = try first.connection.readSubscribe();
+                defer subscribe.deinit(self.server.allocator);
+                try first.connection.writeSubAck(
+                    subscribe.subscribe.packet_id,
+                    &.{0x02},
+                    &.{},
+                );
+                try std.testing.expectEqual(
+                    packet_id,
+                    (try first.connection.writePublish(
+                        "local/restart/value",
+                        "persisted before wire",
+                        .{ .qos = .exactly_once },
+                    )).?,
+                );
+                self.staged.waitUncancelable(self.server.io);
+                try std.testing.expectError(
+                    error.Timeout,
+                    first.connection.readBrokerEventWithTimeout(
+                        .fromMilliseconds(20),
+                    ),
+                );
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                packet_id,
+                (try resumed.connection.writePublish(
+                    "local/restart/value",
+                    "persisted before wire",
+                    .{ .qos = .exactly_once, .dup = true },
+                )).?,
+            );
+            var pubrec = try resumed.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+            try resumed.connection.writePubRel(packet_id, 0);
+            var pubcomp = try resumed.connection.readPubComp();
+            defer pubcomp.deinit(self.server.allocator);
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                self.staged.waitUncancelable(self.server.io);
+                try std.testing.expectError(
+                    error.Timeout,
+                    first.connection.readBrokerEventWithTimeout(
+                        .fromMilliseconds(20),
+                    ),
+                );
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            var publish = try resumed.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expect(publish.publish.dup);
+            try std.testing.expectEqualStrings(
+                "remote/restart/value",
+                publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "persisted before wire",
+                publish.publish.payload,
+            );
+            const packet_id = publish.publish.packet_id.?;
+            try resumed.connection.writePubRec(packet_id, 0);
+            var pubrel = try resumed.connection.readPubRel();
+            defer pubrel.deinit(self.server.allocator);
+            try resumed.connection.writePubComp(packet_id, 0);
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+
+    var source_peer = SourcePeer{
+        .server = &source,
+        .staged = &staged,
+        .first_closed = &source_first_closed,
+    };
+    var target_peer = TargetPeer{
+        .server = &target,
+        .staged = &staged,
+        .first_closed = &target_first_closed,
+    };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer {
+        staged.set(io);
+        if (!source_joined) source_thread.join();
+    }
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer {
+        staged.set(io);
+        if (!target_joined) target_thread.join();
+    }
+
+    var shutdown: std.Io.Event = .unset;
+    const common = outbound.Options{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "outbound-restore-source",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "outbound-restore-target",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .rule = .{
+            .filter = "restart/#",
+            .qos = .exactly_once,
+            .local_prefix = "local/",
+            .remote_prefix = "remote/",
+        },
+        .coordinator = .{
+            .bridge_id = [_]u8{0x5a} ** 16,
+            .dir = tmp.dir,
+            .sub_path = "outbound-restore.log",
+            .mode = .create,
+        },
+    };
+    {
+        var first = try outbound.Bridge.init(
+            allocator,
+            io,
+            source.address(),
+            target.address(),
+            common,
+            &shutdown,
+        );
+        _ = try first.connect();
+        try outbound.testing.stageNextDurableQoS2(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        try std.testing.expect(first.hasPendingDurableQoS2());
+        staged.set(io);
+        try source_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        try target_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first.deinit();
+    }
+
+    var restored_options = common;
+    restored_options.coordinator.?.mode = .restore;
+    var restored = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        restored_options,
+        &shutdown,
+    );
+    defer restored.deinit();
+    const connected = try restored.connect();
+    try std.testing.expect(connected.source_session_present);
+    try std.testing.expect(connected.target_session_present);
+    try std.testing.expect(try restored.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!restored.hasPendingDurableQoS2());
+    try restored.disconnect(0);
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge restores target QoS2 at durable PUBREL boundary" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    var target_pubrec_sent: std.Io.Event = .unset;
+    var staged_pubrel: std.Io.Event = .unset;
+    var source_first_closed: std.Io.Event = .unset;
+    var target_first_closed: std.Io.Event = .unset;
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        staged_pubrel: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const packet_id: u16 = 1;
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var subscribe = try first.connection.readSubscribe();
+                defer subscribe.deinit(self.server.allocator);
+                try first.connection.writeSubAck(
+                    subscribe.subscribe.packet_id,
+                    &.{0x02},
+                    &.{},
+                );
+                try std.testing.expectEqual(
+                    packet_id,
+                    (try first.connection.writePublish(
+                        "local/pubrel/value",
+                        "resume pubrel",
+                        .{ .qos = .exactly_once },
+                    )).?,
+                );
+                self.staged_pubrel.waitUncancelable(self.server.io);
+                try std.testing.expectError(
+                    error.Timeout,
+                    first.connection.readBrokerEventWithTimeout(
+                        .fromMilliseconds(20),
+                    ),
+                );
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            var pubrec = try resumed.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+            try resumed.connection.writePubRel(packet_id, 0);
+            var pubcomp = try resumed.connection.readPubComp();
+            defer pubcomp.deinit(self.server.allocator);
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        pubrec_sent: *std.Io.Event,
+        staged_pubrel: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        packet_id: u16 = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.pubrec_sent.set(self.server.io);
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var publish = try first.connection.readPublish();
+                defer publish.deinit(self.server.allocator);
+                self.packet_id = publish.publish.packet_id.?;
+                try first.connection.writePubRec(self.packet_id, 0);
+                self.pubrec_sent.set(self.server.io);
+                self.staged_pubrel.waitUncancelable(self.server.io);
+                try std.testing.expectError(
+                    error.Timeout,
+                    first.connection.readBrokerEventWithTimeout(
+                        .fromMilliseconds(20),
+                    ),
+                );
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            try resumed.connection.resumeIncomingQoS2(self.packet_id);
+            var pubrel = try resumed.connection.readPubRel();
+            defer pubrel.deinit(self.server.allocator);
+            try std.testing.expectEqual(self.packet_id, pubrel.ack.packet_id);
+            try resumed.connection.writePubComp(self.packet_id, 0);
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+
+    var source_peer = SourcePeer{
+        .server = &source,
+        .staged_pubrel = &staged_pubrel,
+        .first_closed = &source_first_closed,
+    };
+    var target_peer = TargetPeer{
+        .server = &target,
+        .pubrec_sent = &target_pubrec_sent,
+        .staged_pubrel = &staged_pubrel,
+        .first_closed = &target_first_closed,
+    };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer {
+        staged_pubrel.set(io);
+        if (!source_joined) source_thread.join();
+    }
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer {
+        staged_pubrel.set(io);
+        if (!target_joined) target_thread.join();
+    }
+
+    var shutdown: std.Io.Event = .unset;
+    const common = outbound.Options{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "outbound-pubrel-source",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "outbound-pubrel-target",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .rule = .{
+            .filter = "pubrel/#",
+            .qos = .exactly_once,
+            .local_prefix = "local/",
+            .remote_prefix = "remote/",
+        },
+        .coordinator = .{
+            .bridge_id = [_]u8{0x6b} ** 16,
+            .dir = tmp.dir,
+            .sub_path = "outbound-pubrel.log",
+            .mode = .create,
+        },
+    };
+    {
+        var first = try outbound.Bridge.init(
+            allocator,
+            io,
+            source.address(),
+            target.address(),
+            common,
+            &shutdown,
+        );
+        _ = try first.connect();
+        try outbound.testing.stageNextDurableQoS2(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        try outbound.testing.flushDurableTarget(&first);
+        try target_pubrec_sent.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        try outbound.testing.stageTargetPubRec(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        staged_pubrel.set(io);
+        try source_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        try target_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first.deinit();
+    }
+
+    var restored_options = common;
+    restored_options.coordinator.?.mode = .restore;
+    var restored = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        restored_options,
+        &shutdown,
+    );
+    defer restored.deinit();
+    const connected = try restored.connect();
+    try std.testing.expect(connected.source_session_present);
+    try std.testing.expect(connected.target_session_present);
+    try std.testing.expect(try restored.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!restored.hasPendingDurableQoS2());
+    try restored.disconnect(0);
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge durably propagates negative QoS2 PUBREC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var subscribe = try accepted.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try accepted.connection.writeSubAck(
+                subscribe.subscribe.packet_id,
+                &.{0x02},
+                &.{},
+            );
+            const packet_id = (try accepted.connection.writePublish(
+                "negative/qos2",
+                "rejected",
+                .{ .qos = .exactly_once },
+            )).?;
+            var pubrec = try accepted.connection.readPubRec();
+            defer pubrec.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+            try std.testing.expectEqual(@as(u8, 0x97), pubrec.ack.reason_code);
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            try accepted.connection.writeDisconnectWithProperties(0, &.{});
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try accepted.connection.writePubRec(
+                publish.publish.packet_id.?,
+                0x97,
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            try accepted.connection.writeDisconnectWithProperties(0, &.{});
+        }
+    };
+    var source_peer = SourcePeer{ .server = &source };
+    var target_peer = TargetPeer{ .server = &target };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer if (!source_joined) source_thread.join();
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer if (!target_joined) target_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "outbound-negative-source",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "outbound-negative-target",
+                .clean_start = false,
+                .properties = &session_expiry,
+            },
+            .rule = .{
+                .filter = "negative/#",
+                .qos = .exactly_once,
+            },
+            .coordinator = .{
+                .bridge_id = [_]u8{0x97} ** 16,
+                .dir = tmp.dir,
+                .sub_path = "outbound-negative.log",
+                .mode = .create,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    _ = try bridge.connect();
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!bridge.hasPendingDurableQoS2());
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge fails closed when source Session is lost" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+    var staged: std.Io.Event = .unset;
+    var source_first_closed: std.Io.Event = .unset;
+    var target_first_closed: std.Io.Event = .unset;
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var subscribe = try first.connection.readSubscribe();
+                defer subscribe.deinit(self.server.allocator);
+                try first.connection.writeSubAck(
+                    subscribe.subscribe.packet_id,
+                    &.{0x02},
+                    &.{},
+                );
+                _ = try first.connection.writePublish(
+                    "local/lost/source",
+                    "orphan forbidden",
+                    .{ .qos = .exactly_once },
+                );
+                self.staged.waitUncancelable(self.server.io);
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+            var fresh = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = false,
+            });
+            defer fresh.deinit(self.server.allocator);
+            fresh.connection.shutdown() catch {};
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            defer first.deinit(self.server.allocator);
+            self.staged.waitUncancelable(self.server.io);
+            try std.testing.expectError(
+                error.Timeout,
+                first.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            first.connection.shutdown() catch {};
+            self.first_closed.set(self.server.io);
+        }
+    };
+    var source_peer = SourcePeer{
+        .server = &source,
+        .staged = &staged,
+        .first_closed = &source_first_closed,
+    };
+    var target_peer = TargetPeer{
+        .server = &target,
+        .staged = &staged,
+        .first_closed = &target_first_closed,
+    };
+    const source_thread = try std.Thread.spawn(.{}, SourcePeer.run, .{&source_peer});
+    var source_joined = false;
+    defer {
+        staged.set(io);
+        if (!source_joined) source_thread.join();
+    }
+    const target_thread = try std.Thread.spawn(.{}, TargetPeer.run, .{&target_peer});
+    var target_joined = false;
+    defer {
+        staged.set(io);
+        if (!target_joined) target_thread.join();
+    }
+    var shutdown: std.Io.Event = .unset;
+    const common = outbound.Options{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "lost-source",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "lost-source-target",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .rule = .{
+            .filter = "lost/#",
+            .qos = .exactly_once,
+            .local_prefix = "local/",
+        },
+        .coordinator = .{
+            .bridge_id = [_]u8{0x41} ** 16,
+            .dir = tmp.dir,
+            .sub_path = "lost-source.log",
+            .mode = .create,
+        },
+    };
+    {
+        var first = try outbound.Bridge.init(
+            allocator,
+            io,
+            source.address(),
+            target.address(),
+            common,
+            &shutdown,
+        );
+        _ = try first.connect();
+        try outbound.testing.stageNextDurableQoS2(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        staged.set(io);
+        try source_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        try target_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first.deinit();
+    }
+    var restored_options = common;
+    restored_options.coordinator.?.mode = .restore;
+    var restored = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        restored_options,
+        &shutdown,
+    );
+    defer restored.deinit();
+    try std.testing.expectError(error.SourceSessionLost, restored.connect());
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge fails closed when target Session is lost" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+    var staged: std.Io.Event = .unset;
+    var source_first_closed: std.Io.Event = .unset;
+    var target_first_closed: std.Io.Event = .unset;
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var subscribe = try first.connection.readSubscribe();
+                defer subscribe.deinit(self.server.allocator);
+                try first.connection.writeSubAck(
+                    subscribe.subscribe.packet_id,
+                    &.{0x02},
+                    &.{},
+                );
+                _ = try first.connection.writePublish(
+                    "local/lost/target",
+                    "must not replay",
+                    .{ .qos = .exactly_once },
+                );
+                self.staged.waitUncancelable(self.server.io);
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            resumed.connection.shutdown() catch {};
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                self.staged.waitUncancelable(self.server.io);
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+            var fresh = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = false,
+            });
+            defer fresh.deinit(self.server.allocator);
+            try std.testing.expectError(
+                error.Timeout,
+                fresh.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            fresh.connection.shutdown() catch {};
+        }
+    };
+    var source_peer = SourcePeer{
+        .server = &source,
+        .staged = &staged,
+        .first_closed = &source_first_closed,
+    };
+    var target_peer = TargetPeer{
+        .server = &target,
+        .staged = &staged,
+        .first_closed = &target_first_closed,
+    };
+    const source_thread = try std.Thread.spawn(.{}, SourcePeer.run, .{&source_peer});
+    var source_joined = false;
+    defer {
+        staged.set(io);
+        if (!source_joined) source_thread.join();
+    }
+    const target_thread = try std.Thread.spawn(.{}, TargetPeer.run, .{&target_peer});
+    var target_joined = false;
+    defer {
+        staged.set(io);
+        if (!target_joined) target_thread.join();
+    }
+    var shutdown: std.Io.Event = .unset;
+    const common = outbound.Options{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "lost-target-source",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "lost-target",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .rule = .{
+            .filter = "lost/#",
+            .qos = .exactly_once,
+            .local_prefix = "local/",
+        },
+        .coordinator = .{
+            .bridge_id = [_]u8{0x42} ** 16,
+            .dir = tmp.dir,
+            .sub_path = "lost-target.log",
+            .mode = .create,
+        },
+    };
+    {
+        var first = try outbound.Bridge.init(
+            allocator,
+            io,
+            source.address(),
+            target.address(),
+            common,
+            &shutdown,
+        );
+        _ = try first.connect();
+        try outbound.testing.stageNextDurableQoS2(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        staged.set(io);
+        try source_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        try target_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first.deinit();
+    }
+    var restored_options = common;
+    restored_options.coordinator.?.mode = .restore;
+    var restored = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        restored_options,
+        &shutdown,
+    );
+    defer restored.deinit();
+    try std.testing.expectError(error.TargetSessionLost, restored.connect());
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge restores after durable source completion before PUBCOMP" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer target.deinit();
+
+    var completion_staged: std.Io.Event = .unset;
+    var source_first_closed: std.Io.Event = .unset;
+    var target_first_closed: std.Io.Event = .unset;
+    const SourcePeer = struct {
+        server: *runtime.Server,
+        completion_staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            const packet_id: u16 = 1;
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var subscribe = try first.connection.readSubscribe();
+                defer subscribe.deinit(self.server.allocator);
+                try first.connection.writeSubAck(
+                    subscribe.subscribe.packet_id,
+                    &.{0x02},
+                    &.{},
+                );
+                try std.testing.expectEqual(
+                    packet_id,
+                    (try first.connection.writePublish(
+                        "local/source-complete/value",
+                        "clear before pubcomp",
+                        .{ .qos = .exactly_once },
+                    )).?,
+                );
+                var pubrec = try first.connection.readPubRec();
+                defer pubrec.deinit(self.server.allocator);
+                try std.testing.expectEqual(packet_id, pubrec.ack.packet_id);
+                try first.connection.writePubRel(packet_id, 0);
+                self.completion_staged.waitUncancelable(self.server.io);
+                try std.testing.expectError(
+                    error.Timeout,
+                    first.connection.readBrokerEventWithTimeout(
+                        .fromMilliseconds(20),
+                    ),
+                );
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            try resumed.connection.writePubRel(packet_id, 0);
+            var pubcomp = try resumed.connection.readPubComp();
+            defer pubcomp.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubcomp.ack.packet_id);
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        completion_staged: *std.Io.Event,
+        first_closed: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            {
+                var first = try self.server.accept(.{ .protocol = .v5 });
+                defer first.deinit(self.server.allocator);
+                var publish = try first.connection.readPublish();
+                defer publish.deinit(self.server.allocator);
+                try std.testing.expectEqual(
+                    mqtt.QoS.exactly_once,
+                    publish.publish.qos,
+                );
+                try std.testing.expectEqualStrings(
+                    "remote/source-complete/value",
+                    publish.publish.topic,
+                );
+                const packet_id = publish.publish.packet_id.?;
+                try first.connection.writePubRec(packet_id, 0);
+                var pubrel = try first.connection.readPubRel();
+                defer pubrel.deinit(self.server.allocator);
+                try std.testing.expectEqual(packet_id, pubrel.ack.packet_id);
+                try first.connection.writePubComp(packet_id, 0);
+                self.completion_staged.waitUncancelable(self.server.io);
+                first.connection.shutdown() catch {};
+            }
+            self.first_closed.set(self.server.io);
+
+            var resumed = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer resumed.deinit(self.server.allocator);
+            var disconnect = try resumed.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+
+    var source_peer = SourcePeer{
+        .server = &source,
+        .completion_staged = &completion_staged,
+        .first_closed = &source_first_closed,
+    };
+    var target_peer = TargetPeer{
+        .server = &target,
+        .completion_staged = &completion_staged,
+        .first_closed = &target_first_closed,
+    };
+    const source_thread = try std.Thread.spawn(
+        .{},
+        SourcePeer.run,
+        .{&source_peer},
+    );
+    var source_joined = false;
+    defer {
+        completion_staged.set(io);
+        if (!source_joined) source_thread.join();
+    }
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer {
+        completion_staged.set(io);
+        if (!target_joined) target_thread.join();
+    }
+
+    var shutdown: std.Io.Event = .unset;
+    const common = outbound.Options{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "outbound-source-complete-source",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "outbound-source-complete-target",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .rule = .{
+            .filter = "source-complete/#",
+            .qos = .exactly_once,
+            .local_prefix = "local/",
+            .remote_prefix = "remote/",
+        },
+        .coordinator = .{
+            .bridge_id = [_]u8{0x3c} ** 16,
+            .dir = tmp.dir,
+            .sub_path = "outbound-source-complete.log",
+            .mode = .create,
+        },
+    };
+    {
+        var first = try outbound.Bridge.init(
+            allocator,
+            io,
+            source.address(),
+            target.address(),
+            common,
+            &shutdown,
+        );
+        _ = try first.connect();
+        try outbound.testing.stageNextDurableQoS2(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        try outbound.testing.flushDurableTarget(&first);
+        try outbound.testing.completeDurableTarget(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        try outbound.testing.completeDurableTarget(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        try outbound.testing.stageDurableSourcePubRel(&first, .{
+            .timeout = .fromSeconds(1),
+        });
+        try std.testing.expect(!first.hasPendingDurableQoS2());
+        completion_staged.set(io);
+        try source_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        try target_first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first.deinit();
+    }
+
+    var restored_options = common;
+    restored_options.coordinator.?.mode = .restore;
+    var restored = try outbound.Bridge.init(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        restored_options,
+        &shutdown,
+    );
+    defer restored.deinit();
+    const connected = try restored.connect();
+    try std.testing.expect(connected.source_session_present);
+    try std.testing.expect(connected.target_session_present);
+    _ = try restored.step(.{ .timeout = .fromSeconds(1) });
+    try std.testing.expect(!restored.hasPendingDurableQoS2());
+    try restored.disconnect(0);
+
+    source_thread.join();
+    source_joined = true;
+    target_thread.join();
+    target_joined = true;
+    if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
 test "outbound bridge rejects QoS2 without a durable coordinator" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var shutdown: std.Io.Event = .unset;
+    const unused = std.Io.net.IpAddress{ .ip4 = .loopback(1) };
     try std.testing.expectError(
         error.QoS2RequiresDurableCoordinator,
-        (outbound.Rule{
-            .filter = "unsafe/#",
-            .qos = .exactly_once,
-        }).validate(),
+        outbound.Bridge.init(
+            allocator,
+            threaded.io(),
+            unused,
+            unused,
+            .{
+                .source_connect = .{
+                    .protocol = .v5,
+                    .client_id = "unsafe-source",
+                    .clean_start = false,
+                    .properties = &session_expiry,
+                },
+                .target_connect = .{
+                    .protocol = .v5,
+                    .client_id = "unsafe-target",
+                    .clean_start = false,
+                    .properties = &session_expiry,
+                },
+                .rule = .{
+                    .filter = "unsafe/#",
+                    .qos = .exactly_once,
+                },
+            },
+            &shutdown,
+        ),
     );
 }
 
@@ -982,6 +2519,8 @@ test "outbound bridge validates persistence and rule intersections" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
     var shutdown: std.Io.Event = .unset;
     const unused = std.Io.net.IpAddress{ .ip4 = .loopback(1) };
     const mapped_rule = outbound.Rule{
@@ -1050,6 +2589,119 @@ test "outbound bridge validates persistence and rule intersections" {
                     .qos = .at_least_once,
                 },
             },
+            &shutdown,
+        ),
+    );
+    try std.testing.expectError(
+        error.QoS2RequiresPersistentSourceSession,
+        outbound.Bridge.init(
+            allocator,
+            io,
+            unused,
+            unused,
+            .{
+                .source_connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-transient-source",
+                },
+                .target_connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-persistent-target",
+                    .clean_start = false,
+                    .properties = &session_expiry,
+                },
+                .rule = .{
+                    .filter = "qos2/#",
+                    .qos = .exactly_once,
+                },
+                .coordinator = .{
+                    .bridge_id = [_]u8{0x31} ** 16,
+                    .dir = tmp.dir,
+                    .sub_path = "transient-source.log",
+                    .mode = .create,
+                },
+            },
+            &shutdown,
+        ),
+    );
+    try std.testing.expectError(
+        error.QoS2RequiresPersistentTargetSession,
+        outbound.Bridge.init(
+            allocator,
+            io,
+            unused,
+            unused,
+            .{
+                .source_connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-persistent-source",
+                    .clean_start = false,
+                    .properties = &session_expiry,
+                },
+                .target_connect = .{
+                    .protocol = .v5,
+                    .client_id = "qos2-transient-target",
+                },
+                .rule = .{
+                    .filter = "qos2/#",
+                    .qos = .exactly_once,
+                },
+                .coordinator = .{
+                    .bridge_id = [_]u8{0x32} ** 16,
+                    .dir = tmp.dir,
+                    .sub_path = "transient-target.log",
+                    .mode = .create,
+                },
+            },
+            &shutdown,
+        ),
+    );
+
+    const identity_options = outbound.Options{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "identity-source",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "identity-target",
+            .clean_start = false,
+            .properties = &session_expiry,
+        },
+        .rule = .{
+            .filter = "identity/#",
+            .qos = .exactly_once,
+            .remote_prefix = "remote/",
+        },
+        .coordinator = .{
+            .bridge_id = [_]u8{0x33} ** 16,
+            .dir = tmp.dir,
+            .sub_path = "identity.log",
+            .mode = .create,
+        },
+    };
+    var identity_bridge = try outbound.Bridge.init(
+        allocator,
+        io,
+        unused,
+        unused,
+        identity_options,
+        &shutdown,
+    );
+    identity_bridge.deinit();
+    var mismatched_identity = identity_options;
+    mismatched_identity.rule.remote_prefix = "changed/";
+    mismatched_identity.coordinator.?.mode = .restore;
+    try std.testing.expectError(
+        error.CoordinatorIdentityMismatch,
+        outbound.Bridge.init(
+            allocator,
+            io,
+            unused,
+            unused,
+            mismatched_identity,
             &shutdown,
         ),
     );

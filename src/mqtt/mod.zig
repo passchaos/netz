@@ -4775,6 +4775,7 @@ test {
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/reconnect_tests.zig");
     _ = @import("runtime/reconnect_snapshot_tests.zig");
+    _ = @import("bridge/outbound_coordinator.zig");
     _ = @import("runtime/reconnect_publish_attempt_tests.zig");
     _ = @import("runtime/queued_run_tests.zig");
     _ = @import("runtime/reconnect_endpoint_tests.zig");

@@ -1,18 +1,19 @@
 //! Outbound MQTT broker bridge built from two reconnecting MQTT Sessions.
 //!
 //! The source Session subscribes to local topics and acknowledges QoS 1 only
-//! after the target Session receives PUBACK. This gives transport-reconnect
-//! at-least-once forwarding without coupling either broker's internal locks.
-//! Cross-broker QoS 2 requires a durable transaction coordinator and is
-//! deliberately rejected rather than being mislabeled as exactly once.
+//! after the target Session receives PUBACK. QoS 2 is available only with the
+//! explicit durable coordinator and persistent Sessions on both broker legs;
+//! every wire transition that transfers ownership follows its journal fsync.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mqtt = @import("../mod.zig");
 const listener_namespace = @import("../listener_namespace.zig");
 const owned_properties = @import("../owned_properties.zig");
 const reconnect = @import("../reconnect.zig");
 const runtime = @import("../runtime.zig");
 const rule_helpers = @import("rules.zig");
+const coordinator_mod = @import("outbound_coordinator.zig");
 
 const net = std.Io.net;
 
@@ -28,12 +29,17 @@ pub const Endpoint = union(enum) {
     connector: runtime.ClientConnector,
 };
 
-pub const Error = reconnect.Error || listener_namespace.Error || error{
+pub const Error = reconnect.Error || listener_namespace.Error ||
+    coordinator_mod.Error || error{
     NoBridgeRules,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
     QoS2RequiresDurableCoordinator,
     QoS1RequiresPersistentSourceSession,
+    QoS2RequiresPersistentSourceSession,
+    QoS2RequiresPersistentTargetSession,
+    SourceSessionLost,
+    TargetSessionLost,
     TopicOutsideBridgeRule,
     EmptyMappedTopic,
     InvalidBridgeQoS,
@@ -55,9 +61,6 @@ pub const Rule = struct {
         try mqtt.validateTopicFilter(self.filter);
         _ = try listener_namespace.Namespace.init(self.local_prefix);
         _ = try listener_namespace.Namespace.init(self.remote_prefix);
-        if (self.qos == .exactly_once) {
-            return error.QoS2RequiresDurableCoordinator;
-        }
     }
 
     pub fn sourceFilterAlloc(
@@ -130,6 +133,7 @@ pub const Options = struct {
     target_reconnect_policy: reconnect.ReconnectPolicy = .{},
     rule: Rule,
     preserve_retain: bool = true,
+    coordinator: ?CoordinatorOptions = null,
 };
 
 pub const MultiOptions = struct {
@@ -139,6 +143,22 @@ pub const MultiOptions = struct {
     target_reconnect_policy: reconnect.ReconnectPolicy = .{},
     rules: []const Rule,
     preserve_retain: bool = true,
+    coordinator: ?CoordinatorOptions = null,
+};
+
+pub const CoordinatorMode = enum {
+    create,
+    restore,
+};
+
+pub const CoordinatorOptions = struct {
+    /// Stable deployment identity. Reusing a journal with different client
+    /// identities, protocols, rules, or RETAIN policy is rejected separately.
+    bridge_id: [16]u8,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    mode: CoordinatorMode,
+    journal: coordinator_mod.Options = .{},
 };
 
 pub const ConnectEvent = struct {
@@ -320,7 +340,10 @@ pub const Bridge = struct {
     source_session_present: bool = false,
     target_session_present: bool = false,
     source_session_epoch: u64 = 0,
+    target_session_epoch: u64 = 0,
+    source_pubrec_flushed: bool = false,
     completed_source: ?CompletedSource = null,
+    coordinator: ?coordinator_mod.Store = null,
     poll_source_next: bool = true,
 
     pub fn init(
@@ -343,6 +366,7 @@ pub const Bridge = struct {
                 .target_reconnect_policy = options.target_reconnect_policy,
                 .rules = &.{options.rule},
                 .preserve_retain = options.preserve_retain,
+                .coordinator = options.coordinator,
             },
             shutdown,
         );
@@ -390,6 +414,7 @@ pub const Bridge = struct {
                 .target_reconnect_policy = options.target_reconnect_policy,
                 .rules = &.{options.rule},
                 .preserve_retain = options.preserve_retain,
+                .coordinator = options.coordinator,
             },
             shutdown,
         );
@@ -435,6 +460,7 @@ pub const Bridge = struct {
                 .target_reconnect_policy = options.target_reconnect_policy,
                 .rules = &.{options.rule},
                 .preserve_retain = options.preserve_retain,
+                .coordinator = options.coordinator,
             },
             shutdown,
         );
@@ -471,7 +497,14 @@ pub const Bridge = struct {
     ) Error!Bridge {
         var rules = try OwnedRules.init(allocator, options.rules);
         errdefer rules.deinit(allocator);
-        if (rulesUseQoS1(rules.values) and
+        const qos2 = rulesUseQoS2(rules.values);
+        if (qos2 and options.coordinator == null) {
+            return error.QoS2RequiresDurableCoordinator;
+        }
+        if (qos2 and !persistentSession(options.source_connect)) {
+            return error.QoS2RequiresPersistentSourceSession;
+        }
+        if (!qos2 and rulesUseQoS1(rules.values) and
             !persistentSession(options.source_connect))
         {
             return error.QoS1RequiresPersistentSourceSession;
@@ -489,6 +522,11 @@ pub const Bridge = struct {
             .{
                 .max_subscriptions = rules.values.len,
                 .manual_acknowledgements = true,
+                .inbound_qos2_release_policy = if (qos2)
+                    .deferred
+                else
+                    .automatic,
+                .surface_incoming_qos2_retransmissions = qos2,
             },
         );
         errdefer source.deinit();
@@ -499,18 +537,59 @@ pub const Bridge = struct {
                 .retain_as_published = options.source_connect.protocol == .v5,
             }, &.{});
         }
-        const target = try initClient(
+        if (qos2 and !persistentSession(options.target_connect)) {
+            return error.QoS2RequiresPersistentTargetSession;
+        }
+        var target = try initClient(
             allocator,
             io,
             target_endpoint,
             options.target_connect,
             options.target_reconnect_policy,
             shutdown,
-            .{ .publish_delivery = .{
-                .context = target_delivery,
-                .complete = TargetDeliveryState.complete,
-            } },
+            .{
+                .outbound_qos2_release_policy = if (qos2)
+                    .deferred
+                else
+                    .automatic,
+                .publish_delivery = .{
+                    .context = target_delivery,
+                    .complete = TargetDeliveryState.complete,
+                },
+            },
         );
+        errdefer target.deinit();
+        const coordinator = if (options.coordinator) |coordinator_options| blk: {
+            const identity = coordinatorIdentity(
+                coordinator_options.bridge_id,
+                options.source_connect,
+                options.target_connect,
+                rules.values,
+                options.preserve_retain,
+            );
+            break :blk switch (coordinator_options.mode) {
+                .create => try coordinator_mod.Store.create(
+                    allocator,
+                    io,
+                    coordinator_options.dir,
+                    coordinator_options.sub_path,
+                    coordinator_options.journal,
+                    identity,
+                    &source,
+                    &target,
+                ),
+                .restore => try coordinator_mod.Store.restore(
+                    allocator,
+                    io,
+                    coordinator_options.dir,
+                    coordinator_options.sub_path,
+                    coordinator_options.journal,
+                    identity,
+                    &source,
+                    &target,
+                ),
+            };
+        } else null;
         return .{
             .allocator = allocator,
             .source = source,
@@ -518,6 +597,15 @@ pub const Bridge = struct {
             .target_delivery = target_delivery,
             .rules = rules,
             .preserve_retain = options.preserve_retain,
+            .source_session_epoch = if (coordinator) |*store|
+                store.source_session_epoch
+            else
+                0,
+            .target_session_epoch = if (coordinator) |*store|
+                store.target_session_epoch
+            else
+                0,
+            .coordinator = coordinator,
         };
     }
 
@@ -525,6 +613,7 @@ pub const Bridge = struct {
         if (self.completed_source) |*completed| {
             completed.deinit(self.allocator);
         }
+        if (self.coordinator) |*coordinator| coordinator.deinit();
         self.target.deinit();
         self.source.deinit();
         self.rules.deinit(self.allocator);
@@ -535,14 +624,31 @@ pub const Bridge = struct {
     pub fn connect(
         self: *Bridge,
     ) (Error || std.Io.Cancelable)!ConnectEvent {
-        if (self.target.connection() == null) {
-            const connected = try self.target.connect();
-            self.target_session_present = connected.session_present;
+        if (self.durableTransaction() != null) {
+            // Validate source ownership before reconnecting target: the latter
+            // may replay a PUBLISH as part of CONNECT completion. A lost
+            // source Session must fail before any more target-side delivery.
+            if (self.source.connection() == null) {
+                const connected = try self.source.connect();
+                try self.noteSourceConnected(connected);
+            }
+            try self.validateDurableSourceState();
+            if (self.target.connection() == null) {
+                const connected = try self.target.connect();
+                try self.noteTargetConnected(connected);
+            }
+        } else {
+            if (self.target.connection() == null) {
+                const connected = try self.target.connect();
+                try self.noteTargetConnected(connected);
+            }
+            if (self.source.connection() == null) {
+                const connected = try self.source.connect();
+                try self.noteSourceConnected(connected);
+            }
         }
-        if (self.source.connection() == null) {
-            const connected = try self.source.connect();
-            self.noteSourceConnected(connected);
-        }
+        try self.validateDurableTargetState();
+        _ = try self.completeDurableSourceIfReady();
         return .{
             .source_session_present = self.source_session_present,
             .target_session_present = self.target_session_present,
@@ -557,6 +663,10 @@ pub const Bridge = struct {
         try self.source.disconnect(reason_code);
     }
 
+    pub fn hasPendingDurableQoS2(self: *const Bridge) bool {
+        return self.durableTransaction() != null;
+    }
+
     /// Process at most one event from alternating source and target polls.
     /// Poll slices are capped so an idle endpoint cannot starve the other's
     /// Keep Alive or reconnect work. Once a QoS 1 source delivery arrives,
@@ -566,6 +676,10 @@ pub const Bridge = struct {
         self: *Bridge,
         poll_options: reconnect.PollOptions,
     ) (Error || std.Io.Cancelable)!bool {
+        if (self.durableTransaction() != null) {
+            try self.driveDurableQoS2(poll_options);
+            return true;
+        }
         const source_turn = self.poll_source_next;
         self.poll_source_next = !source_turn;
         const bounded = bridgePollOptions(poll_options);
@@ -583,7 +697,7 @@ pub const Bridge = struct {
         var event = try self.source.pollWithOptions(bounded) orelse return false;
         defer event.deinit(self.allocator);
         switch (event) {
-            .connected => |connected| self.noteSourceConnected(connected),
+            .connected => |connected| try self.noteSourceConnected(connected),
             .publish => |owned| {
                 if (try self.consumeCompletedSourceRetry(&owned.publish)) {
                     return true;
@@ -605,7 +719,7 @@ pub const Bridge = struct {
         defer event.deinit(self.allocator);
         switch (event) {
             .connected => |connected| {
-                self.target_session_present = connected.session_present;
+                try self.noteTargetConnected(connected);
             },
             .disconnect => self.target.disconnectTransport(),
             .pingreq, .pingresp, .auth => {},
@@ -640,8 +754,7 @@ pub const Bridge = struct {
             return error.TopicOutsideBridgeRule;
         };
         if (@intFromEnum(source_publish.qos) >
-            @intFromEnum(rule.value.qos) or
-            source_publish.qos == .exactly_once)
+            @intFromEnum(rule.value.qos))
         {
             self.source.disconnectTransport();
             return error.InvalidBridgeQoS;
@@ -680,6 +793,14 @@ pub const Bridge = struct {
         if (self.target.connection() == null) {
             try self.connectTargetWhileServingSource(
                 source_publish,
+                poll_options,
+            );
+        }
+        if (source_publish.qos == .exactly_once) {
+            return self.forwardDurableQoS2(
+                source_publish,
+                target_topic,
+                properties.items,
                 poll_options,
             );
         }
@@ -824,6 +945,353 @@ pub const Bridge = struct {
         return .{ .published = attempt.packet_id };
     }
 
+    fn forwardDurableQoS2(
+        self: *Bridge,
+        source_publish: *const mqtt.Publish,
+        target_topic: []const u8,
+        properties: []mqtt.Property,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        try self.stageDurableQoS2(
+            source_publish,
+            target_topic,
+            properties,
+        );
+        try self.target.flushPending();
+        try self.driveDurableQoS2(poll_options);
+    }
+
+    fn stageDurableQoS2(
+        self: *Bridge,
+        source_publish: *const mqtt.Publish,
+        target_topic: []const u8,
+        properties: []mqtt.Property,
+    ) Error!void {
+        const coordinator = &(self.coordinator orelse
+            return error.QoS2RequiresDurableCoordinator);
+        const source_packet_id = source_publish.packet_id.?;
+        try self.source.stageIncomingQoS2(source_packet_id);
+        var committed = false;
+        errdefer if (!committed) {
+            self.source.discardStagedIncomingQoS2(
+                source_packet_id,
+            ) catch {};
+        };
+        self.target_delivery.reset();
+        const target_packet_id = self.target.stagePublish(
+            target_topic,
+            source_publish.payload,
+            .{
+                .qos = .exactly_once,
+                .retain = self.preserve_retain and source_publish.retain,
+                .properties = properties,
+            },
+        ) catch |err| {
+            try self.source.discardStagedIncomingQoS2(source_packet_id);
+            return err;
+        };
+        errdefer if (!committed) {
+            self.target.discardStagedPublish(target_packet_id) catch {};
+        };
+        const transaction: coordinator_mod.Transaction = .{
+            .phase = .target_await_pubrec,
+            .source_session_epoch = self.source_session_epoch,
+            .target_session_epoch = self.target_session_epoch,
+            .source_packet_id = source_packet_id,
+            .target_packet_id = target_packet_id,
+            .target_reason_code = 0,
+            .source_retain = source_publish.retain,
+            .source_topic = source_publish.topic,
+            .source_payload = source_publish.payload,
+            .source_properties = properties,
+            .source_expiry_interval = mqtt.messageExpiryInterval(properties),
+        };
+        _ = try coordinator.commit(
+            &self.source,
+            &self.target,
+            self.source_session_epoch,
+            self.target_session_epoch,
+            transaction,
+        );
+        committed = true;
+    }
+
+    fn driveDurableQoS2(
+        self: *Bridge,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        while (self.durableTransaction() != null) {
+            try self.validateDurableSourceState();
+            try self.validateDurableTargetState();
+            if (try self.commitCompletedTargetDelivery()) continue;
+            if (try self.reconcileDurableTargetState()) continue;
+            if (try self.completeDurableSourceIfReady()) continue;
+            const bounded = bridgePollOptions(poll_options);
+            if (self.poll_source_next) {
+                self.poll_source_next = false;
+                try self.driveDurableSource(bounded);
+            } else {
+                self.poll_source_next = true;
+                try self.driveDurableTarget(bounded);
+            }
+        }
+    }
+
+    fn driveDurableTarget(
+        self: *Bridge,
+        bounded: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        if (try self.commitCompletedTargetDelivery()) return;
+        var event = self.target.pollWithOptions(bounded) catch |err| {
+            if (err == error.PublishRefused) {
+                if (try self.commitCompletedTargetDelivery()) return;
+                self.target.disconnectTransport();
+                return error.TargetAcknowledgementMismatch;
+            }
+            return err;
+        } orelse return;
+        defer event.deinit(self.allocator);
+        const transaction = self.durableTransaction() orelse return;
+        switch (event) {
+            .connected => |connected| {
+                try self.noteTargetConnected(connected);
+                try self.validateDurableTargetState();
+            },
+            .pubrec => |owned| {
+                if (transaction.phase != .target_await_pubrec or
+                    owned.ack.packet_id != transaction.target_packet_id)
+                {
+                    self.target.disconnectTransport();
+                    return error.TargetAcknowledgementMismatch;
+                }
+                var advanced = transaction;
+                advanced.phase = .target_await_pubcomp;
+                try self.commitDurable(advanced);
+                try self.target.flushPending();
+            },
+            .pubcomp => |owned| {
+                if (transaction.phase != .target_await_pubcomp or
+                    owned.ack.packet_id != transaction.target_packet_id)
+                {
+                    self.target.disconnectTransport();
+                    return error.TargetAcknowledgementMismatch;
+                }
+                var completed = transaction;
+                completed.phase = .target_complete;
+                completed.target_reason_code = owned.ack.reason_code;
+                try self.commitDurable(completed);
+                self.target_delivery.reset();
+                _ = try self.completeDurableSourceIfReady();
+            },
+            .disconnect => self.target.disconnectTransport(),
+            .pingreq, .pingresp, .auth => {},
+            .publish, .puback, .pubrel => {
+                self.target.disconnectTransport();
+                return error.UnexpectedPacket;
+            },
+        }
+    }
+
+    fn commitCompletedTargetDelivery(self: *Bridge) Error!bool {
+        if (!self.target_delivery.completed) return false;
+        const transaction = self.durableTransaction() orelse
+            return error.TargetAcknowledgementMismatch;
+        if (self.target_delivery.packet_id != transaction.target_packet_id) {
+            return error.TargetAcknowledgementMismatch;
+        }
+        var completed = transaction;
+        if (transaction.phase == .target_await_pubrec) {
+            completed.phase = .target_rejected;
+            completed.target_reason_code = self.target_delivery.reason_code;
+        } else {
+            // A negative PUBCOMP cannot prove that the target did not accept
+            // the Application Message. Finish the source handshake as success
+            // rather than risk publishing it again.
+            completed.phase = .target_complete;
+            completed.target_reason_code = 0;
+        }
+        try self.commitDurable(completed);
+        self.target_delivery.reset();
+        _ = try self.completeDurableSourceIfReady();
+        return true;
+    }
+
+    fn driveDurableSource(
+        self: *Bridge,
+        bounded: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        var event = try self.source.pollWithOptions(bounded) orelse return;
+        defer event.deinit(self.allocator);
+        const transaction = self.durableTransaction() orelse return;
+        switch (event) {
+            .connected => |connected| try self.noteSourceConnected(connected),
+            .publish => |owned| {
+                if (!durablePublishMatches(transaction, owned.publish)) {
+                    self.source.disconnectTransport();
+                    return error.InvalidPacketIdentifier;
+                }
+                if (transaction.phase == .target_complete or
+                    transaction.phase == .target_rejected)
+                {
+                    if (self.source_pubrec_flushed) return;
+                    try self.source.flushStagedIncomingQoS2(
+                        transaction.source_packet_id,
+                        .{ .reason_code = transaction.target_reason_code },
+                    );
+                    if (transaction.phase == .target_rejected) {
+                        try self.commitDurable(null);
+                    } else {
+                        self.source_pubrec_flushed = true;
+                    }
+                }
+            },
+            .pubrel => |owned| {
+                if (transaction.phase != .target_complete or
+                    owned.ack.packet_id != transaction.source_packet_id)
+                {
+                    self.source.disconnectTransport();
+                    return error.UnexpectedPacket;
+                }
+                try self.source.stageIncomingQoS2Completion(
+                    transaction.source_packet_id,
+                    .{},
+                );
+                self.commitDurable(null) catch |err| {
+                    try self.source.discardStagedIncomingQoS2Completion(
+                        transaction.source_packet_id,
+                    );
+                    return err;
+                };
+                try self.source.writeStagedIncomingQoS2Completion(
+                    transaction.source_packet_id,
+                    .{},
+                );
+            },
+            .disconnect => self.source.disconnectTransport(),
+            .pingreq, .pingresp, .auth => {},
+            .puback, .pubrec, .pubcomp => {
+                self.source.disconnectTransport();
+                return error.UnexpectedPacket;
+            },
+        }
+    }
+
+    fn completeDurableSourceIfReady(self: *Bridge) Error!bool {
+        const transaction = self.durableTransaction() orelse return false;
+        if (transaction.phase != .target_complete and
+            transaction.phase != .target_rejected) return false;
+        if (transaction.source_session_epoch != self.source_session_epoch) {
+            try self.commitDurable(null);
+            return true;
+        }
+        if (try self.source.incomingQoS2State(
+            transaction.source_packet_id,
+        )) |state| {
+            if (state == .release_pending) {
+                return false;
+            }
+            if (state == .await_pubrel) {
+                if (self.source_pubrec_flushed) return false;
+                if (self.source.connection() != null) {
+                    try self.source.flushStagedIncomingQoS2(
+                        transaction.source_packet_id,
+                        .{ .reason_code = transaction.target_reason_code },
+                    );
+                    if (transaction.phase == .target_rejected) {
+                        try self.commitDurable(null);
+                    } else {
+                        self.source_pubrec_flushed = true;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            return false;
+        }
+        // PUBCOMP was already written and only the final clear commit failed.
+        // Unknown duplicate PUBREL packets remain idempotently acknowledged by
+        // the reconnect client, so dropping the coordinator record is safe.
+        try self.commitDurable(null);
+        return true;
+    }
+
+    fn reconcileDurableTargetState(self: *Bridge) Error!bool {
+        const transaction = self.durableTransaction() orelse return false;
+        if (transaction.phase != .target_await_pubrec) return false;
+        const state = try self.target.outgoingQoSState(
+            transaction.target_packet_id,
+        );
+        if (state != .await_pubcomp) return false;
+        var advanced = transaction;
+        advanced.phase = .target_await_pubcomp;
+        try self.commitDurable(advanced);
+        try self.target.flushPending();
+        return true;
+    }
+
+    fn validateDurableTargetState(self: *Bridge) Error!void {
+        const transaction = self.durableTransaction() orelse return;
+        if (transaction.target_session_epoch != self.target_session_epoch) {
+            return error.TargetSessionLost;
+        }
+        if (transaction.phase == .target_await_pubcomp) {
+            try self.target.flushPending();
+        }
+    }
+
+    fn validateDurableSourceState(self: *Bridge) Error!void {
+        const transaction = self.durableTransaction() orelse return;
+        if (transaction.phase != .target_complete and
+            transaction.phase != .target_rejected and
+            transaction.source_session_epoch != self.source_session_epoch)
+        {
+            return error.SourceSessionLost;
+        }
+    }
+
+    fn noteTargetConnected(
+        self: *Bridge,
+        connected: reconnect.ConnectEvent,
+    ) Error!void {
+        self.target_session_present = connected.session_present;
+        if (!connected.session_present) {
+            self.target_session_epoch +%= 1;
+            if (self.target_session_epoch == 0) self.target_session_epoch = 1;
+        }
+        const transaction = self.durableTransaction() orelse return;
+        if (transaction.phase != .target_complete and
+            transaction.phase != .target_rejected and
+            (!connected.session_present or
+                transaction.target_session_epoch !=
+                    self.target_session_epoch))
+        {
+            return error.TargetSessionLost;
+        }
+    }
+
+    fn durableTransaction(
+        self: *const Bridge,
+    ) ?coordinator_mod.Transaction {
+        const coordinator = if (self.coordinator) |*value| value else return null;
+        return coordinator.currentTransaction();
+    }
+
+    fn commitDurable(
+        self: *Bridge,
+        transaction: ?coordinator_mod.Transaction,
+    ) Error!void {
+        const coordinator = &(self.coordinator orelse
+            return error.QoS2RequiresDurableCoordinator);
+        _ = try coordinator.commit(
+            &self.source,
+            &self.target,
+            self.source_session_epoch,
+            self.target_session_epoch,
+            transaction,
+        );
+        if (transaction == null) self.source_pubrec_flushed = false;
+    }
+
     fn connectTargetWhileServingSource(
         self: *Bridge,
         current: *const mqtt.Publish,
@@ -837,9 +1305,9 @@ pub const Bridge = struct {
             };
             defer event.deinit(self.allocator);
             switch (event) {
-                .connected => |connected| {
-                    self.target_session_present = connected.session_present;
-                },
+                .connected => |connected| try self.noteTargetConnected(
+                    connected,
+                ),
                 .disconnect => self.target.disconnectTransport(),
                 .pingreq, .pingresp, .auth => {},
                 .publish, .puback, .pubrec, .pubrel, .pubcomp => {
@@ -929,7 +1397,7 @@ pub const Bridge = struct {
         var event = try self.source.pollWithOptions(poll_options) orelse return;
         defer event.deinit(self.allocator);
         switch (event) {
-            .connected => |connected| self.noteSourceConnected(connected),
+            .connected => |connected| try self.noteSourceConnected(connected),
             .publish => |owned| {
                 const publish = &owned.publish;
                 if (publish.qos == .at_most_once) return;
@@ -958,15 +1426,61 @@ pub const Bridge = struct {
     fn noteSourceConnected(
         self: *Bridge,
         connected: reconnect.ConnectEvent,
-    ) void {
+    ) Error!void {
         self.source_session_present = connected.session_present;
-        if (connected.session_present) return;
+        self.source_pubrec_flushed = false;
+        if (connected.session_present) {
+            if (self.durableTransaction()) |transaction| {
+                if (transaction.source_session_epoch !=
+                    self.source_session_epoch)
+                {
+                    return error.SourceSessionLost;
+                }
+            }
+            return;
+        }
+        if (self.durableTransaction()) |transaction| {
+            if (transaction.phase != .target_complete and
+                transaction.phase != .target_rejected)
+            {
+                self.source_session_epoch +%= 1;
+                if (self.source_session_epoch == 0) {
+                    self.source_session_epoch = 1;
+                }
+                return error.SourceSessionLost;
+            }
+        }
         self.source_session_epoch +%= 1;
         if (self.source_session_epoch == 0) self.source_session_epoch = 1;
         if (self.completed_source) |*completed| {
             completed.deinit(self.allocator);
         }
         self.completed_source = null;
+        if (self.coordinator) |*coordinator| {
+            const transaction = coordinator.currentTransaction();
+            if (transaction) |value| {
+                if (value.phase == .target_complete or
+                    value.phase == .target_rejected)
+                {
+                    _ = try coordinator.commit(
+                        &self.source,
+                        &self.target,
+                        self.source_session_epoch,
+                        self.target_session_epoch,
+                        null,
+                    );
+                    return;
+                }
+                return error.SourceSessionLost;
+            }
+            _ = try coordinator.commit(
+                &self.source,
+                &self.target,
+                self.source_session_epoch,
+                self.target_session_epoch,
+                transaction,
+            );
+        }
     }
 
     fn matchingRule(self: *const Bridge, topic: []const u8) ?*const OwnedRule {
@@ -1023,7 +1537,121 @@ fn initClient(
 
 test {
     _ = @import("outbound_tests.zig");
+    _ = coordinator_mod;
 }
+
+pub const testing = if (builtin.is_test) struct {
+    pub fn stageNextDurableQoS2(
+        bridge: *Bridge,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        var event = try bridge.source.pollWithOptions(poll_options) orelse
+            return error.Timeout;
+        defer event.deinit(bridge.allocator);
+        const publish = switch (event) {
+            .publish => |*owned| &owned.publish,
+            else => return error.UnexpectedPacket,
+        };
+        const rule = bridge.matchingRule(publish.topic) orelse
+            return error.TopicOutsideBridgeRule;
+        if (publish.qos != .exactly_once or
+            rule.value.qos != .exactly_once)
+        {
+            return error.InvalidBridgeQoS;
+        }
+        const target_topic = try rule.value.mapMatchedTopicAlloc(
+            bridge.allocator,
+            publish.topic,
+        );
+        defer bridge.allocator.free(target_topic);
+        var properties: std.ArrayList(mqtt.Property) = .empty;
+        defer properties.deinit(bridge.allocator);
+        try properties.ensureTotalCapacity(
+            bridge.allocator,
+            publish.properties.len,
+        );
+        for (publish.properties) |property| {
+            if ((property == .two_byte and
+                property.two_byte.id == .topic_alias) or
+                (property == .varint and
+                    property.varint.id == .subscription_identifier))
+            {
+                continue;
+            }
+            properties.appendAssumeCapacity(property);
+        }
+        try bridge.stageDurableQoS2(
+            publish,
+            target_topic,
+            properties.items,
+        );
+    }
+
+    pub fn flushDurableTarget(bridge: *Bridge) Error!void {
+        try bridge.target.flushPending();
+    }
+
+    pub fn stageTargetPubRec(
+        bridge: *Bridge,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        var event = try bridge.target.pollWithOptions(poll_options) orelse
+            return error.Timeout;
+        defer event.deinit(bridge.allocator);
+        const ack = switch (event) {
+            .pubrec => |*owned| owned.ack,
+            else => return error.UnexpectedPacket,
+        };
+        const transaction = bridge.durableTransaction() orelse
+            return error.UnexpectedPacket;
+        if (transaction.phase != .target_await_pubrec or
+            ack.packet_id != transaction.target_packet_id or
+            !ack.accepted())
+        {
+            return error.TargetAcknowledgementMismatch;
+        }
+        var advanced = transaction;
+        advanced.phase = .target_await_pubcomp;
+        try bridge.commitDurable(advanced);
+    }
+
+    pub fn completeDurableTarget(
+        bridge: *Bridge,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        try bridge.driveDurableTarget(poll_options);
+    }
+
+    pub fn stageDurableSourcePubRel(
+        bridge: *Bridge,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        var event = try bridge.source.pollWithOptions(poll_options) orelse
+            return error.Timeout;
+        defer event.deinit(bridge.allocator);
+        const ack = switch (event) {
+            .pubrel => |*owned| owned.ack,
+            else => return error.UnexpectedPacket,
+        };
+        const transaction = bridge.durableTransaction() orelse
+            return error.UnexpectedPacket;
+        if (transaction.phase != .target_complete or
+            ack.packet_id != transaction.source_packet_id)
+        {
+            return error.UnexpectedPacket;
+        }
+        try bridge.source.stageIncomingQoS2Completion(
+            transaction.source_packet_id,
+            .{},
+        );
+        bridge.commitDurable(null) catch |err| {
+            try bridge.source.discardStagedIncomingQoS2Completion(
+                transaction.source_packet_id,
+            );
+            return err;
+        };
+    }
+} else struct {};
 
 fn rulesUseQoS1(rules: []const OwnedRule) bool {
     for (rules) |rule| {
@@ -1032,12 +1660,87 @@ fn rulesUseQoS1(rules: []const OwnedRule) bool {
     return false;
 }
 
+fn rulesUseQoS2(rules: []const OwnedRule) bool {
+    for (rules) |rule| {
+        if (rule.value.qos == .exactly_once) return true;
+    }
+    return false;
+}
+
+fn coordinatorIdentity(
+    bridge_id: [16]u8,
+    source_connect: runtime.ConnectOptions,
+    target_connect: runtime.ConnectOptions,
+    rules: []const OwnedRule,
+    preserve_retain: bool,
+) coordinator_mod.Identity {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(&bridge_id);
+    hashIdentityByte(&hasher, source_connect.protocol.byte());
+    hashIdentityField(&hasher, source_connect.client_id);
+    hashIdentityByte(&hasher, target_connect.protocol.byte());
+    hashIdentityField(&hasher, target_connect.client_id);
+    hashIdentityByte(&hasher, @intFromBool(preserve_retain));
+    var count: [8]u8 = undefined;
+    std.mem.writeInt(u64, &count, rules.len, .big);
+    hasher.update(&count);
+    for (rules) |rule| {
+        hashIdentityField(&hasher, rule.value.filter);
+        hashIdentityByte(&hasher, @intFromEnum(rule.value.qos));
+        hashIdentityField(&hasher, rule.value.local_prefix);
+        hashIdentityField(&hasher, rule.value.remote_prefix);
+    }
+    var identity: coordinator_mod.Identity = undefined;
+    hasher.final(&identity);
+    return identity;
+}
+
+fn hashIdentityField(
+    hasher: *std.crypto.hash.sha2.Sha256,
+    value: []const u8,
+) void {
+    var len: [8]u8 = undefined;
+    std.mem.writeInt(u64, &len, value.len, .big);
+    hasher.update(&len);
+    hasher.update(value);
+}
+
+fn hashIdentityByte(
+    hasher: *std.crypto.hash.sha2.Sha256,
+    value: u8,
+) void {
+    hasher.update(&.{value});
+}
+
 fn persistentSession(connect: runtime.ConnectOptions) bool {
     if (connect.clean_start) return false;
     return switch (connect.protocol) {
         .v3_1_1 => true,
         .v5 => (mqtt.sessionExpiryInterval(connect.properties) orelse 0) != 0,
     };
+}
+
+fn durablePublishMatches(
+    transaction: coordinator_mod.Transaction,
+    publish: mqtt.Publish,
+) bool {
+    if (publish.qos != .exactly_once or
+        publish.packet_id != transaction.source_packet_id or
+        publish.retain != transaction.source_retain or
+        !std.mem.eql(u8, publish.topic, transaction.source_topic) or
+        !std.mem.eql(u8, publish.payload, transaction.source_payload) or
+        !stablePropertiesEqual(
+            transaction.source_properties,
+            publish.properties,
+        ))
+    {
+        return false;
+    }
+    const retry_expiry = mqtt.messageExpiryInterval(publish.properties);
+    return if (transaction.source_expiry_interval) |original|
+        retry_expiry != null and retry_expiry.? <= original
+    else
+        retry_expiry == null;
 }
 
 fn refreshMessageExpiry(
