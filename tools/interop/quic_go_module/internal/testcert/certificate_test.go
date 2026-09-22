@@ -54,3 +54,36 @@ func TestLocalhostUsesServerLeafAndSeparateCA(t *testing.T) {
 		t.Fatalf("verify certificate chain: %v", err)
 	}
 }
+
+func TestSelfSignedLocalhostUsesOneExactCertificate(t *testing.T) {
+	certificate, trustPEM, err := SelfSignedLocalhost()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(certificate.Certificate) != 1 {
+		t.Fatalf("certificate chain length = %d, want 1", len(certificate.Certificate))
+	}
+	block, rest := pem.Decode(trustPEM)
+	if block == nil || len(rest) != 0 ||
+		string(block.Bytes) != string(certificate.Certificate[0]) {
+		t.Fatal("trust PEM is not the exact server certificate")
+	}
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		t.Fatalf("invalid self-signed server usage: is_ca=%t key_usage=%v", leaf.IsCA, leaf.KeyUsage)
+	}
+	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
+		t.Fatalf("extended key usage = %v, want server auth", leaf.ExtKeyUsage)
+	}
+	if err := leaf.VerifyHostname("localhost"); err != nil {
+		t.Fatalf("verify hostname: %v", err)
+	}
+	if err := leaf.CheckSignature(
+		leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature,
+	); err != nil {
+		t.Fatalf("verify self signature: %v", err)
+	}
+}

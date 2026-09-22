@@ -66,3 +66,33 @@ func Localhost() (tls.Certificate, []byte, error) {
 		Type: "CERTIFICATE", Bytes: caDER,
 	}), nil
 }
+
+// SelfSignedLocalhost returns the single-certificate identity expected by the
+// raw handshake-fault client's exact-certificate verifier.
+func SelfSignedLocalhost() (tls.Certificate, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: "localhost"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true, DNSNames: []string{"localhost"},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(
+		rand.Reader, template, template, &key.PublicKey, key,
+	)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+}

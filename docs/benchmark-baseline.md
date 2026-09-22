@@ -3930,6 +3930,11 @@ corruption. The unprivileged relay disarms after exactly one fault. Its strict
 verifier cross-checks direction, implementation scope, version, and counters,
 then requires both peer logs to prove certificate validation, `hq-interop`, two
 exact streams, 10 echoed bytes, and application close.
+The quic-go sides are the repository-owned `raw_echo_server` and
+`raw_echo_client` commands in `tools/interop/quic_go_module`, pinned to quic-go
+v0.59.0 by `go.mod` and `go.sum`. The runner selects a local Go toolchain and
+builds them with `GOTOOLCHAIN=local` and `-mod=readonly`, so this gate no longer
+borrows peer source or module metadata from a mutable `~/Work` checkout.
 
 The first real client-loss run exposed a gap hidden by same-library injection:
 netz split its post-quantum ClientHello across two 1200-byte Initial datagrams.
@@ -4036,9 +4041,10 @@ record for all 110 connections, 3,520 echoed bytes, checksum 5,995, and peer
 close.
 This benchmark's quic-go executable and unit tests are also built from
 `tools/interop/quic_go_module` with `GOTOOLCHAIN=local` and
-`-mod=readonly`. The separate full lifecycle and handshake-fault gates still
-require their specialized external peer sources and are not implied by this
-benchmark migration.
+`-mod=readonly`. The separate full lifecycle gate still requires its
+specialized external peer source and is not implied by this benchmark
+migration; the handshake-fault gate now uses the repository-owned raw echo
+commands described above.
 
 The pinned Quinn revision
 `d9c8c4c695fc64292d9b117844ea6924ca0d0815` now provides the same executable
