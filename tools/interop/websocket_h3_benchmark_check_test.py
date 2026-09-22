@@ -17,6 +17,7 @@ class WebSocketH3BenchmarkCheckTests(unittest.TestCase):
         self, directory: str, *,
         role_pair: str = "netz-client+quic-go-server",
         checksum: int | None = None, with_memory: bool = False,
+        quic_version: int = 1,
     ) -> tuple[pathlib.Path, pathlib.Path]:
         implementations = (
             {"client": "netz", "server": "quic-go"}
@@ -32,11 +33,12 @@ class WebSocketH3BenchmarkCheckTests(unittest.TestCase):
             "protocol=websocket-h3 transport=h3 mode=binary-echo "
             f"role_pair={role_pair} client_io={endpoint_io['client']} "
             f"server_io={endpoint_io['server']} connection_scope=persistent "
-            "warmup=1 iterations=2 payload_bytes=16 timeout_ms=30000"
+            f"warmup=1 iterations=2 payload_bytes=16 timeout_ms=30000 "
+            f"quic_version={quic_version}"
         )
         config_tail = (
             "benchmark_scope=same-application-shape stream_window=1048576 "
-            "connection_window=8388608 steady_state_mtu=1280 quic_version=1 "
+            "connection_window=8388608 steady_state_mtu=1280 "
             "cipher=negotiated-unexposed cert_verify=true compression=false "
             "netz_gso=false netz_gro=false quic_go_gso=implementation-default "
             "quic_go_gro=implementation-default pacing=implementation-specific"
@@ -86,7 +88,7 @@ class WebSocketH3BenchmarkCheckTests(unittest.TestCase):
     def verify_pair(
         self, client: pathlib.Path, server: pathlib.Path, *,
         role_pair: str = "netz-client+quic-go-server",
-        rss: bool = False,
+        rss: bool = False, quic_version: int = 1,
     ) -> None:
         kwargs = {}
         if rss:
@@ -100,7 +102,8 @@ class WebSocketH3BenchmarkCheckTests(unittest.TestCase):
             }
         CHECK.verify(
             role_pair=role_pair, warmup=1, iterations=2, payload_bytes=16,
-            timeout_ms=30000, client_log=client, server_log=server, **kwargs,
+            timeout_ms=30000, quic_version=quic_version,
+            client_log=client, server_log=server, **kwargs,
         )
 
     def test_complete_both_role_pairs_are_accepted(self) -> None:
@@ -114,6 +117,14 @@ class WebSocketH3BenchmarkCheckTests(unittest.TestCase):
     def test_memory_records_are_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             self.verify_pair(*self.write_pair(directory, with_memory=True), rss=True)
+
+    def test_quic_v2_is_accepted_and_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory, quic_version=2)
+            self.verify_pair(client, server, quic_version=2)
+            server.write_text(server.read_text().replace("quic_version=2", "quic_version=1"))
+            with self.assertRaisesRegex(ValueError, "quic_version"):
+                self.verify_pair(client, server, quic_version=2)
 
     def test_wrong_backend_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

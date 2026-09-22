@@ -956,6 +956,10 @@ zig build interop-http3-quic-go -Doptimize=ReleaseFast
 # Run the corresponding bidirectional RFC 9220 WebSocket gate, including
 # subprotocol/permessage-deflate negotiation, Ping/Pong, Close, and QUIC v1/v2.
 zig build interop-websocket-h3-quic-go -Doptimize=ReleaseFast
+# The benchmark defaults to QUIC v1; select v2 with the environment variable.
+NETZ_WEBSOCKET_H3_INTEROP_VERSION=2 \
+  zig build bench-websocket-h3-quic-go -Doptimize=ReleaseFast -- \
+  --warmup=20 --iterations=1000 --payload-bytes=4096
 # Use Hyper's HTTP/2 Extended CONNECT server to validate netz RFC 8441 frame
 # masking, text exchange, Ping/Pong, and the WebSocket Close handshake.
 # The netz endpoint obtains std.Io from zio; the gate asserts zio-std-io

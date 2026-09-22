@@ -85,6 +85,7 @@ def validate_shape(
     iterations: int,
     payload_bytes: int,
     timeout_ms: int,
+    quic_version: int,
 ) -> None:
     expected = {
         "implementation": implementation,
@@ -100,6 +101,7 @@ def validate_shape(
         "iterations": str(iterations),
         "payload_bytes": str(payload_bytes),
         "timeout_ms": str(timeout_ms),
+        "quic_version": str(quic_version),
     }
     for key, value in expected.items():
         if record.get(key) != value:
@@ -124,6 +126,7 @@ def verify(
     iterations: int,
     payload_bytes: int,
     timeout_ms: int,
+    quic_version: int,
     client_log: Path,
     server_log: Path,
     client_rss: Path | None = None,
@@ -140,6 +143,7 @@ def verify(
         or payload_bytes > 4096
         or timeout_ms <= 0
         or timeout_ms > 10 * 60 * 1000
+        or quic_version not in (1, 2)
     ):
         raise ValueError("invalid WebSocket H3 validation configuration")
 
@@ -153,13 +157,13 @@ def verify(
         validate_shape(
             config, role_pair, role, implementations[role], endpoint_io,
             warmup, iterations, payload_bytes, timeout_ms,
+            quic_version,
         )
         expected_config = {
             "benchmark_scope": "same-application-shape",
             "stream_window": "1048576",
             "connection_window": "8388608",
             "steady_state_mtu": "1280",
-            "quic_version": "1",
             "cipher": "negotiated-unexposed",
             "cert_verify": "true",
             "compression": "false",
@@ -185,10 +189,12 @@ def verify(
     validate_shape(
         result, role_pair, "client", implementations["client"], endpoint_io,
         warmup, iterations, payload_bytes, timeout_ms,
+        quic_version,
     )
     validate_shape(
         server, role_pair, "server", implementations["server"], endpoint_io,
         warmup, iterations, payload_bytes, timeout_ms,
+        quic_version,
     )
     expected_bytes = iterations * payload_bytes
     checksum = expected_checksum(warmup, iterations, payload_bytes)
@@ -217,6 +223,7 @@ def verify(
     print(
         f"protocol=websocket-h3 role_pair={role_pair} warmup={warmup} "
         f"iterations={iterations} payload_bytes={payload_bytes} checksum={checksum} "
+        f"quic_version={quic_version} "
         f"client_io={endpoint_io['client']} server_io={endpoint_io['server']} "
         "complete=true"
     )
@@ -241,6 +248,7 @@ def verify(
         validate_shape(
             memory, role_pair, role, implementation, endpoint_io,
             warmup, iterations, payload_bytes, timeout_ms,
+            quic_version,
         )
         expected_scope = "netz-explicit" if implementation == "netz" else "go-runtime-heap"
         if (
@@ -285,6 +293,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, required=True)
     parser.add_argument("--payload-bytes", type=int, required=True)
     parser.add_argument("--timeout-ms", type=int, required=True)
+    parser.add_argument("--quic-version", type=int, required=True)
     parser.add_argument("--client-log", required=True, type=Path)
     parser.add_argument("--server-log", required=True, type=Path)
     parser.add_argument("--client-rss", type=Path)
@@ -295,6 +304,7 @@ def main() -> None:
         role_pair=args.role_pair, warmup=args.warmup,
         iterations=args.iterations, payload_bytes=args.payload_bytes,
         timeout_ms=args.timeout_ms, client_log=args.client_log,
+        quic_version=args.quic_version,
         server_log=args.server_log, client_rss=args.client_rss,
         server_rss=args.server_rss, rss_source=args.rss_source,
     )

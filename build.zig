@@ -148,6 +148,20 @@ pub fn build(b: *std.Build) void {
     const run_http3_quic_go_bench_tests = b.addRunArtifact(
         http3_quic_go_bench_tests,
     );
+    const websocket_h3_quic_go_bench_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/websocket_h3_quic_go_bench.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_websocket_h3_quic_go_bench_tests = b.addRunArtifact(
+        websocket_h3_quic_go_bench_tests,
+    );
     const exact_certificate_verifier_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -292,6 +306,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_quic_persistent_bench_tests.step);
     test_step.dependOn(&run_quic_quic_go_churn_tests.step);
     test_step.dependOn(&run_http3_quic_go_bench_tests.step);
+    test_step.dependOn(&run_websocket_h3_quic_go_bench_tests.step);
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
     test_step.dependOn(&run_webtransport_wtransport_bench_tests.step);

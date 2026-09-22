@@ -240,8 +240,8 @@ fn runBenchmarkWithAllocator(
         .{
             .handshake = .{
                 .local_connection_id = &server_cid,
-                .version = .version_1,
-                .available_versions = &.{.version_1},
+                .version = config.version,
+                .available_versions = config.availableVersions(),
                 .local_transport_parameters = config.transportParameters(),
                 .initial_one_rtt_config = config.oneRttConfig(),
                 .identity = .{

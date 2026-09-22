@@ -5002,8 +5002,11 @@ against reintroducing the by-value copy.
 ### RFC 9220 WebSocket versus quic-go, same application shape
 
 `bench-websocket-h3-quic-go` extends the bidirectional correctness peer with a
-persistent binary-echo workload. Both processes are pinned to separate CPUs,
-use certificate-verified QUIC v1, a 1280-byte steady-state MTU, 1 MiB stream /
+persistent binary-echo workload. The peer shares the repository-owned module
+that pins quic-go v0.59.0, rather than borrowing a separate quicz checkout.
+Both processes are pinned to separate CPUs and use certificate-verified QUIC
+v1 by default (or forced v2 via `NETZ_WEBSOCKET_H3_INTEROP_VERSION=2`), a
+1280-byte steady-state MTU, 1 MiB stream /
 8 MiB connection windows, no WebSocket compression, and one 4 KiB binary
 message outstanding at a time. The netz endpoints now run on zio behind
 `std.Io`. Config, result, server-completion, and memory records bind both

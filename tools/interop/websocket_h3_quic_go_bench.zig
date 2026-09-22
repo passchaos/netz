@@ -8,6 +8,7 @@ pub const mtu: usize = 1280;
 pub const effective_chunk: usize = mtu - 128;
 
 pub const Config = struct {
+    version: netz.quic.Version = .version_1,
     warmup: u32 = 20,
     iterations: u32 = 1000,
     payload_bytes: u32 = 4096,
@@ -16,7 +17,9 @@ pub const Config = struct {
     pub fn parse(args: []const []const u8) !Config {
         var config: Config = .{};
         for (args) |arg| {
-            if (option(arg, "--warmup=")) |value| {
+            if (option(arg, "--version=")) |value| {
+                config.version = try parseVersion(value);
+            } else if (option(arg, "--warmup=")) |value| {
                 config.warmup = std.fmt.parseInt(u32, value, 10) catch
                     return error.InvalidArgument;
             } else if (option(arg, "--iterations=")) |value| {
@@ -62,7 +65,6 @@ pub const Config = struct {
     }
 
     pub fn oneRttConfig(self: Config) netz.quic.handshake.OneRttConfig {
-        _ = self;
         return .{
             .max_frames_per_packet = 256,
             .receive_window = 8 * 1024 * 1024,
@@ -70,6 +72,10 @@ pub const Config = struct {
             .stream_receive_window = 1024 * 1024,
             .max_stream_receive_window = 1024 * 1024,
             .max_datagram_size = mtu,
+            .key_update_profile = if (self.version == .version_2)
+                .quic_go_v0_59
+            else
+                .rfc,
         };
     }
 
@@ -95,12 +101,14 @@ pub const Config = struct {
         iterations: *[10]u8,
         payload_bytes: *[10]u8,
         timeout_ms: *[10]u8,
-    ) ![4]netz.http3.Qpack.HeaderField {
+        version: *[1]u8,
+    ) ![5]netz.http3.Qpack.HeaderField {
         return .{
             .{ .name = "x-netz-bench-warmup", .value = try std.fmt.bufPrint(warmup, "{d}", .{self.warmup}) },
             .{ .name = "x-netz-bench-iterations", .value = try std.fmt.bufPrint(iterations, "{d}", .{self.iterations}) },
             .{ .name = "x-netz-bench-payload-bytes", .value = try std.fmt.bufPrint(payload_bytes, "{d}", .{self.payload_bytes}) },
             .{ .name = "x-netz-bench-timeout-ms", .value = try std.fmt.bufPrint(timeout_ms, "{d}", .{self.timeout_ms}) },
+            .{ .name = "x-netz-bench-quic-version", .value = try std.fmt.bufPrint(version, "{d}", .{self.versionNumber()}) },
         };
     }
 
@@ -110,6 +118,10 @@ pub const Config = struct {
             .iterations = try parseHeader(u32, upgrade, "x-netz-bench-iterations", true),
             .payload_bytes = try parseHeader(u32, upgrade, "x-netz-bench-payload-bytes", true),
             .timeout_ms = try parseHeader(u32, upgrade, "x-netz-bench-timeout-ms", true),
+            .version = try parseVersion(
+                upgrade.header("x-netz-bench-quic-version") orelse
+                    return error.InvalidArgument,
+            ),
         };
         return Config.parseValues(config);
     }
@@ -125,6 +137,17 @@ pub const Config = struct {
         _ = try self.rounds();
         return self;
     }
+
+    pub fn versionNumber(self: Config) u8 {
+        return if (self.version == .version_2) 2 else 1;
+    }
+
+    pub fn availableVersions(self: Config) []const netz.quic.Version {
+        return if (self.version == .version_2)
+            &.{.version_2}
+        else
+            &.{.version_1};
+    }
 };
 
 fn option(arg: []const u8, prefix: []const u8) ?[]const u8 {
@@ -137,6 +160,12 @@ fn parsePositive(comptime T: type, value: []const u8) !T {
         return error.InvalidArgument;
     if (parsed == 0) return error.InvalidArgument;
     return parsed;
+}
+
+fn parseVersion(value: []const u8) !netz.quic.Version {
+    if (std.mem.eql(u8, value, "1")) return .version_1;
+    if (std.mem.eql(u8, value, "2")) return .version_2;
+    return error.InvalidArgument;
 }
 
 fn parseHeader(
@@ -196,7 +225,7 @@ pub fn printConfig(
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
             "warmup={d} iterations={d} payload_bytes={d} " ++
             "stream_window=1048576 connection_window=8388608 timeout_ms={d} " ++
-            "steady_state_mtu=1280 quic_version=1 " ++
+            "steady_state_mtu=1280 quic_version={d} " ++
             "cipher=negotiated-unexposed cert_verify=true compression=false " ++
             "netz_gso=false netz_gro=false " ++
             "quic_go_gso=implementation-default " ++
@@ -204,7 +233,7 @@ pub fn printConfig(
         .{
             role_pair,            endpoint_role,     clientIo(role_pair),
             serverIo(role_pair),  config.warmup,     config.iterations,
-            config.payload_bytes, config.timeout_ms,
+            config.payload_bytes, config.timeout_ms, config.versionNumber(),
         },
     );
 }
@@ -229,7 +258,7 @@ pub fn printResult(
             "mode=binary-echo role_pair={s} endpoint_role=client " ++
             "client_io={s} server_io={s} " ++
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
-            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} " ++
+            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} quic_version={d} " ++
             "elapsed_ns={d} ns_per_roundtrip={d:.3} " ++
             "roundtrips_per_s={d:.3} logical_MiB_s={d:.3} " ++
             "sent_bytes={d} received_bytes={d} checksum={d} complete=true\n",
@@ -241,6 +270,7 @@ pub fn printResult(
             config.iterations,
             config.payload_bytes,
             config.timeout_ms,
+            config.versionNumber(),
             elapsed_ns,
             @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(config.iterations)),
             roundtrips_per_second,
@@ -263,7 +293,7 @@ pub fn printServerComplete(
             "transport=h3 mode=binary-echo role_pair={s} " ++
             "endpoint_role=server client_io={s} server_io={s} " ++
             "connection_scope=persistent benchmark_scope=same-application-shape " ++
-            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} sent_bytes={d} " ++
+            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} quic_version={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} server_complete=true\n",
         .{
             role_pair,
@@ -273,6 +303,7 @@ pub fn printServerComplete(
             config.iterations,
             config.payload_bytes,
             config.timeout_ms,
+            config.versionNumber(),
             bytes,
             bytes,
             checksum,
@@ -290,7 +321,7 @@ pub fn printNetzMemory(
         "record=memory implementation=netz protocol=websocket-h3 transport=h3 " ++
             "mode=binary-echo role_pair={s} endpoint_role={s} " ++
             "client_io={s} server_io={s} connection_scope=persistent " ++
-            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} " ++
+            "warmup={d} iterations={d} payload_bytes={d} timeout_ms={d} quic_version={d} " ++
             "memory_scope=benchmark-run-after-argument-parse " ++
             "allocator_scope=netz-explicit alloc_count={d} free_count={d} " ++
             "resize_count={d} remap_count={d} total_allocated_bytes={d} " ++
@@ -304,6 +335,7 @@ pub fn printNetzMemory(
             config.iterations,
             config.payload_bytes,
             config.timeout_ms,
+            config.versionNumber(),
             snapshot.alloc_count,
             snapshot.free_count,
             snapshot.resize_count,
@@ -327,4 +359,29 @@ pub fn serverIo(role_pair: []const u8) []const u8 {
         "zio-std-io"
     else
         "quic-go-netpoll";
+}
+
+test "WebSocket H3 benchmark selects QUIC version explicitly" {
+    const v2 = try Config.parse(&.{
+        "--version=2",
+        "--warmup=1",
+        "--iterations=2",
+        "--payload-bytes=16",
+        "--timeout-ms=30000",
+    });
+    try std.testing.expectEqual(netz.quic.Version.version_2, v2.version);
+    try std.testing.expectEqual(@as(u8, 2), v2.versionNumber());
+    try std.testing.expectEqualSlices(
+        netz.quic.Version,
+        &.{.version_2},
+        v2.availableVersions(),
+    );
+    try std.testing.expectEqual(
+        netz.quic.protection.KeyPhaseState.UpdateProfile.quic_go_v0_59,
+        v2.oneRttConfig().key_update_profile,
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{"--version=3"}),
+    );
 }

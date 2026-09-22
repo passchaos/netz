@@ -3,9 +3,8 @@ set -euo pipefail
 
 client=${1:?netz RFC 9220 client executable path}
 server=${2:?netz RFC 9220 server executable path}
-quicz_root=${QUICZ_ROOT:-"$HOME/Work/quicz"}
-fixture_dir="$quicz_root/examples/interop/go_echo_client"
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+fixture_dir="$repo_root/tools/interop/http3_quic_go_module"
 version=${NETZ_WEBSOCKET_H3_INTEROP_VERSION:-1}
 if [[ "$version" != 1 && "$version" != 2 ]]; then
   echo "invalid WebSocket-over-H3 QUIC version: $version" >&2
@@ -17,11 +16,18 @@ if [[ "$version" == 2 ]]; then
   go_version_args=(-v2-only)
   netz_version_args=(--version=2)
 fi
-if [[ ! -f "$fixture_dir/go.mod" ]]; then
-  echo "audited quic-go fixture module not found under $fixture_dir" >&2
+if [[ ! -f "$fixture_dir/websocket/main.go" ]]; then
+  echo "repository-owned quic-go RFC 9220 fixture not found under $fixture_dir" >&2
   exit 127
 fi
-if ! command -v go >/dev/null 2>&1; then
+go_bin=${GO_BIN:-}
+if [[ -z $go_bin ]]; then
+  go_bin=$(command -v go 2>/dev/null || true)
+fi
+if [[ -z $go_bin && -x /tmp/go/bin/go ]]; then
+  go_bin=/tmp/go/bin/go
+fi
+if [[ -z $go_bin || ! -x $go_bin ]]; then
   echo 'go not found; install it to build the quic-go RFC 9220 peer' >&2
   exit 127
 fi
@@ -49,11 +55,11 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Build inside the external module so its pinned quic-go version supplies the
-# HTTP/3 implementation, without modifying that checkout.
-(cd "$fixture_dir" && go build \
-  -o "$work/quic-go-rfc9220-peer" \
-  "$repo_root/tools/interop/websocket_h3_quic_go.go")
+# Build inside the repository-owned module so its pinned quic-go version
+# supplies the independent HTTP/3 implementation.
+(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly ./websocket)
+(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
+  -o "$work/quic-go-rfc9220-peer" ./websocket)
 
 free_udp_port() {
   python3 - <<'PY'
@@ -83,8 +89,12 @@ PY
   iterations=1000
   payload_bytes=4096
   timeout_ms=30000
-  go_args=()
+  go_args=("${go_version_args[@]}")
   for arg in "$@"; do
+    if [[ $arg == --version=* || $arg == --v2-only ]]; then
+      echo 'select benchmark QUIC version with NETZ_WEBSOCKET_H3_INTEROP_VERSION=1|2' >&2
+      exit 2
+    fi
     go_args+=("-${arg#--}")
     case "$arg" in
       --stats) stats=true ;;
@@ -94,6 +104,7 @@ PY
       --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
     esac
   done
+  netz_args=("${netz_version_args[@]}" "$@")
   time_command=()
   rss_source=gnu-time-maxrss
   if [[ -n ${TIME_BIN:-} ]]; then
@@ -131,6 +142,7 @@ PY
       "$repo_root/tools/interop/websocket_h3_benchmark_check.py" \
       --role-pair="$1" --warmup="$warmup" --iterations="$iterations" \
       --payload-bytes="$payload_bytes" --timeout-ms="$timeout_ms" \
+      --quic-version="$version" \
       --client-log="$2" --server-log="$3")
     if [[ -n ${4:-} ]]; then
       check_args+=(--client-rss="$4" --server-rss="$5" \
@@ -165,11 +177,13 @@ EOF
   if [[ $stats == true ]]; then
     timeout 180s "${time_command[@]}" -f '%M' -o "$work/netz-bench-client.rss" \
       taskset -c "$client_cpu" "$client" \
-      bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
+      bench-client "$port" "$work/quic-go-bench-ca.pem" \
+      "${netz_args[@]}" \
       >"$work/netz-bench-client.log" 2>&1
   else
     timeout 180s taskset -c "$client_cpu" "$client" \
-      bench-client "$port" "$work/quic-go-bench-ca.pem" "$@" \
+      bench-client "$port" "$work/quic-go-bench-ca.pem" \
+      "${netz_args[@]}" \
       >"$work/netz-bench-client.log" 2>&1
   fi
   wait "$server_pid"
@@ -188,11 +202,13 @@ EOF
   port=$(free_udp_port)
   if [[ $stats == true ]]; then
     timeout 180s "${time_command[@]}" -f '%M' -o "$work/netz-bench-server.rss" \
-      taskset -c "$server_cpu" "$server" bench-server "$port" "$@" \
+      taskset -c "$server_cpu" "$server" bench-server "$port" \
+      "${netz_args[@]}" \
       >"$work/netz-bench-server.log" 2>&1 &
   else
     timeout 180s taskset -c "$server_cpu" "$server" \
-      bench-server "$port" "$@" >"$work/netz-bench-server.log" 2>&1 &
+      bench-server "$port" "${netz_args[@]}" \
+      >"$work/netz-bench-server.log" 2>&1 &
   fi
   server_pid=$!
   wait_for_line "$server_pid" "$work/netz-bench-server.log" \

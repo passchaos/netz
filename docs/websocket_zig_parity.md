@@ -49,8 +49,9 @@ permessage-deflate with no-context-takeover and exercises a compressed
 fragmented text message.
 
 `zig build interop-websocket-h3-quic-go -Doptimize=ReleaseFast` adds
-bidirectional process-boundary coverage against the independently maintained
-quic-go v0.59.0 HTTP/3 stack, for both QUIC v1 and v2. In each direction it
+bidirectional process-boundary coverage against quic-go v0.59.0 from the
+repository-owned, checksum-locked Go module, for both QUIC v1 and v2. In each
+direction it
 requires peer SETTINGS support, TLS certificate verification on the client,
 Origin and subprotocol negotiation, masked fragmented client text, an unmasked
 server response, two independently reset no-context-takeover
@@ -59,9 +60,12 @@ Ping/Pong, and an echoed Close 1000/`done`. Netz limits each HTTP/3 stream
 contribution to five bytes, which drives quic-go beyond its automatic
 100-packet first key-update threshold; the QUIC v2 cases explicitly select the
 pinned v0.59 compatibility profile while the library default remains RFC 9369.
-The Go fixture
-implements its own bounded RFC 6455 frame reader/writer, so this is external
-wire evidence rather than two netz adapters sharing a codec.
+The Go fixture implements its own bounded RFC 6455 frame reader/writer, so this
+is external wire evidence rather than two netz adapters sharing a codec.
+The benchmark runner now carries its selected QUIC version through both
+implementations, the request metadata, and every config/result/completion
+record; the checker rejects a v1/v2 mismatch instead of accepting a successful
+v1 run requested as v2.
 
 `zig build interop-websocket-chrome -Doptimize=ReleaseFast` now drives Chrome's
 native browser WebSocket API against the HTTP/1 runtime. The first connection

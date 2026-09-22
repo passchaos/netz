@@ -238,11 +238,13 @@ fn runBenchmarkWithAllocator(
     var iterations_header: [10]u8 = undefined;
     var payload_header: [10]u8 = undefined;
     var timeout_header: [10]u8 = undefined;
+    var version_header: [1]u8 = undefined;
     const headers = try config.headers(
         &warmup_header,
         &iterations_header,
         &payload_header,
         &timeout_header,
+        &version_header,
     );
     var connection = try netz.websocket.runtime.h3.Client.connect(
         allocator,
@@ -260,8 +262,8 @@ fn runBenchmarkWithAllocator(
             .handshake = .{
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
-                .version = .version_1,
-                .available_versions = &.{.version_1},
+                .version = config.version,
+                .available_versions = config.availableVersions(),
                 .server_name = "localhost",
                 .server_auth = verifier.clientVerifier(),
                 .local_transport_parameters = config.transportParameters(),
