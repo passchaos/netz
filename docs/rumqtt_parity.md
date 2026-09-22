@@ -235,29 +235,40 @@ Mosquitto brokers, and runs the netz bridge between them. A Mosquitto-generated
 MQTT 3.1.1 source publication reaches an MQTT 5 target subscriber at QoS 0; the
 reverse-version case uses QoS 1 plus RETAIN, checks the live delivery with
 RETAIN cleared, then reconnects a new target subscriber and reads the retained
-copy with RETAIN set. The source publisher's broker-local PUBACK is deliberately
+copy with RETAIN set. A third baseline case completes MQTT 5 QoS 2 handshakes
+on the publisher-to-source-broker, source-broker-to-bridge,
+bridge-to-target-broker, and target-broker-to-subscriber hops. The source
+publisher's broker-local acknowledgement is deliberately
 not presented as the bridge subscription ACK boundary; that ordering remains
-covered by the controlled disconnect tests above. Both external cases
+covered by the controlled disconnect tests above. All three baseline cases
 verify the exact `local/sensors/room` to `remote/sensors/room` mapping and
 payload. The runner stops the bridge through its own cancellation event and
 requires a clean exit instead of treating process termination as success.
-A QoS 2 external-Mosquitto bridge scenario is not yet part of this interop
-gate; the current external cases cover QoS 0/1, while the in-process dual-peer
-fault matrix enforces the QoS 2 crash ordering above.
-A third MQTT 5 case stops the target process after both Bridge Sessions are
+A fourth MQTT 5 case stops the target process after both Bridge Sessions are
 established, then publishes a retained QoS 1 message into the live source. The
 source Mosquitto log proves it has sent that delivery to the Bridge but has not
 received the Bridge subscription's PUBACK while the target is absent. Starting
 a new, empty target process causes the Bridge to republish from the still-owned
 source delivery; the gate observes target receipt before the source PUBACK and
 then reads the retained message through a newly connected target subscriber.
-A fourth MQTT 5 case keeps the target broker Session alive behind a fault
+A fifth MQTT 5 case keeps the target broker Session alive behind a fault
 proxy. The proxy forwards the first QoS 1 PUBLISH into Mosquitto, discards its
 PUBACK, and closes only the Bridge-facing TCP connection. It verifies
 Session Present on reconnect, then holds the retransmission until it has checked
 the original Packet Identifier, `DUP=1`, QoS, RETAIN, topic, and payload. The
 source Mosquitto still has no Bridge PUBACK at that point; forwarding the held
 retry and target PUBACK completes both broker transactions and retained replay.
+A sixth MQTT 5 case exercises the durable coordinator across an actual Bridge
+process crash. A fault proxy lets target Mosquitto accept one QoS 2 PUBLISH and
+PUBREL, then drops the returned PUBCOMP. After the runner kills the Bridge, a
+new process opens the same journal in restore mode and requires Session Present
+from both Mosquitto brokers. The proxy rejects any second PUBLISH, observes the
+same target Packet Identifier resumed directly at PUBREL, and forwards PUBCOMP.
+Source Mosquitto then records the Bridge's PUBREC/PUBCOMP completion; the target
+subscriber receives no second Application Message. This external gate covers
+the `target_await_pubcomp` crash boundary, while the in-process fault matrix
+continues to cover pre-wire, final source-clear, negative-PUBREC, identity, and
+Session-loss boundaries.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

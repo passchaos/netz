@@ -10,7 +10,7 @@ const session_expiry = [_]netz.mqtt.Property{.{ .four_byte = .{
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 8) return error.InvalidArguments;
+    if (args.len != 8 and args.len != 10) return error.InvalidArguments;
     const source_port = try parsePort(args[1]);
     const target_port = try parsePort(args[2]);
     const control_port = try parsePort(args[3]);
@@ -19,11 +19,26 @@ pub fn main(init: std.process.Init) !void {
     const qos = try parseQos(args[6]);
     const case_id = args[7];
     if (case_id.len == 0) return error.InvalidArguments;
+    if ((qos == .exactly_once) != (args.len == 10)) {
+        return error.InvalidArguments;
+    }
 
     const allocator = init.gpa;
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
+    const coordinator_dir: ?std.Io.Dir = if (args.len == 10)
+        try std.Io.Dir.openDirAbsolute(io, args[8], .{})
+    else
+        null;
+    defer if (coordinator_dir) |dir| dir.close(io);
+    const coordinator_mode: netz.mqtt.bridge.outbound.CoordinatorMode =
+        if (args.len == 10)
+            try parseCoordinatorMode(args[9])
+        else
+            .create;
+    var bridge_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(case_id, &bridge_digest, .{});
 
     const source_client_id = try std.fmt.allocPrint(
         allocator,
@@ -73,6 +88,12 @@ pub fn main(init: std.process.Init) !void {
                 .local_prefix = "local/",
                 .remote_prefix = "remote/",
             },
+            .coordinator = if (coordinator_dir) |dir| .{
+                .bridge_id = bridge_digest[0..16].*,
+                .dir = dir,
+                .sub_path = "outbound-qos2.log",
+                .mode = coordinator_mode,
+            } else null,
         },
         &shutdown,
     );
@@ -88,7 +109,11 @@ pub fn main(init: std.process.Init) !void {
     defer stop.cancel(io) catch {};
 
     const connected = try bridge.connect();
-    if (connected.source_session_present or connected.target_session_present) {
+    const expect_resume = coordinator_dir != null and
+        coordinator_mode == .restore;
+    if (connected.source_session_present != expect_resume or
+        connected.target_session_present != expect_resume)
+    {
         return error.UnexpectedSessionResume;
     }
     std.debug.print(
@@ -142,6 +167,15 @@ fn parseProtocol(value: []const u8) !netz.mqtt.ProtocolVersion {
 fn parseQos(value: []const u8) !netz.mqtt.QoS {
     if (std.mem.eql(u8, value, "0")) return .at_most_once;
     if (std.mem.eql(u8, value, "1")) return .at_least_once;
+    if (std.mem.eql(u8, value, "2")) return .exactly_once;
+    return error.InvalidArguments;
+}
+
+fn parseCoordinatorMode(
+    value: []const u8,
+) !netz.mqtt.bridge.outbound.CoordinatorMode {
+    if (std.mem.eql(u8, value, "create")) return .create;
+    if (std.mem.eql(u8, value, "restore")) return .restore;
     return error.InvalidArguments;
 }
 

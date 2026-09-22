@@ -268,6 +268,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/mqtt_commit_log_support_test.py",
     });
+    const mqtt_outbound_bridge_support_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_outbound_bridge_support_test.py",
+    });
     const webtransport_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/webtransport_benchmark_check_test.py",
@@ -309,6 +313,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&mqtt_packet_sequence_tests.step);
     test_step.dependOn(&mqtt_vector_source_lock_tests.step);
     test_step.dependOn(&mqtt_commit_log_support_tests.step);
+    test_step.dependOn(&mqtt_outbound_bridge_support_tests.step);
     test_step.dependOn(&websocket_h3_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_churn_checker_tests.step);
