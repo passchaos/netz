@@ -80,6 +80,7 @@ one shared Broker core. For example:
 ```text
 queue_qos0_messages true
 password_file users.pw
+acl_file access.acl
 persistence true
 persistence_location state
 persistence_file broker.db
@@ -102,7 +103,7 @@ max_connections 16
 The accepted directives are exactly `listener`, `protocol`, `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
-`password_file`, `persistence`, `persistence_location`, `persistence_file`,
+`password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
 bounded example interprets each listener's `max_connections` as its finite
@@ -118,6 +119,16 @@ include, reload, plugin, bridge, and full Mosquitto configuration remain
 outside this subset. The password file authenticates peers but does not encrypt
 the MQTT username or password on raw TCP/WS; expose these listeners only over a
 trusted network/terminating proxy, or use the library's TLS/WSS listener APIs.
+`acl_file` accepts Mosquitto `user NAME`,
+`topic [read|write|readwrite|deny] FILTER`, and global `pattern` rules whose `%u` and
+`%c` substitutions occupy a complete topic level. Topic rules before the first
+`user` apply to anonymous clients. Access is denied by default, explicit deny
+rules take precedence, write rules cover PUBLISH and Will admission, and read
+rules are checked against every concrete live, retained, or resumed delivery.
+As in Mosquitto's current ACL-file plugin, SUBSCRIBE/UNSUBSCRIBE requests can be
+installed even when no read rule grants them; unauthorized publications remain
+undeliverable. Unknown directives/access modes and malformed patterns fail
+before listeners are bound.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Run the end-to-end gate with

@@ -35,6 +35,7 @@ pub const Listener = struct {
 pub const Config = struct {
     listeners: []Listener,
     password_file: []u8 = &.{},
+    acl_file: []u8 = &.{},
     queue_qos0_messages: bool = false,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
@@ -46,6 +47,7 @@ pub const Config = struct {
         for (self.listeners) |*listener| listener.deinit(allocator);
         allocator.free(self.listeners);
         if (self.password_file.len != 0) allocator.free(self.password_file);
+        if (self.acl_file.len != 0) allocator.free(self.acl_file);
         if (self.persistence_location.len != 0) {
             allocator.free(self.persistence_location);
         }
@@ -111,6 +113,7 @@ const ListenerSeen = struct {
 const GlobalSeen = struct {
     queue_qos0_messages: bool = false,
     password_file: bool = false,
+    acl_file: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -143,6 +146,7 @@ pub fn parse(
         if (config.password_file.len != 0) {
             allocator.free(config.password_file);
         }
+        if (config.acl_file.len != 0) allocator.free(config.acl_file);
     }
     var global_seen: GlobalSeen = .{};
 
@@ -180,6 +184,9 @@ pub fn parse(
         } else if (std.mem.eql(u8, directive, "password_file")) {
             try markOnce(&global_seen.password_file);
             config.password_file = try parseOneOwned(allocator, &words);
+        } else if (std.mem.eql(u8, directive, "acl_file")) {
+            try markOnce(&global_seen.acl_file);
+            config.acl_file = try parseOneOwned(allocator, &words);
         } else if (std.mem.eql(u8, directive, "persistence")) {
             try markOnce(&global_seen.persistence);
             config.persistence = try parseOneBool(&words);
@@ -361,6 +368,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\# strict supported subset
         \\queue_qos0_messages true
         \\password_file users.pw
+        \\acl_file access.acl
         \\persistence true
         \\persistence_location state
         \\persistence_file broker.db
@@ -381,6 +389,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     defer config.deinit(allocator);
     try std.testing.expect(config.queue_qos0_messages);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
+    try std.testing.expectEqualStrings("access.acl", config.acl_file);
     try std.testing.expect(config.persistence);
     try std.testing.expect(config.autosave_on_changes);
     try std.testing.expectEqual(@as(u32, 17), config.autosave_interval);
@@ -418,6 +427,15 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\listener 1883
             \\allow_anonymous true
             \\allow_anonymous false
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\acl_file first.acl
+            \\acl_file second.acl
+            \\listener 1883
+            \\allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -474,6 +492,7 @@ test "MQTT broker config owns strings independently of source" {
         u8,
         "persistence true\npersistence_location state\n" ++
             "persistence_file broker.db\npassword_file users.pw\n" ++
+            "acl_file access.acl\n" ++
             "listener 1883\n" ++
             "mount_point tenant/\nallow_anonymous true\n",
     );
@@ -488,5 +507,6 @@ test "MQTT broker config owns strings independently of source" {
     );
     try std.testing.expectEqualStrings("broker.db", config.persistence_file);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
+    try std.testing.expectEqualStrings("access.acl", config.acl_file);
     try std.testing.expectEqualStrings("tenant/", config.listeners[0].mount_point);
 }

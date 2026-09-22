@@ -714,7 +714,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/WebSocket listeners, and bounded hashed
   password-file authentication compatible with Argon2id, `$7$`
-  PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, and
+  PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
+  Mosquitto ACL files with anonymous/user scopes, deny precedence and `%u`/`%c`
+  patterns, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, generation-safe duplicate-ClientID takeover that
@@ -1031,8 +1033,8 @@ zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/WebSocket broker state, listener
-# policy, Mosquitto password hashes, authentication rejection, and snapshot
-# restore through the production broker example.
+# policy, Mosquitto password hashes, authentication rejection, ACL read/write/
+# deny/pattern behavior, and snapshot restore through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
 # Build the pinned Mosquitto checkout and bridge two independent broker
 # processes through netz across MQTT versions and QoS 0/1/2. QoS 2 covers the

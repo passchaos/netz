@@ -58,6 +58,29 @@ pub fn run(
     else
         null;
     defer if (passwords) |*file| file.deinit();
+    var acl: ?mqtt.acl_file.File = if (config.acl_file.len != 0)
+        try mqtt.acl_file.load(
+            allocator,
+            io,
+            std.Io.Dir.cwd(),
+            config.acl_file,
+        )
+    else
+        null;
+    defer if (acl) |*file| file.deinit();
+    var acl_policy: mqtt.acl_file.Policy = undefined;
+    const access_control: ?mqtt.broker.ListenerAccessControlHandler =
+        if (acl) |*file| blk: {
+            acl_policy = .{ .acl = file };
+            break :blk .{
+                .context = &acl_policy,
+                .authorize_publish = mqtt.acl_file.Policy.authorizePublish,
+                .authorize_subscribe = mqtt.acl_file.Policy.authorizeSubscribe,
+                .authorize_unsubscribe = mqtt.acl_file.Policy.authorizeUnsubscribe,
+                .authorize_delivery = mqtt.acl_file.Policy.authorizeDelivery,
+                .authorize_will = mqtt.acl_file.Policy.authorizeWill,
+            };
+        } else null;
 
     const connection_count = try config.totalMaxConnections();
     const persistence_path = if (config.persistence)
@@ -152,6 +175,7 @@ pub fn run(
                     .context = &authorizations[index],
                     .authorize = mqtt.password_file.Authorization.authorize,
                 } else null,
+                .access_control = access_control,
                 .use_username_as_client_id = configured.use_username_as_client_id,
             },
             .connection_count = configured.max_connections,

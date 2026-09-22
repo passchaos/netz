@@ -220,7 +220,10 @@ pub const ListenerAuthorization = struct {
 /// Per-listener packet policy. Every callback is optional because this is an
 /// overlay: configured broker-wide ACL callbacks are always evaluated first.
 /// Delayed Wills intentionally remain broker-scoped because they can outlive
-/// both the listener serve call and its borrowed callback context.
+/// both the listener serve call and its borrowed callback context. The
+/// listener Will callback therefore runs during CONNECT admission; it may
+/// suppress registration, while broker-wide `authorize_will` is re-evaluated
+/// when a surviving Will actually becomes due.
 pub const ListenerAccessControlHandler = struct {
     context: *anyopaque,
     authorize_publish: ?*const fn (
@@ -241,6 +244,13 @@ pub const ListenerAccessControlHandler = struct {
     authorize_delivery: ?*const fn (
         context: *anyopaque,
         delivery: DeliveryAuthorization,
+    ) bool = null,
+    /// Validate a mapped Will while CONNECT identity and listener policy are
+    /// both alive. A denial suppresses that Will without refusing CONNECT.
+    authorize_will: ?*const fn (
+        context: *anyopaque,
+        connect: mqtt.Connect,
+        will: mqtt.LastWill,
     ) bool = null,
 };
 
@@ -280,6 +290,9 @@ pub const AccessControlHandler = struct {
 /// precedes Session/inflight allocation and applies equally to QoS 0.
 pub const DeliveryAuthorization = struct {
     client_id: []const u8,
+    /// Username from the currently connected destination, if any. Offline
+    /// queued messages have no listener policy and are rechecked on reconnect.
+    username: ?[]const u8 = null,
     topic: []const u8,
     payload: []const u8,
     qos: mqtt.QoS,
@@ -456,6 +469,8 @@ const ClientSlot = struct {
     /// Borrowed from the active listener descriptor. It is cleared before the
     /// slot can be reused and is never persisted with a durable Session.
     listener_access_control: ?ListenerAccessControlHandler = null,
+    /// Borrowed from `ClientTask.connect` while this slot is active.
+    username: ?[]const u8 = null,
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
     queue_head: usize = 0,
@@ -2616,6 +2631,21 @@ pub const Broker = struct {
                 return null;
             }
         }
+        var effective_connect = pending.connect.connect;
+        if (listener_authorization.use_username_as_client_id) {
+            effective_connect.client_id = effective_connect.username orelse {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                return null;
+            };
+        }
+        if (listener_authorization.access_control) |access| {
+            if (access.authorize_will) |authorize| {
+                if (effective_connect.will) |will| {
+                    suppress_reserved_will = suppress_reserved_will or
+                        !authorize(access.context, effective_connect, will);
+                }
+            }
+        }
         if (suppress_reserved_will) {
             if (mapped_will) |*mapped| {
                 mapped.deinit();
@@ -2624,14 +2654,8 @@ pub const Broker = struct {
             if (pending.connect.connect.will) |*will| {
                 will.deinit(self.allocator);
                 pending.connect.connect.will = null;
+                effective_connect.will = null;
             }
-        }
-        var effective_connect = pending.connect.connect;
-        if (listener_authorization.use_username_as_client_id) {
-            effective_connect.client_id = effective_connect.username orelse {
-                try self.refuseUnauthorizedConnect(pending, &pending_owned);
-                return null;
-            };
         }
         var registration_progress: RegistrationProgress = .{};
         const registration = self.register(
@@ -2765,6 +2789,11 @@ pub const Broker = struct {
         slot.graceful_disconnect = false;
         slot.listener_access_control = listener_access_control;
         errdefer slot.listener_access_control = null;
+        // `preparePending` passes the effective CONNECT after any
+        // username-as-client-id transformation; its username remains the
+        // authenticated wire identity used by listener read ACLs.
+        slot.username = connect.username;
+        errdefer slot.username = null;
         // The configured queue count is also the memory bound. Reserve it once
         // during setup so routing performs no destination queue allocation
         // while holding the global router lock.
@@ -3167,6 +3196,7 @@ pub const Broker = struct {
         slot.session_present = false;
         slot.session_persistent = false;
         slot.listener_access_control = null;
+        slot.username = null;
         slot.will_handle = null;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
@@ -3334,6 +3364,7 @@ pub const Broker = struct {
         slot.session_present = false;
         slot.session_persistent = false;
         slot.listener_access_control = null;
+        slot.username = null;
         slot.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
@@ -3650,6 +3681,7 @@ pub const Broker = struct {
             };
             if (!self.deliveryAuthorized(slot.listener_access_control, .{
                 .client_id = client_id,
+                .username = slot.username,
                 .topic = publish.topic,
                 .payload = publish.payload,
                 .qos = publish.qos,
@@ -4309,6 +4341,7 @@ pub const Broker = struct {
             else
                 null, .{
                 .client_id = try self.sessions.clientId(handle),
+                .username = if (online) destination.?.username else null,
                 .topic = publish.topic,
                 .payload = publish.payload,
                 .qos = route.qos,
@@ -5181,6 +5214,7 @@ pub const Broker = struct {
             if (transmission == .publish and
                 !self.deliveryAuthorized(slot.listener_access_control, .{
                     .client_id = client_id,
+                    .username = slot.username,
                     .topic = transmission.publish.topic,
                     .payload = transmission.publish.payload,
                     .qos = transmission.publish.qos,
