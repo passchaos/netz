@@ -1064,6 +1064,20 @@ pub const Bridge = struct {
                     self.target.disconnectTransport();
                     return error.TargetAcknowledgementMismatch;
                 }
+                if (!owned.ack.accepted()) {
+                    // The reconnect Session has already removed its target
+                    // inflight entry for a terminal negative PUBREC. Persist
+                    // that same terminal state before acknowledging the
+                    // source; committing await_pubcomp here would describe an
+                    // inflight entry that no longer exists.
+                    var rejected = transaction;
+                    rejected.phase = .target_rejected;
+                    rejected.target_reason_code = owned.ack.reason_code;
+                    try self.commitDurable(rejected);
+                    self.target_delivery.reset();
+                    _ = try self.completeDurableSourceIfReady();
+                    return;
+                }
                 var advanced = transaction;
                 advanced.phase = .target_await_pubcomp;
                 try self.commitDurable(advanced);

@@ -148,7 +148,8 @@ def assert_log_absent(path: Path, marker: str, duration: float) -> None:
 
 
 def start_broker(
-    executable: Path, port: int, directory: Path, label: str
+    executable: Path, port: int, directory: Path, label: str,
+    extra_config: str = "",
 ) -> ManagedProcess:
     config = directory / f"{label}.conf"
     log = directory / f"{label}.log"
@@ -156,7 +157,8 @@ def start_broker(
         f"listener {port} 127.0.0.1\n"
         "allow_anonymous true\n"
         "persistence false\n"
-        "log_type all\n",
+        "log_type all\n"
+        + extra_config,
         encoding="ascii",
     )
     output = log.open("wb")

@@ -62,6 +62,13 @@ class WireHelpersTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "Remaining Length"):
             support.decode_remaining_length(bytes.fromhex("30 80808080"))
 
+    def test_ack_parser_observes_negative_pubrec_reason(self) -> None:
+        support.assert_ack(bytes.fromhex("50 04 002a 97 00"), 5, 42, 0x97)
+        with self.assertRaisesRegex(AssertionError, "ACK mismatch"):
+            support.assert_ack(
+                bytes.fromhex("50 04 002a 97 00"), 5, 42, 0x87
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

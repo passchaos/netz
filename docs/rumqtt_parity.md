@@ -280,8 +280,16 @@ external gate also restarts each broker independently after a durable pre-wire
 transaction. Losing the source Session makes the restored Bridge exit with
 `SourceSessionLost` before it reconnects to the target; losing the target
 Session makes it exit with `TargetSessionLost` immediately after the fresh
-CONNACK and before any PUBLISH. The in-process fault matrix continues to cover
-negative-PUBREC, identity mismatch, and malformed coordinator state.
+CONNACK and before any PUBLISH. A final MQTT 5 case gives target Mosquitto a
+read-only ACL. Mosquitto receives exactly one bridge PUBLISH and returns
+`PUBREC 0x87` (Not authorized); wire observers verify the Bridge sends no
+target PUBREL, propagates the same negative PUBREC to the source Session, and
+delivers no Application Message to the target subscriber. A clean restart from
+the resulting empty journal produces no replay. This real-broker case also
+guards the coordinator invariant that a terminal negative PUBREC removes target
+inflight state before the `target_rejected` record is committed. The in-process
+fault matrix continues to cover identity mismatch and malformed coordinator
+state.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

@@ -1834,10 +1834,13 @@ test "outbound bridge durably propagates negative QoS2 PUBREC" {
     );
     defer bridge.deinit();
     _ = try bridge.connect();
-    try std.testing.expect(try bridge.step(.{
-        .timeout = .fromSeconds(2),
-        .cancellation_check_interval = .fromMilliseconds(5),
-    }));
+    try outbound.testing.stageNextDurableQoS2(&bridge, .{
+        .timeout = .fromSeconds(1),
+    });
+    try outbound.testing.flushDurableTarget(&bridge);
+    try outbound.testing.completeDurableTarget(&bridge, .{
+        .timeout = .fromSeconds(1),
+    });
     try std.testing.expect(!bridge.hasPendingDurableQoS2());
 
     source_thread.join();

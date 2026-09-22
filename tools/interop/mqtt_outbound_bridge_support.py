@@ -98,7 +98,23 @@ def assert_publish_on_topic(
     return publish["packet_id"]  # type: ignore[return-value]
 
 
-class _SessionProxy:
+def assert_ack(
+    packet: bytes, packet_type: int, packet_id: int, reason_code: int = 0
+) -> None:
+    remaining, cursor = decode_remaining_length(packet)
+    if packet[0] >> 4 != packet_type or cursor + remaining != len(packet):
+        raise AssertionError(
+            f"expected ACK type {packet_type}, got {packet.hex()}"
+        )
+    actual_id = int.from_bytes(packet[cursor : cursor + 2], "big")
+    actual_reason = packet[cursor + 2] if remaining > 2 else 0
+    if actual_id != packet_id or actual_reason != reason_code:
+        raise AssertionError(
+            f"ACK mismatch: id={actual_id} reason={actual_reason:#x}"
+        )
+
+
+class SessionProxy:
     def __init__(self, listen_port: int, target_port: int, thread_name: str):
         self.target_port = target_port
         self.stop_requested = threading.Event()
@@ -186,7 +202,7 @@ class _SessionProxy:
             raise self.error
 
 
-class AckDropProxy(_SessionProxy):
+class AckDropProxy(SessionProxy):
     def __init__(self, listen_port: int, target_port: int, payload: bytes):
         self.payload = payload
         self.allow_replay = threading.Event()
@@ -261,7 +277,7 @@ class AckDropProxy(_SessionProxy):
             raise self.error
 
 
-class Qos2PubcompDropProxy(_SessionProxy):
+class Qos2PubcompDropProxy(SessionProxy):
     def __init__(self, listen_port: int, target_port: int, payload: bytes):
         self.payload = payload
         self.first_pubcomp_dropped = threading.Event()
@@ -352,7 +368,7 @@ class Qos2PubcompDropProxy(_SessionProxy):
         self.recovery_pubrel_seen.set()
 
 
-class TargetPublishDropProxy(_SessionProxy):
+class TargetPublishDropProxy(SessionProxy):
     def __init__(
         self, listen_port: int, target_port: int, payload: bytes, *,
         recovery_session_present: bool = True,
@@ -459,7 +475,7 @@ class TargetPublishDropProxy(_SessionProxy):
         self.replay_complete.set()
 
 
-class SourcePubcompDropProxy(_SessionProxy):
+class SourcePubcompDropProxy(SessionProxy):
     def __init__(self, listen_port: int, source_port: int, payload: bytes):
         self.payload = payload
         self.first_pubcomp_dropped = threading.Event()

@@ -1027,7 +1027,8 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # dropped target PUBCOMP, and after a dropped source PUBCOMP. It verifies the
 # durable replay stage and final journal-clear boundary without duplicate
 # target Application Messages, plus source-first fail-closed recovery when
-# either broker loses the required persistent Session.
+# either broker loses the required persistent Session and propagation of a
+# Mosquitto ACL-generated negative PUBREC without target delivery.
 zig build interop-mqtt-outbound-bridge-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast
