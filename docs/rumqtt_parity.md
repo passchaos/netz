@@ -266,9 +266,14 @@ from both Mosquitto brokers. The proxy rejects any second PUBLISH, observes the
 same target Packet Identifier resumed directly at PUBREL, and forwards PUBCOMP.
 Source Mosquitto then records the Bridge's PUBREC/PUBCOMP completion; the target
 subscriber receives no second Application Message. This external gate covers
-the `target_await_pubcomp` crash boundary, while the in-process fault matrix
-continues to cover pre-wire, final source-clear, negative-PUBREC, identity, and
-Session-loss boundaries.
+the `target_await_pubcomp` crash boundary. A seventh case puts the fault proxy
+on the source leg: after target completion it drops the Bridge's source PUBCOMP,
+confirms source Mosquitto has not observed that acknowledgement, and kills the
+Bridge after the journal clear. Restoring the now-empty coordinator requires
+both Sessions, accepts source Mosquitto's repeated PUBREL, and returns PUBCOMP
+without any second target PUBLISH or subscriber delivery. The in-process fault
+matrix continues to cover pre-wire, negative-PUBREC, identity, and Session-loss
+boundaries.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

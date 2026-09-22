@@ -1024,7 +1024,8 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Build the pinned Mosquitto checkout and bridge two independent broker
 # processes through netz across MQTT versions and QoS 0/1/2. The QoS 2 gate
 # also kills and restores netz after a dropped target PUBCOMP, proving that the
-# durable coordinator resumes at PUBREL without a second target PUBLISH.
+# durable coordinator resumes at PUBREL without a second target PUBLISH, and
+# after a dropped source PUBCOMP to cover the final journal-clear boundary.
 zig build interop-mqtt-outbound-bridge-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-mosquitto -Doptimize=ReleaseFast
 zig build interop-mqtt-websocket-origin -Doptimize=ReleaseFast

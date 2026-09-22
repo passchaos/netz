@@ -76,8 +76,18 @@ def parse_publish(packet: bytes, protocol: int) -> dict[str, object]:
 def assert_publish(
     packet: bytes, protocol: int, *, qos: int, retain: bool, payload: bytes
 ) -> int | None:
+    return assert_publish_on_topic(
+        packet, protocol, topic="remote/sensors/room", qos=qos,
+        retain=retain, payload=payload,
+    )
+
+
+def assert_publish_on_topic(
+    packet: bytes, protocol: int, *, topic: str, qos: int,
+    retain: bool, payload: bytes,
+) -> int | None:
     publish = parse_publish(packet, protocol)
-    if publish["topic"] != "remote/sensors/room":
+    if publish["topic"] != topic:
         raise AssertionError(f"wrong remapped topic: {publish['topic']}")
     if publish["payload"] != payload:
         raise AssertionError(f"wrong bridged payload: {publish['payload']!r}")
@@ -338,3 +348,100 @@ class Qos2PubcompDropProxy(_SessionProxy):
         self.first_pubcomp_dropped.set()
         self.ready_for_recovery.set()
         self.recovery_pubrel_seen.set()
+
+
+class SourcePubcompDropProxy(_SessionProxy):
+    def __init__(self, listen_port: int, source_port: int, payload: bytes):
+        self.payload = payload
+        self.first_pubcomp_dropped = threading.Event()
+        self.ready_for_recovery = threading.Event()
+        self.recovery_pubcomp_seen = threading.Event()
+        self.publish_count = 0
+        self.packet_id: int | None = None
+        super().__init__(listen_port, source_port, "mqtt-source-pubcomp-drop")
+
+    def _run_fallible(self) -> None:
+        with self._accept() as first:
+            with self._connect_session(first, session_present=False) as source:
+                subscribe = read_packet(first)
+                if subscribe[0] >> 4 != 8:
+                    raise AssertionError(
+                        f"expected bridge SUBSCRIBE, got {subscribe.hex()}"
+                    )
+                source.sendall(subscribe)
+                first.sendall(read_packet(source))
+                publish = read_packet(source)
+                packet_id = assert_publish_on_topic(
+                    publish, 5, topic="local/sensors/room", qos=2,
+                    retain=False, payload=self.payload,
+                )
+                if packet_id is None:
+                    raise AssertionError("source QoS 2 PUBLISH has no packet id")
+                self.publish_count += 1
+                self.packet_id = packet_id
+                first.sendall(publish)
+                pubrec = read_packet(first)
+                if self._packet_id(pubrec, 5) != packet_id:
+                    raise AssertionError("source PUBREC Packet Identifier changed")
+                source.sendall(pubrec)
+                pubrel = read_packet(source)
+                if self._packet_id(pubrel, 6) != packet_id:
+                    raise AssertionError("source PUBREL Packet Identifier changed")
+                first.sendall(pubrel)
+                pubcomp = read_packet(first)
+                if self._packet_id(pubcomp, 7) != packet_id:
+                    raise AssertionError("source PUBCOMP Packet Identifier changed")
+                self.first_pubcomp_dropped.set()
+                self._forward_until_closed(first, source)
+        self.ready_for_recovery.set()
+
+        with self._accept() as resumed:
+            with self._connect_session(resumed, session_present=True) as source:
+                packet = read_packet(source)
+                if packet[0] >> 4 == 3:
+                    self.publish_count += 1
+                    raise AssertionError(
+                        "source broker repeated PUBLISH instead of PUBREL"
+                    )
+                if self._packet_id(packet, 6) != self.packet_id:
+                    raise AssertionError(
+                        "recovered source PUBREL changed Packet Identifier"
+                    )
+                resumed.sendall(packet)
+                pubcomp = read_packet(resumed)
+                if self._packet_id(pubcomp, 7) != self.packet_id:
+                    raise AssertionError("recovered source PUBCOMP mismatch")
+                source.sendall(pubcomp)
+                self.recovery_pubcomp_seen.set()
+                self._forward_until_disconnect(resumed, source)
+
+    def _forward_until_closed(
+        self, client: socket.socket, source: socket.socket
+    ) -> None:
+        while not self.stop_requested.is_set():
+            try:
+                packet = read_packet(client)
+            except (AssertionError, ConnectionResetError, OSError):
+                return
+            source.sendall(packet)
+            if packet[0] >> 4 == 14:
+                return
+            client.sendall(read_packet(source))
+
+    def _forward_until_disconnect(
+        self, client: socket.socket, source: socket.socket
+    ) -> None:
+        while not self.stop_requested.is_set():
+            try:
+                packet = read_packet(client)
+            except socket.timeout:
+                continue
+            source.sendall(packet)
+            if packet[0] >> 4 == 14:
+                return
+            client.sendall(read_packet(source))
+
+    def _wake_waiters(self) -> None:
+        self.first_pubcomp_dropped.set()
+        self.ready_for_recovery.set()
+        self.recovery_pubcomp_seen.set()
