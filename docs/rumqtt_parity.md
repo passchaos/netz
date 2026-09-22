@@ -20,7 +20,7 @@ and equal-wire broker results are kept separate.
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups. Network-client PUBLISH and Will writes to broker-owned `$SYS` and `$share` namespaces are denied by default, with Mosquitto's `$SYS/broker/connection/+/state` exception and an explicit opt-out; trusted local producers retain `$SYS` access | Both references provide production topic indexes; Mosquitto applies the same built-in `$SYS`/`$share` write protection before configured ACLs |
 | Listener topic namespaces and policy | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery. Each listener may override CONNECT/CONNACK policy and add CONNECT plus live publish/subscribe/unsubscribe/delivery authorization on top of mandatory broker-wide policy; its negotiated Maximum QoS controls subscription grants plus live and durable delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener; Maximum QoS, authentication and selected limits may be listener-scoped with `per_listener_settings` |
-| Broker configuration | Public `mqtt.broker_config` parses and deep-owns a strict Mosquitto-style subset for TCP/WebSocket listeners, mount points, anonymous policy, Maximum QoS/Keep Alive, username-derived Client IDs, connection bounds, offline QoS 0, password/ACL files, and snapshot/autosave settings. Public `mqtt.password_file` validates and verifies Mosquitto Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, rejects plaintext/malformed/duplicate/unreasonably expensive input before listening, uses constant-time hash comparison, and serializes KDF work to bound concurrent Argon2 memory. Public `mqtt.acl_file` implements anonymous/user topic rules, global `%u`/`%c` patterns, read/write/readwrite access, default deny and deny precedence. The production example's exclusive `--config=PATH` mode creates all listeners over one shared Broker and enforces each anonymous/authentication/ACL policy | Mosquitto supports a substantially broader configuration language, includes/reload, per-listener security files, plugins, TLS, bridges, persistence, and many additional listener/global controls; rumqttd uses its own structured configuration |
+| Broker configuration | Public `mqtt.broker_config` parses and deep-owns a strict Mosquitto-style subset for TCP/TLS/WebSocket/WSS listeners, listener-local P-256 PEM `certfile`/`keyfile`, mount points, anonymous policy, Maximum QoS/Keep Alive, username-derived Client IDs, connection bounds, offline QoS 0, password/ACL files, and snapshot/autosave settings. TLS identities are all validated before any listener is opened. Public `mqtt.password_file` validates and verifies Mosquitto Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, rejects plaintext/malformed/duplicate/unreasonably expensive input before listening, uses constant-time hash comparison, and serializes KDF work to bound concurrent Argon2 memory. Public `mqtt.acl_file` implements anonymous/user topic rules, global `%u`/`%c` patterns, read/write/readwrite access, default deny and deny precedence. The production example's exclusive `--config=PATH` mode creates all listeners over one shared Broker and enforces each transport/authentication/ACL policy | Mosquitto supports a substantially broader configuration language, includes/reload, per-listener security files, encrypted/RSA server keys, client-certificate identity mapping, plugins, bridges, persistence, and many additional listener/global controls; rumqttd uses its own structured configuration |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route and durable commit before PUBACK; a self-matched PUBLISH is written first on the shared connection, while unrelated slow subscribers cannot delay PUBACK; MQTT 5 reason `0x10` when no subscription matches | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers. Original Client ID provenance is deep-owned and persisted so replay can recheck the publisher's current write authorization; this Mosquitto-compatible check is enabled by default and explicitly configurable | Both production brokers integrate retained delivery; Mosquitto defaults `check_retain_source` on to prevent revoked publishers' stored messages from replaying |
@@ -1708,8 +1708,14 @@ restart. The same gate now verifies user/anonymous `topic` scopes, `%u`
 patterns, default deny and deny precedence over real TCP/WebSocket traffic.
 Like Mosquitto's current ACL-file plugin, SUBSCRIBE and UNSUBSCRIBE themselves
 are admitted while `read` rules filter every concrete live/retained/resumed
-delivery. Reload, TLS directives, plugins and per-listener security files
-remain explicit configuration gaps.
+delivery. Listener-local `certfile` and `keyfile` select the native TLS/WSS
+server paths. The pair is mandatory, all configured identities are validated
+before the first bind, and the public loader accepts leaf-first PEM certificate
+chains with unencrypted P-256 SEC1 or PKCS#8 keys. It rejects malformed or
+non-canonical DER, encrypted/RSA/other-curve keys, oversized inputs and leaf/key
+mismatches. The process gate verifies MQTT/TLS through OpenSSL and WSS through
+a hostname-verifying Python TLS client. Reload, TLS client-certificate
+directives, plugins and per-listener password/ACL files remain explicit gaps.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 225
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
@@ -2380,7 +2386,8 @@ proxy evidence for the entire suite.
    the independent-peer memory gap.
 3. Expand the source-hash-locked gate beyond its current 1,774 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
-   upstream harness's remaining reload/ACL/TLS/persistence semantics. The 225
+   upstream harness's remaining reload/client-certificate/persistence semantics.
+   The 225
    curated scenarios, fourteen complete portable JSON files, audited 279/307
    `CONNECT.json`, 145/146 `CONNACK.json`, 150/160 `PUBLISH.json`, 151/155
    `SUBSCRIBE.json`, and 100/108 `UNSUBSCRIBE.json` subsets still do not cover the full

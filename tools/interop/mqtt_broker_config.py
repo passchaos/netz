@@ -7,6 +7,7 @@ import argparse
 import base64
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import tempfile
 
@@ -216,9 +217,14 @@ def websocket_mqtt_ping(sock: socket.socket) -> None:
         raise AssertionError(f"expected WebSocket PINGRESP, got {response.hex()}")
 
 
-def websocket_connect(port: int) -> socket.socket:
+def websocket_connect(port: int, cafile: Path | None = None) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
+    if cafile is not None:
+        context = ssl.create_default_context(cafile=str(cafile))
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+        sock = context.wrap_socket(sock, server_hostname="localhost")
     key = base64.b64encode(b"netz-config-test").decode()
     request = (
         "GET /mqtt HTTP/1.1\r\n"
@@ -798,6 +804,196 @@ def run_persistence_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_tls_listener_case(broker: Path, directory: Path) -> None:
+    tls_port = free_port()
+    wss_port = free_port()
+    while wss_port == tls_port:
+        wss_port = free_port()
+    certificate = directory / "server-cert.pem"
+    private_key = directory / "server-key.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "ecparam",
+            "-name",
+            "prime256v1",
+            "-genkey",
+            "-noout",
+            "-out",
+            str(private_key),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-new",
+            "-x509",
+            "-key",
+            str(private_key),
+            "-sha256",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyCertSign",
+            "-out",
+            str(certificate),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=True,
+    )
+    config = directory / "tls.conf"
+    config.write_text(
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {certificate}\n"
+        f"keyfile {private_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {wss_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {certificate}\n"
+        f"keyfile {private_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 2 clients" not in ready:
+        raise RuntimeError(f"TLS configured broker failed to start: {ready}")
+
+    clients: list[socket.socket] = []
+    try:
+        openssl = subprocess.run(
+            [
+                "openssl",
+                "s_client",
+                "-connect",
+                f"127.0.0.1:{tls_port}",
+                "-tls1_3",
+                "-servername",
+                "localhost",
+                "-CAfile",
+                str(certificate),
+                "-verify_hostname",
+                "localhost",
+                "-verify_return_error",
+                "-quiet",
+            ],
+            input=connect_packet("openssl-config") + b"\xc0\x00\xe0\x00",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+        remaining, body_offset = decode_variable_integer(openssl.stdout, 1)
+        packet_end = body_offset + remaining
+        connack = openssl.stdout[:packet_end]
+        response_tail = openssl.stdout[packet_end:]
+        if connack_reason(connack) != 0 or response_tail != b"\xd0\x00":
+            raise AssertionError(
+                "OpenSSL MQTT/TLS CONNECT/PING exchange mismatch: "
+                f"got {openssl.stdout.hex()}; "
+                + openssl.stderr.decode(errors="replace")
+            )
+
+        websocket = websocket_connect(wss_port, certificate)
+        clients.append(websocket)
+        send_websocket_binary(websocket, connect_packet("wss-config"))
+        if connack_reason(read_websocket_binary(websocket)) != 0:
+            raise AssertionError("configured WSS CONNECT failed")
+        websocket_mqtt_ping(websocket)
+        send_websocket_binary(websocket, b"\xe0\x00")
+    finally:
+        for client in clients:
+            client.close()
+
+    try:
+        return_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("TLS configured broker did not finish")
+    if return_code != 0:
+        raise RuntimeError(
+            f"TLS configured broker exited {return_code}: "
+            + process.stdout.read()
+        )
+
+
+def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
+    certificate = directory / "server-cert.pem"
+    rsa_key = directory / "rsa-key.pem"
+    cleartext_port = free_port()
+    tls_port = free_port()
+    while tls_port == cleartext_port:
+        tls_port = free_port()
+    subprocess.run(
+        [
+            "openssl",
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+            str(rsa_key),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=True,
+    )
+    config = directory / "unsupported-tls-key.conf"
+    config.write_text(
+        f"listener {cleartext_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {certificate}\n"
+        f"keyfile {rsa_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "InvalidPrivateKey" not in result.stdout:
+        raise AssertionError(
+            "unsupported RSA TLS key did not fail before listen: "
+            + result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
+            raise AssertionError(
+                "an earlier cleartext listener was bound before TLS "
+                "identity validation completed"
+            )
+
+
 def main() -> None:
     args = parse_args()
     with tempfile.TemporaryDirectory() as temporary:
@@ -809,11 +1005,14 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
+        run_tls_listener_case(args.broker, directory)
+        run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
-        "policies, and snapshot restore "
+        "policies, TLS/WSS with OpenSSL verification, strict TLS key "
+        "rejection, and snapshot restore "
         + RUNTIME
     )
 

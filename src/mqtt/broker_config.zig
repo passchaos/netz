@@ -19,6 +19,8 @@ pub const Protocol = enum { mqtt, websockets };
 pub const Listener = struct {
     address: net.IpAddress,
     protocol: Protocol = .mqtt,
+    certfile: []u8 = &.{},
+    keyfile: []u8 = &.{},
     mount_point: []u8 = &.{},
     allow_anonymous: bool = false,
     maximum_qos: ?mqtt.QoS = null,
@@ -27,8 +29,14 @@ pub const Listener = struct {
     max_connections: usize = default_max_connections,
 
     fn deinit(self: *Listener, allocator: std.mem.Allocator) void {
+        if (self.certfile.len != 0) allocator.free(self.certfile);
+        if (self.keyfile.len != 0) allocator.free(self.keyfile);
         if (self.mount_point.len != 0) allocator.free(self.mount_point);
         self.* = undefined;
+    }
+
+    pub fn usesTls(self: Listener) bool {
+        return self.certfile.len != 0;
     }
 };
 
@@ -97,11 +105,14 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     DuplicateListener,
     PersistenceRequired,
     AuthenticationRequired,
+    TlsIdentityIncomplete,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
 
 const ListenerSeen = struct {
     protocol: bool = false,
+    certfile: bool = false,
+    keyfile: bool = false,
     mount_point: bool = false,
     allow_anonymous: bool = false,
     maximum_qos: bool = false,
@@ -231,6 +242,12 @@ pub fn parse(
                     .websockets
                 else
                     return error.InvalidDirective;
+            } else if (std.mem.eql(u8, directive, "certfile")) {
+                try markOnce(&seen.certfile);
+                listener.certfile = try parseOneOwned(allocator, &words);
+            } else if (std.mem.eql(u8, directive, "keyfile")) {
+                try markOnce(&seen.keyfile);
+                listener.keyfile = try parseOneOwned(allocator, &words);
             } else if (std.mem.eql(u8, directive, "mount_point")) {
                 try markOnce(&seen.mount_point);
                 const value = try parseOne(&words);
@@ -276,6 +293,9 @@ pub fn parse(
         return error.PersistenceRequired;
     }
     for (listeners.items) |listener| {
+        if ((listener.certfile.len == 0) != (listener.keyfile.len == 0)) {
+            return error.TlsIdentityIncomplete;
+        }
         if (!listener.allow_anonymous and config.password_file.len == 0) {
             return error.AuthenticationRequired;
         }
@@ -310,6 +330,8 @@ fn markOnce(flag: *bool) error{DuplicateDirective}!void {
 
 fn isListenerDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "protocol") or
+        std.mem.eql(u8, value, "certfile") or
+        std.mem.eql(u8, value, "keyfile") or
         std.mem.eql(u8, value, "mount_point") or
         std.mem.eql(u8, value, "allow_anonymous") or
         std.mem.eql(u8, value, "max_qos") or
@@ -381,6 +403,8 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_connections 4
         \\listener 8080 ::1
         \\protocol websockets
+        \\certfile server-chain.pem
+        \\keyfile server-key.pem
         \\mount_point tenant/
         \\allow_anonymous false
         \\use_username_as_clientid true
@@ -400,6 +424,15 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.listeners[0].maximum_qos.? == .at_least_once);
     try std.testing.expectEqual(@as(?u16, 30), config.listeners[0].maximum_keep_alive_seconds);
     try std.testing.expect(config.listeners[1].protocol == .websockets);
+    try std.testing.expect(config.listeners[1].usesTls());
+    try std.testing.expectEqualStrings(
+        "server-chain.pem",
+        config.listeners[1].certfile,
+    );
+    try std.testing.expectEqualStrings(
+        "server-key.pem",
+        config.listeners[1].keyfile,
+    );
     try std.testing.expectEqualStrings("tenant/", config.listeners[1].mount_point);
     try std.testing.expect(config.listeners[1].use_username_as_client_id);
     const path = try config.persistencePath(allocator);
@@ -418,8 +451,38 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator, "listener 1883"),
     );
     try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "certfile server.pem\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.TlsIdentityIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.TlsIdentityIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\keyfile server.key
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 8883
+            \\certfile first.pem
+            \\certfile second.pem
+            \\keyfile server.key
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
         error.UnsupportedDirective,
-        parse(allocator, "listener 1883\ncertfile server.pem"),
+        parse(allocator, "listener 1883\ncafile clients.pem"),
     );
     try std.testing.expectError(
         error.DuplicateDirective,
@@ -494,6 +557,7 @@ test "MQTT broker config owns strings independently of source" {
             "persistence_file broker.db\npassword_file users.pw\n" ++
             "acl_file access.acl\n" ++
             "listener 1883\n" ++
+            "certfile server.pem\nkeyfile server.key\n" ++
             "mount_point tenant/\nallow_anonymous true\n",
     );
     defer allocator.free(source);
@@ -508,5 +572,7 @@ test "MQTT broker config owns strings independently of source" {
     try std.testing.expectEqualStrings("broker.db", config.persistence_file);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
+    try std.testing.expectEqualStrings("server.pem", config.listeners[0].certfile);
+    try std.testing.expectEqualStrings("server.key", config.listeners[0].keyfile);
     try std.testing.expectEqualStrings("tenant/", config.listeners[0].mount_point);
 }

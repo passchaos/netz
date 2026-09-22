@@ -10,12 +10,16 @@ const mqtt = netz.mqtt;
 
 const ConfiguredServer = union(enum) {
     mqtt: mqtt.runtime.Server,
+    mqtt_tls: mqtt.tls_runtime.Server,
     websockets: mqtt.websocket_runtime.Server,
+    secure_websockets: mqtt.websocket_runtime.TlsServer,
 
     fn deinit(self: *ConfiguredServer) void {
         switch (self.*) {
             .mqtt => |*server| server.deinit(),
+            .mqtt_tls => |*server| server.deinit(),
             .websockets => |*server| server.deinit(),
+            .secure_websockets => |*server| server.deinit(),
         }
         self.* = undefined;
     }
@@ -23,14 +27,27 @@ const ConfiguredServer = union(enum) {
     fn pendingSource(self: *ConfiguredServer) mqtt.runtime.PendingSource {
         return switch (self.*) {
             .mqtt => |*server| server.pendingSource(),
+            .mqtt_tls => |*server| server.pendingSource(),
             .websockets => |*server| server.pendingSource(),
+            .secure_websockets => |*server| server.pendingSource(),
         };
     }
 
     fn address(self: ConfiguredServer) std.Io.net.IpAddress {
         return switch (self) {
             .mqtt => |server| server.address(),
+            .mqtt_tls => |server| server.address(),
             .websockets => |server| server.address(),
+            .secure_websockets => |server| server.address(),
+        };
+    }
+
+    fn transportName(self: ConfiguredServer) []const u8 {
+        return switch (self) {
+            .mqtt => "mqtt",
+            .mqtt_tls => "mqtts",
+            .websockets => "websockets",
+            .secure_websockets => "wss",
         };
     }
 };
@@ -112,6 +129,28 @@ pub fn run(
         };
     }
 
+    const identities = try allocator.alloc(
+        ?netz.tls.server_identity_file.Identity,
+        config.listeners.len,
+    );
+    defer allocator.free(identities);
+    @memset(identities, null);
+    defer for (identities) |*maybe_identity| {
+        if (maybe_identity.*) |*identity| identity.deinit();
+    };
+    // Validate every credential before opening any listener. A malformed later
+    // identity must not leave an earlier configured port briefly exposed.
+    for (config.listeners, 0..) |configured, index| {
+        if (!configured.usesTls()) continue;
+        identities[index] = try netz.tls.server_identity_file.load(
+            allocator,
+            io,
+            std.Io.Dir.cwd(),
+            configured.certfile,
+            configured.keyfile,
+        );
+    }
+
     const servers = try allocator.alloc(
         ConfiguredServer,
         config.listeners.len,
@@ -136,7 +175,24 @@ pub fn run(
     defer allocator.free(authorizations);
 
     for (config.listeners, 0..) |configured, index| {
-        servers[index] = switch (configured.protocol) {
+        servers[index] = if (identities[index]) |*identity|
+            switch (configured.protocol) {
+                .mqtt => .{ .mqtt_tls = try mqtt.tls_runtime.Server.listen(
+                    allocator,
+                    io,
+                    configured.address,
+                    .{ .identity = identity.serverIdentity() },
+                ) },
+                .websockets => .{
+                    .secure_websockets = try mqtt.websocket_runtime.TlsServer.listen(
+                        allocator,
+                        io,
+                        configured.address,
+                        .{ .identity = identity.serverIdentity() },
+                    ),
+                },
+            }
+        else switch (configured.protocol) {
             .mqtt => .{ .mqtt = try mqtt.runtime.Server.listen(
                 allocator,
                 io,
@@ -191,7 +247,7 @@ pub fn run(
         std.debug.print(
             "  {s} {f} mount_point={s} max_connections={d}\n",
             .{
-                @tagName(configured.protocol),
+                server.transportName(),
                 server.address(),
                 if (configured.mount_point.len == 0)
                     "<global>"

@@ -95,12 +95,15 @@ max_connections 16
 
 listener 8080 127.0.0.1
 protocol websockets
+certfile server-chain.pem
+keyfile server-key.pem
 mount_point tenant/
 allow_anonymous true
 max_connections 16
 ```
 
-The accepted directives are exactly `listener`, `protocol`, `mount_point`,
+The accepted directives are exactly `listener`, `protocol`, `certfile`,
+`keyfile`, `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
@@ -114,11 +117,16 @@ users, and excessive KDF parameters fail closed before any listener is opened.
 Hash comparison is constant-time and concurrent KDF work is serialized to cap
 Argon2 memory amplification. A listener with `allow_anonymous false` requires a
 password file; an anonymous-capable listener accepts absent credentials but
-still rejects invalid credentials when a username is supplied. TLS, ACL,
-include, reload, plugin, bridge, and full Mosquitto configuration remain
-outside this subset. The password file authenticates peers but does not encrypt
-the MQTT username or password on raw TCP/WS; expose these listeners only over a
-trusted network/terminating proxy, or use the library's TLS/WSS listener APIs.
+still rejects invalid credentials when a username is supplied. `certfile` and
+`keyfile` are listener-local and must occur together. Their presence upgrades
+`protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
+port is opened, every identity is loaded from a leaf-first PEM certificate
+chain and an unencrypted P-256 SEC1 or PKCS#8 private key, bounded and strictly
+decoded, and checked for a matching leaf key. RSA, other curves, encrypted
+keys, client-certificate directives, include, reload, plugin, bridge, and full
+Mosquitto configuration remain outside this subset and fail closed. A password
+file authenticates peers but does not encrypt the MQTT username or password on
+raw TCP/WS; use `certfile`/`keyfile`, a trusted network, or a terminating proxy.
 `acl_file` accepts Mosquitto `user NAME`,
 `topic [read|write|readwrite|deny] FILTER`, and global `pattern` rules whose `%u` and
 `%c` substitutions occupy a complete topic level. Topic rules before the first
