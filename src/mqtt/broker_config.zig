@@ -34,6 +34,7 @@ pub const Listener = struct {
 
 pub const Config = struct {
     listeners: []Listener,
+    password_file: []u8 = &.{},
     queue_qos0_messages: bool = false,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
@@ -44,6 +45,7 @@ pub const Config = struct {
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.listeners) |*listener| listener.deinit(allocator);
         allocator.free(self.listeners);
+        if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.persistence_location.len != 0) {
             allocator.free(self.persistence_location);
         }
@@ -92,6 +94,7 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     InvalidInteger,
     DuplicateListener,
     PersistenceRequired,
+    AuthenticationRequired,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
 
@@ -107,6 +110,7 @@ const ListenerSeen = struct {
 
 const GlobalSeen = struct {
     queue_qos0_messages: bool = false,
+    password_file: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -135,6 +139,9 @@ pub fn parse(
         }
         if (config.persistence_file.len != 0) {
             allocator.free(config.persistence_file);
+        }
+        if (config.password_file.len != 0) {
+            allocator.free(config.password_file);
         }
     }
     var global_seen: GlobalSeen = .{};
@@ -170,6 +177,9 @@ pub fn parse(
         if (std.mem.eql(u8, directive, "queue_qos0_messages")) {
             try markOnce(&global_seen.queue_qos0_messages);
             config.queue_qos0_messages = try parseOneBool(&words);
+        } else if (std.mem.eql(u8, directive, "password_file")) {
+            try markOnce(&global_seen.password_file);
+            config.password_file = try parseOneOwned(allocator, &words);
         } else if (std.mem.eql(u8, directive, "persistence")) {
             try markOnce(&global_seen.persistence);
             config.persistence = try parseOneBool(&words);
@@ -258,6 +268,11 @@ pub fn parse(
     {
         return error.PersistenceRequired;
     }
+    for (listeners.items) |listener| {
+        if (!listener.allow_anonymous and config.password_file.len == 0) {
+            return error.AuthenticationRequired;
+        }
+    }
     const candidate = Config{ .listeners = listeners.items };
     _ = try candidate.totalMaxConnections();
     config.listeners = try listeners.toOwnedSlice(allocator);
@@ -345,6 +360,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     var config = try parse(allocator,
         \\# strict supported subset
         \\queue_qos0_messages true
+        \\password_file users.pw
         \\persistence true
         \\persistence_location state
         \\persistence_file broker.db
@@ -364,6 +380,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     );
     defer config.deinit(allocator);
     try std.testing.expect(config.queue_qos0_messages);
+    try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expect(config.persistence);
     try std.testing.expect(config.autosave_on_changes);
     try std.testing.expectEqual(@as(u32, 17), config.autosave_interval);
@@ -388,8 +405,8 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator, "mount_point tenant/\nlistener 1883"),
     );
     try std.testing.expectError(
-        error.UnsupportedDirective,
-        parse(allocator, "listener 1883\npassword_file users.txt"),
+        error.AuthenticationRequired,
+        parse(allocator, "listener 1883"),
     );
     try std.testing.expectError(
         error.UnsupportedDirective,
@@ -434,6 +451,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         ),
     );
     try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\password_file first.pw
+            \\password_file second.pw
+            \\listener 1883
+        ),
+    );
+    try std.testing.expectError(
         error.InvalidDirective,
         parse(allocator,
             \\persistence true
@@ -448,7 +473,8 @@ test "MQTT broker config owns strings independently of source" {
     const source = try allocator.dupe(
         u8,
         "persistence true\npersistence_location state\n" ++
-            "persistence_file broker.db\nlistener 1883\n" ++
+            "persistence_file broker.db\npassword_file users.pw\n" ++
+            "listener 1883\n" ++
             "mount_point tenant/\nallow_anonymous true\n",
     );
     defer allocator.free(source);
@@ -461,5 +487,6 @@ test "MQTT broker config owns strings independently of source" {
         config.persistence_location,
     );
     try std.testing.expectEqualStrings("broker.db", config.persistence_file);
+    try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("tenant/", config.listeners[0].mount_point);
 }

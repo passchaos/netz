@@ -15,12 +15,14 @@ pub const redirect = @import("redirect.zig");
 pub const proxy_protocol = @import("proxy_protocol.zig");
 pub const listener_namespace = @import("listener_namespace.zig");
 pub const broker_config = @import("broker_config.zig");
+pub const password_file = @import("password_file.zig");
 pub const will_scheduler = @import("will/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
 test {
     _ = listener_namespace;
     _ = broker_config;
+    _ = password_file;
 }
 
 pub const Error = wire.Error || error{

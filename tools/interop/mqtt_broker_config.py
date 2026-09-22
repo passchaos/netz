@@ -47,13 +47,28 @@ def mqtt_packet(packet_type: int, body: bytes) -> bytes:
     return bytes((packet_type,)) + variable_integer(len(body)) + body
 
 
-def connect_packet(client_id: str, keep_alive: int = 60) -> bytes:
+def connect_packet(
+    client_id: str,
+    keep_alive: int = 60,
+    username: str | None = None,
+    password: str | None = None,
+    proto_ver: int = 5,
+) -> bytes:
+    flags = 0x02
+    payload = utf8(client_id)
+    if username is not None:
+        flags |= 0x80
+        payload += utf8(username)
+    if password is not None:
+        flags |= 0x40
+        encoded_password = password.encode()
+        payload += len(encoded_password).to_bytes(2, "big") + encoded_password
     body = (
         utf8("MQTT")
-        + b"\x05\x02"
+        + bytes((proto_ver, flags))
         + keep_alive.to_bytes(2, "big")
-        + b"\x00"
-        + utf8(client_id)
+        + (b"\x00" if proto_ver == 5 else b"")
+        + payload
     )
     return mqtt_packet(0x10, body)
 
@@ -130,6 +145,15 @@ def assert_connack_policy(
             )
 
 
+def connack_reason(packet: bytes) -> int:
+    if packet[0] != 0x20:
+        raise AssertionError(f"expected CONNACK, got {packet.hex()}")
+    remaining, offset = decode_variable_integer(packet, 1)
+    if remaining < 2 or offset + remaining != len(packet):
+        raise AssertionError(f"malformed CONNACK: {packet.hex()}")
+    return packet[offset + 1]
+
+
 def websocket_connect(port: int) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
@@ -186,20 +210,27 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
     websocket_port = free_port()
     while websocket_port == tcp_port:
         websocket_port = free_port()
+    password_file = directory / "shared.pwfile"
+    password_file.write_text(
+        "user:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
     config = directory / "broker.conf"
     config.write_text(
         "queue_qos0_messages true\n"
+        f"password_file {password_file}\n"
         f"listener {tcp_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "allow_anonymous false\n"
         "max_qos 1\n"
         "max_keepalive 30\n"
-        "max_connections 1\n"
+        "max_connections 2\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
         "mount_point tenant/\n"
         "allow_anonymous true\n"
         "max_qos 0\n"
-        "max_connections 1\n"
+        "max_connections 2\n"
     )
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
@@ -210,7 +241,7 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
     expected = (
-        "netz MQTT 3.1.1/5 broker configured 2 listeners for 2 clients "
+        "netz MQTT 3.1.1/5 broker configured 2 listeners for 4 clients "
         "server_io=zio-std-io"
     )
     if ready != expected:
@@ -221,7 +252,11 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
         tcp = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
         tcp.settimeout(5)
         clients.append(tcp)
-        tcp.sendall(connect_packet("tcp-subscriber"))
+        tcp.sendall(
+            connect_packet(
+                "tcp-subscriber", username="user", password="password"
+            )
+        )
         assert_connack_policy(read_mqtt_packet(tcp), 1, 30)
         tcp.sendall(subscribe_packet(1, "tenant/#"))
         suback = read_mqtt_packet(tcp)
@@ -243,6 +278,38 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
             )
         send_websocket_binary(websocket, b"\xe0\x00")
         tcp.sendall(b"\xe0\x00")
+
+        rejected_tcp = socket.create_connection(
+            ("127.0.0.1", tcp_port), timeout=5
+        )
+        rejected_tcp.settimeout(5)
+        clients.append(rejected_tcp)
+        rejected_tcp.sendall(
+            connect_packet(
+                "tcp-invalid-credentials", username="user", password="wrong"
+            )
+        )
+        rejected_tcp_connack = read_mqtt_packet(rejected_tcp)
+        if connack_reason(rejected_tcp_connack) != 0x87:
+            raise AssertionError(
+                "protected TCP listener accepted invalid credentials: "
+                + rejected_tcp_connack.hex()
+            )
+
+        rejected_websocket = websocket_connect(websocket_port)
+        clients.append(rejected_websocket)
+        send_websocket_binary(
+            rejected_websocket,
+            connect_packet(
+                "ws-invalid-credentials", username="user", password="wrong"
+            ),
+        )
+        rejected_websocket_connack = read_websocket_binary(rejected_websocket)
+        if connack_reason(rejected_websocket_connack) != 0x87:
+            raise AssertionError(
+                "anonymous listener accepted invalid supplied credentials: "
+                + rejected_websocket_connack.hex()
+            )
     finally:
         for client in clients:
             client.close()
@@ -276,11 +343,112 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     )
     if (
         result.returncode == 0
-        or "AuthenticationConfigurationRequired" not in result.stdout
+        or "AuthenticationRequired" not in result.stdout
     ):
         raise AssertionError(
             "allow_anonymous false did not fail closed without credentials: "
             + result.stdout
+        )
+
+
+def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
+    password_file = directory / "plaintext.pwfile"
+    password_file.write_text("user:password\n")
+    config = directory / "invalid-password.conf"
+    config.write_text(
+        f"password_file {password_file}\n"
+        f"listener {free_port()} 127.0.0.1\n"
+        "allow_anonymous false\n"
+        "max_connections 1\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "UnsupportedHash" not in result.stdout:
+        raise AssertionError(
+            "plaintext password file did not fail closed: " + result.stdout
+        )
+
+
+def run_authentication_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    password_file = directory / "formats.pwfile"
+    password_file.write_text(
+        "legacy:$6$Ut1cUS9PG8+gC3vn$"
+        "tOjCfSJJDe1Alu9HktxxyyzwN4+6mAMSWGRAF9gmMN8pzcGTPVEYYMAZpCEp96Oz2ZRRz5YKM6lPMf1tUbb6zA==\n"
+        "pbkdf2:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+        "argon:$argon2id$v=19$m=47104,t=1,p=1$"
+        "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw$"
+        "PSgS0SQP11eYoUs34zQi0HsTw/P8awxX8kf+94qyd5CziAe0af6Lr3RwOmKNdcSYBa6ZJpy4awdqw2JKUW7u4Q\n"
+    )
+    config = directory / "authenticated.conf"
+    config.write_text(
+        f"password_file {password_file}\n"
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous false\n"
+        "max_connections 8\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 8 clients" not in ready:
+        raise RuntimeError(f"authenticated broker failed to start: {ready}")
+
+    cases = (
+        (5, "legacy", "password", 0x00),
+        (5, "pbkdf2", "password", 0x00),
+        (5, "argon", "password", 0x00),
+        (5, "legacy", "wrong", 0x87),
+        (5, "unknown", "password", 0x87),
+        (5, None, None, 0x87),
+        (4, "pbkdf2", "password", 0x00),
+        (4, "pbkdf2", "wrong", 0x05),
+    )
+    for index, (proto_ver, username, password, expected_reason) in enumerate(cases):
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        try:
+            client.sendall(
+                connect_packet(
+                    f"authentication-{index}",
+                    username=username,
+                    password=password,
+                    proto_ver=proto_ver,
+                )
+            )
+            packet = read_mqtt_packet(client)
+            actual_reason = connack_reason(packet)
+            if actual_reason != expected_reason:
+                raise AssertionError(
+                    f"authentication case {index}: expected {expected_reason:#x}, "
+                    f"received {actual_reason:#x}: {packet.hex()}"
+                )
+            if expected_reason == 0:
+                client.sendall(b"\xe0\x00")
+        finally:
+            client.close()
+
+    try:
+        return_code = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("authenticated broker did not finish")
+    if return_code != 0:
+        raise RuntimeError(
+            f"authenticated broker exited {return_code}: {process.stdout.read()}"
         )
 
 
@@ -348,11 +516,13 @@ def main() -> None:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
+        run_invalid_password_file_case(args.broker, directory)
+        run_authentication_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "shared TCP/WebSocket state, mount point, listener policies, and "
-        "snapshot restore "
+        "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
+        "state, mount point, listener policies, and snapshot restore "
         + RUNTIME
     )
 

@@ -48,14 +48,16 @@ pub fn run(
     );
     defer config.deinit(allocator);
 
-    // This example has no password-file or plugin credential provider. A false
-    // value must therefore stop startup instead of creating an anonymous
-    // listener whose configuration claims authentication is mandatory.
-    for (config.listeners) |listener| {
-        if (!listener.allow_anonymous) {
-            return error.AuthenticationConfigurationRequired;
-        }
-    }
+    var passwords: ?mqtt.password_file.File = if (config.password_file.len != 0)
+        try mqtt.password_file.load(
+            allocator,
+            io,
+            std.Io.Dir.cwd(),
+            config.password_file,
+        )
+    else
+        null;
+    defer if (passwords) |*file| file.deinit();
 
     const connection_count = try config.totalMaxConnections();
     const persistence_path = if (config.persistence)
@@ -104,6 +106,11 @@ pub fn run(
         config.listeners.len,
     );
     defer allocator.free(listeners);
+    const authorizations = try allocator.alloc(
+        mqtt.password_file.Authorization,
+        config.listeners.len,
+    );
+    defer allocator.free(authorizations);
 
     for (config.listeners, 0..) |configured, index| {
         servers[index] = switch (configured.protocol) {
@@ -128,6 +135,12 @@ pub fn run(
         accept.maximum_qos = configured.maximum_qos;
         accept.maximum_keep_alive_seconds =
             configured.maximum_keep_alive_seconds;
+        if (passwords) |*file| {
+            authorizations[index] = .{
+                .passwords = file,
+                .allow_anonymous = configured.allow_anonymous,
+            };
+        }
         listeners[index] = .{
             .source = servers[index].pendingSource(),
             .namespace = try mqtt.listener_namespace.Namespace.init(
@@ -135,6 +148,10 @@ pub fn run(
             ),
             .accept = accept,
             .authorization = .{
+                .connect = if (passwords != null) .{
+                    .context = &authorizations[index],
+                    .authorize = mqtt.password_file.Authorization.authorize,
+                } else null,
                 .use_username_as_client_id = configured.use_username_as_client_id,
             },
             .connection_count = configured.max_connections,

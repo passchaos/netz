@@ -79,6 +79,7 @@ one shared Broker core. For example:
 
 ```text
 queue_qos0_messages true
+password_file users.pw
 persistence true
 persistence_location state
 persistence_file broker.db
@@ -86,7 +87,7 @@ autosave_interval 30
 autosave_on_changes false
 
 listener 1883 127.0.0.1
-allow_anonymous true
+allow_anonymous false
 max_qos 1
 max_keepalive 60
 max_connections 16
@@ -101,14 +102,22 @@ max_connections 16
 The accepted directives are exactly `listener`, `protocol`, `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
-`persistence`, `persistence_location`, `persistence_file`,
+`password_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
 bounded example interprets each listener's `max_connections` as its finite
-accept count. It refuses `allow_anonymous false` because this subset does not
-yet provide a password-file or authentication-plugin directive; silently
-opening that listener would weaken the requested policy. TLS, ACL, include,
-reload, bridge, and full Mosquitto configuration remain outside this subset.
+accept count. `password_file` accepts Mosquitto's current Argon2id hashes, `$7$`
+PBKDF2-SHA512 hashes, and legacy `$6$` salted SHA-512 hashes. Plaintext, unknown
+or malformed hashes, duplicate usernames, files over 1 MiB, more than 4,096
+users, and excessive KDF parameters fail closed before any listener is opened.
+Hash comparison is constant-time and concurrent KDF work is serialized to cap
+Argon2 memory amplification. A listener with `allow_anonymous false` requires a
+password file; an anonymous-capable listener accepts absent credentials but
+still rejects invalid credentials when a username is supplied. TLS, ACL,
+include, reload, plugin, bridge, and full Mosquitto configuration remain
+outside this subset. The password file authenticates peers but does not encrypt
+the MQTT username or password on raw TCP/WS; expose these listeners only over a
+trusted network/terminating proxy, or use the library's TLS/WSS listener APIs.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Run the end-to-end gate with
