@@ -50,6 +50,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 - Strict owned TLS server-identity loading from PEM certificate chains and
   unencrypted P-256 SEC1 or PKCS#8 private keys, with bounded input, canonical
   DER validation, secret-buffer clearing, and leaf certificate/key matching
+- Strict owned PEM CA-file loading for TLS client authentication, with bounded
+  certificate counts, validity and clientAuth CA-usage checks, duplicate-name
+  rejection, and exact DER authority names for TLS 1.3 CertificateRequest
 - Caller-supplied bounded caching of successful X.509 bundle verification for
   repeated exact hostname/DER chains; per-connection CertificateVerify remains
   mandatory, and replacing the trust bundle or time snapshot requires replacing
