@@ -270,12 +270,14 @@ pub fn run(
             ),
             .accept = accept,
             .authorization = .{
-                .connect = if (passwords != null) .{
+                .connect = if (passwords != null and
+                    !configured.use_identity_as_username) .{
                     .context = &authorizations[index],
                     .authorize = mqtt.password_file.Authorization.authorize,
                 } else null,
                 .access_control = access_control,
                 .use_username_as_client_id = configured.use_username_as_client_id,
+                .use_identity_as_username = configured.use_identity_as_username,
             },
             .connection_count = configured.max_connections,
         };

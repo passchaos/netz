@@ -5407,13 +5407,73 @@ pub const OwnedPacket = struct {
 pub const OwnedConnect = struct {
     packet: OwnedPacket,
     connect: mqtt.Connect,
+    /// Optional policy-owned username replacement. The parsed wire fields
+    /// continue to borrow packet storage; broker admission may replace the
+    /// username with a verified identity that must survive Session handling.
+    owned_username: ?[]u8 = null,
 
     pub fn deinit(self: *OwnedConnect, allocator: std.mem.Allocator) void {
+        if (self.owned_username) |username| allocator.free(username);
         self.connect.deinit(allocator);
         self.packet.deinit(allocator);
         self.* = undefined;
     }
+
+    pub fn replaceUsername(
+        self: *OwnedConnect,
+        allocator: std.mem.Allocator,
+        username: []const u8,
+    ) (mqtt.Error || std.mem.Allocator.Error)!void {
+        if (username.len == 0 or username.len > std.math.maxInt(u16)) {
+            return error.InvalidUtf8;
+        }
+        try mqtt.validateUtf8String(username);
+        const owned = try allocator.dupe(u8, username);
+        if (self.owned_username) |previous| allocator.free(previous);
+        self.owned_username = owned;
+        self.connect.username = owned;
+        self.connect.password = null;
+    }
 };
+
+test "owned CONNECT can replace username with a policy identity" {
+    const allocator = std.testing.allocator;
+    var owned = OwnedConnect{
+        .packet = .{
+            .bytes = try allocator.alloc(u8, 0),
+            .fixed = undefined,
+        },
+        .connect = .{
+            .protocol = .v5,
+            .clean_start = true,
+            .keep_alive_seconds = 60,
+            .client_id = "client",
+            .properties = try allocator.alloc(mqtt.Property, 0),
+            .username = "wire-user",
+            .password = "wire-password",
+        },
+    };
+    defer owned.deinit(allocator);
+    try owned.replaceUsername(allocator, "certificate-user");
+    try std.testing.expectEqualStrings(
+        "certificate-user",
+        owned.connect.username.?,
+    );
+    try std.testing.expect(owned.connect.password == null);
+    try owned.replaceUsername(allocator, "replacement-user");
+    try std.testing.expectEqualStrings(
+        "replacement-user",
+        owned.connect.username.?,
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        owned.replaceUsername(allocator, "bad\x00user"),
+    );
+    try std.testing.expectEqualStrings(
+        "replacement-user",
+        owned.connect.username.?,
+    );
+}
 
 pub const OwnedConnAck = struct {
     packet: OwnedPacket,

@@ -16,6 +16,7 @@ const client_id_mod = @import("broker/client_id.zig");
 const load_metrics = @import("broker/load_metrics.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
+const vail = @import("vail");
 const qos2_mod = @import("broker/qos2.zig");
 pub const bridge_qos2_mod = @import("broker/bridge_qos2.zig");
 pub const BridgeQoS2Store = bridge_qos2_mod.Store;
@@ -215,6 +216,10 @@ pub const ListenerAuthorization = struct {
     /// takeover, ACL and delivery state then consistently use the username.
     /// A missing username is refused as Not Authorized.
     use_username_as_client_id: bool = false,
+    /// Use the verified leaf certificate's Subject commonName as the MQTT
+    /// username before every authorization callback. Wire username/password
+    /// are ignored; a missing or invalid certificate identity is refused.
+    use_identity_as_username: bool = false,
 };
 
 /// Per-listener packet policy. Every callback is optional because this is an
@@ -2578,6 +2583,37 @@ pub const Broker = struct {
                 refused.deinit(self.allocator);
                 return null;
             }
+        }
+        if (listener_authorization.use_identity_as_username) {
+            const chain = pending.connection.peerCertificates() orelse {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                return null;
+            };
+            if (chain.len == 0) {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                return null;
+            }
+            const common_name = vail.x509.identity.commonNameAlloc(
+                self.allocator,
+                chain[0],
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                    return null;
+                },
+            };
+            defer self.allocator.free(common_name);
+            pending.connect.replaceUsername(
+                self.allocator,
+                common_name,
+            ) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    try self.refuseUnauthorizedConnect(pending, &pending_owned);
+                    return null;
+                },
+            };
         }
         if (pending.connection.authentication.phase == .authenticating) {
             const handler = self.options.authentication orelse {

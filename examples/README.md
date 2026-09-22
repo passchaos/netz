@@ -99,13 +99,15 @@ certfile server-chain.pem
 keyfile server-key.pem
 cafile client-ca.pem
 require_certificate true
+use_identity_as_username true
 mount_point tenant/
 allow_anonymous true
 max_connections 16
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
-`keyfile`, `cafile`, `require_certificate`, `mount_point`,
+`keyfile`, `cafile`, `require_certificate`, `use_identity_as_username`,
+`mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
@@ -130,10 +132,16 @@ outside this subset and fail closed. `cafile` and `require_certificate true`
 must occur together on a TLS listener. Every PEM CA is bounded, unique by DER
 Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;
 its exact DER Subject is advertised in TLS 1.3 CertificateRequest. Client
-certificate identity-to-username mapping, optional client certificates,
-`capath`, and CRLs are not accepted. A password file authenticates MQTT peers
-but does not encrypt credentials on raw TCP/WS; use TLS/WSS, a trusted network,
-or a terminating proxy.
+optional client certificates, `capath`, and CRLs are not accepted. When
+`use_identity_as_username true` is also set, the verified leaf's unique Subject
+CN replaces any wire username and the wire password is ignored before password,
+ACL, Session, Client ID, or Will policy. The CN is converted from supported
+X.509 DirectoryString encodings, must satisfy MQTT UTF-8/u16 bounds, and is
+deeply owned; missing, duplicate, legacy-encoded, malformed, or NUL-containing
+CN values are Not Authorized. This mode is a valid authentication source for
+`allow_anonymous false` and does not use `password_file` on that listener. A
+password file does not encrypt credentials on raw TCP/WS; use TLS/WSS, a
+trusted network, or a proxy.
 `acl_file` accepts Mosquitto `user NAME`,
 `topic [read|write|readwrite|deny] FILTER`, and global `pattern` rules whose `%u` and
 `%c` substitutions occupy a complete topic level. Topic rules before the first

@@ -257,6 +257,21 @@ def websocket_connect(
     return sock
 
 
+def mqtt_tls_socket(
+    port: int,
+    cafile: Path,
+    certfile: Path,
+    keyfile: Path,
+) -> ssl.SSLSocket:
+    context = ssl.create_default_context(cafile=str(cafile))
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
+    raw = socket.create_connection(("127.0.0.1", port), timeout=5)
+    raw.settimeout(5)
+    return context.wrap_socket(raw, server_hostname="localhost")
+
+
 def send_websocket_binary(sock: socket.socket, payload: bytes) -> None:
     mask = b"\x12\x34\x56\x78"
     length = len(payload)
@@ -987,7 +1002,7 @@ def create_ca(directory: Path, name: str, common_name: str) -> tuple[Path, Path]
 def create_signed_certificate(
     directory: Path,
     name: str,
-    common_name: str,
+    common_name: str | None,
     ca_certificate: Path,
     ca_key: Path,
     serial: int,
@@ -1009,9 +1024,8 @@ def create_signed_certificate(
     run_openssl(
         "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
     )
-    run_openssl(
-        "req", "-new", "-key", key, "-subj", f"/CN={common_name}", "-out", request
-    )
+    subject = f"/CN={common_name}" if common_name is not None else "/O=no-common-name"
+    run_openssl("req", "-new", "-key", key, "-subj", subject, "-out", request)
     run_openssl(
         "x509",
         "-req",
@@ -1258,6 +1272,27 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         202,
         "serverAuth",
     )
+    no_identity_certificate, no_identity_key = create_signed_certificate(
+        directory,
+        "no-identity-client",
+        None,
+        client_ca,
+        client_ca_key,
+        203,
+        "clientAuth",
+    )
+
+    identity_acl = directory / "identity.acl"
+    identity_acl.write_text(
+        "pattern write cert/%u/#\n"
+        "pattern write client/%c/#\n"
+    )
+    identity_password_file = directory / "identity.pwfile"
+    identity_password_file.write_text(
+        "password-user:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
 
     tls_port = free_port()
     wss_port = free_port()
@@ -1265,20 +1300,26 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         wss_port = free_port()
     config = directory / "mtls.conf"
     config.write_text(
+        f"password_file {identity_password_file}\n"
+        f"acl_file {identity_acl}\n"
         f"listener {tls_port} 127.0.0.1\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
-        "max_connections 2\n"
+        "use_identity_as_username true\n"
+        "use_username_as_clientid true\n"
+        "allow_anonymous false\n"
+        "max_connections 3\n"
         f"listener {wss_port} 127.0.0.1\n"
         "protocol websockets\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "use_identity_as_username true\n"
+        "use_username_as_clientid true\n"
+        "allow_anonymous false\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -1289,7 +1330,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 2 listeners for 3 clients" not in ready:
+    if "configured 2 listeners for 4 clients" not in ready:
         raise RuntimeError(f"mTLS configured broker failed to start: {ready}")
     openssl_diagnostics = openssl_certificate_request_diagnostics(
         tls_port,
@@ -1312,6 +1353,38 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         client_key,
     )
     assert_openssl_mqtt_success(openssl_success)
+
+    tcp_identity = mqtt_tls_socket(
+        tls_port,
+        server_ca,
+        client_certificate,
+        client_key,
+    )
+    try:
+        tcp_identity.sendall(
+            connect_packet(
+                "wire-client-id",
+                username="wire-user",
+                password="wrong-wire-password",
+            )
+        )
+        if connack_reason(read_mqtt_packet(tcp_identity)) != 0:
+            raise AssertionError("certificate identity TCP CONNECT failed")
+        tcp_identity.sendall(
+            publish_packet(
+                "client/trusted-client/status",
+                b"mapped client id",
+                qos=1,
+                packet_id=41,
+            )
+        )
+        if puback_reason(read_mqtt_packet(tcp_identity), 41) != 0x10:
+            raise AssertionError(
+                "certificate CN was not mapped before use_username_as_clientid"
+            )
+        tcp_identity.sendall(b"\xe0\x00")
+    finally:
+        tcp_identity.close()
     websocket = websocket_connect(
         wss_port,
         server_ca,
@@ -1319,10 +1392,30 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         client_key,
     )
     try:
-        send_websocket_binary(websocket, connect_packet("wss-mtls"))
+        send_websocket_binary(
+            websocket,
+            connect_packet(
+                "wss-wire-id",
+                username="wss-wire-user",
+                password="wrong-wire-password",
+            ),
+        )
         if connack_reason(read_websocket_binary(websocket)) != 0:
             raise AssertionError("configured WSS mTLS CONNECT failed")
         websocket_mqtt_ping(websocket)
+        send_websocket_binary(
+            websocket,
+            publish_packet(
+                "cert/trusted-client/status",
+                b"mapped username",
+                qos=1,
+                packet_id=42,
+            ),
+        )
+        if puback_reason(read_websocket_binary(websocket), 42) != 0x10:
+            raise AssertionError(
+                "certificate CN did not replace the WSS wire username"
+            )
         send_websocket_binary(websocket, b"\xe0\x00")
     finally:
         websocket.close()
@@ -1358,6 +1451,44 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
             certificate,
             key,
         )
+
+    no_identity_port = free_port()
+    no_identity_config = directory / "no-identity.conf"
+    write_mtls_config(
+        no_identity_config,
+        no_identity_port,
+        server_certificate,
+        server_key,
+        client_ca,
+    )
+    no_identity_text = no_identity_config.read_text().replace(
+        "require_certificate true\n",
+        "require_certificate true\nuse_identity_as_username true\n",
+    )
+    no_identity_config.write_text(no_identity_text)
+    no_identity_process = subprocess.Popen(
+        [str(broker), f"--config={no_identity_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert no_identity_process.stdout is not None
+    ready = no_identity_process.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"missing identity broker failed to start: {ready}")
+    no_identity_result = openssl_mqtt_client(
+        no_identity_port,
+        server_ca,
+        no_identity_certificate,
+        no_identity_key,
+    )
+    if connack_reason(no_identity_result.stdout) != 0x87:
+        raise AssertionError(
+            "trusted certificate without CN was not refused: "
+            + no_identity_result.stdout.hex()
+        )
+    if no_identity_process.wait(timeout=5) != 0:
+        raise RuntimeError("missing certificate identity refusal failed")
 
     wss_rejection_port = free_port()
     wss_rejection_config = directory / "missing-wss-client.conf"
@@ -1492,7 +1623,8 @@ def main() -> None:
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
-        "strict TLS key/CA/EKU rejection, and snapshot restore "
+        "certificate-CN identity mapping, strict TLS key/CA/EKU/identity "
+        "rejection, and snapshot restore "
         + RUNTIME
     )
 
