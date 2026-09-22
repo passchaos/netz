@@ -205,6 +205,15 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.grpc.StreamingResponse, "reset"));
     try std.testing.expect(@hasDecl(netz, "tls"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
+    try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));
+    try std.testing.expect(@hasDecl(
+        netz.tls.server_identity_file,
+        "Identity",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.server_identity_file,
+        "load",
+    ));
     try std.testing.expect(@hasDecl(netz.tls, "trust"));
     try std.testing.expect(@hasDecl(netz.tls.trust, "BundleVerifier"));
     try std.testing.expect(@hasDecl(netz.tls.trust, "SystemStore"));

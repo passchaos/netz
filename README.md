@@ -47,6 +47,9 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   introspection, RFC 8446 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation
+- Strict owned TLS server-identity loading from PEM certificate chains and
+  unencrypted P-256 SEC1 or PKCS#8 private keys, with bounded input, canonical
+  DER validation, secret-buffer clearing, and leaf certificate/key matching
 - Caller-supplied bounded caching of successful X.509 bundle verification for
   repeated exact hostname/DER chains; per-connection CertificateVerify remains
   mandatory, and replacing the trust bundle or time snapshot requires replacing
