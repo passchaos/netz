@@ -1,4 +1,4 @@
-module netz-http3-handler-interop
+module netz-http3-quic-go-interop
 
 go 1.24
 

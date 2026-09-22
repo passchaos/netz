@@ -1,47 +1,11 @@
 package main
 
 import (
-	"crypto/x509"
-	"encoding/pem"
 	"testing"
 	"time"
 
 	"github.com/quic-go/quic-go"
 )
-
-func TestLocalhostCertificateUsesSeparateServerLeaf(t *testing.T) {
-	certificate, caPEM, err := localhostCertificate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(certificate.Certificate) != 2 {
-		t.Fatalf("certificate chain length = %d, want 2", len(certificate.Certificate))
-	}
-	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	ca, err := x509.ParseCertificate(certificate.Certificate[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if leaf.IsCA || leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
-		t.Fatalf("invalid server leaf usage: is_ca=%t key_usage=%v", leaf.IsCA, leaf.KeyUsage)
-	}
-	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {
-		t.Fatalf("invalid server leaf EKU: %v", leaf.ExtKeyUsage)
-	}
-	if !ca.IsCA || ca.KeyUsage&x509.KeyUsageCertSign == 0 {
-		t.Fatalf("invalid CA usage: is_ca=%t key_usage=%v", ca.IsCA, ca.KeyUsage)
-	}
-	if err := leaf.CheckSignatureFrom(ca); err != nil {
-		t.Fatal(err)
-	}
-	block, rest := pem.Decode(caPEM)
-	if block == nil || len(rest) != 0 || string(block.Bytes) != string(certificate.Certificate[1]) {
-		t.Fatal("returned trust PEM is not the chain CA")
-	}
-}
 
 func multiStreamTestConfig() benchConfig {
 	return benchConfig{

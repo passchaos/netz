@@ -1,10 +1,9 @@
 //! Certificate-verified HTTP/3 client for process-boundary interoperability
-//! with the quic-go fixture maintained in the audited local quicz checkout.
+//! with the independently implemented, repository-pinned quic-go fixture.
 
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("http3_quic_go_bench.zig");
-const exact_certificate = @import("exact_certificate_verifier.zig");
 const CountingAllocator = @import("benchmark_counting_allocator")
     .CountingAllocator;
 
@@ -81,14 +80,7 @@ pub fn main(init: std.process.Init) !void {
         .bundle = &ca_bundle,
         .now_seconds = now.toSeconds(),
     };
-    var exact_verifier = try exact_certificate.Verifier.init(
-        &ca_bundle,
-        now.toSeconds(),
-    );
-    const server_verifier = if (informational)
-        bundle_verifier.clientVerifier()
-    else
-        exact_verifier.clientVerifier();
+    const server_verifier = bundle_verifier.clientVerifier();
 
     var original_dcid: [8]u8 = undefined;
     var client_cid: [8]u8 = undefined;

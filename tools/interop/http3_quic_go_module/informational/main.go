@@ -1,23 +1,15 @@
 // Command http3_quic_go_informational is a one-request HTTP/3 1xx peer.
-// The shell gate builds it with the audited quic-go module pinned by the local
-// quicz fixture, without modifying that external checkout.
+// The shell gate builds it with netz's audited, repository-owned quic-go module.
 package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
@@ -27,6 +19,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"netz-http3-quic-go-interop/internal/testcert"
 )
 
 func main() {
@@ -59,7 +52,7 @@ func runServer(address, caOut string, v2Only bool) {
 	if caOut == "" {
 		log.Fatal("-ca-out is required in server mode")
 	}
-	certificate, certificatePEM, err := localhostCertificate()
+	certificate, certificatePEM, err := testcert.Localhost()
 	if err != nil {
 		log.Fatalf("create certificate: %v", err)
 	}
@@ -198,49 +191,4 @@ func runClient(address, caPath string, v2Only bool) {
 		version = 2
 	}
 	fmt.Printf("quic-go HTTP/3 client received netz informational responses: version=%d statuses=103,102 final=200 body=5\n", version)
-}
-
-func localhostCertificate() (tls.Certificate, []byte, error) {
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	now := time.Now()
-	caTemplate := &x509.Certificate{
-		SerialNumber: caSerial,
-		Subject:      pkix.Name{CommonName: "netz interop test CA"},
-		NotBefore:    now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
-		KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true,
-		IsCA: true, MaxPathLenZero: true,
-	}
-	caDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	leafSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	leafTemplate := &x509.Certificate{
-		SerialNumber: leafSerial, Subject: pkix.Name{CommonName: "localhost"},
-		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true, DNSNames: []string{"localhost"},
-		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
-	}
-	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, caTemplate, &leafKey.PublicKey, caKey)
-	if err != nil {
-		return tls.Certificate{}, nil, err
-	}
-	certificate := tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: leafKey}
-	return certificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), nil
 }

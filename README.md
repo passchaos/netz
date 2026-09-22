@@ -945,7 +945,8 @@ zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # All netz HTTP/2 interop endpoints obtain `std.Io` from the zio-backed runtime;
 # the Hyper and direct h2 peers identify their Tokio execution backend in the
 # success records, and the h2spec server schedules accepted sockets with zio.
-# Build the audited quic-go fixture and verify HTTP/3 POST bodies/trailers,
+# Build the repository-owned fixture against pinned quic-go v0.59.0 and verify
+# HTTP/3 POST bodies/trailers,
 # ordered 103/102 responses, and streamed responses/trailers over
 # certificate-checked QUIC v1 and v2 in both directions,
 # including H3_REQUEST_CANCELLED followed by same-connection reuse in both

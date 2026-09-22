@@ -1894,9 +1894,11 @@ shape. Capture-backed equal-wire comparison remains open.
 
 ### HTTP/3 versus quic-go, same application shape
 
-`bench-http3-quic-go` builds against quic-go v0.59.0 from the audited local
-fixture and runs both sender roles for upload and download. Client and server
-are pinned to separate CPUs. Every sample creates a fresh certificate-verified
+`bench-http3-quic-go` builds against quic-go v0.59.0 from the audited,
+repository-owned Go module under `tools/interop`, so it no longer depends on a
+separate quicz checkout. It runs both sender roles for upload and download.
+Client and server are pinned to separate CPUs. Every sample creates a fresh
+certificate-verified
 QUIC v1 or forced-v2 H3 connection, completes an untimed `/benchmark/ready` request, then
 times 1, 4, or 16 request bodies through receiver-validated status, headers,
 EOF, bytes, and checksums. This prevents congestion, QPACK, and retired-stream
