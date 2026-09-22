@@ -12943,11 +12943,12 @@ pub const Connection = struct {
                     }
                 },
                 .path_response => |path_response| {
-                    const matched = self.path_validation
-                        .takeResponseValidated(path_response.data) orelse
-                        return error.UnknownPathResponse;
-                    if (matched.path_epoch == self.pmtu_path_epoch) {
-                        current_path_validated = true;
+                    if (self.path_validation
+                        .takeResponseValidated(path_response.data)) |matched|
+                    {
+                        if (matched.path_epoch == self.pmtu_path_epoch) {
+                            current_path_validated = true;
+                        }
                     }
                 },
                 .reset_stream => |reset| {
@@ -13247,14 +13248,6 @@ pub const Connection = struct {
     ) ?quic.FramePayloadCloseError {
         const frame = triggering_frame orelse return null;
         return switch (err) {
-            error.UnknownPathResponse => if (frame == .path_response)
-                quic.FramePayloadCloseError{
-                    .code = .protocol_violation,
-                    .frame_type = @intFromEnum(quic.FrameType.path_response),
-                    .reason_phrase = "path response",
-                }
-            else
-                null,
             error.InvalidFrame => blk: {
                 if (self.config.local_endpoint == .server and frame == .new_token) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.new_token), "new token");
                 if (self.config.local_endpoint == .server and frame == .handshake_done) break :blk semanticClose(.protocol_violation, @intFromEnum(quic.FrameType.handshake_done), "handshake done");

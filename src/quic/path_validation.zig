@@ -4,7 +4,6 @@ const quic = @import("mod.zig");
 pub const Error = error{
     NoPendingPathResponse,
     NoPendingPathChallenge,
-    UnknownPathResponse,
     DuplicatePathChallenge,
 } || std.mem.Allocator.Error;
 
@@ -218,13 +217,16 @@ pub const State = struct {
             self: *ReceivePreflight,
             data: [8]u8,
         ) Error!void {
+            // RFC 9000 defines a matching response as successful validation,
+            // but assigns no connection error to an unmatched or duplicated
+            // response. Ignore it while preserving other frames in the packet.
             for (self.received_responses[0..self.received_response_len]) |received| {
                 if (std.mem.eql(u8, &received, &data)) {
-                    return error.UnknownPathResponse;
+                    return;
                 }
             }
             if (!self.state.outstanding_challenge_index.contains(data)) {
-                return error.UnknownPathResponse;
+                return;
             }
             if (self.received_response_len == self.received_responses.len) {
                 return error.OutOfMemory;
@@ -400,8 +402,8 @@ pub const State = struct {
     }
 
     pub fn receiveResponse(self: *State, data: [8]u8) Error!void {
-        if (!self.receiveResponseValidated(data))
-            return error.UnknownPathResponse;
+        // A late or duplicate response can follow loss and probe retry.
+        _ = self.receiveResponseValidated(data);
     }
 
     pub fn receiveResponseValidated(self: *State, data: [8]u8) bool {
@@ -724,7 +726,7 @@ test "QUIC path validation state queues responses and validates challenges" {
     try std.testing.expectEqual(@as(usize, 1), state.outstandingChallengeCount());
     try state.receiveResponse(challenge);
     try std.testing.expectEqual(@as(usize, 0), state.outstandingChallengeCount());
-    try std.testing.expectError(error.UnknownPathResponse, state.receiveResponse(challenge));
+    try state.receiveResponse(challenge);
 }
 
 test "QUIC path validation pending queues pop FIFO without shifting" {
@@ -833,7 +835,7 @@ test "QUIC path receive preflight avoids allocation without path frames" {
     try std.testing.expectEqual(@as(usize, 0), no_alloc.alloc_index);
 }
 
-test "QUIC path receive preflight rejects duplicate response transactionally" {
+test "QUIC path receive preflight ignores duplicate response transactionally" {
     const allocator = std.testing.allocator;
     var state = State.init(allocator);
     defer state.deinit();
@@ -849,10 +851,7 @@ test "QUIC path receive preflight rejects duplicate response transactionally" {
     );
 
     try preflight.recordResponse(challenge);
-    try std.testing.expectError(
-        error.UnknownPathResponse,
-        preflight.recordResponse(challenge),
-    );
+    try preflight.recordResponse(challenge);
     try std.testing.expectEqual(
         @as(usize, 1),
         state.outstandingChallengeCount(),

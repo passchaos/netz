@@ -1,7 +1,7 @@
 //! Certificate-verified QUIC stream interop client for external peer fixtures.
 //!
-//! The primary matrix lives in the audited local quicz checkout and uses
-//! quic-go; the basic stream/close path is also shared with s2n-quic.
+//! The primary quic-go matrix uses the repository-owned, checksum-locked Go
+//! module; the basic stream/close path is also shared with s2n-quic.
 
 const std = @import("std");
 const netz = @import("netz");

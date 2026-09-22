@@ -3,13 +3,21 @@ set -euo pipefail
 
 client=${1:?netz client executable path}
 server=${2:?netz server executable path}
-quicz_root=${QUICZ_ROOT:-"$HOME/Work/quicz"}
-go_server_dir="$quicz_root/examples/interop/go_echo_client"
-if [[ ! -f "$go_server_dir/echo_server/main.go" ]]; then
-  echo "quicz quic-go fixture not found under $go_server_dir" >&2
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+fixture_dir="$repo_root/tools/interop/quic_go_module"
+if [[ ! -f $fixture_dir/raw_echo_server/main.go ||
+      ! -f $fixture_dir/lifecycle_client/main.go ]]; then
+  echo "repository-owned quic-go lifecycle fixture not found under $fixture_dir" >&2
   exit 127
 fi
-if ! command -v go >/dev/null 2>&1; then
+go_bin=${GO_BIN:-}
+if [[ -z $go_bin ]]; then
+  go_bin=$(command -v go 2>/dev/null || true)
+fi
+if [[ -z $go_bin && -x /tmp/go/bin/go ]]; then
+  go_bin=/tmp/go/bin/go
+fi
+if [[ -z $go_bin || ! -x $go_bin ]]; then
   echo "go not found; install it to build the quic-go interop fixture" >&2
   exit 127
 fi
@@ -46,10 +54,12 @@ require_netz_server_runtime() {
     "$1"
 }
 
-(cd "$go_server_dir" && go build \
-  -o "$work/quic-go-server" ./echo_server)
-(cd "$go_server_dir" && go build \
-  -o "$work/quic-go-client" .)
+(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly \
+  ./internal/rawpeer ./raw_echo_server ./lifecycle_client)
+(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
+  -o "$work/quic-go-server" ./raw_echo_server)
+(cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
+  -o "$work/quic-go-client" ./lifecycle_client)
 port=$(free_udp_port)
 
 "$work/quic-go-server" \
@@ -353,7 +363,7 @@ run_quic_go_client_scenario() {
   if [[ -n "$client_flag" ]]; then
     client_args+=("$client_flag")
   fi
-  if ! timeout 20s "$work/quic-go-client" \
+  if ! timeout 30s "$work/quic-go-client" \
       "${client_args[@]}" >"$client_log" 2>&1; then
     cat "$client_log" >&2
     cat "$server_log" >&2

@@ -3947,6 +3947,17 @@ All 16 external cases and the pre-existing complete quic-go lifecycle
 matrix pass after the fix. This is deterministic recovery evidence, not a
 performance or equal-wire result.
 
+The complete `interop-quic-quic-go` lifecycle matrix is now self-contained as
+well. Its repository-owned `lifecycle_client` and extended `raw_echo_server`
+cover 19 process scenarios: v1/v2 echo, Retry and two key updates, reset/stop,
+flow-control and stream-credit renewal, unidirectional streams, Initial and
+application PTO recovery, exact application close, two-hop active migration
+with and without a dropped probe response, and same-IP NAT rebinding. During
+the migration-loss conversion, a delayed duplicate PATH_RESPONSE exposed an
+over-strict netz receive path. Netz now ignores responses that do not match an
+outstanding challenge, as Quinn, quiche, and tquic do, while retaining same-
+packet STREAM processing; encrypted regression coverage locks that behavior.
+
 The same harness accepts `--stats` for process and allocator memory evidence:
 
 ```sh
@@ -4041,10 +4052,8 @@ record for all 110 connections, 3,520 echoed bytes, checksum 5,995, and peer
 close.
 This benchmark's quic-go executable and unit tests are also built from
 `tools/interop/quic_go_module` with `GOTOOLCHAIN=local` and
-`-mod=readonly`. The separate full lifecycle gate still requires its
-specialized external peer source and is not implied by this benchmark
-migration; the handshake-fault gate now uses the repository-owned raw echo
-commands described above.
+`-mod=readonly`. The full lifecycle and handshake-fault gates now use the
+repository-owned raw peer commands described above as well.
 
 The pinned Quinn revision
 `d9c8c4c695fc64292d9b117844ea6924ca0d0815` now provides the same executable

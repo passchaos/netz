@@ -965,7 +965,8 @@ NETZ_WEBSOCKET_H3_INTEROP_VERSION=2 \
 # The netz endpoint obtains std.Io from zio; the gate asserts zio-std-io
 # against the audited Hyper fixture's hyper-tokio execution backend.
 zig build interop-websocket-hyper-h2 -Doptimize=ReleaseFast
-# Build the quic-go fixtures from the audited local quicz checkout and run
+# Build the quic-go fixtures from the repository-owned, checksum-locked module
+# and run
 # certificate-verified, ALPN-checked two-stream echoes in both directions,
 # including a quic-go server that forces a Retry/address-validation round trip,
 # plus two netz-initiated 1-RTT key updates with ACK gating and peer decryption,

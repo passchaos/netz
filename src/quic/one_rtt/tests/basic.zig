@@ -3201,7 +3201,7 @@ test "QUIC 1-RTT connection preflights CID frames before receive-side effects" {
     try std.testing.expectEqual(@as(usize, 1), client.peer_connection_ids.count());
 }
 
-test "QUIC 1-RTT connection preflights role and path control frames before receive-side effects" {
+test "QUIC 1-RTT connection rejects role errors and ignores unmatched path responses" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -3267,16 +3267,14 @@ test "QUIC 1-RTT connection preflights role and path control frames before recei
         },
     });
 
-    try std.testing.expectError(error.UnknownPathResponse, path_server.receivePacket());
-    try std.testing.expectEqual(@as(u64, 0), path_server.recv_data_total);
-    try std.testing.expectEqual(@as(usize, 0), path_server.stream_recv_flows.items.len);
-    try std.testing.expectEqual(@as(usize, 0), path_server.received.ranges.items.len);
-    try std.testing.expectEqual(@as(u64, 0), path_server.expected_packet_number);
+    var ignored = try path_server.receivePacket();
+    ignored.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, "before-path-error".len), path_server.recv_data_total);
+    try std.testing.expectEqual(@as(usize, 1), path_server.stream_recv_flows.items.len);
+    try std.testing.expectEqual(@as(usize, 1), path_server.received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 1), path_server.expected_packet_number);
     try std.testing.expectEqual(@as(usize, 0), path_server.path_validation.outstandingChallengeCount());
-    try std.testing.expect(path_server.closing());
-    try std.testing.expectEqual(@intFromEnum(quic.TransportErrorCode.protocol_violation), path_server.close_info.?.error_code);
-    try std.testing.expectEqual(@as(u64, @intFromEnum(quic.FrameType.path_response)), path_server.close_info.?.frame_type);
-    try std.testing.expectEqualStrings("path response", path_server.close_info.?.reason_phrase);
+    try std.testing.expect(!path_server.closing());
 }
 
 test "QUIC 1-RTT receivePacketAt updates RTT from ACK" {
