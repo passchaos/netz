@@ -1022,7 +1022,8 @@ zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Build the pinned Mosquitto checkout and bridge two independent broker
-# processes through netz across MQTT versions and QoS 0/1/2. The QoS 2 gate
+# processes through netz across MQTT versions and QoS 0/1/2. QoS 2 covers the
+# complete MQTT 3.1.1/5 source-target protocol matrix. Its fault gate also
 # kills and restores netz before the first target wire delivery, after a
 # dropped target PUBCOMP, and after a dropped source PUBCOMP. It verifies the
 # durable replay stage and final journal-clear boundary without duplicate

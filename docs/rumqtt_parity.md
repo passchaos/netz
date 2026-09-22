@@ -235,12 +235,13 @@ Mosquitto brokers, and runs the netz bridge between them. A Mosquitto-generated
 MQTT 3.1.1 source publication reaches an MQTT 5 target subscriber at QoS 0; the
 reverse-version case uses QoS 1 plus RETAIN, checks the live delivery with
 RETAIN cleared, then reconnects a new target subscriber and reads the retained
-copy with RETAIN set. A third baseline case completes MQTT 5 QoS 2 handshakes
-on the publisher-to-source-broker, source-broker-to-bridge,
+copy with RETAIN set. Four additional baseline cases cover the complete
+MQTT 3.1.1/5 source-target protocol matrix at QoS 2 and complete handshakes on
+the publisher-to-source-broker, source-broker-to-bridge,
 bridge-to-target-broker, and target-broker-to-subscriber hops. The source
 publisher's broker-local acknowledgement is deliberately
 not presented as the bridge subscription ACK boundary; that ordering remains
-covered by the controlled disconnect tests above. All three baseline cases
+covered by the controlled disconnect tests above. Every baseline case
 verify the exact `local/sensors/room` to `remote/sensors/room` mapping and
 payload. The runner stops the bridge through its own cancellation event and
 requires a clean exit instead of treating process termination as success.

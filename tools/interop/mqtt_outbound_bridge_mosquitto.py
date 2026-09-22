@@ -42,6 +42,9 @@ RUNTIME = (
 CASES = (
     Case("v311-to-v5-qos0", 4, 5, 0, False),
     Case("v5-to-v311-qos1-retain", 5, 4, 1, True),
+    Case("v311-to-v311-qos2", 4, 4, 2, False),
+    Case("v311-to-v5-qos2", 4, 5, 2, False),
+    Case("v5-to-v311-qos2", 5, 4, 2, False),
     Case("v5-to-v5-qos2", 5, 5, 2, False),
 )
 
@@ -832,7 +835,8 @@ def main() -> None:
     run_negative_pubrec_case(args.bridge, args.mosquitto, mqtt_packets)
     print(
         "MQTT OutboundBridge two-Mosquitto interop passed: "
-        "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, v5 QoS2, "
+        "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, "
+        "complete v3.1.1/v5 QoS2 matrix, "
         "fresh-target republish, resumed-target same-ID DUP replay, "
         "durable pre-target-wire restart with same-ID DUP PUBLISH, "
         "durable QoS2 PUBCOMP-loss process restart without target republish, "
