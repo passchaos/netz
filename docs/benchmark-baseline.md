@@ -1718,6 +1718,34 @@ four-stream comparisons also favored cross-stream body sending in every pair:
 upload median rose from 103.35 to 112.77 MiB/s (1.091x) and download from
 73.41 to 80.27 MiB/s (1.093x). Multi-stream benchmark mode therefore enables
 body batching by default; single-stream mode remains sequential.
+
+A 2026-09-22 body-batch send-path audit removed the HTTP/3 layer's second exact
+packet-length walk immediately before `Connection.sendManyProgress`. The QUIC
+batch preflight already validates every packet's frame lengths, packet-number
+overhead, current PMTU, and endpoint datagram limit before reserving flow or
+congestion credit, recovery ownership, packet numbers, or socket output. A new
+small-MTU regression verifies that an oversized body batch still returns
+`DatagramTooLarge` with unchanged body offset/FIN state, no completion callback,
+no sent-packet increment, and no UDP datagram. Fixed ReleaseFast binaries,
+CPU 0, and seven order-alternated 16-MiB/four-stream pairs at an explicit
+3,000-byte body chunk measured:
+
+| Direction | Before SHA-256 | Before median | After SHA-256 | After median | Paired result |
+|---|---|---:|---|---:|---:|
+| upload | `4f777fd91e9ef46b7d9b3bf132605afcfaa75b3ac97c6c5d3d0a29509ee5077b` | 149 MiB/s | `02135fc0dc0f43f29b01dec362e0548a9e335c677ed1c6f6143cba16b656907a` | 155 MiB/s | 7/7 wins, 1.040x |
+| download | same | 76 MiB/s | same | 77 MiB/s | 5 wins, 1 tie, 1 loss, 1.013x |
+
+The upload improvement is consistent; the download delta is close to host
+noise and is not presented as a general speed claim. A separate same-binary,
+order-alternated five-pair policy comparison then changed the benchmark-only
+sub-64-MiB multi-stream chunk from 3,000 to 5,000 bytes. Upload medians moved
+from 139 to 197 MiB/s (1.417x, 5/5 wins) and download from 82 to 103 MiB/s
+(1.256x, 5/5 wins). The 64-MiB benchmark retains its separately established
+6,000-byte policy, and production's conservative 1,024-byte default remains
+unchanged for standard 1,200-byte paths. Final five-sample 5,000-byte runs
+verified 83,886,080 bytes and status total 4,000 in each direction: upload
+mean 203.28 MiB/s (19.57% standard deviation, 129.76–235.07) and download mean
+113.54 MiB/s (0.82%, 111.96–114.69).
 `--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.

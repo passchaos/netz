@@ -936,6 +936,93 @@ test "HTTP/3 stateful body batch returns socket-visible error prefix" {
     try std.testing.expect(bodies.isEmpty());
 }
 
+test "HTTP/3 stateful body batch preflights later oversized packet" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    var sender = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096, .enable_gso_send = false },
+    );
+    defer sender.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x98} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&sender, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "batch-client",
+        .peer_connection_id = "batch-server",
+        .max_datagram_size = 48,
+        .enable_pacing = false,
+        .tls_handshake_complete = true,
+    });
+    defer connection.deinit();
+    var bodies = OutboundBodySet.init(allocator, 2);
+    defer bodies.deinit();
+    inline for (.{ @as(u62, 0), @as(u62, 4) }) |stream_id| {
+        try bodies.reserveOpen(stream_id);
+        bodies.appendOpenAssumeCapacity(
+            stream_id,
+            quic.stream_state.SendState.init(stream_id),
+            if (stream_id == 0) 2 else 40,
+        );
+    }
+
+    const Context = struct {
+        finished: usize = 0,
+
+        fn finish(self: *@This(), _: u62) void {
+            self.finished += 1;
+        }
+    };
+    var context: Context = .{};
+    const before = connection.stats();
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        body_sender.sendConnectionBodyBatchPacedProgress(
+            &connection,
+            &bodies,
+            &.{
+                .{ .stream_id = 0, .data = "ok", .fin = true },
+                .{ .stream_id = 4, .data = "x" ** 40, .fin = true },
+            },
+            .{
+                .paced_body_chunk_bytes = @as(usize, 64),
+                .max_stream_frame_data = @as(usize, 64),
+                .max_frames_per_packet = @as(usize, 4),
+            },
+            &context,
+            Context.finish,
+        ),
+    );
+    inline for (.{ @as(u62, 0), @as(u62, 4) }) |stream_id| {
+        const entry = bodies.find(stream_id).?;
+        try std.testing.expectEqual(@as(u64, 0), entry.send.next_offset);
+        try std.testing.expect(!entry.send.fin_sent);
+    }
+    try std.testing.expectEqual(@as(usize, 0), context.finished);
+    try std.testing.expectEqual(before.packets_sent, connection.stats().packets_sent);
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.receiveWithTimeout(.{ .duration = .{
+            .raw = .zero,
+            .clock = .awake,
+        } }),
+    );
+}
+
 test "HTTP/3 deadline body batch retains socket-visible error prefix" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

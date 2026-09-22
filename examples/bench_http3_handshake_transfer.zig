@@ -28,10 +28,12 @@ const single_stream_paced_body_chunk_bytes: usize = 7200;
 // upload benchmark over 4096 on loopback while avoiding the instability seen
 // with larger 12000-byte datagrams.
 const multi_stream_one_rtt_datagram_size: usize = 8192;
-const multi_stream_paced_body_chunk_bytes: usize = 3000;
+// Five 16-MiB four-stream order-alternated pairs beat the previous 3000-byte
+// value in both directions. Keep the separately tuned 64-MiB path below.
+const multi_stream_paced_body_chunk_bytes: usize = 5000;
 // ACK-driven loss repair removed the old false 3200-byte stability ceiling.
-// The larger packet wins on quicz-shaped 64 MiB runs, while 3000 bytes remains
-// more stable for shorter transfers. Keep the benchmark default adaptive
+// The larger packet wins on quicz-shaped 64 MiB runs, while 5000 bytes is the
+// measured choice for shorter transfers. Keep the benchmark default adaptive
 // rather than regressing one shape to optimize another.
 const large_multi_stream_body_bytes: usize = 64 * 1024 * 1024;
 const large_multi_stream_paced_body_chunk_bytes: usize = 6000;

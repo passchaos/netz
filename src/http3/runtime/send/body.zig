@@ -752,14 +752,13 @@ pub fn sendConnectionBodyBatchPacedProgress(
 
     for (bodies.batch_scratch.frame_ranges.items[0..count], 0..) |range, i| {
         packets[i] = bodies.batch_scratch.frames.items[range.start .. range.start + range.len];
-        if (try connection.packetLenForFramesAtOffset(
-            i,
-            packets[i],
-        ) > connection.currentSendDatagramSize()) {
-            return error.DatagramTooLarge;
-        }
     }
 
+    // sendManyProgress performs one exact, whole-prefix packet-size preflight
+    // before reserving flow/congestion state, recovery ownership, packet
+    // numbers, or touching the socket. Avoid walking every STREAM frame a
+    // second time here; staged HTTP/3 body state is committed only for the
+    // socket-visible prefix returned below.
     const result = try connection.sendManyProgress(packets[0..count]);
     if (!batchProgressIsValid(
         result.sent_count,
