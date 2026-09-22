@@ -10,7 +10,7 @@ fn sessionExpiryProperty(seconds: u32) mqtt.Property {
     } };
 }
 
-test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
+test "MQTT reconnect Session snapshot stages QoS2 before first wire write" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -27,13 +27,16 @@ test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
 
     const Shared = struct {
         server: *runtime.Server,
-        packet_id: u16 = 0,
+        expected_packet_id: u16 = 0,
+        staged: std.Io.Event = .unset,
+        prewire_checked: std.Io.Event = .unset,
         first_publish_seen: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
             self.runFallible() catch |err| {
                 self.err = err;
+                self.prewire_checked.set(self.server.io);
                 self.first_publish_seen.set(self.server.io);
             };
         }
@@ -41,11 +44,25 @@ test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
         fn runFallible(self: *@This()) !void {
             var first = try self.server.accept(.{ .protocol = .v5 });
             defer first.deinit(self.server.allocator);
+            try self.staged.waitTimeout(self.server.io, .{ .duration = .{
+                .raw = .fromSeconds(1),
+                .clock = .awake,
+            } });
+            try std.testing.expectError(
+                error.Timeout,
+                first.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.prewire_checked.set(self.server.io);
             var publish = try first.connection.readPublish();
             defer publish.deinit(self.server.allocator);
             try std.testing.expectEqual(mqtt.QoS.exactly_once, publish.publish.qos);
             try std.testing.expect(!publish.publish.dup);
-            self.packet_id = publish.publish.packet_id.?;
+            try std.testing.expectEqual(
+                self.expected_packet_id,
+                publish.publish.packet_id.?,
+            );
             self.first_publish_seen.set(self.server.io);
             first.connection.shutdown() catch {};
 
@@ -56,15 +73,21 @@ test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
             defer second.deinit(self.server.allocator);
             var replay = try second.connection.readPublish();
             defer replay.deinit(self.server.allocator);
-            try std.testing.expectEqual(self.packet_id, replay.publish.packet_id.?);
+            try std.testing.expectEqual(
+                self.expected_packet_id,
+                replay.publish.packet_id.?,
+            );
             try std.testing.expect(replay.publish.dup);
             try std.testing.expectEqualStrings("snapshot/qos2", replay.publish.topic);
             try std.testing.expectEqualStrings("durable", replay.publish.payload);
-            try second.connection.writePubRec(self.packet_id, 0);
+            try second.connection.writePubRec(self.expected_packet_id, 0);
             var pubrel = try second.connection.readPubRel();
             defer pubrel.deinit(self.server.allocator);
-            try std.testing.expectEqual(self.packet_id, pubrel.ack.packet_id);
-            try second.connection.writePubComp(self.packet_id, 0);
+            try std.testing.expectEqual(
+                self.expected_packet_id,
+                pubrel.ack.packet_id,
+            );
+            try second.connection.writePubComp(self.expected_packet_id, 0);
             var disconnect = try second.connection.readDisconnect();
             defer disconnect.deinit(self.server.allocator);
         }
@@ -92,23 +115,45 @@ test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
     );
     defer first_client.deinit();
     _ = try first_client.connectWithTimeout(.fromSeconds(1));
-    const attempt = try first_client.publishOneAttempt(
+    const active = first_client.connection().?;
+    const runtime_packet_id_before = active.next_packet_id;
+    const runtime_inflight_before = active.outgoing_inflight;
+    const alias_count_before = active.outgoing_topic_aliases.count();
+    try std.testing.expectError(
+        error.InvalidQoS,
+        first_client.stagePublish(
+            "snapshot/qos0",
+            "not-durable",
+            .{},
+        ),
+    );
+    const packet_id = try first_client.stagePublish(
         "snapshot/qos2",
         "durable",
         .{ .qos = .exactly_once },
     );
-    try shared.first_publish_seen.waitTimeout(io, .{ .duration = .{
+    try std.testing.expectEqual(
+        runtime_packet_id_before,
+        active.next_packet_id,
+    );
+    try std.testing.expectEqual(
+        runtime_inflight_before,
+        active.outgoing_inflight,
+    );
+    try std.testing.expectEqual(
+        alias_count_before,
+        active.outgoing_topic_aliases.count(),
+    );
+    shared.expected_packet_id = packet_id;
+    shared.staged.set(io);
+    try shared.prewire_checked.waitTimeout(io, .{ .duration = .{
         .raw = .fromSeconds(1),
         .clock = .awake,
     } });
-    var busy_snapshot: std.ArrayList(u8) = .empty;
-    defer busy_snapshot.deinit(allocator);
-    try std.testing.expectError(
-        error.SnapshotBusy,
-        first_client.writeSessionSnapshot(&busy_snapshot),
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try first_client.outgoingStats()).inflight_count,
     );
-    first_client.disconnectTransport();
-
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
     try first_client.writeSessionSnapshotAt(
@@ -116,6 +161,17 @@ test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
         std.Io.Timestamp.fromNanoseconds(std.time.ns_per_s),
         std.Io.Timestamp.fromNanoseconds(100 * std.time.ns_per_s),
     );
+    try first_client.flushPending();
+    try std.testing.expectError(
+        error.InvalidAcknowledgement,
+        first_client.discardStagedPublish(packet_id),
+    );
+    try shared.first_publish_seen.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+    first_client.disconnectTransport();
+
     try std.testing.expectError(
         error.SessionStateNotEmpty,
         first_client.restoreSessionSnapshotAt(
@@ -148,16 +204,117 @@ test "MQTT reconnect Session snapshot resumes outgoing QoS2 on the wire" {
     var pubrec = (try restored.pollWithTimeout(.fromSeconds(1))).?;
     defer pubrec.deinit(allocator);
     try std.testing.expect(pubrec == .pubrec);
-    try std.testing.expectEqual(attempt.packet_id.?, pubrec.pubrec.ack.packet_id);
+    try std.testing.expectEqual(packet_id, pubrec.pubrec.ack.packet_id);
     var pubcomp = (try restored.pollWithTimeout(.fromSeconds(1))).?;
     defer pubcomp.deinit(allocator);
     try std.testing.expect(pubcomp == .pubcomp);
-    try std.testing.expectEqual(attempt.packet_id.?, pubcomp.pubcomp.ack.packet_id);
+    try std.testing.expectEqual(packet_id, pubcomp.pubcomp.ack.packet_id);
     try std.testing.expectEqual(
         @as(usize, 0),
         (try restored.outgoingStats()).inflight_count,
     );
     try restored.disconnect(0);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT reconnect staged publish can be discarded before selection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        rollback_complete: std.Io.Event = .unset,
+        prewire_checked: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.prewire_checked.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            try self.rollback_complete.waitTimeout(
+                self.server.io,
+                .{ .duration = .{
+                    .raw = .fromSeconds(1),
+                    .clock = .awake,
+                } },
+            );
+            try std.testing.expectError(
+                error.Timeout,
+                accepted.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.prewire_checked.set(self.server.io);
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "snapshot-rollback",
+            .clean_start = false,
+            .properties = &properties,
+        },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connectWithTimeout(.fromSeconds(1));
+    const packet_id = try client.stagePublish(
+        "snapshot/rollback",
+        "discarded",
+        .{ .qos = .at_least_once },
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        (try client.outgoingStats()).inflight_count,
+    );
+    try client.discardStagedPublish(packet_id);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try client.outgoingStats()).inflight_count,
+    );
+    try std.testing.expectError(
+        error.InvalidAcknowledgement,
+        client.discardStagedPublish(packet_id),
+    );
+    shared.rollback_complete.set(io);
+    try shared.prewire_checked.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+    try client.disconnect(0);
 
     server_thread.join();
     joined = true;

@@ -3303,6 +3303,51 @@ pub const Connection = struct {
         };
     }
 
+    /// Validate a canonical QoS 1/2 Session PUBLISH without reserving runtime
+    /// packet state, committing a Topic Alias, or writing transport bytes.
+    /// Durable coordinators use this before staging a message in their Session
+    /// Store. The canonical full-topic representation is intentionally checked
+    /// against Maximum Packet Size so a snapshot never depends on one current
+    /// connection's alias table to remain sendable.
+    pub fn validateClientSessionPublish(
+        self: *Connection,
+        topic: []const u8,
+        payload: []const u8,
+        options: PublishOptions,
+    ) Error!void {
+        if (options.qos == .at_most_once) return error.InvalidQoS;
+        try @import("session/mod.zig").validatePublishForSession(
+            topic,
+            payload,
+            options.properties,
+        );
+        try self.validateOutgoingPublish(
+            topic,
+            options.qos,
+            options.retain,
+            options.properties,
+        );
+        self.write_scratch.clearRetainingCapacity();
+        const lengths = try mqtt.writePublishPrefix(
+            &self.write_scratch,
+            self.allocator,
+            self.protocol,
+            topic,
+            payload,
+            .{
+                .qos = options.qos,
+                .retain = options.retain,
+                .dup = false,
+                .packet_id = 1,
+                .properties = options.properties,
+            },
+        );
+        try self.authentication.ensurePacketAllowed(.publish);
+        if (lengths.total > self.peer_max_packet_size) {
+            return error.OutgoingPacketTooLarge;
+        }
+    }
+
     fn writeSessionPublish(
         self: *Connection,
         value: @import("session/mod.zig").PublishTransmission,

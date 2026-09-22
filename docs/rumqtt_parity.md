@@ -179,8 +179,15 @@ delivery is left to the persistent source Session rather than copied into a
 bridge queue. Topic Alias, Subscription
 Identifier, DUP, and Packet Identifier are connection-scoped and never cross
 the bridge; other MQTT 5 Application Message properties and the configurable
-RETAIN bit do. Cross-broker QoS 2 is rejected until a durable coordinator can
-atomically connect both broker transactions. A bidirectional deployment must
+RETAIN bit do. The reconnect client now exposes a pre-wire QoS 1/2 primitive:
+`stagePublish` owns the canonical message and stable Packet Identifier without
+writing the transport, an online `writeSessionSnapshot` can then be included
+in a caller's atomic record, and `flushPending` performs the first send with
+DUP clear. Restoring that pre-wire snapshot conservatively sends the same
+Packet Identifier with DUP set; `discardStagedPublish` can roll back only
+before selection. This is a coordinator building block, not the coordinator:
+cross-broker QoS 2 remains rejected until one atomically connects both broker
+Sessions with its own transaction record. A bidirectional deployment must
 use two instances with disjoint namespaces or another explicit loop-prevention
 policy. In-process wire tests cover MQTT 3.1.1/5 target reconnect with both
 resumed and fresh Sessions, both cross-version directions, exact DUP/Packet
@@ -1487,16 +1494,18 @@ Keep Alive and shutdown checks; neither mechanism renews the application
 budget. Partial TCP/TLS/WebSocket packets and packets queued during PING remain
 resumable after timeout; TLS packet transports now retain their own fixed-header
 and payload progress instead of relying on stack-local framing state.
-Reconnect clients can also encode and transactionally restore an identity-
-bound Session snapshot while no Network Connection is active. The versioned
-CRC envelope binds protocol and Client ID, deducts wall-clock downtime from
+Reconnect clients can also encode an identity-bound Session snapshot while
+online under their single-owner API and transactionally restore it only while
+no Network Connection is active. The versioned CRC envelope binds protocol and
+Client ID, deducts wall-clock downtime from
 Message Expiry, restores outgoing QoS 1/2 at the exact PUBLISH/PUBREL stage,
 and preserves deferred inbound QoS 2 `await_pubrel`/`release_pending` markers.
 Decode uses a temporary one-Session store and swaps only after full validation;
-online clients, transient CONNECT configurations, non-empty destination state,
-foreign identities, trailing bytes, and corrupt checksums fail without
-changing the current Session. Durable file replacement remains a higher-level
-coordinator responsibility so an outbound bridge can atomically compose both
+online restore attempts, transient CONNECT configurations, non-empty
+destination state, foreign identities, trailing bytes, and corrupt checksums
+fail without changing the current Session. Durable file replacement remains a
+higher-level coordinator responsibility so an outbound bridge can atomically
+compose both
 broker legs with its own transaction record. Cross-broker QoS 2 remains gated
 until that coordinator is implemented rather than being mislabeled exactly-once.
 Every

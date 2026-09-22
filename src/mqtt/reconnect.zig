@@ -1624,9 +1624,10 @@ pub const Client = struct {
     }
 
     /// Append an identity-bound snapshot of this client's durable MQTT Session
-    /// state. The reconnect transport must be offline so no concurrent ACK or
-    /// socket write can race the snapshot. File replacement, fsync, and atomic
-    /// composition with higher-level coordinator state remain caller policy.
+    /// state. The client is single-owner, so an online caller can stage state,
+    /// append it to a larger durable record, and only then select network work.
+    /// File replacement, fsync, and atomic composition with higher-level
+    /// coordinator state remain caller policy. Restoration stays offline-only.
     pub fn writeSessionSnapshot(
         self: *Client,
         out: *std.ArrayList(u8),
@@ -1644,7 +1645,6 @@ pub const Client = struct {
         monotonic_now: std.Io.Timestamp,
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
-        if (self.connection_state != null) return error.SnapshotBusy;
         if (!configuredPersistentSession(self.options.value)) {
             return error.SessionPersistenceDisabled;
         }
@@ -2039,6 +2039,47 @@ pub const Client = struct {
         const connected = try self.connect();
         if (!connected.session_present) return error.SessionLost;
         return attempt.packet_id;
+    }
+
+    /// Own a QoS 1/2 PUBLISH and reserve its stable Packet Identifier without
+    /// emitting network bytes or mutating connection-local Packet Identifier
+    /// and Topic Alias state. The caller can append `writeSessionSnapshot` to a
+    /// larger atomic coordinator record before `flushPending` performs the
+    /// first send. On the same process that first send uses DUP=0; after
+    /// snapshot restoration it conservatively uses DUP=1.
+    pub fn stagePublish(
+        self: *Client,
+        topic: []const u8,
+        payload: []const u8,
+        options: runtime.PublishOptions,
+    ) Error!u16 {
+        const active = self.connection() orelse
+            return error.ConnectionUnavailable;
+        try active.validateClientSessionPublish(topic, payload, options);
+        return self.outgoing.stageImmediatePublish(
+            self.outgoing_handle,
+            topic,
+            payload,
+            .{
+                .qos = options.qos,
+                .retain = options.retain,
+                .properties = options.properties,
+                .now = std.Io.Clock.awake.now(self.io),
+            },
+            active.max_outgoing_inflight,
+        );
+    }
+
+    /// Roll back a locally staged PUBLISH before `flushPending` selects it.
+    /// Coordinators use this when their durable commit fails.
+    pub fn discardStagedPublish(
+        self: *Client,
+        packet_id: u16,
+    ) Error!void {
+        return self.outgoing.discardStagedPublish(
+            self.outgoing_handle,
+            packet_id,
+        );
     }
 
     /// Queue and attempt one outbound PUBLISH without reconnecting inside this

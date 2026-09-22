@@ -110,7 +110,7 @@ pub fn validatePublishForSession(
     topic: []const u8,
     payload: []const u8,
     properties: []const mqtt.Property,
-) Error!void {
+) mqtt.Error!void {
     try mqtt.validateTopicName(topic);
     try mqtt.validatePublishProperties(properties);
     try validateQueuedPayload(properties, payload);
@@ -1621,6 +1621,46 @@ pub const Store = struct {
         options: EnqueueOptions,
         receive_maximum: u16,
     ) Error!PublishTransmission {
+        return self.addImmediatePublish(
+            handle,
+            topic,
+            payload,
+            options,
+            receive_maximum,
+            false,
+        );
+    }
+
+    /// Own one QoS 1/2 Application Message and reserve its Packet Identifier
+    /// without selecting it for a socket write. A coordinator can persist this
+    /// state before `drainInto` exposes the first wire transmission.
+    pub fn stageImmediatePublish(
+        self: *Store,
+        handle: Handle,
+        topic: []const u8,
+        payload: []const u8,
+        options: EnqueueOptions,
+        receive_maximum: u16,
+    ) Error!u16 {
+        return (try self.addImmediatePublish(
+            handle,
+            topic,
+            payload,
+            options,
+            receive_maximum,
+            true,
+        )).packet_id;
+    }
+
+    fn addImmediatePublish(
+        self: *Store,
+        handle: Handle,
+        topic: []const u8,
+        payload: []const u8,
+        options: EnqueueOptions,
+        receive_maximum: u16,
+        needs_send: bool,
+    ) Error!PublishTransmission {
         if (options.qos == .at_most_once or receive_maximum == 0) {
             return error.InvalidProperty;
         }
@@ -1676,7 +1716,7 @@ pub const Store = struct {
                     .exactly_once => .await_pubrec,
                     .at_most_once => unreachable,
                 },
-                .needs_send = false,
+                .needs_send = needs_send,
                 .retransmission = false,
             },
         );
@@ -1693,6 +1733,27 @@ pub const Store = struct {
             session.inflight.items[inflight_index].?,
             options.now.nanoseconds,
         );
+    }
+
+    /// Remove a publication staged before its first wire attempt. Once a drain
+    /// selects the PUBLISH, or a restored snapshot marks it as a possible
+    /// retransmission, the operation is no longer safely reversible.
+    pub fn discardStagedPublish(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const target = try self.getSession(handle);
+        const index = target.packet_index.get(packet_id) orelse
+            return error.InvalidAcknowledgement;
+        const inflight = target.inflight.items[index] orelse
+            return error.InvalidAcknowledgement;
+        if (!inflight.needs_send or inflight.retransmission or
+            inflight.state == .await_pubcomp)
+        {
+            return error.InvalidAcknowledgement;
+        }
+        self.removeInflight(target, index);
     }
 
     /// Emit all pending retransmissions that fit `out`, then move unsent
@@ -2672,7 +2733,7 @@ fn countSentPublishInflight(session: Session) usize {
 fn validateQueuedPayload(
     properties: []const mqtt.Property,
     payload: []const u8,
-) Error!void {
+) mqtt.Error!void {
     for (properties) |property| {
         if (property == .byte and
             property.byte.id == .payload_format_indicator and
