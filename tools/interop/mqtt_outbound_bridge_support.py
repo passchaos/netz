@@ -350,6 +350,90 @@ class Qos2PubcompDropProxy(_SessionProxy):
         self.recovery_pubrel_seen.set()
 
 
+class TargetPublishDropProxy(_SessionProxy):
+    def __init__(self, listen_port: int, target_port: int, payload: bytes):
+        self.payload = payload
+        self.first_publish_dropped = threading.Event()
+        self.ready_for_recovery = threading.Event()
+        self.replay_complete = threading.Event()
+        self.bridge_publish_count = 0
+        self.forwarded_publish_count = 0
+        self.packet_id: int | None = None
+        super().__init__(listen_port, target_port, "mqtt-target-publish-drop")
+
+    def _run_fallible(self) -> None:
+        with self._accept() as first:
+            with self._connect_session(first, session_present=False) as target:
+                publish = read_packet(first)
+                packet_id = assert_publish(
+                    publish, 5, qos=2, retain=False, payload=self.payload
+                )
+                if packet_id is None:
+                    raise AssertionError("QoS 2 target PUBLISH has no packet id")
+                if publish[0] & 0x08:
+                    raise AssertionError("initial target PUBLISH unexpectedly set DUP")
+                self.bridge_publish_count += 1
+                self.packet_id = packet_id
+                self.first_publish_dropped.set()
+                self._wait_until_closed(first)
+        self.ready_for_recovery.set()
+
+        with self._accept() as resumed:
+            with self._connect_session(resumed, session_present=True) as target:
+                publish = read_packet(resumed)
+                packet_id = assert_publish(
+                    publish, 5, qos=2, retain=False, payload=self.payload
+                )
+                self.bridge_publish_count += 1
+                if publish[0] & 0x08 == 0:
+                    raise AssertionError("restored target PUBLISH omitted DUP")
+                if packet_id != self.packet_id:
+                    raise AssertionError(
+                        "restored target PUBLISH changed Packet Identifier"
+                    )
+                target.sendall(publish)
+                self.forwarded_publish_count += 1
+                pubrec = read_packet(target)
+                if self._packet_id(pubrec, 5) != packet_id:
+                    raise AssertionError("restored target PUBREC mismatch")
+                resumed.sendall(pubrec)
+                pubrel = read_packet(resumed)
+                if self._packet_id(pubrel, 6) != packet_id:
+                    raise AssertionError("restored target PUBREL mismatch")
+                target.sendall(pubrel)
+                pubcomp = read_packet(target)
+                if self._packet_id(pubcomp, 7) != packet_id:
+                    raise AssertionError("restored target PUBCOMP mismatch")
+                resumed.sendall(pubcomp)
+                self.replay_complete.set()
+                self._forward_until_disconnect(resumed, target)
+
+    def _wait_until_closed(self, client: socket.socket) -> None:
+        while not self.stop_requested.is_set():
+            try:
+                read_packet(client)
+            except (AssertionError, ConnectionResetError, OSError):
+                return
+
+    def _forward_until_disconnect(
+        self, client: socket.socket, target: socket.socket
+    ) -> None:
+        while not self.stop_requested.is_set():
+            try:
+                packet = read_packet(client)
+            except socket.timeout:
+                continue
+            target.sendall(packet)
+            if packet[0] >> 4 == 14:
+                return
+            client.sendall(read_packet(target))
+
+    def _wake_waiters(self) -> None:
+        self.first_publish_dropped.set()
+        self.ready_for_recovery.set()
+        self.replay_complete.set()
+
+
 class SourcePubcompDropProxy(_SessionProxy):
     def __init__(self, listen_port: int, source_port: int, payload: bytes):
         self.payload = payload

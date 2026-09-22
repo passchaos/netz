@@ -258,22 +258,26 @@ Session Present on reconnect, then holds the retransmission until it has checked
 the original Packet Identifier, `DUP=1`, QoS, RETAIN, topic, and payload. The
 source Mosquitto still has no Bridge PUBACK at that point; forwarding the held
 retry and target PUBACK completes both broker transactions and retained replay.
-A sixth MQTT 5 case exercises the durable coordinator across an actual Bridge
-process crash. A fault proxy lets target Mosquitto accept one QoS 2 PUBLISH and
-PUBREL, then drops the returned PUBCOMP. After the runner kills the Bridge, a
-new process opens the same journal in restore mode and requires Session Present
-from both Mosquitto brokers. The proxy rejects any second PUBLISH, observes the
-same target Packet Identifier resumed directly at PUBREL, and forwards PUBCOMP.
-Source Mosquitto then records the Bridge's PUBREC/PUBCOMP completion; the target
-subscriber receives no second Application Message. This external gate covers
-the `target_await_pubcomp` crash boundary. A seventh case puts the fault proxy
-on the source leg: after target completion it drops the Bridge's source PUBCOMP,
-confirms source Mosquitto has not observed that acknowledgement, and kills the
-Bridge after the journal clear. Restoring the now-empty coordinator requires
-both Sessions, accepts source Mosquitto's repeated PUBREL, and returns PUBCOMP
-without any second target PUBLISH or subscriber delivery. The in-process fault
-matrix continues to cover pre-wire, negative-PUBREC, identity, and Session-loss
-boundaries.
+A sixth MQTT 5 case exercises the durable coordinator before its first target
+wire boundary. A fault proxy accepts and drops the Bridge's initial QoS 2
+PUBLISH, proving target Mosquitto has received none, then the runner kills the
+Bridge. A new process opens the same journal and requires Session Present from
+both brokers; it retransmits the same target Packet Identifier with `DUP=1`.
+Only that replay reaches Mosquitto, and the target subscriber receives one
+Application Message. A seventh case lets target Mosquitto accept one QoS 2
+PUBLISH and PUBREL, then drops the returned PUBCOMP. After another process
+restart, the proxy rejects any second PUBLISH, observes the same target Packet
+Identifier resumed directly at PUBREL, and forwards PUBCOMP. Source Mosquitto
+then records the Bridge's PUBREC/PUBCOMP completion; the target subscriber
+receives no second Application Message. These cases cover the pre-target-wire
+and `target_await_pubcomp` crash boundaries. An eighth case puts the fault
+proxy on the source leg: after target completion it drops the Bridge's source
+PUBCOMP, confirms source Mosquitto has not observed that acknowledgement, and
+kills the Bridge after the journal clear. Restoring the now-empty coordinator
+requires both Sessions, accepts source Mosquitto's repeated PUBREL, and returns
+PUBCOMP without any second target PUBLISH or subscriber delivery. The
+in-process fault matrix continues to cover negative-PUBREC, identity, and
+Session-loss boundaries.
 
 Netz now exceeds the audited rumqtt shared-selection policy surface by adding
 Rendezvous hashing. This provides deterministic topic affinity and the

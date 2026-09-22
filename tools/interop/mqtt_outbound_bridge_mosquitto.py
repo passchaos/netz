@@ -4,19 +4,28 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 import socket
-import subprocess
 import sys
 import tempfile
-import time
-from typing import BinaryIO
 
+from mqtt_outbound_bridge_harness import (
+    Case,
+    ManagedProcess,
+    assert_log_absent,
+    cleanup_case,
+    connect_client,
+    distinct_ports,
+    start_bridge,
+    start_broker,
+    subscribe,
+    wait_for_log,
+)
 from mqtt_outbound_bridge_support import (
     AckDropProxy,
     Qos2PubcompDropProxy,
     SourcePubcompDropProxy,
+    TargetPublishDropProxy,
     assert_publish,
     read_packet,
 )
@@ -28,67 +37,11 @@ RUNTIME = (
 )
 
 
-@dataclass(frozen=True)
-class Case:
-    name: str
-    source_protocol: int
-    target_protocol: int
-    qos: int
-    retain: bool
-
-    @property
-    def source_label(self) -> str:
-        return "v311" if self.source_protocol == 4 else "v5"
-
-    @property
-    def target_label(self) -> str:
-        return "v311" if self.target_protocol == 4 else "v5"
-
-
 CASES = (
     Case("v311-to-v5-qos0", 4, 5, 0, False),
     Case("v5-to-v311-qos1-retain", 5, 4, 1, True),
     Case("v5-to-v5-qos2", 5, 5, 2, False),
 )
-
-
-@dataclass
-class ManagedProcess:
-    label: str
-    process: subprocess.Popen[bytes]
-    output: BinaryIO
-    log: Path
-
-    def stop(self) -> None:
-        if self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
-        if not self.output.closed:
-            self.output.close()
-
-    def wait_clean(self) -> None:
-        try:
-            return_code = self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"{self.label} did not stop gracefully") from exc
-        if not self.output.closed:
-            self.output.close()
-        if return_code != 0:
-            raise RuntimeError(
-                f"{self.label} exited {return_code}: "
-                + self.log.read_text(errors="replace")
-            )
-
-    def crash(self) -> None:
-        if self.process.poll() is None:
-            self.process.kill()
-            self.process.wait(timeout=5)
-        if not self.output.closed:
-            self.output.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -101,160 +54,6 @@ def parse_args() -> argparse.Namespace:
         default=Path.home() / "Work/mosquitto/test",
     )
     return parser.parse_args()
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
-def distinct_ports(count: int) -> list[int]:
-    ports: set[int] = set()
-    while len(ports) != count:
-        ports.add(free_port())
-    return list(ports)
-
-
-def connect_client(
-    port: int, mqtt_packets, client_id: str, protocol: int
-) -> socket.socket:
-    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
-    sock.settimeout(5)
-    sock.sendall(mqtt_packets.gen_connect(client_id, proto_ver=protocol))
-    connack = read_packet(sock)
-    if connack[0] != 0x20 or len(connack) < 4 or connack[3] >= 0x80:
-        sock.close()
-        raise AssertionError(f"invalid CONNACK: {connack.hex()}")
-    return sock
-
-
-def subscribe(
-    sock: socket.socket, mqtt_packets, protocol: int, topic: str, qos: int
-) -> None:
-    sock.sendall(mqtt_packets.gen_subscribe(1, topic, qos, proto_ver=protocol))
-    packet = read_packet(sock)
-    if packet[0] != 0x90:
-        raise AssertionError(f"expected SUBACK, received {packet.hex()}")
-    expected = mqtt_packets.gen_suback(1, qos, proto_ver=protocol)
-    if packet != expected:
-        raise AssertionError(
-            f"SUBACK mismatch: expected {expected.hex()}, got {packet.hex()}"
-        )
-
-
-def wait_for_log(
-    process: subprocess.Popen[bytes], path: Path, marker: str, label: str
-) -> None:
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        content = path.read_text(errors="replace") if path.exists() else ""
-        if marker in content:
-            return
-        code = process.poll()
-        if code is not None:
-            raise RuntimeError(f"{label} exited {code}: {content}")
-        time.sleep(0.02)
-    raise RuntimeError(f"timed out waiting for {label}: {path.read_text()}")
-
-
-def assert_log_absent(path: Path, marker: str, duration: float) -> None:
-    deadline = time.monotonic() + duration
-    while time.monotonic() < deadline:
-        if marker in path.read_text(errors="replace"):
-            raise AssertionError(f"unexpected log marker before recovery: {marker}")
-        time.sleep(0.02)
-
-
-def start_broker(
-    executable: Path, port: int, directory: Path, label: str
-) -> ManagedProcess:
-    config = directory / f"{label}.conf"
-    log = directory / f"{label}.log"
-    config.write_text(
-        f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
-        "persistence false\n"
-        "log_type all\n",
-        encoding="ascii",
-    )
-    output = log.open("wb")
-    managed = ManagedProcess(
-        label,
-        subprocess.Popen(
-            [str(executable), "-c", str(config), "-v"],
-            stdout=output,
-            stderr=subprocess.STDOUT,
-        ),
-        output,
-        log,
-    )
-    try:
-        wait_for_log(managed.process, log, " running", label)
-    except BaseException:
-        managed.stop()
-        raise
-    return managed
-
-
-def start_bridge(
-    executable: Path, source_port: int, target_port: int,
-    control_port: int, case: Case, directory: Path,
-    coordinator_mode: str | None = None,
-) -> ManagedProcess:
-    log = directory / (
-        "bridge.log" if coordinator_mode is None
-        else f"bridge-{coordinator_mode}.log"
-    )
-    output = log.open("wb")
-    command = [
-        str(executable), str(source_port), str(target_port),
-        str(control_port), case.source_label, case.target_label,
-        str(case.qos), case.name,
-    ]
-    if coordinator_mode is not None:
-        command.extend((str(directory), coordinator_mode))
-    managed = ManagedProcess(
-        "bridge",
-        subprocess.Popen(
-            command,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-        ),
-        output,
-        log,
-    )
-    try:
-        wait_for_log(
-            managed.process, managed.log, "outbound bridge ready",
-            managed.label,
-        )
-    except BaseException:
-        managed.stop()
-        raise
-    return managed
-
-
-def cleanup_case(
-    clients: list[socket.socket],
-    processes: list[ManagedProcess],
-    failed: bool,
-) -> None:
-    for client in clients:
-        try:
-            client.close()
-        except OSError:
-            pass
-    for managed in reversed(processes):
-        managed.stop()
-    if failed:
-        for managed in processes:
-            print(f"===== {managed.label} log =====", file=sys.stderr)
-            if managed.log.exists():
-                print(
-                    managed.log.read_text(errors="replace"),
-                    file=sys.stderr,
-                )
 
 
 def run_case(
@@ -714,6 +513,161 @@ def run_qos2_pubcomp_restart(
             cleanup_case(clients, processes, sys.exc_info()[0] is not None)
 
 
+def run_qos2_pre_target_wire_restart(
+    bridge_executable: Path, mosquitto: Path, mqtt_packets
+) -> None:
+    case = Case("qos2-pre-target-wire-restart", 5, 5, 2, False)
+    source_port, target_port, proxy_port, first_control_port, second_control_port = (
+        distinct_ports(5)
+    )
+    payload = b"qos2-journal-before-target-wire"
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        processes: list[ManagedProcess] = []
+        clients: list[socket.socket] = []
+        proxy: TargetPublishDropProxy | None = None
+        try:
+            source = start_broker(
+                mosquitto, source_port, directory, "source"
+            )
+            processes.append(source)
+            target = start_broker(
+                mosquitto, target_port, directory, "target"
+            )
+            processes.append(target)
+            proxy = TargetPublishDropProxy(proxy_port, target_port, payload)
+            first_bridge = start_bridge(
+                bridge_executable, source_port, proxy_port,
+                first_control_port, case, directory, "create",
+            )
+            processes.append(first_bridge)
+
+            subscriber = connect_client(
+                target_port, mqtt_packets, "qos2-pre-wire-subscriber", 5
+            )
+            clients.append(subscriber)
+            subscribe(subscriber, mqtt_packets, 5, "remote/sensors/#", 2)
+            publisher = connect_client(
+                source_port, mqtt_packets, "qos2-pre-wire-publisher", 5
+            )
+            clients.append(publisher)
+            publisher.sendall(
+                mqtt_packets.gen_publish(
+                    "local/sensors/room", qos=2, mid=7,
+                    retain=False, payload=payload, proto_ver=5,
+                )
+            )
+            publisher_pubrec = read_packet(publisher)
+            if publisher_pubrec != mqtt_packets.gen_pubrec(7, proto_ver=5):
+                raise AssertionError(
+                    f"publisher PUBREC mismatch: {publisher_pubrec.hex()}"
+                )
+            publisher.sendall(mqtt_packets.gen_pubrel(7, proto_ver=5))
+            publisher_pubcomp = read_packet(publisher)
+            if publisher_pubcomp != mqtt_packets.gen_pubcomp(7, proto_ver=5):
+                raise AssertionError(
+                    f"publisher PUBCOMP mismatch: {publisher_pubcomp.hex()}"
+                )
+
+            proxy.wait(
+                proxy.first_publish_dropped,
+                "first target PUBLISH drop",
+            )
+            bridge_source_id = (
+                "netz-outbound-source-qos2-pre-target-wire-restart"
+            )
+            bridge_target_id = (
+                "netz-outbound-target-qos2-pre-target-wire-restart"
+            )
+            assert_log_absent(
+                source.log,
+                f"Received PUBREC from {bridge_source_id}",
+                0.3,
+            )
+            if f"Received PUBLISH from {bridge_target_id}" in (
+                target.log.read_text(errors="replace")
+            ):
+                raise AssertionError(
+                    "target broker observed the dropped pre-crash PUBLISH"
+                )
+            first_bridge.crash()
+            proxy.wait(
+                proxy.ready_for_recovery,
+                "first target bridge transport closure",
+            )
+            restored_bridge = start_bridge(
+                bridge_executable, source_port, proxy_port,
+                second_control_port, case, directory, "restore",
+            )
+            processes.append(restored_bridge)
+            proxy.wait(proxy.replay_complete, "restored target QoS 2 flow")
+            wait_for_log(
+                source.process, source.log,
+                f"Received PUBREC from {bridge_source_id}",
+                "restored source PUBREC",
+            )
+            wait_for_log(
+                source.process, source.log,
+                f"Received PUBCOMP from {bridge_source_id}",
+                "restored source PUBCOMP",
+            )
+            delivered_packet_id = assert_publish(
+                read_packet(subscriber), 5, qos=2, retain=False,
+                payload=payload,
+            )
+            if delivered_packet_id is None:
+                raise AssertionError("subscriber QoS 2 PUBLISH has no packet id")
+            subscriber.sendall(
+                mqtt_packets.gen_pubrec(delivered_packet_id, proto_ver=5)
+            )
+            subscriber_pubrel = read_packet(subscriber)
+            if subscriber_pubrel != mqtt_packets.gen_pubrel(
+                delivered_packet_id, proto_ver=5
+            ):
+                raise AssertionError(
+                    f"subscriber PUBREL mismatch: {subscriber_pubrel.hex()}"
+                )
+            subscriber.sendall(
+                mqtt_packets.gen_pubcomp(delivered_packet_id, proto_ver=5)
+            )
+            if proxy.bridge_publish_count != 2:
+                raise AssertionError(
+                    "bridge did not emit exactly one initial and one restored PUBLISH"
+                )
+            if proxy.forwarded_publish_count != 1:
+                raise AssertionError(
+                    "target broker did not receive exactly one PUBLISH"
+                )
+            target_log = target.log.read_text(errors="replace")
+            marker = f"Received PUBLISH from {bridge_target_id}"
+            if target_log.count(marker) != 1:
+                raise AssertionError(
+                    "target broker did not log exactly one bridge PUBLISH"
+                )
+            subscriber.settimeout(0.3)
+            try:
+                duplicate = read_packet(subscriber)
+            except socket.timeout:
+                duplicate = None
+            if duplicate is not None:
+                raise AssertionError(
+                    "subscriber received a second Application Message: "
+                    + duplicate.hex()
+                )
+
+            publisher.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            subscriber.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            with socket.create_connection(
+                ("127.0.0.1", second_control_port), timeout=5
+            ) as control:
+                control.sendall(b"\x01")
+            restored_bridge.wait_clean()
+        finally:
+            if proxy is not None:
+                proxy.stop()
+            cleanup_case(clients, processes, sys.exc_info()[0] is not None)
+
+
 def run_qos2_source_pubcomp_restart(
     bridge_executable: Path, mosquitto: Path, mqtt_packets
 ) -> None:
@@ -869,12 +823,14 @@ def main() -> None:
         run_case(args.bridge, args.mosquitto, mqtt_packets, case)
     run_fresh_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
     run_resumed_target_reconnect(args.bridge, args.mosquitto, mqtt_packets)
+    run_qos2_pre_target_wire_restart(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets)
     run_qos2_source_pubcomp_restart(args.bridge, args.mosquitto, mqtt_packets)
     print(
         "MQTT OutboundBridge two-Mosquitto interop passed: "
         "v3.1.1->v5 QoS0, v5->v3.1.1 QoS1 retained, v5 QoS2, "
         "fresh-target republish, resumed-target same-ID DUP replay, "
+        "durable pre-target-wire restart with same-ID DUP PUBLISH, "
         "durable QoS2 PUBCOMP-loss process restart without target republish, "
         "durable source-PUBCOMP-loss restart after journal clear, "
         "delayed bridge ACK, topic remap "

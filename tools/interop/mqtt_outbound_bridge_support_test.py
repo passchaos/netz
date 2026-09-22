@@ -33,6 +33,17 @@ class WireHelpersTests(unittest.TestCase):
             ),
             42,
         )
+        local_packet = bytes.fromhex(
+            "34 1e 0012 6c6f63616c2f73656e736f72732f726f6f6d "
+            "002a 00 7061796c6f6164"
+        )
+        self.assertEqual(
+            support.assert_publish_on_topic(
+                local_packet, 5, topic="local/sensors/room", qos=2,
+                retain=False, payload=b"payload",
+            ),
+            42,
+        )
 
     def test_assert_publish_rejects_wrong_application_message(self) -> None:
         packet = bytes.fromhex("30 07 0001 61 64617461")
