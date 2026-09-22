@@ -138,6 +138,26 @@ pub fn run(
     defer for (identities) |*maybe_identity| {
         if (maybe_identity.*) |*identity| identity.deinit();
     };
+    const client_cas = try allocator.alloc(
+        ?netz.tls.client_ca_file.File,
+        config.listeners.len,
+    );
+    defer allocator.free(client_cas);
+    @memset(client_cas, null);
+    defer for (client_cas) |*maybe_ca| {
+        if (maybe_ca.*) |*ca| ca.deinit();
+    };
+    const client_verifiers = try allocator.alloc(
+        netz.tls.trust.ClientCertificateBundleVerifier,
+        config.listeners.len,
+    );
+    defer allocator.free(client_verifiers);
+    const client_auth_policies = try allocator.alloc(
+        ?mqtt.tls_runtime.ClientAuthPolicy,
+        config.listeners.len,
+    );
+    defer allocator.free(client_auth_policies);
+    @memset(client_auth_policies, null);
     // Validate every credential before opening any listener. A malformed later
     // identity must not leave an earlier configured port briefly exposed.
     for (config.listeners, 0..) |configured, index| {
@@ -149,6 +169,23 @@ pub fn run(
             configured.certfile,
             configured.keyfile,
         );
+        if (configured.require_certificate) {
+            client_cas[index] = try netz.tls.client_ca_file.load(
+                allocator,
+                io,
+                std.Io.Dir.cwd(),
+                configured.cafile,
+            );
+            const ca = &client_cas[index].?;
+            client_verifiers[index] = ca.verifier(
+                std.Io.Timestamp.now(io, .real).toSeconds(),
+            );
+            client_auth_policies[index] = .{
+                .verifier = client_verifiers[index].clientVerifier(),
+                .certificate_authorities = ca.authorities(),
+                .requirement = .required,
+            };
+        }
     }
 
     const servers = try allocator.alloc(
@@ -181,14 +218,20 @@ pub fn run(
                     allocator,
                     io,
                     configured.address,
-                    .{ .identity = identity.serverIdentity() },
+                    .{
+                        .identity = identity.serverIdentity(),
+                        .client_auth = client_auth_policies[index],
+                    },
                 ) },
                 .websockets => .{
                     .secure_websockets = try mqtt.websocket_runtime.TlsServer.listen(
                         allocator,
                         io,
                         configured.address,
-                        .{ .identity = identity.serverIdentity() },
+                        .{
+                            .identity = identity.serverIdentity(),
+                            .client_auth = client_auth_policies[index],
+                        },
                     ),
                 },
             }

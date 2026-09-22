@@ -97,13 +97,15 @@ listener 8080 127.0.0.1
 protocol websockets
 certfile server-chain.pem
 keyfile server-key.pem
+cafile client-ca.pem
+require_certificate true
 mount_point tenant/
 allow_anonymous true
 max_connections 16
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
-`keyfile`, `mount_point`,
+`keyfile`, `cafile`, `require_certificate`, `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
@@ -123,10 +125,15 @@ still rejects invalid credentials when a username is supplied. `certfile` and
 port is opened, every identity is loaded from a leaf-first PEM certificate
 chain and an unencrypted P-256 SEC1 or PKCS#8 private key, bounded and strictly
 decoded, and checked for a matching leaf key. RSA, other curves, encrypted
-keys, client-certificate directives, include, reload, plugin, bridge, and full
-Mosquitto configuration remain outside this subset and fail closed. A password
-file authenticates peers but does not encrypt the MQTT username or password on
-raw TCP/WS; use `certfile`/`keyfile`, a trusted network, or a terminating proxy.
+keys, include, reload, plugin, bridge, and full Mosquitto configuration remain
+outside this subset and fail closed. `cafile` and `require_certificate true`
+must occur together on a TLS listener. Every PEM CA is bounded, unique by DER
+Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;
+its exact DER Subject is advertised in TLS 1.3 CertificateRequest. Client
+certificate identity-to-username mapping, optional client certificates,
+`capath`, and CRLs are not accepted. A password file authenticates MQTT peers
+but does not encrypt credentials on raw TCP/WS; use TLS/WSS, a trusted network,
+or a terminating proxy.
 `acl_file` accepts Mosquitto `user NAME`,
 `topic [read|write|readwrite|deny] FILTER`, and global `pattern` rules whose `%u` and
 `%c` substitutions occupy a complete topic level. Topic rules before the first

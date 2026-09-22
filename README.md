@@ -719,7 +719,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
   PUBLISH/SUBSCRIBE/UNSUBSCRIBE, per-recipient outgoing-delivery, and
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
-  listener-local P-256 PEM `certfile`/`keyfile`, and bounded hashed
+  listener-local P-256 PEM `certfile`/`keyfile` and required mTLS through a
+  strictly validated `cafile`/`require_certificate`, and bounded hashed
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   Mosquitto ACL files with anonymous/user scopes, deny precedence and `%u`/`%c`
@@ -1041,8 +1042,8 @@ zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
 # policy, Mosquitto password hashes, authentication rejection, ACL read/write/
-# deny/pattern behavior, OpenSSL-verified TLS, strict key rejection, and
-# snapshot restore through the production example.
+# deny/pattern behavior, OpenSSL-verified TLS/mTLS and acceptable CA names,
+# strict key/CA/EKU rejection, and snapshot restore through the example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
 # Build the pinned Mosquitto checkout and bridge two independent broker
 # processes through netz across MQTT versions and QoS 0/1/2. QoS 2 covers the

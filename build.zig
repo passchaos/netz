@@ -508,7 +508,7 @@ pub fn build(b: *std.Build) void {
     mqtt_broker_config.addArtifactArg(mqtt_vectors_broker);
     const mqtt_broker_config_step = b.step(
         "interop-mqtt-broker-config",
-        "Exercise strict broker config across TCP and WebSocket listeners",
+        "Exercise strict broker config across TCP/TLS/WS/WSS listeners",
     );
     mqtt_broker_config_step.dependOn(&mqtt_broker_config.step);
     test_step.dependOn(&mqtt_broker_config.step);

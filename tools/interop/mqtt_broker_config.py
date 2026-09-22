@@ -217,13 +217,22 @@ def websocket_mqtt_ping(sock: socket.socket) -> None:
         raise AssertionError(f"expected WebSocket PINGRESP, got {response.hex()}")
 
 
-def websocket_connect(port: int, cafile: Path | None = None) -> socket.socket:
+def websocket_connect(
+    port: int,
+    cafile: Path | None = None,
+    certfile: Path | None = None,
+    keyfile: Path | None = None,
+) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
     if cafile is not None:
         context = ssl.create_default_context(cafile=str(cafile))
         context.minimum_version = ssl.TLSVersion.TLSv1_3
         context.maximum_version = ssl.TLSVersion.TLSv1_3
+        if certfile is not None:
+            if keyfile is None:
+                raise AssertionError("client certificate requires a key")
+            context.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
         sock = context.wrap_socket(sock, server_hostname="localhost")
     key = base64.b64encode(b"netz-config-test").decode()
     request = (
@@ -938,6 +947,476 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_openssl(*arguments: object) -> None:
+    subprocess.run(
+        ["openssl", *(str(argument) for argument in arguments)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=True,
+    )
+
+
+def create_ca(directory: Path, name: str, common_name: str) -> tuple[Path, Path]:
+    key = directory / f"{name}.key"
+    certificate = directory / f"{name}.crt"
+    run_openssl(
+        "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
+    )
+    run_openssl(
+        "req",
+        "-new",
+        "-x509",
+        "-key",
+        key,
+        "-sha256",
+        "-days",
+        "1",
+        "-subj",
+        f"/CN={common_name}",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+        "-out",
+        certificate,
+    )
+    return certificate, key
+
+
+def create_signed_certificate(
+    directory: Path,
+    name: str,
+    common_name: str,
+    ca_certificate: Path,
+    ca_key: Path,
+    serial: int,
+    extended_key_usage: str,
+    subject_alt_name: str | None = None,
+) -> tuple[Path, Path]:
+    key = directory / f"{name}.key"
+    request = directory / f"{name}.csr"
+    certificate = directory / f"{name}.crt"
+    extensions = directory / f"{name}.ext"
+    extension_lines = [
+        "basicConstraints=critical,CA:FALSE",
+        "keyUsage=critical,digitalSignature",
+        f"extendedKeyUsage={extended_key_usage}",
+    ]
+    if subject_alt_name is not None:
+        extension_lines.append(f"subjectAltName={subject_alt_name}")
+    extensions.write_text("\n".join(extension_lines) + "\n")
+    run_openssl(
+        "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
+    )
+    run_openssl(
+        "req", "-new", "-key", key, "-subj", f"/CN={common_name}", "-out", request
+    )
+    run_openssl(
+        "x509",
+        "-req",
+        "-in",
+        request,
+        "-CA",
+        ca_certificate,
+        "-CAkey",
+        ca_key,
+        "-set_serial",
+        serial,
+        "-days",
+        "1",
+        "-sha256",
+        "-extfile",
+        extensions,
+        "-out",
+        certificate,
+    )
+    return certificate, key
+
+
+def openssl_mqtt_client(
+    port: int,
+    server_ca: Path,
+    client_certificate: Path | None = None,
+    client_key: Path | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    command = [
+        "openssl",
+        "s_client",
+        "-connect",
+        f"127.0.0.1:{port}",
+        "-tls1_3",
+        "-servername",
+        "localhost",
+        "-CAfile",
+        str(server_ca),
+        "-verify_hostname",
+        "localhost",
+        "-verify_return_error",
+        "-quiet",
+    ]
+    if client_certificate is not None:
+        if client_key is None:
+            raise AssertionError("client certificate requires a key")
+        command.extend(("-cert", str(client_certificate), "-key", str(client_key)))
+    return subprocess.run(
+        command,
+        input=connect_packet("openssl-mtls") + b"\xc0\x00\xe0\x00",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+
+
+def assert_openssl_mqtt_success(result: subprocess.CompletedProcess[bytes]) -> None:
+    remaining, body_offset = decode_variable_integer(result.stdout, 1)
+    packet_end = body_offset + remaining
+    connack = result.stdout[:packet_end]
+    response_tail = result.stdout[packet_end:]
+    if connack_reason(connack) != 0 or response_tail != b"\xd0\x00":
+        raise AssertionError(
+            "OpenSSL MQTT/mTLS CONNECT/PING exchange mismatch: "
+            f"got {result.stdout.hex()}; "
+            + result.stderr.decode(errors="replace")
+        )
+
+
+def openssl_certificate_request_diagnostics(
+    port: int,
+    server_ca: Path,
+    client_certificate: Path,
+    client_key: Path,
+) -> str:
+    result = subprocess.run(
+        [
+            "openssl",
+            "s_client",
+            "-connect",
+            f"127.0.0.1:{port}",
+            "-tls1_3",
+            "-servername",
+            "localhost",
+            "-CAfile",
+            str(server_ca),
+            "-verify_hostname",
+            "localhost",
+            "-verify_return_error",
+            "-cert",
+            str(client_certificate),
+            "-key",
+            str(client_key),
+            "-prexit",
+        ],
+        input=connect_packet("openssl-ca-names") + b"\xe0\x00",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=5,
+        check=False,
+    )
+    return (result.stdout + result.stderr).decode(errors="replace")
+
+
+def write_mtls_config(
+    path: Path,
+    port: int,
+    server_certificate: Path,
+    server_key: Path,
+    client_ca: Path,
+    protocol: str = "mqtt",
+) -> None:
+    path.write_text(
+        f"listener {port} 127.0.0.1\n"
+        + ("protocol websockets\n" if protocol == "websockets" else "")
+        + f"certfile {server_certificate}\n"
+        + f"keyfile {server_key}\n"
+        + f"cafile {client_ca}\n"
+        + "require_certificate true\n"
+        + "allow_anonymous true\n"
+        + "max_connections 1\n"
+    )
+
+
+def run_mtls_rejection_case(
+    broker: Path,
+    config: Path,
+    port: int,
+    server_ca: Path,
+    expected_error: str,
+    client_certificate: Path | None = None,
+    client_key: Path | None = None,
+) -> None:
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"mTLS rejection broker failed to start: {ready}")
+    result = openssl_mqtt_client(
+        port,
+        server_ca,
+        client_certificate,
+        client_key,
+    )
+    if result.stdout.startswith(b"\x20"):
+        raise AssertionError("rejected mTLS client received MQTT CONNACK")
+    try:
+        return_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("mTLS rejection broker did not finish")
+    output = process.stdout.read()
+    if return_code == 0 or expected_error not in output:
+        raise AssertionError(
+            f"mTLS rejection expected {expected_error}, got: " + output
+        )
+
+
+def run_wss_mtls_rejection_case(
+    broker: Path,
+    config: Path,
+    port: int,
+    server_ca: Path,
+) -> None:
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"WSS mTLS rejection broker failed to start: {ready}")
+    websocket: socket.socket | None = None
+    rejected = False
+    try:
+        websocket = websocket_connect(port, server_ca)
+    except (ssl.SSLError, ConnectionError, OSError, TimeoutError, AssertionError):
+        rejected = True
+    finally:
+        if websocket is not None:
+            websocket.close()
+    if not rejected:
+        raise AssertionError("WSS listener accepted a client without a certificate")
+    try:
+        return_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("WSS mTLS rejection broker did not finish")
+    output = process.stdout.read()
+    if return_code == 0 or "ClientCertificateRequired" not in output:
+        raise AssertionError(
+            "WSS missing-certificate rejection mismatch: " + output
+        )
+
+
+def run_mtls_listener_case(broker: Path, directory: Path) -> None:
+    server_ca, server_ca_key = create_ca(directory, "server-ca", "Server Root")
+    server_certificate, server_key = create_signed_certificate(
+        directory,
+        "mtls-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        101,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    client_ca, client_ca_key = create_ca(directory, "client-ca", "Client Root")
+    client_certificate, client_key = create_signed_certificate(
+        directory,
+        "trusted-client",
+        "trusted-client",
+        client_ca,
+        client_ca_key,
+        201,
+        "clientAuth",
+    )
+    wrong_ca, wrong_ca_key = create_ca(directory, "wrong-ca", "Wrong Root")
+    wrong_certificate, wrong_key = create_signed_certificate(
+        directory,
+        "wrong-client",
+        "wrong-client",
+        wrong_ca,
+        wrong_ca_key,
+        301,
+        "clientAuth",
+    )
+    wrong_purpose_certificate, wrong_purpose_key = create_signed_certificate(
+        directory,
+        "wrong-purpose-client",
+        "wrong-purpose-client",
+        client_ca,
+        client_ca_key,
+        202,
+        "serverAuth",
+    )
+
+    tls_port = free_port()
+    wss_port = free_port()
+    while wss_port == tls_port:
+        wss_port = free_port()
+    config = directory / "mtls.conf"
+    config.write_text(
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+        f"listener {wss_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 3 clients" not in ready:
+        raise RuntimeError(f"mTLS configured broker failed to start: {ready}")
+    openssl_diagnostics = openssl_certificate_request_diagnostics(
+        tls_port,
+        server_ca,
+        client_certificate,
+        client_key,
+    )
+    if (
+        "Acceptable client certificate CA names" not in openssl_diagnostics
+        or "CN=Client Root" not in openssl_diagnostics
+    ):
+        raise AssertionError(
+            "OpenSSL did not decode the configured CertificateRequest CA name: "
+            + openssl_diagnostics
+        )
+    openssl_success = openssl_mqtt_client(
+        tls_port,
+        server_ca,
+        client_certificate,
+        client_key,
+    )
+    assert_openssl_mqtt_success(openssl_success)
+    websocket = websocket_connect(
+        wss_port,
+        server_ca,
+        client_certificate,
+        client_key,
+    )
+    try:
+        send_websocket_binary(websocket, connect_packet("wss-mtls"))
+        if connack_reason(read_websocket_binary(websocket)) != 0:
+            raise AssertionError("configured WSS mTLS CONNECT failed")
+        websocket_mqtt_ping(websocket)
+        send_websocket_binary(websocket, b"\xe0\x00")
+    finally:
+        websocket.close()
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError("successful mTLS broker exited with an error")
+
+    rejection_cases = (
+        ("missing-client", None, None, "ClientCertificateRequired"),
+        ("wrong-ca-client", wrong_certificate, wrong_key, "CertificateUntrusted"),
+        (
+            "wrong-purpose-client",
+            wrong_purpose_certificate,
+            wrong_purpose_key,
+            "CertificateUntrusted",
+        ),
+    )
+    for name, certificate, key, expected_error in rejection_cases:
+        port = free_port()
+        rejected_config = directory / f"{name}.conf"
+        write_mtls_config(
+            rejected_config,
+            port,
+            server_certificate,
+            server_key,
+            client_ca,
+        )
+        run_mtls_rejection_case(
+            broker,
+            rejected_config,
+            port,
+            server_ca,
+            expected_error,
+            certificate,
+            key,
+        )
+
+    wss_rejection_port = free_port()
+    wss_rejection_config = directory / "missing-wss-client.conf"
+    write_mtls_config(
+        wss_rejection_config,
+        wss_rejection_port,
+        server_certificate,
+        server_key,
+        client_ca,
+        "websockets",
+    )
+    run_wss_mtls_rejection_case(
+        broker,
+        wss_rejection_config,
+        wss_rejection_port,
+        server_ca,
+    )
+
+    cleartext_port = free_port()
+    invalid_ca_port = free_port()
+    while invalid_ca_port == cleartext_port:
+        invalid_ca_port = free_port()
+    invalid_ca_config = directory / "invalid-client-ca.conf"
+    invalid_ca_config.write_text(
+        f"listener {cleartext_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {invalid_ca_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {server_certificate}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    invalid_ca_result = subprocess.run(
+        [str(broker), f"--config={invalid_ca_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if (
+        invalid_ca_result.returncode == 0
+        or "InvalidCertificateAuthority" not in invalid_ca_result.stdout
+    ):
+        raise AssertionError(
+            "non-CA cafile did not fail before listen: "
+            + invalid_ca_result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
+            raise AssertionError(
+                "an earlier listener was bound before client CA validation"
+            )
+
+
 def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
     certificate = directory / "server-cert.pem"
     rsa_key = directory / "rsa-key.pem"
@@ -1006,13 +1485,14 @@ def main() -> None:
         run_authentication_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
+        run_mtls_listener_case(args.broker, directory)
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
-        "policies, TLS/WSS with OpenSSL verification, strict TLS key "
-        "rejection, and snapshot restore "
+        "policies, TLS/WSS and required mTLS with OpenSSL verification, "
+        "strict TLS key/CA/EKU rejection, and snapshot restore "
         + RUNTIME
     )
 

@@ -21,6 +21,8 @@ pub const Listener = struct {
     protocol: Protocol = .mqtt,
     certfile: []u8 = &.{},
     keyfile: []u8 = &.{},
+    cafile: []u8 = &.{},
+    require_certificate: bool = false,
     mount_point: []u8 = &.{},
     allow_anonymous: bool = false,
     maximum_qos: ?mqtt.QoS = null,
@@ -31,6 +33,7 @@ pub const Listener = struct {
     fn deinit(self: *Listener, allocator: std.mem.Allocator) void {
         if (self.certfile.len != 0) allocator.free(self.certfile);
         if (self.keyfile.len != 0) allocator.free(self.keyfile);
+        if (self.cafile.len != 0) allocator.free(self.cafile);
         if (self.mount_point.len != 0) allocator.free(self.mount_point);
         self.* = undefined;
     }
@@ -106,6 +109,7 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     PersistenceRequired,
     AuthenticationRequired,
     TlsIdentityIncomplete,
+    ClientCertificateConfigurationIncomplete,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
 
@@ -113,6 +117,8 @@ const ListenerSeen = struct {
     protocol: bool = false,
     certfile: bool = false,
     keyfile: bool = false,
+    cafile: bool = false,
+    require_certificate: bool = false,
     mount_point: bool = false,
     allow_anonymous: bool = false,
     maximum_qos: bool = false,
@@ -248,6 +254,12 @@ pub fn parse(
             } else if (std.mem.eql(u8, directive, "keyfile")) {
                 try markOnce(&seen.keyfile);
                 listener.keyfile = try parseOneOwned(allocator, &words);
+            } else if (std.mem.eql(u8, directive, "cafile")) {
+                try markOnce(&seen.cafile);
+                listener.cafile = try parseOneOwned(allocator, &words);
+            } else if (std.mem.eql(u8, directive, "require_certificate")) {
+                try markOnce(&seen.require_certificate);
+                listener.require_certificate = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "mount_point")) {
                 try markOnce(&seen.mount_point);
                 const value = try parseOne(&words);
@@ -296,6 +308,14 @@ pub fn parse(
         if ((listener.certfile.len == 0) != (listener.keyfile.len == 0)) {
             return error.TlsIdentityIncomplete;
         }
+        if (listener.require_certificate and
+            (listener.cafile.len == 0 or !listener.usesTls()))
+        {
+            return error.ClientCertificateConfigurationIncomplete;
+        }
+        if (listener.cafile.len != 0 and !listener.require_certificate) {
+            return error.ClientCertificateConfigurationIncomplete;
+        }
         if (!listener.allow_anonymous and config.password_file.len == 0) {
             return error.AuthenticationRequired;
         }
@@ -332,6 +352,8 @@ fn isListenerDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "protocol") or
         std.mem.eql(u8, value, "certfile") or
         std.mem.eql(u8, value, "keyfile") or
+        std.mem.eql(u8, value, "cafile") or
+        std.mem.eql(u8, value, "require_certificate") or
         std.mem.eql(u8, value, "mount_point") or
         std.mem.eql(u8, value, "allow_anonymous") or
         std.mem.eql(u8, value, "max_qos") or
@@ -405,6 +427,8 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\protocol websockets
         \\certfile server-chain.pem
         \\keyfile server-key.pem
+        \\cafile client-ca.pem
+        \\require_certificate true
         \\mount_point tenant/
         \\allow_anonymous false
         \\use_username_as_clientid true
@@ -433,6 +457,11 @@ test "MQTT broker config parses owned multi-listener policy" {
         "server-key.pem",
         config.listeners[1].keyfile,
     );
+    try std.testing.expectEqualStrings(
+        "client-ca.pem",
+        config.listeners[1].cafile,
+    );
+    try std.testing.expect(config.listeners[1].require_certificate);
     try std.testing.expectEqualStrings("tenant/", config.listeners[1].mount_point);
     try std.testing.expect(config.listeners[1].use_username_as_client_id);
     const path = try config.persistencePath(allocator);
@@ -482,7 +511,71 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     );
     try std.testing.expectError(
         error.UnsupportedDirective,
-        parse(allocator, "listener 1883\ncafile clients.pem"),
+        parse(allocator, "listener 1883\ncapath clients"),
+    );
+    try std.testing.expectError(
+        error.ClientCertificateConfigurationIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\require_certificate true
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.ClientCertificateConfigurationIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\cafile clients.pem
+            \\require_certificate false
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\cafile first.pem
+            \\cafile second.pem
+            \\require_certificate true
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\cafile clients.pem
+            \\require_certificate true
+            \\require_certificate true
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.ClientCertificateConfigurationIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\cafile clients.pem
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.ClientCertificateConfigurationIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\cafile clients.pem
+            \\require_certificate true
+            \\allow_anonymous true
+        ),
     );
     try std.testing.expectError(
         error.DuplicateDirective,
@@ -558,6 +651,7 @@ test "MQTT broker config owns strings independently of source" {
             "acl_file access.acl\n" ++
             "listener 1883\n" ++
             "certfile server.pem\nkeyfile server.key\n" ++
+            "cafile clients.pem\nrequire_certificate true\n" ++
             "mount_point tenant/\nallow_anonymous true\n",
     );
     defer allocator.free(source);
@@ -574,5 +668,7 @@ test "MQTT broker config owns strings independently of source" {
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
     try std.testing.expectEqualStrings("server.pem", config.listeners[0].certfile);
     try std.testing.expectEqualStrings("server.key", config.listeners[0].keyfile);
+    try std.testing.expectEqualStrings("clients.pem", config.listeners[0].cafile);
+    try std.testing.expect(config.listeners[0].require_certificate);
     try std.testing.expectEqualStrings("tenant/", config.listeners[0].mount_point);
 }
