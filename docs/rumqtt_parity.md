@@ -185,7 +185,12 @@ writing the transport, an online `writeSessionSnapshot` can then be included
 in a caller's atomic record, and `flushPending` performs the first send with
 DUP clear. Restoring that pre-wire snapshot conservatively sends the same
 Packet Identifier with DUP set; `discardStagedPublish` can roll back only
-before selection. This is a coordinator building block, not the coordinator:
+before selection. Its opt-in deferred outbound QoS 2 release likewise surfaces
+PUBREC after moving durable state to `await_pubcomp`, but holds PUBREL until a
+snapshot succeeds and `flushPending` explicitly releases it. A reconnect in
+the same process cannot bypass that gate; restoring the committed snapshot can
+resume PUBREL directly. These are coordinator building blocks, not the
+coordinator:
 cross-broker QoS 2 remains rejected until one atomically connects both broker
 Sessions with its own transaction record. A bidirectional deployment must
 use two instances with disjoint namespaces or another explicit loop-prevention

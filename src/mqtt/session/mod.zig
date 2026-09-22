@@ -284,6 +284,10 @@ const Inflight = struct {
     state: InflightState,
     needs_send: bool,
     retransmission: bool,
+    /// Process-local durability barrier for an accepted PUBREC. Snapshots
+    /// intentionally omit this bit: restoring an encoded `await_pubcomp`
+    /// state proves that the transition was committed and may emit PUBREL.
+    pubrel_blocked: bool = false,
 };
 
 const PendingQoS0 = struct {
@@ -876,6 +880,7 @@ pub const Store = struct {
                     .state = state,
                     .needs_send = true,
                     .retransmission = state != .await_pubcomp,
+                    .pubrel_blocked = false,
                 },
             );
             session.packet_index.putAssumeCapacityNoClobber(
@@ -1718,6 +1723,7 @@ pub const Store = struct {
                 },
                 .needs_send = needs_send,
                 .retransmission = false,
+                .pubrel_blocked = false,
             },
         );
         session.packet_index.putAssumeCapacityNoClobber(
@@ -1839,6 +1845,8 @@ pub const Store = struct {
             if (written == out.len) break;
             const inflight = &(maybe_inflight.* orelse continue);
             if (!inflight.needs_send) continue;
+            if (inflight.state == .await_pubcomp and
+                inflight.pubrel_blocked) continue;
             const transmission = transmissionForInflight(
                 inflight.*,
                 now.nanoseconds,
@@ -1930,6 +1938,7 @@ pub const Store = struct {
                         .state = state,
                         .needs_send = false,
                         .retransmission = false,
+                        .pubrel_blocked = false,
                     },
                 );
                 session.queued.items[queue_index] = null;
@@ -2049,6 +2058,40 @@ pub const Store = struct {
                 return .completed;
             },
             else => return error.InvalidAcknowledgement,
+        }
+    }
+
+    /// Hold an accepted outgoing QoS 2 transaction at its durable
+    /// `await_pubcomp` state without allowing `drainInto` to expose PUBREL.
+    /// The gate survives transport reconnects in this process but is omitted
+    /// from snapshots, whose existence proves the transition was committed.
+    pub fn blockPendingPubRel(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        const index = session.packet_index.get(packet_id) orelse
+            return error.InvalidAcknowledgement;
+        const inflight = &session.inflight.items[index].?;
+        if (inflight.state != .await_pubcomp or !inflight.needs_send) {
+            return error.InvalidAcknowledgement;
+        }
+        inflight.pubrel_blocked = true;
+    }
+
+    /// Release every PUBREL held behind the caller's durability boundary.
+    /// Selection and wire output still occur later through `drainInto`.
+    pub fn releasePendingPubRels(
+        self: *Store,
+        handle: Handle,
+    ) Error!void {
+        const session = try self.getSession(handle);
+        for (session.inflight.items) |*maybe_inflight| {
+            const inflight = &(maybe_inflight.* orelse continue);
+            if (inflight.state == .await_pubcomp) {
+                inflight.pubrel_blocked = false;
+            }
         }
     }
 

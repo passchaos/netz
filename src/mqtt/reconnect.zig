@@ -1099,6 +1099,15 @@ pub const InboundQoS2ReleasePolicy = enum {
     deferred,
 };
 
+pub const OutboundQoS2ReleasePolicy = enum {
+    /// Advance an accepted PUBREC and emit PUBREL in the same poll call.
+    automatic,
+    /// Advance to `await_pubcomp`, surface PUBREC, and hold PUBREL until
+    /// `flushPending`. This lets a single-owner coordinator persist the new
+    /// Session state before the control packet becomes visible to the peer.
+    deferred,
+};
+
 pub const IncomingQoS2ResumeState = enum {
     await_pubrel,
     release_pending,
@@ -1112,6 +1121,7 @@ pub const ClientOptions = struct {
     /// handle so the single socket-owner invariant is preserved.
     manual_acknowledgements: bool = false,
     inbound_qos2_release_policy: InboundQoS2ReleasePolicy = .automatic,
+    outbound_qos2_release_policy: OutboundQoS2ReleasePolicy = .automatic,
     /// Deliver a retransmitted inbound QoS 2 PUBLISH to a manual-acknowledging
     /// application instead of consuming it after re-emitting PUBREC. Durable
     /// bridges use this to compare the complete message against their own
@@ -2508,12 +2518,14 @@ pub const Client = struct {
     /// This is useful when `publish` returned `ConnectionUnavailable` after
     /// durably queueing the request.
     pub fn flushPending(self: *Client) Error!void {
+        try self.outgoing.releasePendingPubRels(self.outgoing_handle);
         try self.replayPending();
         self.noteControlSent();
     }
 
-    /// Read and apply one QoS acknowledgement. For PUBREC, PUBREL is emitted
-    /// before returning so the durable state transition is wire-visible.
+    /// Read and apply one QoS acknowledgement. With automatic outbound QoS 2
+    /// release, PUBREL is emitted before returning. Deferred release instead
+    /// leaves it behind the `flushPending` durability boundary.
     pub fn completeNextPublish(self: *Client) Error!u16 {
         while (true) {
             const active = self.connection() orelse
@@ -2532,13 +2544,13 @@ pub const Client = struct {
                 .pubcomp => |value| value.ack,
                 else => return error.UnexpectedPacket,
             };
-            const action = try self.outgoing.handleAck(
-                self.outgoing_handle,
-                ack.packet_type,
-                ack.packet_id,
-                ack.reason_code,
-            );
-            if (action == .send_pubrel) try self.replayPending();
+            const action = try self.applyOutgoingAck(ack);
+            if (action == .send_pubrel and
+                self.client_options.outbound_qos2_release_policy ==
+                    .automatic)
+            {
+                try self.replayPending();
+            }
             if (action == .completed) {
                 self.finishPublishDelivery(.{
                     .packet_id = ack.packet_id,
@@ -2736,10 +2748,13 @@ pub const Client = struct {
             },
             .pubrec => |owned| blk: {
                 const action = try self.applyOutgoingAck(owned.ack);
-                if (action == .send_pubrel) {
+                if (action == .send_pubrel and
+                    self.client_options.outbound_qos2_release_policy ==
+                        .automatic)
+                {
                     try self.replayPending();
                     self.noteControlSent();
-                } else {
+                } else if (action == .completed) {
                     // A negative PUBREC terminates the QoS 2 transaction and
                     // is its protocol-level delivery result.
                     self.finishPublishDelivery(.{
@@ -3040,12 +3055,21 @@ pub const Client = struct {
         self: *Client,
         ack: mqtt.AckPacket,
     ) Error!session.AckAction {
-        return self.outgoing.handleAck(
+        const action = try self.outgoing.handleAck(
             self.outgoing_handle,
             ack.packet_type,
             ack.packet_id,
             ack.reason_code,
         );
+        if (action == .send_pubrel and
+            self.client_options.outbound_qos2_release_policy == .deferred)
+        {
+            try self.outgoing.blockPendingPubRel(
+                self.outgoing_handle,
+                ack.packet_id,
+            );
+        }
+        return action;
     }
 
     fn noteControlSent(self: *Client) void {

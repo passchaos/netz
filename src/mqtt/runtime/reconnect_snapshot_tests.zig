@@ -10,6 +10,222 @@ fn sessionExpiryProperty(seconds: u32) mqtt.Property {
     } };
 }
 
+fn runDeferredOutgoingQoS2SnapshotCase(
+    restore_before_pubrel: bool,
+) !void {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        restore_before_pubrel: bool,
+        reconnect_requested: std.Io.Event = .unset,
+        snapshot_written: std.Io.Event = .unset,
+        no_pubrel_seen: std.Io.Event = .unset,
+        first_closed: std.Io.Event = .unset,
+        reconnected_no_pubrel: std.Io.Event = .unset,
+        second_closed: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.no_pubrel_seen.set(self.server.io);
+                self.first_closed.set(self.server.io);
+                self.reconnected_no_pubrel.set(self.server.io);
+                self.second_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            defer first.deinit(self.server.allocator);
+            var publish = try first.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            const packet_id = publish.publish.packet_id.?;
+            try std.testing.expectEqual(
+                mqtt.QoS.exactly_once,
+                publish.publish.qos,
+            );
+            try first.connection.writePubRec(packet_id, 0);
+            try std.testing.expectError(
+                error.Timeout,
+                first.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.no_pubrel_seen.set(self.server.io);
+
+            if (!self.restore_before_pubrel) {
+                var pubrel = try first.connection.readPubRel();
+                defer pubrel.deinit(self.server.allocator);
+                try std.testing.expectEqual(packet_id, pubrel.ack.packet_id);
+                try first.connection.writePubComp(packet_id, 0);
+                var disconnect = try first.connection.readDisconnect();
+                defer disconnect.deinit(self.server.allocator);
+                return;
+            }
+
+            self.reconnect_requested.waitUncancelable(self.server.io);
+            first.connection.shutdown() catch {};
+            self.first_closed.set(self.server.io);
+            var second = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer second.deinit(self.server.allocator);
+            try std.testing.expectError(
+                error.Timeout,
+                second.connection.readBrokerEventWithTimeout(
+                    .fromMilliseconds(20),
+                ),
+            );
+            self.reconnected_no_pubrel.set(self.server.io);
+            self.snapshot_written.waitUncancelable(self.server.io);
+            second.connection.shutdown() catch {};
+            self.second_closed.set(self.server.io);
+
+            var third = try self.server.accept(.{
+                .protocol = .v5,
+                .session_present = true,
+            });
+            defer third.deinit(self.server.allocator);
+            try third.connection.resumeIncomingQoS2(packet_id);
+            var pubrel = try third.connection.readPubRel();
+            defer pubrel.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, pubrel.ack.packet_id);
+            try third.connection.writePubComp(packet_id, 0);
+            var disconnect = try third.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{
+        .server = &server,
+        .restore_before_pubrel = restore_before_pubrel,
+    };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer {
+        shared.reconnect_requested.set(io);
+        shared.snapshot_written.set(io);
+        if (!joined) server_thread.join();
+    }
+
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    const connect_options: runtime.ConnectOptions = .{
+        .protocol = .v5,
+        .client_id = if (restore_before_pubrel)
+            "snapshot-deferred-restore"
+        else
+            "snapshot-deferred-flush",
+        .clean_start = false,
+        .properties = &properties,
+    };
+    const client_options: reconnect.ClientOptions = .{
+        .outbound_qos2_release_policy = .deferred,
+    };
+    var shutdown: std.Io.Event = .unset;
+    var first_client = try reconnect.Client.initWithOptions(
+        allocator,
+        io,
+        server.address(),
+        connect_options,
+        .{},
+        &shutdown,
+        client_options,
+    );
+    defer first_client.deinit();
+    _ = try first_client.connectWithTimeout(.fromSeconds(1));
+    const packet_id = try first_client.stagePublish(
+        "snapshot/deferred-pubrel",
+        "durable transition",
+        .{ .qos = .exactly_once },
+    );
+    try first_client.flushPending();
+    var pubrec = (try first_client.pollWithTimeout(.fromSeconds(1))).?;
+    defer pubrec.deinit(allocator);
+    try std.testing.expect(pubrec == .pubrec);
+    try std.testing.expectEqual(packet_id, pubrec.pubrec.ack.packet_id);
+    try shared.no_pubrel_seen.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+
+    if (!restore_before_pubrel) {
+        try first_client.flushPending();
+        var pubcomp = (try first_client.pollWithTimeout(.fromSeconds(1))).?;
+        defer pubcomp.deinit(allocator);
+        try std.testing.expect(pubcomp == .pubcomp);
+        try std.testing.expectEqual(packet_id, pubcomp.pubcomp.ack.packet_id);
+        try first_client.disconnect(0);
+    } else {
+        shared.reconnect_requested.set(io);
+        try shared.first_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first_client.disconnectTransport();
+        const reconnected = try first_client.connectWithTimeout(
+            .fromSeconds(1),
+        );
+        try std.testing.expect(reconnected.session_present);
+        try shared.reconnected_no_pubrel.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try first_client.writeSessionSnapshot(&encoded);
+        shared.snapshot_written.set(io);
+        try shared.second_closed.waitTimeout(io, .{ .duration = .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        } });
+        first_client.disconnectTransport();
+        var restored = try reconnect.Client.initWithOptions(
+            allocator,
+            io,
+            server.address(),
+            connect_options,
+            .{},
+            &shutdown,
+            client_options,
+        );
+        defer restored.deinit();
+        try restored.restoreSessionSnapshot(encoded.items);
+        const connected = try restored.connectWithTimeout(.fromSeconds(1));
+        try std.testing.expect(connected.session_present);
+        var pubcomp = (try restored.pollWithTimeout(.fromSeconds(1))).?;
+        defer pubcomp.deinit(allocator);
+        try std.testing.expect(pubcomp == .pubcomp);
+        try std.testing.expectEqual(packet_id, pubcomp.pubcomp.ack.packet_id);
+        try restored.disconnect(0);
+    }
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT deferred outgoing QoS2 writes PUBREL only after flush" {
+    try runDeferredOutgoingQoS2SnapshotCase(false);
+}
+
+test "MQTT snapshot restores deferred outgoing QoS2 at PUBREL" {
+    try runDeferredOutgoingQoS2SnapshotCase(true);
+}
+
 test "MQTT reconnect Session snapshot stages QoS2 before first wire write" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
