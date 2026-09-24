@@ -4372,22 +4372,17 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
     );
     defer server.deinit();
 
-    var first: [101]u8 = undefined;
-    var second: [103]u8 = undefined;
-    for (&first, 0..) |*byte, index| byte.* = @truncate(index *% 37 +% 11);
-    for (&second, 0..) |*byte, index| byte.* = @truncate(index *% 53 +% 19);
+    const payload = "fragmented-context-takeover-" ** 16;
     const fragments = [_][]const u8{
-        first[0..37],
+        payload[0..73],
         &.{},
-        first[37..],
-        second[0..51],
-        second[51..],
+        payload[73..181],
+        payload[181..317],
+        payload[317..],
     };
-    const total = first.len + second.len;
+    const total = payload.len;
     const Shared = struct {
         server: *h3.Server,
-        first: []const u8,
-        second: []const u8,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -4399,6 +4394,7 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept(.{
                 .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
                 .compression_threshold = 1,
                 .limits = .{
                     .max_frame_bytes = total,
@@ -4406,31 +4402,20 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
                 },
             });
             defer connection.deinit();
+            try std.testing.expect(
+                connection.compression_receive_context_takeover,
+            );
             var message = try connection.receiveMessageWithTimeout(
                 .fromSeconds(10),
             );
             defer message.deinit(allocator);
             try std.testing.expectEqual(websocket.Opcode.binary, message.opcode);
-            try std.testing.expect(!message.was_compressed);
-            try std.testing.expectEqual(total, message.payload.len);
-            try std.testing.expectEqualSlices(
-                u8,
-                self.first,
-                message.payload[0..self.first.len],
-            );
-            try std.testing.expectEqualSlices(
-                u8,
-                self.second,
-                message.payload[self.first.len..],
-            );
+            try std.testing.expect(message.was_compressed);
+            try std.testing.expectEqualStrings(payload, message.payload);
             try connection.sendText("fragmented-ok");
         }
     };
-    var shared = Shared{
-        .server = &server,
-        .first = &first,
-        .second = &second,
-    };
+    var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -4458,6 +4443,7 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
             .authority = "localhost",
             .path = "/fragmented-deadline",
             .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
             .compression_threshold = 1,
             .limits = .{
                 .max_frame_bytes = total,
@@ -4466,6 +4452,7 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
         },
     );
     defer client.deinit();
+    try std.testing.expect(client.compression_send_context_takeover);
 
     var fixed = FixedSendIo{ .delegate = client.h3.endpoint.io };
     var vtable = fixed.delegate.vtable.*;
@@ -4489,7 +4476,8 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
     try std.testing.expect(progress.committed_bytes > 0);
     try std.testing.expect(progress.committed_bytes < progress.total_bytes);
     try std.testing.expect(!progress.frame_committed);
-    const different = [_][]const u8{ &first, &second };
+    try std.testing.expect(client.compression_send.previewPending());
+    const different = [_][]const u8{payload};
     const send_calls = fixed.send_calls;
     try std.testing.expectError(
         error.WriteInProgress,
@@ -4511,6 +4499,7 @@ test "WebSocket HTTP3 fragmented deadline resumes exact suffix" {
     );
     try std.testing.expect(progress.frame_committed);
     try std.testing.expectEqual(progress.total_bytes, progress.committed_bytes);
+    try std.testing.expect(!client.compression_send.previewPending());
     var response = try client.receiveMessageWithTimeout(.fromSeconds(10));
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("fragmented-ok", response.payload);
