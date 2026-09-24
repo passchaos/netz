@@ -150,6 +150,27 @@ pub fn build(b: *std.Build) void {
         "Fuzz bounded QUIC frames, parameters, packets, and TLS messages",
     );
     fuzz_quic_wire_step.dependOn(&run_quic_wire_fuzz_tests.step);
+    const quic_protection_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/quic_protection_fuzz_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_quic_protection_fuzz_tests = b.addRunArtifact(
+        quic_protection_fuzz_tests,
+    );
+    const fuzz_quic_protection_step = b.step(
+        "fuzz-quic-protection",
+        "Fuzz bounded QUIC packet and header protection",
+    );
+    fuzz_quic_protection_step.dependOn(
+        &run_quic_protection_fuzz_tests.step,
+    );
     const quic_handshake_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -378,6 +399,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_stateful_fuzz_tests.step);
     test_step.dependOn(&run_websocket_compression_fuzz_tests.step);
     test_step.dependOn(&run_quic_wire_fuzz_tests.step);
+    test_step.dependOn(&run_quic_protection_fuzz_tests.step);
     test_step.dependOn(&run_quic_handshake_bench_tests.step);
     test_step.dependOn(&run_quic_persistent_bench_tests.step);
     test_step.dependOn(&run_quic_quic_go_churn_tests.step);

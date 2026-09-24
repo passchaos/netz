@@ -79,7 +79,7 @@ jobs:
         run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
 
       - name: Replay bounded fuzz corpora
-        run: zig build fuzz-parsers fuzz-stateful fuzz-websocket-compression fuzz-quic-wire
+        run: zig build fuzz-parsers fuzz-stateful fuzz-websocket-compression fuzz-quic-wire fuzz-quic-protection
 
       - name: Run the complete test gate serially
         run: zig build test -j1 --summary all
@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz-parsers, fuzz-stateful, fuzz-websocket-compression, fuzz-quic-wire]
+        target: [fuzz-parsers, fuzz-stateful, fuzz-websocket-compression, fuzz-quic-wire, fuzz-quic-protection]
     defaults:
       run:
         working-directory: netz

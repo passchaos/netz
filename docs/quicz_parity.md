@@ -14,6 +14,7 @@ parity:
 ```sh
 zig build test
 zig build fuzz-quic-wire
+zig build fuzz-quic-protection
 zig build run-quic-echo -Doptimize=ReleaseFast
 zig build run-quic-handshake-echo -Doptimize=ReleaseFast
 zig build run-quic-datagram-echo -Doptimize=ReleaseFast
@@ -39,8 +40,15 @@ EncryptedExtensions, and Finished messages carried by QUIC CRYPTO frames. The
 default test gate replays structured seeds plus deterministic truncation,
 bit-flip, and random mutations; `zig build fuzz-quic-wire --fuzz=N` enables
 coverage-guided runs, and scheduled CI preserves its corpus. This target does
-not claim encrypted packet-protection, stateful live-connection, or network-I/O
-fuzz coverage.
+not claim stateful live-connection or network-I/O fuzz coverage.
+`fuzz-quic-protection` supplies the complementary encrypted-packet gate. Its
+bounded generated path round-trips QUIC v1/v2 Initial, Handshake, 0-RTT, and
+1-RTT packets, caller-storage and prepared-key APIs, Initial's mandated
+AES-128-GCM plus all four negotiated traffic ciphers, zero-fixed-bit policy,
+and next-generation key phases. Its hostile path covers arbitrary/truncated
+input, packet-number reconstruction, long-header peeking, header protection,
+owning opens, and authenticated tag mutation. It does not model loss,
+reordering, connection state, sockets, or TLS key schedule transitions.
 
 Longer performance gates that have been used successfully include:
 
