@@ -16,7 +16,13 @@ fragmented-message assembly, WebTransport session/stream lifecycles, and MQTT
 Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
-round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`. These
+round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
+`zig build fuzz-websocket-context` exercises the public stateful RFC 7692
+compressor/decompressor across independent directions, retained and explicitly
+reset histories, fragmented/repeated messages, hostile input, and transactional
+output-limit failures. The H1/H2/H3 runtimes still negotiate both
+`*_no_context_takeover` parameters until this state is integrated with their
+bounded partial-write lifecycle. These
 targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
 headers, Version Negotiation, Retry integrity, transport parameters, frame
 streams, and carried TLS handshake messages. `zig build fuzz-quic-protection`
@@ -30,8 +36,8 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all six corpora and the complete test gate on pushes and pull
-requests, then runs the six coverage-guided targets daily and on demand. Because
+workflow replays all seven corpora and the complete test gate on pushes and pull
+requests, then runs the seven coverage-guided targets daily and on demand. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret

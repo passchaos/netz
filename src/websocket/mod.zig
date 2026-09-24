@@ -3,8 +3,11 @@ const builtin = @import("builtin");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
 const vort = @import("../internal/vort.zig");
+const compression_context = @import("compression_context.zig");
 
 pub const runtime = @import("runtime.zig");
+pub const CompressionContext = compression_context.CompressionContext;
+pub const DecompressionContext = compression_context.DecompressionContext;
 
 const backend_supports_vectors = switch (builtin.zig_backend) {
     .stage2_llvm, .stage2_c => true,

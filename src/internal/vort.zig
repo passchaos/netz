@@ -134,6 +134,8 @@ pub const RawFixedSyncFlushEncoder = struct {
     epochs: std.ArrayList(u32) = .empty,
     previous: std.ArrayList(u32) = .empty,
     chunk_offsets: std.ArrayList(usize) = .empty,
+    chunk_views: std.ArrayList([]const u8) = .empty,
+    history: std.ArrayList(u8) = .empty,
     epoch: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator) RawFixedSyncFlushEncoder {
@@ -145,7 +147,13 @@ pub const RawFixedSyncFlushEncoder = struct {
         self.epochs.deinit(self.allocator);
         self.previous.deinit(self.allocator);
         self.chunk_offsets.deinit(self.allocator);
+        self.chunk_views.deinit(self.allocator);
+        self.history.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn resetContext(self: *RawFixedSyncFlushEncoder) void {
+        self.history.clearRetainingCapacity();
     }
 
     pub fn encodeAppend(
@@ -163,11 +171,47 @@ pub const RawFixedSyncFlushEncoder = struct {
         chunks: []const []const u8,
         options: CompressionOptions,
     ) !usize {
+        self.resetContext();
+        return self.encodeChunksAppendMode(out, chunks, options, false);
+    }
+
+    pub fn encodeAppendContext(
+        self: *RawFixedSyncFlushEncoder,
+        out: *std.ArrayList(u8),
+        input: []const u8,
+        options: CompressionOptions,
+    ) !usize {
+        return self.encodeChunksAppendContext(out, &.{input}, options);
+    }
+
+    pub fn encodeChunksAppendContext(
+        self: *RawFixedSyncFlushEncoder,
+        out: *std.ArrayList(u8),
+        chunks: []const []const u8,
+        options: CompressionOptions,
+    ) !usize {
+        return self.encodeChunksAppendMode(out, chunks, options, true);
+    }
+
+    fn encodeChunksAppendMode(
+        self: *RawFixedSyncFlushEncoder,
+        out: *std.ArrayList(u8),
+        chunks: []const []const u8,
+        options: CompressionOptions,
+        retain_context: bool,
+    ) !usize {
         _ = options.parser;
+        const history_len = if (retain_context) self.history.items.len else 0;
+        const input_chunks = if (retain_context) blk: {
+            try self.chunk_views.resize(self.allocator, chunks.len + 1);
+            self.chunk_views.items[0] = self.history.items;
+            @memcpy(self.chunk_views.items[1..], chunks);
+            break :blk self.chunk_views.items;
+        } else chunks;
         const input = try Input.init(
             self.allocator,
             &self.chunk_offsets,
-            chunks,
+            input_chunks,
         );
         const window_len = options.lz77_options.window_len;
         if (window_len < 256 or window_len > 32 * 1024 or
@@ -181,16 +225,23 @@ pub const RawFixedSyncFlushEncoder = struct {
             options.lz77_options.window_len,
         );
         self.beginMessage();
+        if (retain_context) {
+            var history_pos: usize = 0;
+            while (history_pos < history_len) : (history_pos += 1) {
+                self.insert(input, history_pos);
+            }
+        }
         const start = out.items.len;
         errdefer out.items.len = start;
+        const message_len = input.total - history_len;
         try out.ensureUnusedCapacity(
             self.allocator,
-            input.total +| (input.total + 7) / 8 +| 8,
+            message_len +| (message_len + 7) / 8 +| 8,
         );
         var bits = Bits{ .out = out };
         bits.write(0b010, 3); // BFINAL=0, BTYPE=fixed Huffman.
 
-        var pos: usize = 0;
+        var pos: usize = history_len;
         while (pos < input.total) {
             const match = self.findAndInsert(input, pos, options);
             if (match.len < min_match) {
@@ -214,7 +265,56 @@ pub const RawFixedSyncFlushEncoder = struct {
         bits.write(0, 3); // Empty non-final stored block.
         bits.byteAlign();
         out.appendSliceAssumeCapacity(&.{ 0, 0, 0xff, 0xff });
+        if (retain_context) {
+            try self.rememberContext(
+                chunks,
+                message_len,
+                window_len,
+            );
+        }
         return out.items.len - start;
+    }
+
+    fn rememberContext(
+        self: *RawFixedSyncFlushEncoder,
+        chunks: []const []const u8,
+        input_len: usize,
+        window_len: usize,
+    ) !void {
+        const keep_input = @min(input_len, window_len);
+        const keep_history = @min(
+            self.history.items.len,
+            window_len - keep_input,
+        );
+        try self.history.ensureTotalCapacity(
+            self.allocator,
+            keep_history + keep_input,
+        );
+        if (keep_history != 0) {
+            const old_len = self.history.items.len;
+            @memmove(
+                self.history.items[0..keep_history],
+                self.history.items[old_len - keep_history ..],
+            );
+        }
+        self.history.items.len = keep_history + keep_input;
+
+        var skip = input_len - keep_input;
+        var write_offset = keep_history;
+        for (chunks) |chunk| {
+            if (skip >= chunk.len) {
+                skip -= chunk.len;
+                continue;
+            }
+            const source = chunk[skip..];
+            @memcpy(
+                self.history.items[write_offset..][0..source.len],
+                source,
+            );
+            write_offset += source.len;
+            skip = 0;
+        }
+        std.debug.assert(write_offset == self.history.items.len);
     }
 
     fn ensureWorkspace(
