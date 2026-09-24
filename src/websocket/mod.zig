@@ -140,6 +140,19 @@ pub const ExtensionNegotiation = struct {
     client_max_window_bits: ?u8 = null,
     server_max_window_bits: ?u8 = null,
 
+    pub const Policy = struct {
+        enable_permessage_deflate: bool = false,
+        allow_context_takeover: bool = false,
+    };
+
+    pub fn offerValue(policy: Policy) ?[]const u8 {
+        if (!policy.enable_permessage_deflate) return null;
+        return if (policy.allow_context_takeover)
+            "permessage-deflate"
+        else
+            "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
+    }
+
     pub fn parseOffer(header_value: []const u8) Error!ExtensionNegotiation {
         var offers = std.mem.splitScalar(u8, header_value, ',');
         while (offers.next()) |raw_offer| {
@@ -149,7 +162,17 @@ pub const ExtensionNegotiation = struct {
     }
 
     pub fn accept(allocator: std.mem.Allocator, offer_header: ?[]const u8, enable_permessage_deflate: bool) Error!?[]u8 {
-        if (!enable_permessage_deflate) return null;
+        return acceptWithPolicy(allocator, offer_header, .{
+            .enable_permessage_deflate = enable_permessage_deflate,
+        });
+    }
+
+    pub fn acceptWithPolicy(
+        allocator: std.mem.Allocator,
+        offer_header: ?[]const u8,
+        policy: Policy,
+    ) Error!?[]u8 {
+        if (!policy.enable_permessage_deflate) return null;
         const raw = offer_header orelse return null;
         const offer = try parseOffer(raw);
         if (!offer.permessage_deflate) return null;
@@ -157,10 +180,16 @@ pub const ExtensionNegotiation = struct {
         var value: std.ArrayList(u8) = .empty;
         errdefer value.deinit(allocator);
         try value.appendSlice(allocator, "permessage-deflate");
-        // Both directions deliberately reset at message boundaries. This keeps
-        // the runtime's bounded per-message scratch model while the explicit
-        // LZ77 window lets the sender honor a smaller server_max_window_bits.
-        try value.appendSlice(allocator, "; server_no_context_takeover; client_no_context_takeover");
+        if (!policy.allow_context_takeover or
+            offer.server_no_context_takeover)
+        {
+            try value.appendSlice(allocator, "; server_no_context_takeover");
+        }
+        if (!policy.allow_context_takeover or
+            offer.client_no_context_takeover)
+        {
+            try value.appendSlice(allocator, "; client_no_context_takeover");
+        }
         if (offer.server_max_window_bits) |bits| {
             var writer = std.Io.Writer.Allocating.fromArrayList(
                 allocator,
@@ -180,16 +209,36 @@ pub const ExtensionNegotiation = struct {
         headers: []const http1.Header,
         enable_permessage_deflate: bool,
     ) Error!?[]u8 {
-        if (!enable_permessage_deflate) return null;
+        return acceptClientHeadersWithPolicy(allocator, headers, .{
+            .enable_permessage_deflate = enable_permessage_deflate,
+        });
+    }
+
+    pub fn acceptClientHeadersWithPolicy(
+        allocator: std.mem.Allocator,
+        headers: []const http1.Header,
+        policy: Policy,
+    ) Error!?[]u8 {
+        if (!policy.enable_permessage_deflate) return null;
         for (headers) |header| {
             if (!header.eqlName("sec-websocket-extensions")) continue;
-            if (try accept(allocator, header.value, true)) |accepted| return accepted;
+            if (try acceptWithPolicy(allocator, header.value, policy)) |accepted| return accepted;
         }
         return null;
     }
 
     pub fn validateResponse(header_value: ?[]const u8) Error!ExtensionNegotiation {
+        return validateResponseWithPolicy(header_value, .{
+            .enable_permessage_deflate = true,
+        });
+    }
+
+    pub fn validateResponseWithPolicy(
+        header_value: ?[]const u8,
+        policy: Policy,
+    ) Error!ExtensionNegotiation {
         const raw = header_value orelse return .{};
+        if (!policy.enable_permessage_deflate) return error.InvalidExtension;
         var negotiated: ?ExtensionNegotiation = null;
         var responses = std.mem.splitScalar(u8, raw, ',');
         while (responses.next()) |response| {
@@ -198,7 +247,12 @@ pub const ExtensionNegotiation = struct {
             const parsed = (try parseExtensionOffer(trimmed)) orelse return error.InvalidExtension;
             if (!parsed.permessage_deflate) return error.InvalidExtension;
             if (negotiated != null) return error.InvalidExtension;
-            if (!parsed.client_no_context_takeover or !parsed.server_no_context_takeover) return error.InvalidExtension;
+            if (!policy.allow_context_takeover and
+                (!parsed.client_no_context_takeover or
+                    !parsed.server_no_context_takeover))
+            {
+                return error.InvalidExtension;
+            }
             negotiated = parsed;
         }
         return negotiated orelse error.InvalidExtension;
@@ -2278,6 +2332,52 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
         "permessage-deflate; server_max_window_bits=15; server_max_window_bits=15",
     ));
+
+    try std.testing.expect(ExtensionNegotiation.offerValue(.{}) == null);
+    try std.testing.expectEqualStrings(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+        ExtensionNegotiation.offerValue(.{
+            .enable_permessage_deflate = true,
+        }).?,
+    );
+    try std.testing.expectEqualStrings(
+        "permessage-deflate",
+        ExtensionNegotiation.offerValue(.{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        }).?,
+    );
+    const takeover_accept = try ExtensionNegotiation.acceptWithPolicy(
+        allocator,
+        "permessage-deflate",
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        },
+    );
+    defer if (takeover_accept) |value| allocator.free(value);
+    try std.testing.expectEqualStrings(
+        "permessage-deflate",
+        takeover_accept.?,
+    );
+    const takeover_response = try ExtensionNegotiation
+        .validateResponseWithPolicy(
+        takeover_accept,
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        },
+    );
+    try std.testing.expect(takeover_response.permessage_deflate);
+    try std.testing.expect(!takeover_response.client_no_context_takeover);
+    try std.testing.expect(!takeover_response.server_no_context_takeover);
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseWithPolicy(
+            "permessage-deflate",
+            .{ .enable_permessage_deflate = false },
+        ),
+    );
 
     const payload = "compress me compress me compress me compress me";
     const compressed = try compressMessage(allocator, payload);

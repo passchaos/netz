@@ -60,12 +60,22 @@ const hostile_seed = smithSliceSeed(&.{
     11, 47,
     13, 0,
 });
+const preview_seed = smithSliceSeed(&.{
+    15, 15,
+    15, 64, // Client preview, discard.
+    15, 66, // Client preview, commit.
+    15, 65, // Server preview, discard.
+    15, 67, // Server preview, commit.
+    12, 0,
+    13, 0,
+});
 
 const corpus = &.{
     &takeover_seed,
     &reset_seed,
     &no_context_seed,
     &hostile_seed,
+    &preview_seed,
 };
 
 test "structured WebSocket context-takeover sequences reach target states" {
@@ -83,6 +93,10 @@ test "structured WebSocket context-takeover sequences reach target states" {
     const hostile = try exerciseSequence(hostile_seed[4..]);
     try std.testing.expect(hostile.hostile_attempts >= 2);
     try std.testing.expect(hostile.transactional_failures >= 2);
+
+    const preview = try exerciseSequence(preview_seed[4..]);
+    try std.testing.expectEqual(@as(usize, 2), preview.previews_committed);
+    try std.testing.expectEqual(@as(usize, 2), preview.previews_discarded);
 
     for (8..16) |bits| {
         const window_sequence = [_]u8{
@@ -139,6 +153,8 @@ const Summary = struct {
     hostile_attempts: usize = 0,
     transactional_failures: usize = 0,
     resets: usize = 0,
+    previews_committed: usize = 0,
+    previews_discarded: usize = 0,
 };
 
 const Direction = struct {
@@ -352,16 +368,46 @@ fn exerciseSequence(bytes: []const u8) !Summary {
                 server.reset();
                 summary.resets += 2;
             },
-            15 => {
-                try client.roundTrip(payload, true, true);
-                try server.roundTrip(payload, true, true);
-                summary.no_context_messages += 2;
-                summary.fragmented_messages += 2;
-            },
+            15 => try previewOperation(
+                if ((argument & 1) == 0) &client else &server,
+                payload,
+                (argument & 2) != 0,
+                &summary,
+            ),
             else => unreachable,
         }
     }
     return summary;
+}
+
+fn previewOperation(
+    direction: *Direction,
+    payload: []const u8,
+    commit: bool,
+    summary: *Summary,
+) !void {
+    const encoded = try direction.compressor.previewInto(
+        &direction.wire,
+        payload,
+    );
+    if (!commit) {
+        direction.compressor.discardPreview();
+        summary.previews_discarded += 1;
+        return;
+    }
+    try direction.compressor.commitPreview();
+    try std.testing.expectEqualSlices(
+        u8,
+        payload,
+        try direction.decompressor.decompressInto(
+            &direction.output,
+            encoded,
+            payload.len,
+        ),
+    );
+    @memmove(direction.last_message[0..payload.len], payload);
+    direction.last_message_len = payload.len;
+    summary.previews_committed += 1;
 }
 
 fn buildMessage(

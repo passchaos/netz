@@ -11,13 +11,14 @@ pub const Error = error{
     InvalidExtension,
     InvalidFrame,
     PayloadTooLarge,
+    PreviewPending,
     WriteFailed,
 } || std.mem.Allocator.Error;
 
 const base_options: vort.CompressionOptions = .{
     .parser = .hash,
     .lz77_options = .{
-        .window_len = 16 * 1024,
+        .window_len = 32 * 1024,
         .max_chain = 4,
         .nice_len = 32,
     },
@@ -61,6 +62,8 @@ fn removeTail(output: *std.ArrayList(u8)) Error![]const u8 {
 pub const CompressionContext = struct {
     encoder: vort.RawFixedSyncFlushEncoder,
     max_window_bits: u8,
+    pending: std.ArrayList(u8) = .empty,
+    pending_active: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -74,12 +77,84 @@ pub const CompressionContext = struct {
     }
 
     pub fn deinit(self: *CompressionContext) void {
+        self.pending.deinit(self.encoder.allocator);
         self.encoder.deinit();
         self.* = undefined;
     }
 
     pub fn resetContext(self: *CompressionContext) void {
+        self.pending.clearRetainingCapacity();
+        self.pending_active = false;
         self.encoder.resetContext();
+    }
+
+    pub fn previewPending(self: CompressionContext) bool {
+        return self.pending_active;
+    }
+
+    pub fn discardPreview(self: *CompressionContext) void {
+        self.pending.clearRetainingCapacity();
+        self.pending_active = false;
+    }
+
+    pub fn commitPreview(self: *CompressionContext) Error!void {
+        if (!self.previewPending()) return;
+        const window_len = @as(usize, 1) << @intCast(self.max_window_bits);
+        self.encoder.commitPreparedContext(self.pending.items, window_len);
+        self.pending.clearRetainingCapacity();
+        self.pending_active = false;
+    }
+
+    pub fn previewInto(
+        self: *CompressionContext,
+        output: *std.ArrayList(u8),
+        payload: []const u8,
+    ) Error![]const u8 {
+        return self.previewFragmentsInto(output, &.{payload});
+    }
+
+    pub fn previewFragmentsInto(
+        self: *CompressionContext,
+        output: *std.ArrayList(u8),
+        fragments: []const []const u8,
+    ) Error![]const u8 {
+        if (self.previewPending()) return error.PreviewPending;
+        const options = try compressionOptions(self.max_window_bits);
+        output.clearRetainingCapacity();
+        _ = self.encoder.encodeChunksAppendContextPreview(
+            output,
+            fragments,
+            options,
+        ) catch |err| return mapCompressionError(err);
+        errdefer output.clearRetainingCapacity();
+        const encoded = try removeTail(output);
+
+        var total_len: usize = 0;
+        for (fragments) |fragment| {
+            total_len = std.math.add(usize, total_len, fragment.len) catch
+                return error.PayloadTooLarge;
+        }
+        const keep = @min(total_len, options.lz77_options.window_len);
+        try self.pending.ensureTotalCapacity(self.encoder.allocator, keep);
+        self.pending.items.len = keep;
+        var skip = total_len - keep;
+        var write_offset: usize = 0;
+        for (fragments) |fragment| {
+            if (skip >= fragment.len) {
+                skip -= fragment.len;
+                continue;
+            }
+            const source = fragment[skip..];
+            @memcpy(
+                self.pending.items[write_offset..][0..source.len],
+                source,
+            );
+            write_offset += source.len;
+            skip = 0;
+        }
+        std.debug.assert(write_offset == keep);
+        self.pending_active = true;
+        return encoded;
     }
 
     pub fn compressInto(
@@ -87,13 +162,10 @@ pub const CompressionContext = struct {
         output: *std.ArrayList(u8),
         payload: []const u8,
     ) Error![]const u8 {
-        output.clearRetainingCapacity();
-        _ = self.encoder.encodeAppendContext(
-            output,
-            payload,
-            try compressionOptions(self.max_window_bits),
-        ) catch |err| return mapCompressionError(err);
-        return removeTail(output);
+        const encoded = try self.previewInto(output, payload);
+        errdefer self.discardPreview();
+        try self.commitPreview();
+        return encoded;
     }
 
     pub fn compressFragmentsInto(
@@ -101,13 +173,10 @@ pub const CompressionContext = struct {
         output: *std.ArrayList(u8),
         fragments: []const []const u8,
     ) Error![]const u8 {
-        output.clearRetainingCapacity();
-        _ = self.encoder.encodeChunksAppendContext(
-            output,
-            fragments,
-            try compressionOptions(self.max_window_bits),
-        ) catch |err| return mapCompressionError(err);
-        return removeTail(output);
+        const encoded = try self.previewFragmentsInto(output, fragments);
+        errdefer self.discardPreview();
+        try self.commitPreview();
+        return encoded;
     }
 };
 
@@ -330,5 +399,56 @@ test "context takeover decodes external zlib sequence" {
     try std.testing.expectError(
         error.InvalidFrame,
         decompressor.decompressInto(&output, &second_wire, payload.len),
+    );
+}
+
+test "context takeover preview commits or discards explicitly" {
+    const allocator = std.testing.allocator;
+    const payload = "preview context transaction preview context transaction";
+    var compressor = try CompressionContext.init(allocator, 15);
+    defer compressor.deinit();
+    var decompressor = try DecompressionContext.init(allocator, 15);
+    defer decompressor.deinit();
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(allocator);
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+
+    const discarded = try compressor.previewInto(&wire, payload);
+    const discarded_copy = try allocator.dupe(u8, discarded);
+    defer allocator.free(discarded_copy);
+    try std.testing.expect(compressor.previewPending());
+    try std.testing.expectError(
+        error.PreviewPending,
+        compressor.previewInto(&wire, payload),
+    );
+    compressor.discardPreview();
+    try std.testing.expect(!compressor.previewPending());
+
+    const after_discard = try compressor.previewInto(&wire, payload);
+    try std.testing.expectEqualSlices(u8, discarded_copy, after_discard);
+    try compressor.commitPreview();
+    try std.testing.expect(!compressor.previewPending());
+    try std.testing.expectEqualStrings(
+        payload,
+        try decompressor.decompressInto(&output, after_discard, payload.len),
+    );
+
+    const retained = try compressor.previewInto(&wire, payload);
+    try std.testing.expect(retained.len < discarded_copy.len);
+    try compressor.commitPreview();
+    try std.testing.expectEqualStrings(
+        payload,
+        try decompressor.decompressInto(&output, retained, payload.len),
+    );
+
+    compressor.resetContext();
+    const empty = try compressor.previewInto(&wire, &.{});
+    try std.testing.expect(compressor.previewPending());
+    try compressor.commitPreview();
+    try std.testing.expect(!compressor.previewPending());
+    try std.testing.expectEqualStrings(
+        "",
+        try decompressor.decompressInto(&output, empty, 0),
     );
 }

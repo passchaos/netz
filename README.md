@@ -30,7 +30,8 @@ separately checks QUIC v1/v2 Initial, Handshake, 0-RTT, and 1-RTT packet and
 header protection: Initial uses its RFC-mandated AES-128-GCM, while the other
 packet spaces exercise AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM.
 It also covers truncation and authenticated-tamper rejection. These targets do
-not yet fuzz context-takeover compression. `zig build fuzz-quic-connection`
+not yet fuzz WebSocket context takeover through live H1/H2/H3 transports.
+`zig build fuzz-quic-connection`
 adds bounded stateful QUIC v1/v2 sequences over real loopback UDP: bidirectional
 STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,

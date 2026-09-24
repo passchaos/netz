@@ -2232,6 +2232,20 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket, "ExtensionNegotiation"));
     try std.testing.expect(@hasDecl(netz.websocket, "compressMessage"));
     try std.testing.expect(@hasDecl(netz.websocket, "decompressMessage"));
+    try std.testing.expect(@hasDecl(netz.websocket, "CompressionContext"));
+    try std.testing.expect(@hasDecl(netz.websocket, "DecompressionContext"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.CompressionContext,
+        "previewInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.CompressionContext,
+        "commitPreview",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.CompressionContext,
+        "discardPreview",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Client"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Server"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Connection"));

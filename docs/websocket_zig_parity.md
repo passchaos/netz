@@ -869,9 +869,12 @@ messages, output-limit rollback, hostile compressed sequences, and every
 negotiated window. A Python zlib continuous-stream vector independently proves
 that the second message consumes prior-message history and fails after reset.
 HTTP Upgrade, RFC 8441/9220 runtime context-takeover negotiation, live transport
-I/O and TLS remain outside these fuzz surfaces. Runtime integration also needs
-an explicit compression preview/commit boundary so an expansion fallback to
-uncompressed wire data cannot accidentally advance the retained dictionary.
+I/O and TLS remain outside these fuzz surfaces. The public compressor now has
+an explicit preview/commit/discard boundary: expansion fallback or an abandoned
+write can discard the preview without advancing the retained dictionary, while
+commit is allocation-free after preview. Runtime carriers still need to consume
+that boundary at their distinct socket/HTTP-stream commit points before they may
+safely stop negotiating both `*_no_context_takeover` parameters.
 
 All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock

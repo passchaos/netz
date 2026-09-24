@@ -1,9 +1,10 @@
 //! Focused DEFLATE compatibility surface used by netz.
 //!
 //! The raw encoder writes one non-final fixed-Huffman block followed by the
-//! RFC 7692 sync-flush marker. Its hash-chain workspace is retained across
-//! independent messages, keeping the WebSocket hot path allocation-free after
-//! warmup without pulling an unrelated compression repository into the package.
+//! RFC 7692 sync-flush marker. Its hash-chain workspace is reused across
+//! independent messages, and its opt-in context API retains a bounded plaintext
+//! history across messages. This keeps the WebSocket hot path allocation-free
+//! after warmup without pulling another compression repository into the package.
 
 const std = @import("std");
 
@@ -190,7 +191,70 @@ pub const RawFixedSyncFlushEncoder = struct {
         chunks: []const []const u8,
         options: CompressionOptions,
     ) !usize {
+        const written = try self.encodeChunksAppendContextPreview(
+            out,
+            chunks,
+            options,
+        );
+        try self.commitContextChunks(chunks, options.lz77_options.window_len);
+        return written;
+    }
+
+    pub fn encodeAppendContextPreview(
+        self: *RawFixedSyncFlushEncoder,
+        out: *std.ArrayList(u8),
+        input: []const u8,
+        options: CompressionOptions,
+    ) !usize {
+        return self.encodeChunksAppendContextPreview(
+            out,
+            &.{input},
+            options,
+        );
+    }
+
+    pub fn encodeChunksAppendContextPreview(
+        self: *RawFixedSyncFlushEncoder,
+        out: *std.ArrayList(u8),
+        chunks: []const []const u8,
+        options: CompressionOptions,
+    ) !usize {
         return self.encodeChunksAppendMode(out, chunks, options, true);
+    }
+
+    pub fn commitContext(
+        self: *RawFixedSyncFlushEncoder,
+        input: []const u8,
+        window_len: usize,
+    ) !void {
+        return self.commitContextChunks(&.{input}, window_len);
+    }
+
+    pub fn commitContextChunks(
+        self: *RawFixedSyncFlushEncoder,
+        chunks: []const []const u8,
+        window_len: usize,
+    ) !void {
+        var input_len: usize = 0;
+        for (chunks) |chunk| {
+            input_len = std.math.add(usize, input_len, chunk.len) catch
+                return error.IntegerOverflow;
+        }
+        try self.rememberContext(chunks, input_len, window_len);
+    }
+
+    /// Commit a previously previewed, caller-retained context tail.
+    /// `encode*ContextPreview` preflights the complete history capacity, so
+    /// this step is allocation-free after the wire bytes have been accepted.
+    pub fn commitPreparedContext(
+        self: *RawFixedSyncFlushEncoder,
+        input: []const u8,
+        window_len: usize,
+    ) void {
+        std.debug.assert(window_len >= 256 and window_len <= 32 * 1024);
+        std.debug.assert(input.len <= window_len);
+        std.debug.assert(self.history.capacity >= window_len);
+        self.rememberContextAssumeCapacity(&.{input}, input.len, window_len);
     }
 
     fn encodeChunksAppendMode(
@@ -201,6 +265,19 @@ pub const RawFixedSyncFlushEncoder = struct {
         retain_context: bool,
     ) !usize {
         _ = options.parser;
+        const window_len = options.lz77_options.window_len;
+        if (window_len < 256 or window_len > 32 * 1024 or
+            options.lz77_options.max_chain == 0 or
+            options.lz77_options.nice_len < min_match)
+        {
+            return error.InvalidBlockPlan;
+        }
+        if (retain_context) {
+            // Reserve before exposing `history.items` through `chunk_views`; a
+            // later reallocation would otherwise leave the synthetic first
+            // chunk dangling during this encode.
+            try self.history.ensureTotalCapacity(self.allocator, window_len);
+        }
         const history_len = if (retain_context) self.history.items.len else 0;
         const input_chunks = if (retain_context) blk: {
             try self.chunk_views.resize(self.allocator, chunks.len + 1);
@@ -213,13 +290,6 @@ pub const RawFixedSyncFlushEncoder = struct {
             &self.chunk_offsets,
             input_chunks,
         );
-        const window_len = options.lz77_options.window_len;
-        if (window_len < 256 or window_len > 32 * 1024 or
-            options.lz77_options.max_chain == 0 or
-            options.lz77_options.nice_len < min_match)
-        {
-            return error.InvalidBlockPlan;
-        }
         try self.ensureWorkspace(
             input.total,
             options.lz77_options.window_len,
@@ -265,13 +335,6 @@ pub const RawFixedSyncFlushEncoder = struct {
         bits.write(0, 3); // Empty non-final stored block.
         bits.byteAlign();
         out.appendSliceAssumeCapacity(&.{ 0, 0, 0xff, 0xff });
-        if (retain_context) {
-            try self.rememberContext(
-                chunks,
-                message_len,
-                window_len,
-            );
-        }
         return out.items.len - start;
     }
 
@@ -289,6 +352,20 @@ pub const RawFixedSyncFlushEncoder = struct {
         try self.history.ensureTotalCapacity(
             self.allocator,
             keep_history + keep_input,
+        );
+        self.rememberContextAssumeCapacity(chunks, input_len, window_len);
+    }
+
+    fn rememberContextAssumeCapacity(
+        self: *RawFixedSyncFlushEncoder,
+        chunks: []const []const u8,
+        input_len: usize,
+        window_len: usize,
+    ) void {
+        const keep_input = @min(input_len, window_len);
+        const keep_history = @min(
+            self.history.items.len,
+            window_len - keep_input,
         );
         if (keep_history != 0) {
             const old_len = self.history.items.len;
