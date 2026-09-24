@@ -14,13 +14,16 @@ fuzz-stateful` drives bounded operation sequences through HTTP/1 pipelines,
 HTTP/2 flow control and HPACK, HTTP/3 control streams and QPACK, WebSocket
 fragmented-message assembly, WebTransport session/stream lifecycles, and MQTT
 Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
-These targets do not yet fuzz live network runtimes, compression payload
-internals, TLS, or encrypted QUIC packets.
-The pinned GitHub Actions workflow replays both corpora and the complete test
-gate on pushes and pull requests, then runs both coverage-guided targets daily
-and on demand. Because the source checkout currently uses sibling `../vail`
-and `../pbz` paths, repository administrators must configure the read-only
-`NETZ_DEPENDENCIES_TOKEN` secret for the private `passchaos/vail` checkout.
+`zig build fuzz-websocket-compression` separately checks hostile bounded
+DEFLATE input and exact standard/Vort single-buffer and fragmented-input
+round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`. These
+targets do not yet fuzz live network runtimes, context-takeover compression,
+TLS, or encrypted QUIC packets. The pinned GitHub Actions workflow replays all
+three corpora and the complete test gate on pushes and pull requests, then runs
+the three coverage-guided targets daily and on demand. Because the source
+checkout currently uses sibling `../vail` and `../pbz` paths, repository
+administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
+for the private `passchaos/vail` checkout.
 
 Current protocol coverage includes:
 

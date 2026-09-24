@@ -860,8 +860,11 @@ extension negotiation. Default tests replay truncations, byte flips and random
 inputs; Zig's `--fuzz` mode adds coverage guidance. The companion
 `fuzz-stateful` target drives bounded text/binary fragmentation, continuation,
 control-frame interleaving, UTF-8 completion, and aggregate message limits.
-Compression internals, HTTP Upgrade, RFC 8441/9220 scheduling, live transport
-I/O and TLS remain outside these fuzz surfaces.
+The dedicated `fuzz-websocket-compression` target feeds arbitrary bounded bytes
+to the RFC 7692 inflater and verifies exact round trips through the standard and
+Vort compressors, including fragmented plaintext and every negotiated 8-15 bit
+window. Context-takeover compression, HTTP Upgrade, RFC 8441/9220 scheduling,
+live transport I/O and TLS remain outside these fuzz surfaces.
 
 All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock
