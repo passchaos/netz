@@ -1407,6 +1407,13 @@ keep-alive, cancellation and GOAWAY gate remains green.
 
 ## Remaining evidence
 
+The shared `fuzz-parsers` target exercises strict borrowed and owned HTTP/1
+request/response parsing plus chunked decoding under a 64-KiB input and
+128-header cap. Default tests replay valid, ambiguous-length and chunked seeds
+with deterministic mutations; Zig's `--fuzz` mode adds coverage-guided search.
+HTTP/2/3 state machines, HPACK/QPACK, TLS and multi-message sequencing remain
+outside this stateless fuzz surface.
+
 The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may
 send one or more complete HTTP/1 requests, shut down its write half, and still

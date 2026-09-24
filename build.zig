@@ -78,6 +78,25 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     const run_package_tests = b.addRunArtifact(package_tests);
+    const parser_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/parser_fuzz_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            // Zig 0.16's fuzz test runner currently mixes builtin and debug
+            // StackTrace types in its error-reporting branch. Omitting error
+            // traces avoids that compiler-owned mismatch without changing
+            // parser coverage or allocator leak checks.
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_parser_fuzz_tests = b.addRunArtifact(parser_fuzz_tests);
+    const fuzz_parsers_step = b.step(
+        "fuzz-parsers",
+        "Fuzz bounded HTTP/WebSocket/WebTransport/MQTT parsers",
+    );
+    fuzz_parsers_step.dependOn(&run_parser_fuzz_tests.step);
     const quic_handshake_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -302,6 +321,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_package_tests.step);
+    test_step.dependOn(&run_parser_fuzz_tests.step);
     test_step.dependOn(&run_quic_handshake_bench_tests.step);
     test_step.dependOn(&run_quic_persistent_bench_tests.step);
     test_step.dependOn(&run_quic_quic_go_churn_tests.step);

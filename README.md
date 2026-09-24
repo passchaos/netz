@@ -1,7 +1,18 @@
 # netz
 
-`netz` is a Zig 0.16 protocol toolkit for modern application networking.  It
-starts with deterministic parsers, serializers, preallocated fixed-width wire-integer helpers, and state helpers for:
+`netz` is a Zig 0.16 protocol toolkit for modern application networking. It
+starts with deterministic parsers, serializers, preallocated fixed-width
+wire-integer helpers, and state helpers across four public protocol families.
+
+The four public protocol families share a bounded parser fuzz target.
+`zig build fuzz-parsers` replays valid and hostile HTTP/1, WebSocket,
+WebTransport, and MQTT seeds plus deterministic truncation/bit-flip/random
+mutations under the leak-checking test allocator. `zig build fuzz-parsers
+--fuzz=100000` runs Zig's coverage-guided fuzzer against the same 64-KiB-bounded
+cross-protocol target. This covers stateless message parsers, not stateful
+runtime, compression, TLS, QUIC, or multi-packet sequence fuzzing.
+
+Current protocol coverage includes:
 
 - HTTP/1.1 requests, responses, preallocated request/response/header-block writes, header field syntax validation, chunked transfer decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus validated and repeated-value-merged trailer fields, opt-in obsolete folded-field

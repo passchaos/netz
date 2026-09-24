@@ -1525,6 +1525,14 @@ rumqttd.
 
 ## Remaining work before broad superiority
 
+The shared `fuzz-parsers` target dispatches every bounded input through the
+MQTT Fixed Header and MQTT 3.1.1/5 CONNECT, CONNACK, PUBLISH, ACK,
+SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, DISCONNECT and AUTH parsers. Default
+tests replay valid and malformed seeds plus deterministic truncation/bit-flip/
+random mutations with leak checks; Zig's `--fuzz` mode adds coverage guidance.
+Broker Session ordering, reconnect, persistence, bridge and multi-packet state
+machines remain outside this stateless target.
+
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
 graceful DISCONNECT, pending-PUBLISH flush and re-authentication commands with

@@ -854,6 +854,13 @@ adapter destruction.
 
 ## Remaining evidence before a broad completion claim
 
+The shared `fuzz-parsers` target feeds bounded arbitrary bytes through
+WebSocket frame headers, owned frames, Close payloads and permessage-deflate
+extension negotiation. Default tests replay truncations, byte flips and random
+inputs; Zig's `--fuzz` mode adds coverage guidance. Stateful fragmented-message
+assembly, compression internals, HTTP Upgrade, RFC 8441/9220 scheduling and TLS
+remain outside this parser-only target.
+
 All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock
 domains before sending Ping/Close or mutating incremental receive state. The
