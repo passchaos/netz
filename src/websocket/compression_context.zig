@@ -216,6 +216,27 @@ pub const DecompressionContext = struct {
         compressed_payload: []const u8,
         max_message_bytes: usize,
     ) Error![]const u8 {
+        output.clearRetainingCapacity();
+        try output.ensureTotalCapacity(
+            self.allocator,
+            max_message_bytes,
+        );
+        const decoded = try self.decompressToSlice(
+            output.allocatedSlice()[0..max_message_bytes],
+            compressed_payload,
+        );
+        output.items.len = decoded.len;
+        return output.items;
+    }
+
+    /// Inflate one complete RFC 7692 message directly into caller-owned
+    /// storage while retaining only the negotiated history window. History is
+    /// committed only after the complete stream fits and decodes successfully.
+    pub fn decompressToSlice(
+        self: *DecompressionContext,
+        output: []u8,
+        compressed_payload: []const u8,
+    ) Error![]u8 {
         const tail = [_]u8{
             0x00, 0x00, 0xff, 0xff,
             0x01, 0x00, 0x00, 0xff,
@@ -247,23 +268,16 @@ pub const DecompressionContext = struct {
         decompressor.reader.seek = history_len;
         decompressor.reader.end = history_len;
 
-        output.clearRetainingCapacity();
-        try output.ensureTotalCapacity(
-            self.allocator,
-            max_message_bytes,
-        );
-        var writer: std.Io.Writer = .fixed(
-            output.allocatedSlice()[0..max_message_bytes],
-        );
+        var writer: std.Io.Writer = .fixed(output);
         _ = decompressor.reader.streamRemaining(&writer) catch |err| {
             return switch (err) {
                 error.WriteFailed => error.PayloadTooLarge,
                 error.ReadFailed => error.InvalidFrame,
             };
         };
-        output.items.len = writer.end;
-        try self.rememberContext(output.items);
-        return output.items;
+        const decoded = output[0..writer.end];
+        try self.rememberContext(decoded);
+        return decoded;
     }
 
     fn rememberContext(
@@ -450,5 +464,42 @@ test "context takeover preview commits or discards explicitly" {
     try std.testing.expectEqualStrings(
         "",
         try decompressor.decompressInto(&output, empty, 0),
+    );
+}
+
+test "caller-buffer context decode failure does not advance history" {
+    const allocator = std.testing.allocator;
+    const payload = "caller buffer context caller buffer context";
+    var compressor = try CompressionContext.init(allocator, 15);
+    defer compressor.deinit();
+    var decompressor = try DecompressionContext.init(allocator, 15);
+    defer decompressor.deinit();
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(allocator);
+
+    const first = try compressor.compressInto(&wire, payload);
+    const first_copy = try allocator.dupe(u8, first);
+    defer allocator.free(first_copy);
+    const second = try compressor.compressInto(&wire, payload);
+    const second_copy = try allocator.dupe(u8, second);
+    defer allocator.free(second_copy);
+
+    var too_short: [payload.len - 1]u8 = undefined;
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        decompressor.decompressToSlice(&too_short, first_copy),
+    );
+    var output: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidFrame,
+        decompressor.decompressToSlice(&output, second_copy),
+    );
+    try std.testing.expectEqualStrings(
+        payload,
+        try decompressor.decompressToSlice(&output, first_copy),
+    );
+    try std.testing.expectEqualStrings(
+        payload,
+        try decompressor.decompressToSlice(&output, second_copy),
     );
 }

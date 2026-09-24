@@ -872,9 +872,12 @@ HTTP Upgrade, RFC 8441/9220 runtime context-takeover negotiation, live transport
 I/O and TLS remain outside these fuzz surfaces. The public compressor now has
 an explicit preview/commit/discard boundary: expansion fallback or an abandoned
 write can discard the preview without advancing the retained dictionary, while
-commit is allocation-free after preview. Runtime carriers still need to consume
-that boundary at their distinct socket/HTTP-stream commit points before they may
-safely stop negotiating both `*_no_context_takeover` parameters.
+commit is allocation-free after preview. The shared runtime compression scratch
+now owns the same preview transaction, supports stateful decode directly into
+caller storage, and can observe fragmented raw-frame messages solely to advance
+the receive dictionary. Runtime carriers still need to invoke those boundaries
+at their distinct socket/HTTP-stream commit points before they may safely stop
+negotiating both `*_no_context_takeover` parameters.
 
 All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock

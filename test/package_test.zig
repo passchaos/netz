@@ -2246,6 +2246,10 @@ test "public modules are reachable" {
         netz.websocket.CompressionContext,
         "discardPreview",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.DecompressionContext,
+        "decompressToSlice",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Client"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Server"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Connection"));
