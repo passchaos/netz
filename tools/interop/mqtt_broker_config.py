@@ -972,12 +972,30 @@ def run_openssl(*arguments: object) -> None:
     )
 
 
-def create_ca(directory: Path, name: str, common_name: str) -> tuple[Path, Path]:
+def create_ca(
+    directory: Path,
+    name: str,
+    common_name: str,
+    algorithm: str = "ec",
+) -> tuple[Path, Path]:
     key = directory / f"{name}.key"
     certificate = directory / f"{name}.crt"
-    run_openssl(
-        "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
-    )
+    if algorithm == "ec":
+        run_openssl(
+            "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
+        )
+    elif algorithm == "rsa":
+        run_openssl(
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+            key,
+        )
+    else:
+        raise AssertionError(f"unsupported CA algorithm {algorithm}")
     run_openssl(
         "req",
         "-new",
@@ -1008,6 +1026,7 @@ def create_signed_certificate(
     serial: int,
     extended_key_usage: str,
     subject_alt_name: str | None = None,
+    key_algorithm: str = "ec",
 ) -> tuple[Path, Path]:
     key = directory / f"{name}.key"
     request = directory / f"{name}.csr"
@@ -1021,9 +1040,22 @@ def create_signed_certificate(
     if subject_alt_name is not None:
         extension_lines.append(f"subjectAltName={subject_alt_name}")
     extensions.write_text("\n".join(extension_lines) + "\n")
-    run_openssl(
-        "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
-    )
+    if key_algorithm == "ec":
+        run_openssl(
+            "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
+        )
+    elif key_algorithm == "rsa":
+        run_openssl(
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-out",
+            key,
+        )
+    else:
+        raise AssertionError(f"unsupported key algorithm {key_algorithm}")
     subject = f"/CN={common_name}" if common_name is not None else "/O=no-common-name"
     run_openssl("req", "-new", "-key", key, "-subj", subject, "-out", request)
     run_openssl(
@@ -1685,6 +1717,96 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_rsa_crl_listener_case(broker: Path, directory: Path) -> None:
+    server_ca = directory / "server-ca.crt"
+    server_certificate = directory / "mtls-server.crt"
+    server_key = directory / "mtls-server.key"
+    rsa_ca, rsa_ca_key = create_ca(
+        directory,
+        "rsa-client-ca",
+        "RSA Client Root",
+        "rsa",
+    )
+    rsa_client, rsa_client_key = create_signed_certificate(
+        directory,
+        "rsa-client",
+        "rsa-client",
+        rsa_ca,
+        rsa_ca_key,
+        401,
+        "clientAuth",
+        key_algorithm="rsa",
+    )
+    rsa_revoked, rsa_revoked_key = create_signed_certificate(
+        directory,
+        "rsa-revoked-client",
+        "rsa-revoked-client",
+        rsa_ca,
+        rsa_ca_key,
+        402,
+        "clientAuth",
+        key_algorithm="rsa",
+    )
+    rsa_crl = create_crl(
+        directory,
+        "rsa-client-revocations",
+        rsa_ca,
+        rsa_ca_key,
+        rsa_revoked,
+    )
+
+    port = free_port()
+    config = directory / "rsa-crl.conf"
+    write_mtls_config(
+        config,
+        port,
+        server_certificate,
+        server_key,
+        rsa_ca,
+        crlfile=rsa_crl,
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"RSA CRL broker failed to start: {ready}")
+    assert_openssl_mqtt_success(
+        openssl_mqtt_client(
+            port,
+            server_ca,
+            rsa_client,
+            rsa_client_key,
+        )
+    )
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError("RSA CRL good-client broker exited with an error")
+
+    rejected_port = free_port()
+    rejected_config = directory / "rsa-crl-revoked.conf"
+    write_mtls_config(
+        rejected_config,
+        rejected_port,
+        server_certificate,
+        server_key,
+        rsa_ca,
+        crlfile=rsa_crl,
+    )
+    run_mtls_rejection_case(
+        broker,
+        rejected_config,
+        rejected_port,
+        server_ca,
+        "CertificateUntrusted",
+        rsa_revoked,
+        rsa_revoked_key,
+    )
+
+
 def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
     certificate = directory / "server-cert.pem"
     rsa_key = directory / "rsa-key.pem"
@@ -1754,13 +1876,14 @@ def main() -> None:
         run_persistence_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
         run_mtls_listener_case(args.broker, directory)
+        run_rsa_crl_listener_case(args.broker, directory)
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
-        "certificate-CN identity mapping, signed CRL revocation, strict TLS "
+        "certificate-CN identity mapping, P-256/RSA signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, and snapshot restore "
         + RUNTIME
     )
