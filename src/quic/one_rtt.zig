@@ -14246,10 +14246,16 @@ pub const Connection = struct {
 
     fn qlogEventTime(self: Connection, now_ns: u64) u64 {
         const observer = self.config.qlog_observer orelse return now_ns;
-        return switch (observer.trace.options.time_format) {
+        const normalized = switch (observer.trace.options.time_format) {
             .relative => @max(now_ns, observer.trace.options.reference_time_ns),
             .absolute => now_ns,
         };
+        // Connection APIs accept both exact nanosecond timestamps and coarse
+        // millisecond close timestamps, while convenience operations sample
+        // the I/O clock internally. Preserve event emission order when those
+        // sources round differently; Trace.writeEvent remains strict for
+        // direct callers and catches genuinely regressed event streams.
+        return @max(normalized, observer.trace.last_time_ns orelse normalized);
     }
 
     fn waitForPacing(self: Connection, now_ns: u64) Error!void {

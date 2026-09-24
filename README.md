@@ -654,7 +654,9 @@ Current protocol coverage includes:
   optional 1-RTT connection observers that automatically emit successful
   connection-start, transport-parameter, packet send/receive, packet-loss,
   recovery metrics, key-update, key-retirement, and close events with sticky,
-  caller-queryable diagnostics that never roll back network state, plus a
+  caller-queryable diagnostics that never roll back network state; connection
+  observation also preserves monotonic qlog order across explicit nanosecond,
+  internal awake-clock, and millisecond close timestamps, plus a
   no-allocation 1-RTT `stats`/`getStats` snapshot with lifetime packet/byte,
   loss, stream, DATAGRAM, RTT, congestion, recovery, sent/received-packet
   including retained ACK-history plus ack-eliciting in-flight size and latest send time, ECN,

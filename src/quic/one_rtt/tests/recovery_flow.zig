@@ -9,7 +9,6 @@ test "QUIC server anti-amplification batch retains only sent wire bytes" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var sender_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -8394,7 +8393,6 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
-
     var server_endpoint = try quic.runtime.Endpoint.bind(
         allocator,
         io,
@@ -8410,13 +8408,13 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     );
     defer client_endpoint.deinit();
 
-    var client_output: std.Io.Writer.Allocating = .init(allocator);
-    defer client_output.deinit();
-    var client_trace = quic.qlog.Trace.init(&client_output.writer, .{});
+    var client_output_storage: [32 * 1024]u8 = undefined;
+    var client_output: std.Io.Writer = .fixed(&client_output_storage);
+    var client_trace = quic.qlog.Trace.init(&client_output, .{});
     var client_observer = quic.qlog.Observer.init(&client_trace);
-    var server_output: std.Io.Writer.Allocating = .init(allocator);
-    defer server_output.deinit();
-    var server_trace = quic.qlog.Trace.init(&server_output.writer, .{});
+    var server_output_storage: [32 * 1024]u8 = undefined;
+    var server_output: std.Io.Writer = .fixed(&server_output_storage);
+    var server_trace = quic.qlog.Trace.init(&server_output, .{});
     var server_observer = quic.qlog.Observer.init(&server_trace);
 
     const client_cid = [_]u8{ 1, 2, 3, 4 };
@@ -8445,111 +8443,120 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
     defer server.deinit();
 
     const ping = [_]quic.Frame{.{ .ping = {} }};
+    // Explicit transport timestamps deliberately differ from the internal
+    // awake-clock samples used by key update and close. The connection's qlog
+    // adapter must preserve emission order across those timestamp sources.
     for (0..5) |_| try client.sendAt(&ping, 1_000_000);
+    if (client.takeQlogError()) |err| return err;
     for (0..4) |_| {
         var dropped = try server_endpoint.receiveBytes();
         dropped.deinit(allocator);
     }
     var received = try server.receivePacketAt(2_000_000);
     defer received.deinit(allocator);
+    if (server.takeQlogError()) |err| return err;
     try std.testing.expect(try server.sendAckForPacketsIfNeeded(&.{received}));
+    if (server.takeQlogError()) |err| return err;
     var ack = try client.receivePacketAt(3_000_000);
     defer ack.deinit(allocator);
+    if (client.takeQlogError()) |err| return err;
     try client.initiateKeyUpdate();
+    if (client.takeQlogError()) |err| return err;
     try client.closeApplicationAt(42, "done", null, null);
+    if (client.takeQlogError()) |err| return err;
     client.schedulePreviousOneRttKeyDiscard(std.math.maxInt(i64));
     try std.testing.expect(client.discardExpiredOneRttKeys(std.math.maxInt(i64)));
 
-    try std.testing.expect(client.takeQlogError() == null);
-    try std.testing.expect(server.takeQlogError() == null);
+    if (client.takeQlogError()) |err| return err;
+    if (server.takeQlogError()) |err| return err;
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"connectivity:connection_started\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"quic:parameters_set\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"owner\":\"local\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"owner\":\"remote\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"quic:packet_sent\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"quic:packet_received\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"recovery:metrics_updated\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"recovery:packet_lost\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"trigger\":\"packet_threshold\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"security:key_updated\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"key_type\":\"client_1rtt_secret\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"security:key_retired\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"generation\":0",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"name\":\"connectivity:connection_closed\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"trigger\":\"local_close\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"application_code\":42",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        client_output.written(),
+        client_output.buffered(),
         "\"reason\":\"done\"",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
-        server_output.written(),
+        server_output.buffered(),
         "\"frame_type\":\"ping\"",
     ) != null);
 }
