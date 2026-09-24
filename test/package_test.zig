@@ -207,6 +207,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));
     try std.testing.expect(@hasDecl(netz.tls, "client_ca_file"));
+    try std.testing.expect(@hasDecl(netz.tls, "client_crl_file"));
     try std.testing.expect(@hasDecl(
         netz.tls.server_identity_file,
         "Identity",

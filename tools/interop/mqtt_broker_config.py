@@ -1048,6 +1048,71 @@ def create_signed_certificate(
     return certificate, key
 
 
+def create_crl(
+    directory: Path,
+    name: str,
+    ca_certificate: Path,
+    ca_key: Path,
+    revoked_certificate: Path,
+) -> Path:
+    ca_directory = directory / f"{name}-database"
+    ca_directory.mkdir()
+    (ca_directory / "newcerts").mkdir()
+    (ca_directory / "index.txt").write_text("")
+    (ca_directory / "serial").write_text("1000\n")
+    (ca_directory / "crlnumber").write_text("1000\n")
+    config = ca_directory / "openssl.cnf"
+    config.write_text(
+        "[ ca ]\n"
+        "default_ca = CA_default\n"
+        "[ CA_default ]\n"
+        f"dir = {ca_directory}\n"
+        "database = $dir/index.txt\n"
+        "new_certs_dir = $dir/newcerts\n"
+        f"certificate = {ca_certificate}\n"
+        f"private_key = {ca_key}\n"
+        "serial = $dir/serial\n"
+        "crlnumber = $dir/crlnumber\n"
+        "default_md = sha256\n"
+        "default_crl_days = 1\n"
+        "policy = policy_any\n"
+        "[ policy_any ]\n"
+        "commonName = optional\n"
+    )
+    run_openssl(
+        "ca",
+        "-batch",
+        "-config",
+        config,
+        "-revoke",
+        revoked_certificate,
+        "-crl_reason",
+        "keyCompromise",
+    )
+    crl = directory / f"{name}.crl"
+    run_openssl("ca", "-batch", "-config", config, "-gencrl", "-out", crl)
+    return crl
+
+
+def tamper_pem_crl(source: Path, destination: Path) -> None:
+    encoded = "".join(
+        line.strip()
+        for line in source.read_text().splitlines()
+        if not line.startswith("-----")
+    )
+    der = bytearray(base64.b64decode(encoded))
+    if not der:
+        raise AssertionError("generated CRL was empty")
+    der[-1] ^= 1
+    damaged = base64.b64encode(der).decode()
+    lines = [damaged[index : index + 64] for index in range(0, len(damaged), 64)]
+    destination.write_text(
+        "-----BEGIN X509 CRL-----\n"
+        + "\n".join(lines)
+        + "\n-----END X509 CRL-----\n"
+    )
+
+
 def openssl_mqtt_client(
     port: int,
     server_ca: Path,
@@ -1138,6 +1203,7 @@ def write_mtls_config(
     server_key: Path,
     client_ca: Path,
     protocol: str = "mqtt",
+    crlfile: Path | None = None,
 ) -> None:
     path.write_text(
         f"listener {port} 127.0.0.1\n"
@@ -1145,6 +1211,7 @@ def write_mtls_config(
         + f"certfile {server_certificate}\n"
         + f"keyfile {server_key}\n"
         + f"cafile {client_ca}\n"
+        + (f"crlfile {crlfile}\n" if crlfile is not None else "")
         + "require_certificate true\n"
         + "allow_anonymous true\n"
         + "max_connections 1\n"
@@ -1281,6 +1348,22 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         203,
         "clientAuth",
     )
+    revoked_certificate, revoked_key = create_signed_certificate(
+        directory,
+        "revoked-client",
+        "revoked-client",
+        client_ca,
+        client_ca_key,
+        204,
+        "clientAuth",
+    )
+    client_crl = create_crl(
+        directory,
+        "client-revocations",
+        client_ca,
+        client_ca_key,
+        revoked_certificate,
+    )
 
     identity_acl = directory / "identity.acl"
     identity_acl.write_text(
@@ -1306,6 +1389,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
+        f"crlfile {client_crl}\n"
         "require_certificate true\n"
         "use_identity_as_username true\n"
         "use_username_as_clientid true\n"
@@ -1316,6 +1400,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
+        f"crlfile {client_crl}\n"
         "require_certificate true\n"
         "use_identity_as_username true\n"
         "use_username_as_clientid true\n"
@@ -1431,6 +1516,12 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
             wrong_purpose_key,
             "CertificateUntrusted",
         ),
+        (
+            "revoked-client",
+            revoked_certificate,
+            revoked_key,
+            "CertificateUntrusted",
+        ),
     )
     for name, certificate, key, expected_error in rejection_cases:
         port = free_port()
@@ -1441,6 +1532,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
             server_certificate,
             server_key,
             client_ca,
+            crlfile=client_crl,
         )
         run_mtls_rejection_case(
             broker,
@@ -1460,6 +1552,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         server_certificate,
         server_key,
         client_ca,
+        crlfile=client_crl,
     )
     no_identity_text = no_identity_config.read_text().replace(
         "require_certificate true\n",
@@ -1499,6 +1592,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         server_key,
         client_ca,
         "websockets",
+        client_crl,
     )
     run_wss_mtls_rejection_case(
         broker,
@@ -1545,6 +1639,49 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
             raise AssertionError(
                 "an earlier listener was bound before client CA validation"
+            )
+
+    tampered_crl = directory / "tampered.crl"
+    tamper_pem_crl(client_crl, tampered_crl)
+    cleartext_port = free_port()
+    invalid_crl_port = free_port()
+    while invalid_crl_port == cleartext_port:
+        invalid_crl_port = free_port()
+    invalid_crl_config = directory / "invalid-crl.conf"
+    invalid_crl_config.write_text(
+        f"listener {cleartext_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {invalid_crl_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        f"crlfile {tampered_crl}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    invalid_crl_result = subprocess.run(
+        [str(broker), f"--config={invalid_crl_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if (
+        invalid_crl_result.returncode == 0
+        or "InvalidCrl" not in invalid_crl_result.stdout
+    ):
+        raise AssertionError(
+            "tampered CRL did not fail before listen: "
+            + invalid_crl_result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
+            raise AssertionError(
+                "an earlier listener was bound before CRL validation"
             )
 
 
@@ -1623,8 +1760,8 @@ def main() -> None:
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
-        "certificate-CN identity mapping, strict TLS key/CA/EKU/identity "
-        "rejection, and snapshot restore "
+        "certificate-CN identity mapping, signed CRL revocation, strict TLS "
+        "key/CA/EKU/identity/CRL rejection, and snapshot restore "
         + RUNTIME
     )
 

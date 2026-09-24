@@ -53,6 +53,8 @@ starts with deterministic parsers, serializers, preallocated fixed-width wire-in
 - Strict owned PEM CA-file loading for TLS client authentication, with bounded
   certificate counts, validity and clientAuth CA-usage checks, duplicate-name
   rejection, and exact DER authority names for TLS 1.3 CertificateRequest
+- Strict owned P-256/SHA-256 PEM CRL loading, including issuer/cRLSign,
+  signature, update-window, extension and leaf-serial validation before bind
 - Caller-supplied bounded caching of successful X.509 bundle verification for
   repeated exact hostname/DER chains; per-connection CertificateVerify remains
   mandatory, and replacing the trust bundle or time snapshot requires replacing
@@ -1044,8 +1046,8 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
 # policy, Mosquitto password hashes, authentication rejection, ACL read/write/
 # deny/pattern behavior, OpenSSL-verified TLS/mTLS, acceptable CA names and
-# certificate-CN username/Client-ID mapping, strict key/CA/EKU/identity
-# rejection, and snapshot restore through the production example.
+# certificate-CN username/Client-ID mapping, signed CRL revocation, strict
+# key/CA/EKU/identity/CRL rejection, and snapshot restore through the example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
 # Build the pinned Mosquitto checkout and bridge two independent broker
 # processes through netz across MQTT versions and QoS 0/1/2. QoS 2 covers the

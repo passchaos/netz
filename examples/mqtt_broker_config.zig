@@ -147,11 +147,25 @@ pub fn run(
     defer for (client_cas) |*maybe_ca| {
         if (maybe_ca.*) |*ca| ca.deinit();
     };
+    const client_crls = try allocator.alloc(
+        ?netz.tls.client_crl_file.File,
+        config.listeners.len,
+    );
+    defer allocator.free(client_crls);
+    @memset(client_crls, null);
+    defer for (client_crls) |*maybe_crl| {
+        if (maybe_crl.*) |*crl| crl.deinit();
+    };
     const client_verifiers = try allocator.alloc(
         netz.tls.trust.ClientCertificateBundleVerifier,
         config.listeners.len,
     );
     defer allocator.free(client_verifiers);
+    const client_crl_verifiers = try allocator.alloc(
+        netz.tls.client_crl_file.Verifier,
+        config.listeners.len,
+    );
+    defer allocator.free(client_crl_verifiers);
     const client_auth_policies = try allocator.alloc(
         ?mqtt.tls_runtime.ClientAuthPolicy,
         config.listeners.len,
@@ -180,8 +194,22 @@ pub fn run(
             client_verifiers[index] = ca.verifier(
                 std.Io.Timestamp.now(io, .real).toSeconds(),
             );
+            const verifier = if (configured.crlfile.len != 0) blk: {
+                client_crls[index] = try netz.tls.client_crl_file.load(
+                    allocator,
+                    io,
+                    std.Io.Dir.cwd(),
+                    configured.crlfile,
+                    ca,
+                );
+                client_crl_verifiers[index] = .{
+                    .trust = client_verifiers[index],
+                    .crls = &client_crls[index].?,
+                };
+                break :blk client_crl_verifiers[index].clientVerifier();
+            } else client_verifiers[index].clientVerifier();
             client_auth_policies[index] = .{
-                .verifier = client_verifiers[index].clientVerifier(),
+                .verifier = verifier,
                 .certificate_authorities = ca.authorities(),
                 .requirement = .required,
             };

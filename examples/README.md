@@ -98,6 +98,7 @@ protocol websockets
 certfile server-chain.pem
 keyfile server-key.pem
 cafile client-ca.pem
+crlfile client-revocations.pem
 require_certificate true
 use_identity_as_username true
 mount_point tenant/
@@ -106,7 +107,7 @@ max_connections 16
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
-`keyfile`, `cafile`, `require_certificate`, `use_identity_as_username`,
+`keyfile`, `cafile`, `crlfile`, `require_certificate`, `use_identity_as_username`,
 `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
@@ -131,8 +132,12 @@ keys, include, reload, plugin, bridge, and full Mosquitto configuration remain
 outside this subset and fail closed. `cafile` and `require_certificate true`
 must occur together on a TLS listener. Every PEM CA is bounded, unique by DER
 Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;
-its exact DER Subject is advertised in TLS 1.3 CertificateRequest. Client
-optional client certificates, `capath`, and CRLs are not accepted. When
+its exact DER Subject is advertised in TLS 1.3 CertificateRequest. Optional
+`crlfile` PEM lists must be signed by a unique CA in `cafile`; P-256/SHA-256
+issuer/signature, cRLSign, thisUpdate/nextUpdate, extensions and leaf serials
+are validated before bind. Revoked clients are rejected during TLS. RSA or
+Ed25519-signed, indirect, delta, expired, future, malformed and unmatched CRLs
+fail closed. Optional client certificates and `capath` are not accepted. When
 `use_identity_as_username true` is also set, the verified leaf's unique Subject
 CN replaces any wire username and the wire password is ignored before password,
 ACL, Session, Client ID, or Will policy. The CN is converted from supported
