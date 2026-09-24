@@ -396,15 +396,34 @@ fn previewOperation(
         return;
     }
     try direction.compressor.commitPreview();
+    var decoded_storage: [max_message_bytes]u8 = undefined;
+    const decoded = try direction.decompressor.previewToSlice(
+        decoded_storage[0..payload.len],
+        encoded,
+    );
     try std.testing.expectEqualSlices(
         u8,
         payload,
-        try direction.decompressor.decompressInto(
-            &direction.output,
+        decoded,
+    );
+    try std.testing.expect(direction.decompressor.previewPending());
+    try std.testing.expectError(
+        error.PreviewPending,
+        direction.decompressor.previewToSlice(
+            decoded_storage[0..payload.len],
             encoded,
-            payload.len,
         ),
     );
+    direction.decompressor.discardPreview();
+    try std.testing.expectEqualSlices(
+        u8,
+        payload,
+        try direction.decompressor.previewToSlice(
+            decoded_storage[0..payload.len],
+            encoded,
+        ),
+    );
+    direction.decompressor.commitPreview();
     @memmove(direction.last_message[0..payload.len], payload);
     direction.last_message_len = payload.len;
     summary.previews_committed += 1;

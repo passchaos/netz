@@ -838,6 +838,175 @@ test "HTTP1 bounded TCP send resumes exact suffix after backpressure" {
     try std.testing.expectEqualSlices(u8, payload, parsed_slices.payload);
 }
 
+test "HTTP1 context takeover commits only after bounded send completes" {
+    if (comptime @import("builtin").os.tag == .windows) return;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const streams = try testNetworkStreams(io);
+    defer streams[1].close(io);
+
+    const send_buffer: c_int = 4096;
+    try std.posix.setsockopt(
+        streams[0].socket.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.SNDBUF,
+        std.mem.asBytes(&send_buffer),
+    );
+    const history_len = 16 * 1024;
+    const payload = try allocator.alloc(u8, history_len * 32);
+    defer allocator.free(payload);
+    var random_state: u64 = 0xd1b5_4a32_d192_ed03;
+    const block_len = 1024;
+    var offset: usize = 0;
+    while (offset < payload.len) : (offset += block_len * 2) {
+        for (payload[offset..][0..block_len]) |*byte| {
+            random_state ^= random_state << 13;
+            random_state ^= random_state >> 7;
+            random_state ^= random_state << 17;
+            byte.* = @truncate(random_state);
+        }
+        @memcpy(
+            payload[offset + block_len ..][0..block_len],
+            payload[offset..][0..block_len],
+        );
+    }
+
+    var connection = runtime.testing.initDirectConnection(
+        allocator,
+        io,
+        streams[0],
+        .client,
+        .{
+            .max_frame_bytes = payload.len,
+            .max_message_bytes = payload.len,
+        },
+    );
+    defer connection.close();
+    connection.permessage_deflate = true;
+    connection.compression_send_context_takeover = true;
+    connection.compression_threshold = 0;
+
+    var progress: runtime.MessageWriteProgress = .{};
+    try std.testing.expectError(
+        error.Timeout,
+        connection.sendBinaryWithTimeout(
+            payload,
+            &progress,
+            .fromMilliseconds(30),
+        ),
+    );
+    try std.testing.expect(progress.committed_bytes > 0);
+    try std.testing.expect(progress.committed_bytes < progress.total_bytes);
+    try std.testing.expect(!progress.frame_committed);
+    try std.testing.expect(connection.compression_send.previewPending());
+
+    const first_wire = try allocator.alloc(u8, progress.total_bytes);
+    defer allocator.free(first_wire);
+    const Shared = struct {
+        io: std.Io,
+        stream: std.Io.net.Stream,
+        out: []u8,
+        read: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            while (self.read < self.out.len) {
+                var parts = [_][]u8{self.out[self.read..]};
+                const count = self.io.vtable.netRead(
+                    self.io.userdata,
+                    self.stream.socket.handle,
+                    &parts,
+                ) catch |err| {
+                    self.err = err;
+                    return;
+                };
+                if (count == 0) {
+                    self.err = error.TestUnexpectedResult;
+                    return;
+                }
+                self.read += count;
+            }
+        }
+    };
+    var shared = Shared{
+        .io = io,
+        .stream = streams[1],
+        .out = first_wire,
+    };
+    const reader = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var reader_joined = false;
+    defer if (!reader_joined) {
+        connection.stream.shutdown(io, .both) catch {};
+        reader.join();
+    };
+    try connection.sendBinaryWithTimeout(
+        payload,
+        &progress,
+        .fromSeconds(3),
+    );
+    reader.join();
+    reader_joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(progress.frame_committed);
+    try std.testing.expect(!connection.compression_send.previewPending());
+
+    var first = try websocket.parseFrameOptions(allocator, first_wire, .{
+        .expect_mask = .masked,
+        .allow_rsv1 = true,
+    });
+    defer first.deinit(allocator);
+    try std.testing.expect(first.header.rsv1);
+    var decoder = try websocket.DecompressionContext.init(allocator, 15);
+    defer decoder.deinit();
+    const decoded = try allocator.alloc(u8, payload.len);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        payload,
+        try decoder.decompressToSlice(decoded, first.payload),
+    );
+
+    try connection.sendBinary(payload[payload.len - history_len ..]);
+    const second_payload_len = connection.compression_send.payload.items.len;
+    var header_storage: [websocket.max_frame_header_len]u8 = undefined;
+    const second_header = try websocket.writeFrameHeaderForLengthInto(
+        &header_storage,
+        .binary,
+        second_payload_len,
+        .{ .mask_key = .{ 0, 0, 0, 0 }, .rsv1 = true },
+    );
+    const second_wire = try allocator.alloc(
+        u8,
+        second_header.len + second_payload_len,
+    );
+    defer allocator.free(second_wire);
+    try readExact(io, streams[1], second_wire);
+    var second = try websocket.parseFrameOptions(allocator, second_wire, .{
+        .expect_mask = .masked,
+        .allow_rsv1 = true,
+    });
+    defer second.deinit(allocator);
+    try std.testing.expect(second.header.rsv1);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        websocket.decompressMessage(
+            allocator,
+            second.payload,
+            history_len,
+        ),
+    );
+    var second_decoded: [history_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        payload[payload.len - history_len ..],
+        try decoder.decompressToSlice(&second_decoded, second.payload),
+    );
+}
+
 test "HTTP1 bounded in-place send masks once and resumes exact suffix" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

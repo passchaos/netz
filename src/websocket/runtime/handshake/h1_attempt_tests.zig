@@ -546,3 +546,105 @@ test "WebSocket HTTP1 accepted attempt skips informational and preserves coalesc
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "WebSocket HTTP1 default client rejects unsolicited context takeover" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: *net.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const stream = self.listener.accept(self.io) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer stream.close(self.io);
+            var request = http1_runtime.readRequestFromStreamWithTimeout(
+                self.allocator,
+                self.io,
+                stream,
+                .{ .max_head_bytes = 4096, .max_body_bytes = 0 },
+                .{ .max_headers = 32 },
+                .fromSeconds(3),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer request.deinit(self.allocator);
+            const key = request.request.header("sec-websocket-key") orelse {
+                self.err = error.MissingHeader;
+                return;
+            };
+            const accept = websocket.acceptKey(key);
+            var response: std.ArrayList(u8) = .empty;
+            defer response.deinit(self.allocator);
+            response.appendSlice(
+                self.allocator,
+                "HTTP/1.1 101 Switching Protocols\r\n" ++
+                    "Upgrade: websocket\r\n" ++
+                    "Connection: Upgrade\r\n" ++
+                    "Sec-WebSocket-Accept: ",
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            response.appendSlice(self.allocator, &accept) catch |err| {
+                self.err = err;
+                return;
+            };
+            response.appendSlice(
+                self.allocator,
+                "\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n",
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            writeAll(self.io, stream, response.items) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var shared = Shared{
+        .allocator = allocator,
+        .io = io,
+        .listener = &listener,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var attempt = try runtime.Client.connectAttemptWithTimeout(
+        allocator,
+        io,
+        listener.socket.address,
+        .{
+            .host = "localhost",
+            .enable_permessage_deflate = true,
+            .limits = .{ .max_head_bytes = 4096 },
+        },
+        .fromSeconds(3),
+    );
+    defer attempt.deinit();
+    try std.testing.expect(attempt.accepted());
+    try std.testing.expectError(
+        error.InvalidExtension,
+        attempt.requireAccepted(),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}

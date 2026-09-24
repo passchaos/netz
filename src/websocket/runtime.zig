@@ -1356,15 +1356,22 @@ fn receiveUpgradeRequestFromTransport(
     if (options.require_subprotocol and selected_protocol == null) {
         return error.InvalidSubprotocol;
     }
+    const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+        .enable_permessage_deflate = options.enable_permessage_deflate,
+        .allow_context_takeover = options.allow_context_takeover,
+    };
     const selected_extension =
-        try websocket.ExtensionNegotiation.acceptClientHeaders(
+        try websocket.ExtensionNegotiation.acceptClientHeadersWithPolicy(
             allocator,
             request.headers,
-            options.enable_permessage_deflate,
+            extension_policy,
         );
     errdefer if (selected_extension) |extension| allocator.free(extension);
     const negotiated_extension = if (selected_extension) |extension|
-        try websocket.ExtensionNegotiation.validateResponse(extension)
+        try websocket.ExtensionNegotiation.validateResponseWithPolicy(
+            extension,
+            extension_policy,
+        )
     else
         websocket.ExtensionNegotiation{};
 
@@ -1655,6 +1662,9 @@ pub const AcceptOptions = struct {
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http1.Header = &.{},
     enable_permessage_deflate: bool = false,
+    /// Permit RFC 7692 history retention in either negotiated direction.
+    /// Disabled by default so existing endpoints retain no-context behavior.
+    allow_context_takeover: bool = false,
     /// Minimum complete message size considered for outbound compression.
     /// Inbound compressed messages remain accepted after negotiation.
     compression_threshold: usize = default_compression_threshold,
@@ -1843,8 +1853,13 @@ pub const PendingUpgrade = struct {
             .limits = limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = negotiated_extension.permessage_deflate,
+            .compression_send_context_takeover = negotiated_extension.permessage_deflate and
+                !negotiated_extension.server_no_context_takeover,
+            .compression_receive_context_takeover = negotiated_extension.permessage_deflate and
+                !negotiated_extension.client_no_context_takeover,
             .compression_threshold = compression_threshold,
             .compression_send_max_window_bits = negotiated_extension.server_max_window_bits orelse 15,
+            .compression_receive_max_window_bits = negotiated_extension.client_max_window_bits orelse 15,
         };
     }
 
@@ -1937,6 +1952,7 @@ pub const ConnectAttempt = struct {
     key: [24]u8,
     protocols: []const []const u8,
     enable_permessage_deflate: bool,
+    allow_context_takeover: bool,
     compression_threshold: usize,
     limits: Limits,
 
@@ -1989,10 +2005,16 @@ pub const ConnectAttempt = struct {
             self.allocator.free(protocol);
         };
         const selected_extension = try websocket.ExtensionNegotiation
-            .validateResponse(try optionalSingletonHeader(
-            self.response.headers,
-            "sec-websocket-extensions",
-        ));
+            .validateResponseWithPolicy(
+            try optionalSingletonHeader(
+                self.response.headers,
+                "sec-websocket-extensions",
+            ),
+            .{
+                .enable_permessage_deflate = self.enable_permessage_deflate,
+                .allow_context_takeover = self.allow_context_takeover,
+            },
+        );
         if (selected_extension.permessage_deflate and
             !self.enable_permessage_deflate)
         {
@@ -2018,8 +2040,13 @@ pub const ConnectAttempt = struct {
             .limits = self.limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = selected_extension.permessage_deflate,
+            .compression_send_context_takeover = selected_extension.permessage_deflate and
+                !selected_extension.client_no_context_takeover,
+            .compression_receive_context_takeover = selected_extension.permessage_deflate and
+                !selected_extension.server_no_context_takeover,
             .compression_threshold = self.compression_threshold,
             .compression_send_max_window_bits = selected_extension.client_max_window_bits orelse 15,
+            .compression_receive_max_window_bits = selected_extension.server_max_window_bits orelse 15,
             .inbuf = .fromOwnedSlice(initial_websocket_bytes),
         };
         const allocator = self.allocator;
@@ -3422,10 +3449,13 @@ pub const Client = struct {
             headers[header_index] = .{ .name = "Origin", .value = origin };
             header_index += 1;
         }
-        if (options.enable_permessage_deflate) {
+        if (websocket.ExtensionNegotiation.offerValue(.{
+            .enable_permessage_deflate = options.enable_permessage_deflate,
+            .allow_context_takeover = options.allow_context_takeover,
+        })) |extension_offer| {
             headers[header_index] = .{
                 .name = "Sec-WebSocket-Extensions",
-                .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+                .value = extension_offer,
             };
             header_index += 1;
         }
@@ -3543,6 +3573,7 @@ pub const Client = struct {
             .key = key,
             .protocols = options.protocols,
             .enable_permessage_deflate = options.enable_permessage_deflate,
+            .allow_context_takeover = options.allow_context_takeover,
             .compression_threshold = options.compression_threshold,
             .limits = options.limits,
         };
@@ -3577,6 +3608,9 @@ pub const ConnectOptions = struct {
     /// create an ambiguous or body-bearing Upgrade request.
     extra_headers: []const http1.Header = &.{},
     enable_permessage_deflate: bool = false,
+    /// Offer RFC 7692 context takeover. The peer may still select
+    /// direction-specific no-context parameters.
+    allow_context_takeover: bool = false,
     /// Minimum complete message size considered for outbound compression.
     /// Set to zero to attempt every data message or maxInt to receive-only.
     compression_threshold: usize = default_compression_threshold,
@@ -3640,10 +3674,13 @@ pub const Connection = struct {
     message_frame_receive: MessageFrameReceiveState = .{},
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_send_context_takeover: bool = false,
+    compression_receive_context_takeover: bool = false,
     compression_threshold: usize = default_compression_threshold,
     /// Maximum LZ77 distance for messages emitted by this endpoint. The field
     /// follows the role-specific RFC 7692 direction selected at handshake.
     compression_send_max_window_bits: u8 = 15,
+    compression_receive_max_window_bits: u8 = 15,
     compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
     /// One HTTP/1 application frame may outlive a bounded socket write. The
@@ -3919,14 +3956,19 @@ pub const Connection = struct {
                 payload_len,
             );
             if (compressed.len < payload_len) {
-                try self.writeFrameLockedExtended(
+                self.writeFrameLockedExtended(
                     .binary,
                     compressed,
                     true,
                     .{ .rsv1 = true },
-                );
+                ) catch |err| {
+                    self.abortAfterUnboundedMessageWriteLocked();
+                    return err;
+                };
+                self.commitCompressionPreviewLocked();
                 return;
             }
+            self.discardCompressionPreviewLocked();
         }
 
         var header_storage: [websocket.max_frame_header_len]u8 = undefined;
@@ -3937,7 +3979,10 @@ pub const Connection = struct {
                 payload_len,
                 .{},
             );
-            try writeUnmaskedPayloadSlices(self.transport(), header, parts);
+            writeUnmaskedPayloadSlices(self.transport(), header, parts) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
             return;
         }
 
@@ -3949,12 +3994,15 @@ pub const Connection = struct {
             payload_len,
             .{ .mask_key = mask_key },
         );
-        try writeMaskedPayloadParts(
+        writeMaskedPayloadParts(
             self.transport(),
             header,
             parts,
             mask_key,
-        );
+        ) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     pub fn sendBinarySlicesWithTimeout(
@@ -4905,16 +4953,24 @@ pub const Connection = struct {
         {
             const compressed = try self.compressMessageLocked(payload);
             if (compressed.len < payload.len) {
-                try self.writeFrameLockedExtended(
+                self.writeFrameLockedExtended(
                     opcode,
                     compressed,
                     true,
                     .{ .rsv1 = true },
-                );
+                ) catch |err| {
+                    self.abortAfterUnboundedMessageWriteLocked();
+                    return err;
+                };
+                self.commitCompressionPreviewLocked();
                 return;
             }
+            self.discardCompressionPreviewLocked();
         }
-        try self.writeFrameLocked(opcode, payload, true);
+        self.writeFrameLocked(opcode, payload, true) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     fn sendMessageWithDeadlineLocked(
@@ -4964,6 +5020,7 @@ pub const Connection = struct {
             .original_len = payload.len,
         };
         var encoded_payload = payload;
+        errdefer self.discardCompressionPreviewLocked();
         if (self.permessage_deflate and
             payload.len >= self.compression_threshold)
         {
@@ -4971,6 +5028,8 @@ pub const Connection = struct {
             if (compressed.len < payload.len) {
                 encoded_payload = compressed;
                 pending.compressed = true;
+            } else {
+                self.discardCompressionPreviewLocked();
             }
         }
         if (self.role == .client) {
@@ -5033,6 +5092,7 @@ pub const Connection = struct {
             .original_len = parts.len,
         };
         var encoded_len = payload_len;
+        errdefer self.discardCompressionPreviewLocked();
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
         {
@@ -5043,6 +5103,8 @@ pub const Connection = struct {
             if (compressed.len < payload_len) {
                 encoded_len = compressed.len;
                 pending.compressed = true;
+            } else {
+                self.discardCompressionPreviewLocked();
             }
         }
         if (self.role == .client) {
@@ -5152,6 +5214,7 @@ pub const Connection = struct {
             .total_bytes = pending.totalLen(),
             .frame_committed = true,
         };
+        if (pending.compressed) self.commitCompressionPreviewLocked();
         self.pending_message = null;
         self.application_write_pending.store(false, .release);
     }
@@ -5228,6 +5291,7 @@ pub const Connection = struct {
             .total_bytes = pending.totalLen(),
             .frame_committed = true,
         };
+        if (pending.compressed) self.commitCompressionPreviewLocked();
         self.pending_message = null;
         self.application_write_pending.store(false, .release);
     }
@@ -5254,34 +5318,35 @@ pub const Connection = struct {
             }
             if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
             if (plain_len >= self.compression_threshold) {
-                try self.compression_send.prepare(
-                    self.allocator,
+                const compressed = try self.compressMessagePartsLocked(
+                    fragments,
                     plain_len,
                 );
-                const compressed = try websocket
-                    .compressMessageFragmentsVortIntoWindowWithEncoder(
-                    &self.compression_send.encoder.?,
-                    &self.compression_send.payload,
-                    fragments,
-                    self.compression_send_max_window_bits,
-                );
                 if (compressed.len < plain_len) {
-                    try self.writeCompressedFragmentsLocked(
+                    self.writeCompressedFragmentsLocked(
                         opcode,
                         compressed,
                         fragments.len,
-                    );
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    };
+                    self.commitCompressionPreviewLocked();
                     return;
                 }
+                self.discardCompressionPreviewLocked();
             }
             for (fragments, 0..) |fragment, index| {
                 const frame_opcode: websocket.Opcode =
                     if (index == 0) opcode else .continuation;
-                try self.writeFrameLocked(
+                self.writeFrameLocked(
                     frame_opcode,
                     fragment,
                     index + 1 == fragments.len,
-                );
+                ) catch |err| {
+                    self.abortAfterUnboundedMessageWriteLocked();
+                    return err;
+                };
             }
             return;
         }
@@ -5300,11 +5365,14 @@ pub const Connection = struct {
         for (fragments, 0..) |fragment, index| {
             const frame_opcode: websocket.Opcode =
                 if (index == 0) opcode else .continuation;
-            try self.writeFrameLocked(
+            self.writeFrameLocked(
                 frame_opcode,
                 fragment,
                 index + 1 == fragments.len,
-            );
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         }
     }
 
@@ -5386,35 +5454,39 @@ pub const Connection = struct {
             .original_ptr = @intFromPtr(fragments.ptr),
             .original_len = fragments.len,
         };
+        errdefer self.discardCompressionPreviewLocked();
         if (self.permessage_deflate and
             plain_len >= self.compression_threshold)
         {
-            try self.compression_send.prepare(self.allocator, plain_len);
-            const compressed = try websocket
-                .compressMessageFragmentsVortIntoWindowWithEncoder(
-                &self.compression_send.encoder.?,
-                &self.compression_send.payload,
+            const compressed = try self.compressMessagePartsLocked(
                 fragments,
-                self.compression_send_max_window_bits,
+                plain_len,
             );
             pending.compressed = compressed.len < plain_len;
             if (pending.compressed) {
                 pending.fragmented_payload_total = compressed.len;
+            } else {
+                self.discardCompressionPreviewLocked();
             }
         }
         pending.wire_total = try fragmentedWireLen(
             fragments,
-            if (pending.compressed) pending.payload_len else null,
+            if (pending.compressed) pending.fragmented_payload_total else null,
             self.role == .client,
         );
         self.pending_message = pending;
         self.application_write_pending.store(true, .release);
-        try self.preparePendingFragmentLocked(fragments);
+        errdefer {
+            self.pending_message = null;
+            self.application_write_pending.store(false, .release);
+        }
+        try self.preparePendingFragmentLocked(fragments, 0);
     }
 
     fn preparePendingFragmentLocked(
         self: *Connection,
         fragments: []const []const u8,
+        index: usize,
     ) Error!void {
         const pending = &self.pending_message.?;
         std.debug.assert(pending.source == .fragmented);
@@ -5422,27 +5494,31 @@ pub const Connection = struct {
             compressedFragmentRange(
                 pending.fragmented_payload_total,
                 fragments.len,
-                pending.fragment_index,
+                index,
             )
         else
-            .{ .start = 0, .end = fragments[pending.fragment_index].len };
-        pending.payload_len = range.end - range.start;
-        pending.fragment_start = pending.committed;
-        pending.mask_key = if (self.role == .client) blk: {
+            .{ .start = 0, .end = fragments[index].len };
+        const mask_key: ?[4]u8 = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
             try std.Io.randomSecure(self.io, &key);
             break :blk key;
         } else null;
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
         const header = try websocket.writeFrameHeaderForLengthInto(
-            &pending.header,
-            if (pending.fragment_index == 0) pending.opcode else .continuation,
-            pending.payload_len,
+            &header_storage,
+            if (index == 0) pending.opcode else .continuation,
+            range.end - range.start,
             .{
-                .fin = pending.fragment_index + 1 == fragments.len,
-                .mask_key = pending.mask_key,
-                .rsv1 = pending.compressed and pending.fragment_index == 0,
+                .fin = index + 1 == fragments.len,
+                .mask_key = mask_key,
+                .rsv1 = pending.compressed and index == 0,
             },
         );
+        @memcpy(pending.header[0..header.len], header);
+        pending.fragment_index = index;
+        pending.payload_len = range.end - range.start;
+        pending.fragment_start = pending.committed;
+        pending.mask_key = mask_key;
         pending.header_len = header.len;
     }
 
@@ -5504,18 +5580,24 @@ pub const Connection = struct {
             if (pending.committed - pending.fragment_start ==
                 pending.header_len + pending.payload_len)
             {
-                pending.fragment_index += 1;
-                if (pending.fragment_index == fragments.len) {
+                const next_index = pending.fragment_index + 1;
+                if (next_index == fragments.len) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
                         .total_bytes = pending.wire_total,
                         .frame_committed = true,
                     };
+                    if (pending.compressed) {
+                        self.commitCompressionPreviewLocked();
+                    }
                     self.pending_message = null;
                     self.application_write_pending.store(false, .release);
                     return;
                 }
-                try self.preparePendingFragmentLocked(fragments);
+                try self.preparePendingFragmentLocked(
+                    fragments,
+                    next_index,
+                );
             }
         }
     }
@@ -5580,7 +5662,30 @@ pub const Connection = struct {
         );
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
-        if (self.closeReceived() and frame.header.opcode != .close) return error.ConnectionClosed;
+        if (self.closeReceived() and frame.header.opcode != .close) {
+            return error.ConnectionClosed;
+        }
+        if (self.compression_receive_context_takeover and
+            !frame.header.opcode.isControl())
+        {
+            self.compression_receive.observeFrame(
+                self.allocator,
+                frame.header.opcode != .continuation,
+                frame.header.rsv1,
+                frame.header.opcode == .text,
+                frame.header.fin,
+                frame.payload,
+                self.limits.max_message_bytes,
+                self.compression_receive_max_window_bits,
+            ) catch |err| switch (err) {
+                error.PreviewPending => return error.InvalidFrame,
+                error.OutOfMemory => {
+                    _ = failReceive(self);
+                    return error.OutOfMemory;
+                },
+                else => |other| return @errorCast(other),
+            };
+        }
         if (frame.header.opcode == .close) self.close_received.store(true, .release);
         return frame;
     }
@@ -5786,10 +5891,9 @@ pub const Connection = struct {
                     if (maybe_message) |message| {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
-                        return finishIncomingMessage(
-                            self.allocator,
+                        return finishIncomingMessageForConnection(
+                            self,
                             message,
-                            self.limits.max_message_bytes,
                         );
                     }
                 },
@@ -5838,16 +5942,33 @@ pub const Connection = struct {
     }
 
     fn ensureCompressionReceiveScratch(self: *Connection) Error!void {
-        try self.compression_receive.prepare(
-            self.allocator,
-            self.limits.max_message_bytes,
-        );
+        if (self.compression_receive_context_takeover) {
+            try self.compression_receive.prepareContext(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        } else {
+            try self.compression_receive.prepare(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        }
     }
 
     fn compressMessageLocked(
         self: *Connection,
         payload: []const u8,
     ) Error![]const u8 {
+        if (self.compression_send_context_takeover) {
+            return self.compression_send.preview(
+                self.allocator,
+                payload,
+                self.compression_send_max_window_bits,
+            ) catch |err| switch (err) {
+                error.PreviewPending => error.WriteInProgress,
+                else => |other| @errorCast(other),
+            };
+        }
         try self.compression_send.prepare(
             self.allocator,
             payload.len,
@@ -5865,6 +5986,17 @@ pub const Connection = struct {
         parts: []const []const u8,
         payload_len: usize,
     ) Error![]const u8 {
+        if (self.compression_send_context_takeover) {
+            return self.compression_send.previewFragments(
+                self.allocator,
+                parts,
+                payload_len,
+                self.compression_send_max_window_bits,
+            ) catch |err| switch (err) {
+                error.PreviewPending => error.WriteInProgress,
+                else => |other| @errorCast(other),
+            };
+        }
         try self.compression_send.prepare(
             self.allocator,
             payload_len,
@@ -5875,6 +6007,25 @@ pub const Connection = struct {
             parts,
             self.compression_send_max_window_bits,
         );
+    }
+
+    fn commitCompressionPreviewLocked(self: *Connection) void {
+        if (self.compression_send_context_takeover) {
+            self.compression_send.commitPreview() catch unreachable;
+        }
+    }
+
+    fn discardCompressionPreviewLocked(self: *Connection) void {
+        if (self.compression_send_context_takeover) {
+            self.compression_send.discardPreview();
+        }
+    }
+
+    fn abortAfterUnboundedMessageWriteLocked(self: *Connection) void {
+        self.discardCompressionPreviewLocked();
+        self.write_aborted.store(true, .release);
+        transportStream(self.transport()).shutdown(self.io, .both) catch {};
+        common.clearPendingOutboundLocked(self);
     }
 
     fn writeFrameLocked(self: *Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
@@ -6375,8 +6526,11 @@ pub const H2Connection = struct {
     receive_finished: bool = false,
     selected_protocol: ?[]u8 = null,
     permessage_deflate: bool = false,
+    compression_send_context_takeover: bool = false,
+    compression_receive_context_takeover: bool = false,
     compression_threshold: usize = default_compression_threshold,
     compression_send_max_window_bits: u8 = 15,
+    compression_receive_max_window_bits: u8 = 15,
     compression_send: compression_scratch.SendScratch = .{},
     compression_receive: compression_scratch.Scratch = .{},
 
@@ -9990,7 +10144,9 @@ pub const testing = if (builtin.is_test) struct {
             !connection.message_into.active() and
             connection.message_frame_receive.header == null and
             connection.compression_receive.payload.capacity == 0 and
+            connection.compression_receive.decoded.capacity == 0 and
             connection.compression_receive.flate_window == null and
+            connection.compression_receive.context == null and
             tunnel_storage_released;
     }
 
@@ -10006,7 +10162,8 @@ pub const testing = if (builtin.is_test) struct {
             !connection.application_write_pending.load(.acquire) and
             !connection.automatic_write_pending.load(.acquire) and
             connection.compression_send.payload.capacity == 0 and
-            connection.compression_send.encoder == null;
+            connection.compression_send.encoder == null and
+            connection.compression_send.context == null;
     }
 
     pub fn failReceiveAndFinish(
@@ -10457,18 +10614,41 @@ fn receiveMessageIntoDirectConnection(
             return error.InvalidFrame;
         const was_compressed = connection.message_into.compressed;
         const payload = if (was_compressed)
-            try websocket.decompressMessageInto(
-                out[0..connection.limits.max_message_bytes],
-                connection.compression_receive.payload.items[0..connection.message_into.written],
-                connection.compression_receive.payload.allocatedSlice(),
-                connection.compression_receive.flate_window.?,
-            )
+            if (connection.compression_receive_context_takeover)
+                connection.compression_receive.previewContextInto(
+                    connection.allocator,
+                    out[0..connection.limits.max_message_bytes],
+                    connection.compression_receive.payload.items[0..connection.message_into.written],
+                    connection.compression_receive_max_window_bits,
+                ) catch |err| switch (err) {
+                    error.PreviewPending => return error.InvalidFrame,
+                    error.OutOfMemory => {
+                        _ = failReceive(connection);
+                        return error.OutOfMemory;
+                    },
+                    else => |other| return @errorCast(other),
+                }
+            else
+                try websocket.decompressMessageInto(
+                    out[0..connection.limits.max_message_bytes],
+                    connection.compression_receive.payload.items[0..connection.message_into.written],
+                    connection.compression_receive.payload.allocatedSlice(),
+                    connection.compression_receive.flate_window.?,
+                )
         else
             out[0..connection.message_into.written];
         if (connection.message_into.payloadNeedsFinalUtf8Validation() and
             !std.unicode.utf8ValidateSlice(payload))
         {
+            if (connection.compression_receive_context_takeover) {
+                connection.compression_receive.discardContextPreview();
+            }
             return error.InvalidUtf8;
+        }
+        if (was_compressed and
+            connection.compression_receive_context_takeover)
+        {
+            connection.compression_receive.commitContextPreview();
         }
         connection.message_into.reset();
         return .{
@@ -10950,6 +11130,53 @@ fn validateBufferedTextRange(
 }
 
 const finishIncomingMessage = message_state.finishIncomingMessage;
+
+fn finishIncomingMessageForConnection(
+    connection: *Connection,
+    message: websocket.MessageAssembler.Message,
+) Error!OwnedMessage {
+    if (!message.compressed or
+        !connection.compression_receive_context_takeover)
+    {
+        return finishIncomingMessage(
+            connection.allocator,
+            message,
+            connection.limits.max_message_bytes,
+        );
+    }
+    const compressed_payload = message.payload;
+    const payload = connection.compression_receive.previewContextOwned(
+        connection.allocator,
+        compressed_payload,
+        connection.limits.max_message_bytes,
+        connection.compression_receive_max_window_bits,
+    ) catch |err| {
+        connection.allocator.free(compressed_payload);
+        return switch (err) {
+            error.PreviewPending => error.InvalidFrame,
+            error.OutOfMemory => blk: {
+                _ = failReceive(connection);
+                break :blk error.OutOfMemory;
+            },
+            else => |other| @errorCast(other),
+        };
+    };
+    connection.allocator.free(compressed_payload);
+    errdefer connection.allocator.free(payload);
+    if (message.opcode == .text and
+        !std.unicode.utf8ValidateSlice(payload))
+    {
+        connection.compression_receive.discardContextPreview();
+        return error.InvalidUtf8;
+    }
+    connection.compression_receive.commitContextPreview();
+    return .{
+        .opcode = message.opcode,
+        .payload = payload,
+        .was_compressed = true,
+    };
+}
+
 const compressedFragmentRange = message_state.compressedFragmentRange;
 
 const HttpHead = struct {
@@ -12215,6 +12442,8 @@ test "WebSocket runtime negotiates permessage-deflate" {
             var connection = try server_ptr.accept(.{ .enable_permessage_deflate = true });
             defer connection.close();
             try std.testing.expect(connection.permessage_deflate);
+            try std.testing.expect(!connection.compression_send_context_takeover);
+            try std.testing.expect(!connection.compression_receive_context_takeover);
 
             var compressed: std.ArrayList(u8) = .empty;
             defer compressed.deinit(server_ptr.http.allocator);
@@ -12300,6 +12529,8 @@ test "WebSocket runtime negotiates permessage-deflate" {
     });
     defer client.close();
     try std.testing.expect(client.permessage_deflate);
+    try std.testing.expect(!client.compression_send_context_takeover);
+    try std.testing.expect(!client.compression_receive_context_takeover);
 
     // Split one UTF-8 scalar across the application slices. Compression must
     // still produce one DEFLATE message, then preserve the requested three
@@ -12339,6 +12570,186 @@ test "WebSocket runtime negotiates permessage-deflate" {
     try client.sendClose(.normal_closure, "bye");
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP1 context takeover spans runtime API shapes" {
+    const allocator = std.testing.allocator;
+    const context_payload =
+        "abcdefghijklmnopqrstuvwxyz0123456789" ** 8;
+    const fallback_payload = [_]u8{
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept(.{
+                .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
+                .compression_threshold = 0,
+            });
+            defer connection.close();
+            try std.testing.expect(connection.permessage_deflate);
+            try std.testing.expect(
+                connection.compression_send_context_takeover,
+            );
+            try std.testing.expect(
+                connection.compression_receive_context_takeover,
+            );
+
+            // Expansion fallback must discard its preview. If the first
+            // plaintext were retained, the identical second payload would
+            // become a tiny context-reference frame instead of plain wire.
+            for (0..2) |_| {
+                var frame = try connection.receiveFrame();
+                defer frame.deinit(server_ptr.http.allocator);
+                try std.testing.expectEqual(websocket.Opcode.binary, frame.header.opcode);
+                try std.testing.expect(!frame.header.rsv1);
+                try std.testing.expectEqualSlices(u8, &fallback_payload, frame.payload);
+            }
+
+            var first_wire: std.ArrayList(u8) = .empty;
+            defer first_wire.deinit(server_ptr.http.allocator);
+            for (0..3) |index| {
+                var frame = try connection.receiveFrame();
+                defer frame.deinit(server_ptr.http.allocator);
+                try std.testing.expectEqual(
+                    if (index == 0) websocket.Opcode.text else .continuation,
+                    frame.header.opcode,
+                );
+                try std.testing.expectEqual(index == 0, frame.header.rsv1);
+                try std.testing.expectEqual(index == 2, frame.header.fin);
+                try first_wire.appendSlice(
+                    server_ptr.http.allocator,
+                    frame.payload,
+                );
+            }
+            const first_plain = try websocket.decompressMessage(
+                server_ptr.http.allocator,
+                first_wire.items,
+                context_payload.len,
+            );
+            defer server_ptr.http.allocator.free(first_plain);
+            try std.testing.expectEqualStrings(context_payload, first_plain);
+
+            var dependent = try connection.receiveFrame();
+            defer dependent.deinit(server_ptr.http.allocator);
+            try std.testing.expect(dependent.header.rsv1);
+            try std.testing.expectError(
+                error.InvalidFrame,
+                websocket.decompressMessage(
+                    server_ptr.http.allocator,
+                    dependent.payload,
+                    context_payload.len,
+                ),
+            );
+
+            var progress: MessageWriteProgress = .{};
+            try connection.sendFragmentedWithDeadline(
+                .text,
+                &.{
+                    context_payload[0..71],
+                    context_payload[71..173],
+                    context_payload[173..],
+                },
+                &progress,
+                .fromNow(server_ptr.http.io, .{
+                    .raw = .fromSeconds(5),
+                    .clock = .awake,
+                }),
+            );
+            try std.testing.expect(progress.frame_committed);
+            try connection.sendBinarySlices(&.{
+                context_payload[0..97],
+                "",
+                context_payload[97..],
+            });
+
+            var close = try connection.receiveFrame();
+            defer close.deinit(server_ptr.http.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .host = "127.0.0.1",
+        .target = "/context-takeover",
+        .enable_permessage_deflate = true,
+        .allow_context_takeover = true,
+        .compression_threshold = 0,
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    });
+    defer client.close();
+    try std.testing.expect(client.compression_send_context_takeover);
+    try std.testing.expect(client.compression_receive_context_takeover);
+
+    try client.sendBinary(&fallback_payload);
+    try client.sendBinary(&fallback_payload);
+    var send_progress: MessageWriteProgress = .{};
+    try client.sendFragmentedWithDeadline(
+        .text,
+        &.{
+            context_payload[0..83],
+            context_payload[83..199],
+            context_payload[199..],
+        },
+        &send_progress,
+        .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }),
+    );
+    try std.testing.expect(send_progress.frame_committed);
+    try client.sendBinarySlices(&.{
+        context_payload[0..101],
+        "",
+        context_payload[101..],
+    });
+
+    var first_response = try client.receiveMessage();
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, first_response.opcode);
+    try std.testing.expectEqualStrings(context_payload, first_response.payload);
+    var caller_storage: [4096]u8 = undefined;
+    const second_response = try client.receiveMessageInto(&caller_storage);
+    try std.testing.expectEqual(websocket.Opcode.binary, second_response.opcode);
+    try std.testing.expectEqualStrings(context_payload, second_response.payload);
+    try std.testing.expect(second_response.was_compressed);
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 

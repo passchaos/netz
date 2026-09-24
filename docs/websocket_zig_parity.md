@@ -12,7 +12,7 @@ superiority.
 | HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, two-phase application admission before 101 with request metadata, custom acceptance fields, and final 3xx-5xx rejection, client `ConnectAttempt` access to rejected status/headers/trailers/bounded body while legacy `connect*` retains `InvalidResponse`, strict duplicate critical-header checks, upgrade-body rejection, optional client DNS/TCP connect budgets, caller-owned relative/absolute connection deadlines spanning DNS/TCP, TLS where applicable, and the complete HTTP Upgrade, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, pre-101 handler callbacks and custom response headers, a Unix listener, client TCP/TLS connect timeouts, a server-side handshake timeout, worker pools and coordinated shutdown |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, separate resolved-address plus TLS-host connection, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 and HTTP/3 WebSocket (RFC 8441/RFC 9220) | Covered through extended CONNECT client/server adapters. The authenticated HTTP/3 path negotiates CONNECT over QUIC/TLS, preserves masking direction, subprotocol, Origin and permessage-deflate validation, and exchanges data/control/Close frames across split HTTP/3 DATA framing | Neither transport is present in the audited source |
-| permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with no-context-takeover, actual LZ77/Huffman compression and expansion fallback; public bounded context-takeover compressor/decompressor state is also available, while runtime negotiation remains intentionally no-context until partial-write lifecycle integration is complete | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
+| permessage-deflate | Negotiated and exercised by HTTP/1 and H2 runtimes with actual LZ77/Huffman compression and expansion fallback. HTTP/1 additionally supports explicit context-takeover opt-in across ordinary, sliced, fragmented, deadline-resumable, allocating, caller-buffer, and raw-frame APIs; H2/H3 remain no-context until their partial-write lifecycle integration is complete | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
 | Fragmentation / aggregate limits | Strict assembler and runtime message limits, UTF-8 validation after fragmented text assembly | Fragment assembly and configurable message/buffer limits |
 | Receive/send ownership | `parseFrameInto`, `receiveMessageInto`, and its absolute-deadline variant use caller storage, including permessage-deflate output with reusable connection scratch on HTTP/1 and RFC 8441; HTTP/1, RFC 8441, and HTTP/3 clients expose `sendBinaryInPlace` for the reference's mutable post-send contract while safe `[]const u8` sends remain available | Reader returns borrowed payloads and allocates/pools compressed output; client send APIs require mutable payloads and leave them masked |
 | Close / Ping / Pong | Typed close parsing/writing, close-state guards, automatic Pong and Close replies, deadline-bounded typed peer-Close reads, plus deadline-bounded active Ping/Pong round trips that preserve interleaved application frames for HTTP/1 Upgrade, RFC 8441, and RFC 9220. Partial receive data and partially sent explicit or automatic control replies remain resumable after timeout without changing their mask, replaying a committed prefix, or losing a peer Ping/Close event | Handler callbacks and automatic default control replies |
@@ -868,16 +868,18 @@ machines, retained and explicitly reset histories, fragmented and repeated
 messages, output-limit rollback, hostile compressed sequences, and every
 negotiated window. A Python zlib continuous-stream vector independently proves
 that the second message consumes prior-message history and fails after reset.
-HTTP Upgrade, RFC 8441/9220 runtime context-takeover negotiation, live transport
-I/O and TLS remain outside these fuzz surfaces. The public compressor now has
+RFC 8441/9220 runtime context-takeover negotiation, live transport I/O, and TLS
+remain outside these fuzz surfaces. HTTP/1 loopback tests cover its opt-in
+takeover handshake, bidirectional history, compression fallback, API mixing,
+and partial-write resume. The public compressor now has
 an explicit preview/commit/discard boundary: expansion fallback or an abandoned
 write can discard the preview without advancing the retained dictionary, while
 commit is allocation-free after preview. The shared runtime compression scratch
 now owns the same preview transaction, supports stateful decode directly into
 caller storage, and can observe fragmented raw-frame messages solely to advance
-the receive dictionary. Runtime carriers still need to invoke those boundaries
-at their distinct socket/HTTP-stream commit points before they may safely stop
-negotiating both `*_no_context_takeover` parameters.
+the receive dictionary. HTTP/1 invokes those boundaries at its socket commit
+points; H2/H3 still need to do so before they may safely stop negotiating both
+`*_no_context_takeover` parameters.
 
 All TCP/TLS and RFC 8441 timeout APIs derive awake-clock deadlines once at
 entry, while their absolute-deadline counterparts now reject other clock

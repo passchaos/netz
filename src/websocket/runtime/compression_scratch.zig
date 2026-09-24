@@ -15,6 +15,7 @@ pub const Scratch = struct {
     flate_window: ?[]u8 = null,
     context: ?compression_context.DecompressionContext = null,
     frame_message_compressed: bool = false,
+    frame_message_text: bool = false,
 
     pub fn deinit(
         self: *Scratch,
@@ -32,8 +33,7 @@ pub const Scratch = struct {
         allocator: std.mem.Allocator,
         max_message_bytes: usize,
     ) !void {
-        // RFC 7692 decoding restores a nine-byte sync-flush/final-block tail
-        // after the compressed wire payload.
+        // RFC 7692 decoding restores a nine-byte sync-flush/final-block tail.
         const capacity = std.math.add(
             usize,
             max_message_bytes,
@@ -53,7 +53,37 @@ pub const Scratch = struct {
         }
     }
 
+    pub fn prepareContext(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+        max_message_bytes: usize,
+    ) !void {
+        try self.payload.ensureTotalCapacityPrecise(
+            allocator,
+            max_message_bytes,
+        );
+        self.payload.clearRetainingCapacity();
+        self.payload.items.len = max_message_bytes;
+    }
+
     pub fn decompressContextInto(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+        output: []u8,
+        compressed_payload: []const u8,
+        max_window_bits: u8,
+    ) ![]u8 {
+        const decoded = try self.previewContextInto(
+            allocator,
+            output,
+            compressed_payload,
+            max_window_bits,
+        );
+        self.commitContextPreview();
+        return decoded;
+    }
+
+    pub fn previewContextInto(
         self: *Scratch,
         allocator: std.mem.Allocator,
         output: []u8,
@@ -66,10 +96,44 @@ pub const Scratch = struct {
                 max_window_bits,
             );
         }
-        return self.context.?.decompressToSlice(
+        return self.context.?.previewToSlice(
             output,
             compressed_payload,
         );
+    }
+
+    pub fn previewContextOwned(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+        compressed_payload: []const u8,
+        max_message_bytes: usize,
+        max_window_bits: u8,
+    ) ![]u8 {
+        if (self.context == null) {
+            self.context = try compression_context.DecompressionContext.init(
+                allocator,
+                max_window_bits,
+            );
+        }
+        self.decoded.clearRetainingCapacity();
+        try self.decoded.ensureTotalCapacity(allocator, max_message_bytes);
+        const decoded = try self.context.?.previewToSlice(
+            self.decoded.allocatedSlice()[0..max_message_bytes],
+            compressed_payload,
+        );
+        self.decoded.items.len = decoded.len;
+        return self.decoded.toOwnedSlice(allocator) catch |err| {
+            self.context.?.discardPreview();
+            return err;
+        };
+    }
+
+    pub fn commitContextPreview(self: *Scratch) void {
+        if (self.context) |*context| context.commitPreview();
+    }
+
+    pub fn discardContextPreview(self: *Scratch) void {
+        if (self.context) |*context| context.discardPreview();
     }
 
     pub fn observeFrame(
@@ -77,6 +141,7 @@ pub const Scratch = struct {
         allocator: std.mem.Allocator,
         starts_message: bool,
         compressed: bool,
+        text: bool,
         fin: bool,
         payload_bytes: []const u8,
         max_message_bytes: usize,
@@ -84,6 +149,7 @@ pub const Scratch = struct {
     ) !void {
         if (starts_message) {
             self.frame_message_compressed = compressed;
+            self.frame_message_text = text;
             self.payload.clearRetainingCapacity();
         }
         if (!self.frame_message_compressed) return;
@@ -98,18 +164,24 @@ pub const Scratch = struct {
         defer {
             self.payload.clearRetainingCapacity();
             self.frame_message_compressed = false;
+            self.frame_message_text = false;
         }
 
         try self.decoded.ensureTotalCapacity(allocator, max_message_bytes);
-        const decoded = try self.decompressContextInto(
+        const decoded = try self.previewContextInto(
             allocator,
             self.decoded.allocatedSlice()[0..max_message_bytes],
             self.payload.items,
             max_window_bits,
         );
         self.decoded.items.len = decoded.len;
-        self.payload.clearRetainingCapacity();
-        self.frame_message_compressed = false;
+        if (self.frame_message_text and
+            !std.unicode.utf8ValidateSlice(decoded))
+        {
+            self.discardContextPreview();
+            return error.InvalidUtf8;
+        }
+        self.commitContextPreview();
     }
 };
 
@@ -254,6 +326,7 @@ test "runtime receive scratch observes fragmented takeover messages" {
         allocator,
         true,
         true,
+        true,
         false,
         first_copy[0..split],
         payload.len,
@@ -261,6 +334,7 @@ test "runtime receive scratch observes fragmented takeover messages" {
     );
     try scratch.observeFrame(
         allocator,
+        false,
         false,
         false,
         true,

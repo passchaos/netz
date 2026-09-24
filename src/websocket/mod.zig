@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
 const vort = @import("../internal/vort.zig");
+const flate_guarded_reader = @import("../internal/flate_guarded_reader.zig");
 const compression_context = @import("compression_context.zig");
 
 pub const runtime = @import("runtime.zig");
@@ -1254,7 +1255,13 @@ fn validateServerHandshakeHeaders(headers: []const wire.Header) !void {
         } else if (header.eqlName("sec-websocket-extensions")) {
             if (saw_extensions) return error.InvalidHandshake;
             saw_extensions = true;
-            _ = try ExtensionNegotiation.validateResponse(header.value);
+            _ = try ExtensionNegotiation.validateResponseWithPolicy(
+                header.value,
+                .{
+                    .enable_permessage_deflate = true,
+                    .allow_context_takeover = true,
+                },
+            );
         }
     }
 }
@@ -1641,18 +1648,24 @@ fn removeCompressionTail(
 }
 
 pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {
-    var with_tail = try std.ArrayList(u8).initCapacity(allocator, compressed_payload.len + 4);
-    defer with_tail.deinit(allocator);
-    try with_tail.appendSlice(allocator, compressed_payload);
-    try with_tail.appendSlice(allocator, &.{
+    const tail = [_]u8{
         0x00, 0x00, 0xff, 0xff, // RFC 7692 tail restored for the message.
         0x01, 0x00, 0x00, 0xff, 0xff, // Final empty block for std's raw inflater.
-    });
-
-    var input_reader = std.Io.Reader.fixed(with_tail.items);
+    };
+    const logical_input_len = std.math.add(
+        usize,
+        compressed_payload.len,
+        tail.len,
+    ) catch return error.PayloadTooLarge;
+    var with_tail = try std.ArrayList(u8).initCapacity(allocator, logical_input_len);
+    defer with_tail.deinit(allocator);
+    try with_tail.appendSlice(allocator, compressed_payload);
+    try with_tail.appendSlice(allocator, &tail);
+    var guarded_input = flate_guarded_reader.GuardedReader.init(with_tail.items);
+    const input_reader = guarded_input.reader();
     const buffer = try allocator.alloc(u8, std.compress.flate.max_window_len);
     defer allocator.free(buffer);
-    var decompressor = std.compress.flate.Decompress.init(&input_reader, .raw, buffer);
+    var decompressor = std.compress.flate.Decompress.init(input_reader, .raw, buffer);
     var output = std.Io.Writer.Allocating.init(allocator);
     errdefer output.deinit();
     while (decompressor.reader.peekGreedy(1)) |bytes| {
@@ -1662,6 +1675,12 @@ pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []con
     } else |err| switch (err) {
         error.EndOfStream => {},
         error.ReadFailed => return error.InvalidFrame,
+    }
+    if (decompressor.err != null or
+        guarded_input.used_guard or
+        guarded_input.sourceConsumed() != logical_input_len)
+    {
+        return error.InvalidFrame;
     }
     return output.toOwnedSlice();
 }
@@ -1701,12 +1720,12 @@ pub fn decompressMessageInto(
         compressed_scratch[compressed_payload.len..input_len],
         tail,
     );
-
-    var input_reader = std.Io.Reader.fixed(
+    var guarded_input = flate_guarded_reader.GuardedReader.init(
         compressed_scratch[0..input_len],
     );
+    const input_reader = guarded_input.reader();
     var decompressor = std.compress.flate.Decompress.init(
-        &input_reader,
+        input_reader,
         .raw,
         flate_window[0..std.compress.flate.max_window_len],
     );
@@ -1717,6 +1736,12 @@ pub fn decompressMessageInto(
             error.ReadFailed => error.InvalidFrame,
         };
     };
+    if (decompressor.err != null or
+        guarded_input.used_guard or
+        guarded_input.sourceConsumed() != input_len)
+    {
+        return error.InvalidFrame;
+    }
     return output_writer.buffered();
 }
 

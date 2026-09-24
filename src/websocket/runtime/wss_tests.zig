@@ -446,7 +446,7 @@ test "ordinary vail WSS client exposes TLS state and KeyUpdate" {
     if (shared.err) |err| return err;
 }
 
-test "WSS compression threshold propagates through TLS endpoints" {
+test "WSS compression threshold and context takeover propagate through TLS endpoints" {
     const allocator = std.testing.allocator;
     const below = "wss-below-threshold";
     const at_threshold = "wss-threshold-compressible-" ** 10;
@@ -498,9 +498,16 @@ test "WSS compression threshold propagates through TLS endpoints" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept(.{
                 .enable_permessage_deflate = true,
-                .compression_threshold = std.math.maxInt(usize),
+                .allow_context_takeover = true,
+                .compression_threshold = threshold,
             });
             defer connection.close();
+            try std.testing.expect(
+                connection.compression_send_context_takeover,
+            );
+            try std.testing.expect(
+                connection.compression_receive_context_takeover,
+            );
 
             var first = try connection.receiveFrame();
             defer first.deinit(self.server.allocator);
@@ -518,8 +525,14 @@ test "WSS compression threshold propagates through TLS endpoints" {
             defer self.server.allocator.free(decoded);
             try std.testing.expectEqualStrings(at_threshold, decoded);
 
+            var repeated = try connection.receiveMessage();
+            defer repeated.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(at_threshold, repeated.payload);
+            try std.testing.expect(repeated.was_compressed);
+
             try connection.sendText(at_threshold);
-            try std.testing.expect(connection.compression_send.encoder == null);
+            try connection.sendText(at_threshold);
+            try std.testing.expect(connection.compression_send.context != null);
         }
     };
     var shared = Shared{ .server = &server };
@@ -541,6 +554,7 @@ test "WSS compression threshold propagates through TLS endpoints" {
         uri,
         .{
             .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
             .compression_threshold = threshold,
             .limits = .{
                 .max_head_bytes = 4096,
@@ -554,15 +568,22 @@ test "WSS compression threshold propagates through TLS endpoints" {
         } },
     );
     defer client.close();
+    try std.testing.expect(client.compression_send_context_takeover);
+    try std.testing.expect(client.compression_receive_context_takeover);
 
     try client.sendText(below);
     try std.testing.expect(client.compression_send.encoder == null);
     try client.sendText(at_threshold);
-    try std.testing.expect(client.compression_send.encoder != null);
-    var response = try client.receiveFrame();
+    try client.sendText(at_threshold);
+    try std.testing.expect(client.compression_send.context != null);
+    var response = try client.receiveMessage();
     defer response.deinit(allocator);
-    try std.testing.expect(!response.header.rsv1);
+    try std.testing.expect(response.was_compressed);
     try std.testing.expectEqualStrings(at_threshold, response.payload);
+    var output: [4096]u8 = undefined;
+    const repeated = try client.receiveMessageInto(&output);
+    try std.testing.expect(repeated.was_compressed);
+    try std.testing.expectEqualStrings(at_threshold, repeated.payload);
 
     thread.join();
     joined = true;

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const vort = @import("../internal/vort.zig");
+const flate_guarded_reader = @import("../internal/flate_guarded_reader.zig");
 
 pub const Error = error{
     InvalidExtension,
@@ -187,6 +188,8 @@ pub const DecompressionContext = struct {
     history: std.ArrayList(u8) = .empty,
     input: std.ArrayList(u8) = .empty,
     window: ?[]u8 = null,
+    pending: std.ArrayList(u8) = .empty,
+    pending_active: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -203,11 +206,45 @@ pub const DecompressionContext = struct {
         self.history.deinit(self.allocator);
         self.input.deinit(self.allocator);
         if (self.window) |window| self.allocator.free(window);
+        self.pending.deinit(self.allocator);
         self.* = undefined;
     }
 
     pub fn resetContext(self: *DecompressionContext) void {
         self.history.clearRetainingCapacity();
+        self.discardPreview();
+    }
+
+    pub fn previewPending(self: DecompressionContext) bool {
+        return self.pending_active;
+    }
+
+    /// Forget the most recently decoded message without advancing history.
+    pub fn discardPreview(self: *DecompressionContext) void {
+        self.pending.clearRetainingCapacity();
+        self.pending_active = false;
+    }
+
+    /// Advance history after the caller accepts the previewed message. This is
+    /// allocation-free because `previewToSlice` reserves the complete window.
+    pub fn commitPreview(self: *DecompressionContext) void {
+        if (!self.previewPending()) return;
+        const window_len = @as(usize, 1) << @intCast(self.max_window_bits);
+        const keep_history = @min(
+            self.history.items.len,
+            window_len - self.pending.items.len,
+        );
+        std.debug.assert(self.history.capacity >= window_len);
+        if (keep_history != 0) {
+            const old_len = self.history.items.len;
+            @memmove(
+                self.history.items[0..keep_history],
+                self.history.items[old_len - keep_history ..],
+            );
+        }
+        self.history.items.len = keep_history + self.pending.items.len;
+        @memcpy(self.history.items[keep_history..], self.pending.items);
+        self.discardPreview();
     }
 
     pub fn decompressInto(
@@ -221,11 +258,12 @@ pub const DecompressionContext = struct {
             self.allocator,
             max_message_bytes,
         );
-        const decoded = try self.decompressToSlice(
+        const decoded = try self.previewToSlice(
             output.allocatedSlice()[0..max_message_bytes],
             compressed_payload,
         );
         output.items.len = decoded.len;
+        self.commitPreview();
         return output.items;
     }
 
@@ -237,6 +275,22 @@ pub const DecompressionContext = struct {
         output: []u8,
         compressed_payload: []const u8,
     ) Error![]u8 {
+        const decoded = try self.previewToSlice(output, compressed_payload);
+        errdefer self.discardPreview();
+        self.commitPreview();
+        return decoded;
+    }
+
+    /// Decode into caller storage without changing the retained dictionary.
+    /// The caller must finish validation and then commit or discard the result.
+    pub fn previewToSlice(
+        self: *DecompressionContext,
+        output: []u8,
+        compressed_payload: []const u8,
+    ) Error![]u8 {
+        if (self.previewPending()) return error.PreviewPending;
+        self.pending.clearRetainingCapacity();
+        errdefer self.pending.clearRetainingCapacity();
         const tail = [_]u8{
             0x00, 0x00, 0xff, 0xff,
             0x01, 0x00, 0x00, 0xff,
@@ -259,9 +313,12 @@ pub const DecompressionContext = struct {
         const history_len = self.history.items.len;
         @memcpy(window[0..history_len], self.history.items);
 
-        var input_reader = std.Io.Reader.fixed(self.input.items);
+        var guarded_input = flate_guarded_reader.GuardedReader.init(
+            self.input.items,
+        );
+        const input_reader = guarded_input.reader();
         var decompressor = std.compress.flate.Decompress.init(
-            &input_reader,
+            input_reader,
             .raw,
             window,
         );
@@ -275,38 +332,20 @@ pub const DecompressionContext = struct {
                 error.ReadFailed => error.InvalidFrame,
             };
         };
-        const decoded = output[0..writer.end];
-        try self.rememberContext(decoded);
-        return decoded;
-    }
-
-    fn rememberContext(
-        self: *DecompressionContext,
-        payload: []const u8,
-    ) std.mem.Allocator.Error!void {
-        const window_len = @as(usize, 1) <<
-            @intCast(self.max_window_bits);
-        const keep_payload = @min(payload.len, window_len);
-        const keep_history = @min(
-            self.history.items.len,
-            window_len - keep_payload,
-        );
-        try self.history.ensureTotalCapacity(
-            self.allocator,
-            keep_history + keep_payload,
-        );
-        if (keep_history != 0) {
-            const old_len = self.history.items.len;
-            @memmove(
-                self.history.items[0..keep_history],
-                self.history.items[old_len - keep_history ..],
-            );
+        if (decompressor.err != null or
+            guarded_input.used_guard or
+            guarded_input.sourceConsumed() != self.input.items.len)
+        {
+            return error.InvalidFrame;
         }
-        self.history.items.len = keep_history + keep_payload;
-        @memcpy(
-            self.history.items[keep_history..],
-            payload[payload.len - keep_payload ..],
-        );
+        const decoded = output[0..writer.end];
+        const window_len = @as(usize, 1) << @intCast(self.max_window_bits);
+        const keep = @min(decoded.len, window_len);
+        try self.pending.ensureTotalCapacity(self.allocator, keep);
+        try self.history.ensureTotalCapacity(self.allocator, window_len);
+        self.pending.appendSliceAssumeCapacity(decoded[decoded.len - keep ..]);
+        self.pending_active = true;
+        return decoded;
     }
 };
 
@@ -494,12 +533,30 @@ test "caller-buffer context decode failure does not advance history" {
         error.InvalidFrame,
         decompressor.decompressToSlice(&output, second_copy),
     );
+    try std.testing.expect(!decompressor.previewPending());
     try std.testing.expectEqualStrings(
         payload,
-        try decompressor.decompressToSlice(&output, first_copy),
+        try decompressor.previewToSlice(&output, first_copy),
+    );
+    try std.testing.expect(decompressor.previewPending());
+    try std.testing.expectError(
+        error.PreviewPending,
+        decompressor.previewToSlice(&output, first_copy),
+    );
+    decompressor.discardPreview();
+    try std.testing.expect(!decompressor.previewPending());
+    try std.testing.expectError(
+        error.InvalidFrame,
+        decompressor.decompressToSlice(&output, second_copy),
     );
     try std.testing.expectEqualStrings(
         payload,
-        try decompressor.decompressToSlice(&output, second_copy),
+        try decompressor.previewToSlice(&output, first_copy),
     );
+    decompressor.commitPreview();
+    try std.testing.expectEqualStrings(
+        payload,
+        try decompressor.previewToSlice(&output, second_copy),
+    );
+    decompressor.commitPreview();
 }

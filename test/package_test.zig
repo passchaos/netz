@@ -2250,6 +2250,30 @@ test "public modules are reachable" {
         netz.websocket.DecompressionContext,
         "decompressToSlice",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.DecompressionContext,
+        "previewToSlice",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.DecompressionContext,
+        "previewPending",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.DecompressionContext,
+        "commitPreview",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.DecompressionContext,
+        "discardPreview",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.ConnectOptions,
+        "allow_context_takeover",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.AcceptOptions,
+        "allow_context_takeover",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Client"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Server"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Connection"));

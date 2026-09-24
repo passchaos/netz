@@ -38,6 +38,11 @@ const external_deflate_seed = smithSliceSeed(&.{
 const malformed_deflate_seed = smithSliceSeed(&.{
     0xff, 0xff, 0x00, 0x00, 0x7f, 0x80, 0x01, 0xfe,
 });
+// Reduced from a coverage-guided crash in Zig 0.16's buffered inflater path.
+const short_dynamic_deflate_seed = smithSliceSeed(&.{
+    0x04, 0xfb, 0x05, 0xfa, 0x00, 0xff, 0x00, 0xff, 0x01,
+    0xfe, 0x02, 0xfd, 0x03, 0xfc, 0x04, 0xfb, 0x05, 0xfa,
+});
 
 test "fuzz bounded WebSocket compression" {
     try std.testing.fuzz({}, fuzzCompression, .{ .corpus = &.{
@@ -46,6 +51,7 @@ test "fuzz bounded WebSocket compression" {
         &binary_seed,
         &external_deflate_seed,
         &malformed_deflate_seed,
+        &short_dynamic_deflate_seed,
     } });
 }
 
@@ -56,6 +62,7 @@ test "bounded deterministic WebSocket compression mutation smoke" {
         binary_seed[4..],
         external_deflate_seed[4..],
         malformed_deflate_seed[4..],
+        short_dynamic_deflate_seed[4..],
     };
     var buffer: [max_input_bytes]u8 = undefined;
     for (seeds) |seed| {
@@ -94,15 +101,6 @@ fn exerciseCompression(bytes: []const u8) !void {
 
 fn exerciseCompressedInput(bytes: []const u8) !void {
     const allocator = std.testing.allocator;
-    if (netz.websocket.decompressMessage(
-        allocator,
-        bytes,
-        max_decompressed_bytes,
-    )) |decoded| {
-        defer allocator.free(decoded);
-        try std.testing.expect(decoded.len <= max_decompressed_bytes);
-    } else |_| {}
-
     var output: [max_decompressed_bytes]u8 = undefined;
     var scratch: [max_input_bytes + restored_tail_bytes]u8 = undefined;
     var window: [std.compress.flate.max_window_len]u8 = undefined;
@@ -113,6 +111,15 @@ fn exerciseCompressedInput(bytes: []const u8) !void {
         &window,
     )) |decoded| {
         try std.testing.expect(decoded.len <= output.len);
+    } else |_| {}
+
+    if (netz.websocket.decompressMessage(
+        allocator,
+        bytes,
+        max_decompressed_bytes,
+    )) |decoded| {
+        defer allocator.free(decoded);
+        try std.testing.expect(decoded.len <= max_decompressed_bytes);
     } else |_| {}
 }
 

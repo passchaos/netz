@@ -89,10 +89,16 @@ pub fn validateHttp1Server(
     );
     const expected = websocket.acceptKey(client_key);
     if (!std.mem.eql(u8, accept, &expected)) return error.InvalidHandshake;
-    _ = try websocket.ExtensionNegotiation.validateResponse(try optionalHttp1(
-        response.headers,
-        "sec-websocket-extensions",
-    ));
+    _ = try websocket.ExtensionNegotiation.validateResponseWithPolicy(
+        try optionalHttp1(
+            response.headers,
+            "sec-websocket-extensions",
+        ),
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        },
+    );
     if (try optionalHttp1(
         response.headers,
         "sec-websocket-protocol",

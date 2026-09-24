@@ -5629,7 +5629,9 @@ pub const testing = if (builtin.is_test) struct {
             !connection.message_into.active() and
             connection.message_frame_receive.header == null and
             connection.compression_receive.payload.capacity == 0 and
-            connection.compression_receive.flate_window == null;
+            connection.compression_receive.decoded.capacity == 0 and
+            connection.compression_receive.flate_window == null and
+            connection.compression_receive.context == null;
     }
 
     pub fn writeAborted(connection: anytype) bool {
@@ -5644,7 +5646,8 @@ pub const testing = if (builtin.is_test) struct {
             !connection.application_write_pending.load(.acquire) and
             !connection.automatic_write_pending.load(.acquire) and
             connection.compression_send.payload.capacity == 0 and
-            connection.compression_send.encoder == null;
+            connection.compression_send.encoder == null and
+            connection.compression_send.context == null;
     }
 
     pub fn beginPendingMessage(

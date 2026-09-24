@@ -20,9 +20,11 @@ round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
 `zig build fuzz-websocket-context` exercises the public stateful RFC 7692
 compressor/decompressor across independent directions, retained and explicitly
 reset histories, fragmented/repeated messages, hostile input, and transactional
-output-limit failures. The H1/H2/H3 runtimes still negotiate both
-`*_no_context_takeover` parameters until this state is integrated with their
-bounded partial-write lifecycle. These
+output-limit failures. The HTTP/1 runtime additionally supports explicit
+`allow_context_takeover` opt-in across ordinary, sliced, fragmented, and
+deadline-resumable sends plus allocating, caller-buffer, and raw-frame receive
+APIs. HTTP/2 and HTTP/3 still negotiate both `*_no_context_takeover` parameters
+until the same lifecycle is integrated into those carriers. These
 targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
 headers, Version Negotiation, Retry integrity, transport parameters, frame
 streams, and carried TLS handshake messages. `zig build fuzz-quic-protection`
@@ -696,7 +698,8 @@ Current protocol coverage includes:
   that accept the same post-send mutation contract as websocket.zig,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation with strict client response selection, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
-  no-context-takeover RFC 7692 sync-flush raw-DEFLATE encode/decode, retained
+  default no-context-takeover plus explicit HTTP/1 context-takeover opt-in,
+  transactional RFC 7692 sync-flush raw-DEFLATE encode/decode, retained
   independent send/receive codec scratch, actual LZ77/Huffman wire compression
   with uncompressed fallback when compression expands the message, plus quoted window-bit parsing and rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses,
