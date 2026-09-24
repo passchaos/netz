@@ -1300,11 +1300,23 @@ pub const Hpack = struct {
             self.latest_name.clearRetainingCapacity();
             self.latest_exact.clearRetainingCapacity();
             for (self.entries.items, 0..) |entry, index| {
-                self.latest_name.putAssumeCapacity(entry.name, index);
-                self.latest_exact.putAssumeCapacity(.{
+                // Hash-map replacement updates only the value. Rebind keys as
+                // well: they borrow entry storage, and a later eviction may
+                // free an older duplicate while this slot names a newer one.
+                const name_slot = self.latest_name.getOrPutAssumeCapacity(
+                    entry.name,
+                );
+                name_slot.key_ptr.* = entry.name;
+                name_slot.value_ptr.* = index;
+                const exact_key = DynamicExactKey{
                     .name = entry.name,
                     .value = entry.value,
-                }, index);
+                };
+                const exact_slot = self.latest_exact.getOrPutAssumeCapacity(
+                    exact_key,
+                );
+                exact_slot.key_ptr.* = exact_key;
+                exact_slot.value_ptr.* = index;
             }
         }
     };
@@ -3787,6 +3799,41 @@ test "HTTP/2 HPACK owned decode preserves table state after output limits" {
     defer Hpack.freeOwnedFields(allocator, decoded);
     try std.testing.expectEqualStrings("compressible-value", decoded[0].value);
     try std.testing.expectEqualStrings("another-compressible-value", decoded[1].value);
+}
+
+test "HTTP/2 HPACK compaction rebinds duplicate lookup keys" {
+    const allocator = std.testing.allocator;
+    var encoder = Hpack.Encoder{};
+    defer encoder.deinit(allocator);
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    // Fill the table with repeated names and distinct values, then shrink it
+    // far enough to evict at least half the physical entries. Compaction must
+    // make every hash-map key borrow from the newest surviving entry.
+    for (0..12) |index| {
+        var value_storage: [2]u8 = .{
+            'a' + @as(u8, @intCast(index)),
+            '0' + @as(u8, @intCast(index % 10)),
+        };
+        encoded.clearRetainingCapacity();
+        try encoder.encodeBlock(&encoded, allocator, &.{.{
+            .name = "x-repeated",
+            .value = &value_storage,
+        }});
+    }
+    encoder.setMaxDynamicTableSize(allocator, 160);
+
+    // A second shrink frees the entry that supplied the pre-compaction key.
+    // The next encode performs lookups and would read freed memory if the key
+    // had not been rebound during rebuildIndexes.
+    encoder.setMaxDynamicTableSize(allocator, 0);
+    encoded.clearRetainingCapacity();
+    try encoder.encodeBlock(&encoded, allocator, &.{.{
+        .name = "x-repeated",
+        .value = "after-clear",
+    }});
+    try std.testing.expectEqual(@as(usize, 0), encoder.dynamic_table.used);
 }
 
 test "HTTP/2 HPACK owned decoder distinguishes truncation from field limit" {

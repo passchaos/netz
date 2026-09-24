@@ -97,6 +97,23 @@ pub fn build(b: *std.Build) void {
         "Fuzz bounded HTTP/WebSocket/WebTransport/MQTT parsers",
     );
     fuzz_parsers_step.dependOn(&run_parser_fuzz_tests.step);
+    const stateful_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stateful_fuzz_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            // See the parser fuzz target above: this is a Zig 0.16 fuzz-runner
+            // workaround and does not disable allocator leak detection.
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_stateful_fuzz_tests = b.addRunArtifact(stateful_fuzz_tests);
+    const fuzz_stateful_step = b.step(
+        "fuzz-stateful",
+        "Fuzz bounded HTTP/WebSocket/WebTransport/MQTT state sequences",
+    );
+    fuzz_stateful_step.dependOn(&run_stateful_fuzz_tests.step);
     const quic_handshake_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -322,6 +339,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_package_tests.step);
     test_step.dependOn(&run_parser_fuzz_tests.step);
+    test_step.dependOn(&run_stateful_fuzz_tests.step);
     test_step.dependOn(&run_quic_handshake_bench_tests.step);
     test_step.dependOn(&run_quic_persistent_bench_tests.step);
     test_step.dependOn(&run_quic_quic_go_churn_tests.step);

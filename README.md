@@ -9,8 +9,12 @@ The four public protocol families share a bounded parser fuzz target.
 WebTransport, and MQTT seeds plus deterministic truncation/bit-flip/random
 mutations under the leak-checking test allocator. `zig build fuzz-parsers
 --fuzz=100000` runs Zig's coverage-guided fuzzer against the same 64-KiB-bounded
-cross-protocol target. This covers stateless message parsers, not stateful
-runtime, compression, TLS, QUIC, or multi-packet sequence fuzzing.
+cross-protocol target. `zig build fuzz-stateful` drives bounded operation
+sequences through HTTP/1 pipelines, HTTP/2 flow control and HPACK, HTTP/3
+control streams and QPACK, WebSocket fragmented-message assembly, WebTransport
+session/stream lifecycles, and MQTT Session/QoS persistence; add `--fuzz=N` for
+coverage-guided sequence discovery. These targets do not yet fuzz live network
+runtimes, compression payload internals, TLS, or encrypted QUIC packets.
 
 Current protocol coverage includes:
 

@@ -848,9 +848,12 @@ real handshake test exercises both outcomes and then serves a sibling request.
 
 The shared `fuzz-parsers` target exercises bounded Capsule, DATAGRAM and
 bidirectional/unidirectional association-header parsing with deterministic and
-coverage-guided mutation. Stateful QUIC/H3 stream sequencing, QPACK, encrypted
-packet processing and multi-session routing remain outside this stateless fuzz
-surface and retain their focused protocol/fault gates.
+coverage-guided mutation. The companion `fuzz-stateful` target drives session
+establish/drain/close transitions, datagram accounting, bounded local/peer
+stream registration, FIN/reset/stop/priority transitions, HTTP/3 control-stream
+fragmentation, and QPACK table mutation. Encrypted QUIC packet processing, live
+H3 scheduling and multi-session routing remain outside these fuzz surfaces and
+retain their focused protocol/fault gates.
 
 1. The endpoint also exposes a synchronous `serveUntil` callback loop with
    bounded receive polling and external shutdown. Add independent per-session

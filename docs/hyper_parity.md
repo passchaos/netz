@@ -1411,8 +1411,13 @@ The shared `fuzz-parsers` target exercises strict borrowed and owned HTTP/1
 request/response parsing plus chunked decoding under a 64-KiB input and
 128-header cap. Default tests replay valid, ambiguous-length and chunked seeds
 with deterministic mutations; Zig's `--fuzz` mode adds coverage-guided search.
-HTTP/2/3 state machines, HPACK/QPACK, TLS and multi-message sequencing remain
-outside this stateless fuzz surface.
+The companion `fuzz-stateful` target drives bounded HTTP/1 incremental and
+pipelined message sequences, HTTP/2 flow-window and HPACK dynamic-table
+transitions, and HTTP/3 split control frames and QPACK table transitions. It
+found and now guards an HPACK compaction bug in which duplicate-name lookup
+keys could outlive their backing entry. Live socket scheduling, TLS, encrypted
+QUIC packets, and complete HTTP/2/3 connection state remain outside these fuzz
+surfaces.
 
 The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may

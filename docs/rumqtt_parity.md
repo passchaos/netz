@@ -1530,8 +1530,11 @@ MQTT Fixed Header and MQTT 3.1.1/5 CONNECT, CONNACK, PUBLISH, ACK,
 SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, DISCONNECT and AUTH parsers. Default
 tests replay valid and malformed seeds plus deterministic truncation/bit-flip/
 random mutations with leak checks; Zig's `--fuzz` mode adds coverage guidance.
-Broker Session ordering, reconnect, persistence, bridge and multi-packet state
-machines remain outside this stateless target.
+The companion `fuzz-stateful` target interleaves bounded Session open/takeover,
+disconnect/expiry, subscription, queued and immediate publication, outgoing
+QoS 1/2 acknowledgement, incoming QoS 2, and snapshot round-trip operations.
+Live broker connection ordering, reconnect timing, retained-message routing,
+bridge state and multi-client packet I/O remain outside these fuzz surfaces.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
