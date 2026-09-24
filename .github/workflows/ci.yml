@@ -1,0 +1,173 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzz_runs:
+        description: Coverage-guided runs per fuzz target
+        required: false
+        default: "10000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: netz
+    steps:
+      - name: Checkout netz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: netz
+          persist-credentials: false
+
+      - name: Require sibling dependency credentials
+        env:
+          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+        run: |
+          if [ -z "$DEPENDENCIES_TOKEN" ]; then
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail"
+            exit 1
+          fi
+
+      - name: Checkout pinned vail
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vail
+          ref: 291573cd9ab4beee72a6aaebf1f723cf8e8484f2
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vail
+          persist-credentials: false
+
+      - name: Checkout pinned pbz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/pbz
+          ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
+          path: pbz
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      - name: Cache Zig downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/zig
+          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'pbz/build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-0.16-
+
+      - name: Check formatting
+        run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
+
+      - name: Replay bounded fuzz corpora
+        run: zig build fuzz-parsers fuzz-stateful
+
+      - name: Run the complete test gate serially
+        run: zig build test -j1 --summary all
+
+  fuzz:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fuzz-parsers, fuzz-stateful]
+    defaults:
+      run:
+        working-directory: netz
+    steps:
+      - name: Checkout netz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: netz
+          persist-credentials: false
+
+      - name: Require sibling dependency credentials
+        env:
+          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+        run: |
+          if [ -z "$DEPENDENCIES_TOKEN" ]; then
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail"
+            exit 1
+          fi
+
+      - name: Checkout pinned vail
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vail
+          ref: 291573cd9ab4beee72a6aaebf1f723cf8e8484f2
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vail
+          persist-credentials: false
+
+      - name: Checkout pinned pbz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/pbz
+          ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
+          path: pbz
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      - name: Restore Zig downloads and fuzz corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/zig
+            netz/.zig-cache/f
+          key: ${{ runner.os }}-zig-0.16-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-zig-0.16-${{ matrix.target }}-
+
+      - name: Run bounded coverage-guided fuzzing
+        env:
+          FUZZ_RUNS: ${{ inputs.fuzz_runs || '10000' }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          case "$FUZZ_RUNS" in
+            ''|*[!0-9]*)
+              echo "::error::fuzz_runs must be an integer"
+              exit 2
+              ;;
+          esac
+          if [ "$FUZZ_RUNS" -lt 1 ] || [ "$FUZZ_RUNS" -gt 1000000 ]; then
+            echo "::error::fuzz_runs must be between 1 and 1000000"
+            exit 2
+          fi
+          zig build "$FUZZ_TARGET" --fuzz="$FUZZ_RUNS"
+
+      - name: Upload failure corpus
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ matrix.target }}-failure-corpus-${{ github.run_id }}
+          path: |
+            netz/.zig-cache/f
+            netz/.zig-cache/tmp/libfuzzer.log
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 30

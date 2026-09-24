@@ -96,16 +96,32 @@ pub const Target = union(enum) {
     ) runtime.Error!runtime.ConnectAttempt {
         return switch (self) {
             .tcp => |address| runtime.Client.connectAttemptWithDeadline(
-                allocator, io, address, options, deadline,
+                allocator,
+                io,
+                address,
+                options,
+                deadline,
             ),
             .host => |host| runtime.Client.connectHostAttemptWithDeadline(
-                allocator, io, host.name, host.port, options, deadline,
+                allocator,
+                io,
+                host.name,
+                host.port,
+                options,
+                deadline,
             ),
             .uri => |uri| runtime.Client.connectUriAttemptWithDeadline(
-                allocator, io, uri, options, deadline,
+                allocator,
+                io,
+                uri,
+                options,
+                deadline,
             ),
             .connector => |connector| connector.connectAttemptWithDeadline(
-                allocator, io, options, deadline,
+                allocator,
+                io,
+                options,
+                deadline,
             ),
         };
     }

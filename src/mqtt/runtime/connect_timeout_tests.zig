@@ -164,8 +164,8 @@ test "MQTT accepted TCP stream timeout bounds CONNECT admission" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            const stream = self.server.listener.accept(self.server.io) catch
-                |err| {
+            const stream = self.server.listener.accept(self.server.io) catch |err|
+                {
                     self.err = err;
                     return;
                 };

@@ -1967,8 +1967,11 @@ pub const ReconnectConnector = struct {
     ) runtime.Error!runtime.ConnectAttempt {
         const self: *ReconnectConnector = @ptrCast(@alignCast(context));
         return Client.connectUriAttemptWithDeadline(
-            allocator, io, self.uri,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.uri,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };
@@ -2017,8 +2020,12 @@ pub const HostReconnectConnector = struct {
     ) runtime.Error!runtime.ConnectAttempt {
         const self: *HostReconnectConnector = @ptrCast(@alignCast(context));
         return Client.connectHostAttemptWithDeadline(
-            allocator, io, self.host, self.port,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };
@@ -2068,8 +2075,12 @@ pub const TlsHostReconnectConnector = struct {
         const self: *TlsHostReconnectConnector =
             @ptrCast(@alignCast(context));
         return Client.connectTlsHostAttemptWithDeadline(
-            allocator, io, self.host, self.port,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };
@@ -2120,8 +2131,12 @@ pub const TlsAddressReconnectConnector = struct {
         const self: *TlsAddressReconnectConnector =
             @ptrCast(@alignCast(context));
         return Client.connectTlsAddressAttemptWithDeadline(
-            allocator, io, self.address, self.tls_host,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.address,
+            self.tls_host,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };

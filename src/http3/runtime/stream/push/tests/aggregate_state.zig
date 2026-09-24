@@ -112,7 +112,6 @@ test "HTTP/3 push aggregate transfers response ownership without allocation" {
     try std.testing.expectEqual(@as(usize, 0), state.body.items.len);
 }
 
-
 test "HTTP/3 push aggregate preserves state when body transfer is OOM" {
     const allocator = std.testing.allocator;
     var body = try std.ArrayList(u8).initCapacity(allocator, 32);

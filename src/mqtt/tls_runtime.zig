@@ -1019,8 +1019,12 @@ pub const ReconnectConnector = struct {
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const self: *ReconnectConnector = @ptrCast(@alignCast(context));
         return Client.connectAddressAttemptWithDeadline(
-            allocator, io, self.address, self.tls_host,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.address,
+            self.tls_host,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };
@@ -1070,8 +1074,12 @@ pub const HostReconnectConnector = struct {
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const self: *HostReconnectConnector = @ptrCast(@alignCast(context));
         return Client.connectHostAttemptWithDeadline(
-            allocator, io, self.host, self.port,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };
@@ -1120,8 +1128,11 @@ pub const UriReconnectConnector = struct {
     ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
         const self: *UriReconnectConnector = @ptrCast(@alignCast(context));
         return Client.connectUriAttemptWithDeadline(
-            allocator, io, self.uri,
-            reconnectOptions(self.options, mqtt_options), deadline,
+            allocator,
+            io,
+            self.uri,
+            reconnectOptions(self.options, mqtt_options),
+            deadline,
         );
     }
 };

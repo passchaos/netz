@@ -15,6 +15,11 @@ control streams and QPACK, WebSocket fragmented-message assembly, WebTransport
 session/stream lifecycles, and MQTT Session/QoS persistence; add `--fuzz=N` for
 coverage-guided sequence discovery. These targets do not yet fuzz live network
 runtimes, compression payload internals, TLS, or encrypted QUIC packets.
+The pinned GitHub Actions workflow replays both corpora and the complete test
+gate on pushes and pull requests, then runs both coverage-guided targets daily
+and on demand. Because the source checkout currently uses sibling `../vail`
+and `../pbz` paths, repository administrators must configure the read-only
+`NETZ_DEPENDENCIES_TOKEN` secret for the private `passchaos/vail` checkout.
 
 Current protocol coverage includes:
 
@@ -1449,11 +1454,13 @@ userspace accounting as kernel/interface capture; `--traffic` and `--stats`
 are deliberately mutually exclusive.
 
 The build script pins the package to Zig `0.16.0`.
-The package manifest pins its public `vail`, `zio`, and lazy `pbz` dependencies
-by immutable URL and content hash. WebSocket/gRPC DEFLATE support is included
-under `src/internal`, and the published path set includes all example, benchmark,
-documentation, test, and interop sources referenced by the build graph. A clean
-archive therefore needs no sibling `../vail`, `../vort`, or `../pbz` checkout.
+The development package manifest uses sibling `../vail` and `../pbz` checkouts
+and pins `zio` by immutable URL and content hash. CI checks out exact vail and
+pbz commits into that layout. WebSocket/gRPC DEFLATE support is included under
+`src/internal`, and the published path set includes all example, benchmark,
+documentation, test, and interop sources referenced by the build graph. A
+standalone release archive must vendor or rewrite the two sibling dependencies;
+release packaging automation for that step remains future work.
 
 ## Implementation order
 
