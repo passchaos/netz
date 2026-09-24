@@ -5,16 +5,17 @@ starts with deterministic parsers, serializers, preallocated fixed-width
 wire-integer helpers, and state helpers across four public protocol families.
 
 The four public protocol families share a bounded parser fuzz target.
-`zig build fuzz-parsers` replays valid and hostile HTTP/1, WebSocket,
-WebTransport, and MQTT seeds plus deterministic truncation/bit-flip/random
-mutations under the leak-checking test allocator. `zig build fuzz-parsers
---fuzz=100000` runs Zig's coverage-guided fuzzer against the same 64-KiB-bounded
-cross-protocol target. `zig build fuzz-stateful` drives bounded operation
-sequences through HTTP/1 pipelines, HTTP/2 flow control and HPACK, HTTP/3
-control streams and QPACK, WebSocket fragmented-message assembly, WebTransport
-session/stream lifecycles, and MQTT Session/QoS persistence; add `--fuzz=N` for
-coverage-guided sequence discovery. These targets do not yet fuzz live network
-runtimes, compression payload internals, TLS, or encrypted QUIC packets.
+`zig build fuzz-parsers` replays valid and hostile HTTP/1, HTTP/2, HTTP/3,
+HPACK, QPACK, WebSocket, WebTransport, and MQTT seeds plus deterministic
+truncation/bit-flip/random mutations under the leak-checking test allocator.
+`zig build fuzz-parsers --fuzz=100000` runs Zig's coverage-guided fuzzer
+against the same 64-KiB-bounded cross-protocol target. `zig build
+fuzz-stateful` drives bounded operation sequences through HTTP/1 pipelines,
+HTTP/2 flow control and HPACK, HTTP/3 control streams and QPACK, WebSocket
+fragmented-message assembly, WebTransport session/stream lifecycles, and MQTT
+Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
+These targets do not yet fuzz live network runtimes, compression payload
+internals, TLS, or encrypted QUIC packets.
 The pinned GitHub Actions workflow replays both corpora and the complete test
 gate on pushes and pull requests, then runs both coverage-guided targets daily
 and on demand. Because the source checkout currently uses sibling `../vail`

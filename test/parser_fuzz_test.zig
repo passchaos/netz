@@ -27,12 +27,38 @@ const http_ambiguous_seed = smithSliceSeed(
     "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\n" ++
         "Content-Length: 2\r\n\r\nx",
 );
+const http2_settings_seed = smithSliceSeed(&.{
+    0x00, 0x00, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x04, 0x00, 0x00, 0xff, 0xff,
+});
+const http2_headers_seed = smithSliceSeed(&.{
+    0x00, 0x00, 0x02, 0x01, 0x05, 0x00, 0x00, 0x00, 0x01,
+    0x82, 0x84,
+});
+const hpack_seed = smithSliceSeed(&.{ 0x82, 0x84, 0x87 });
+const http3_settings_seed = smithSliceSeed(&.{
+    0x00, 0x04, 0x02, 0x01, 0x00,
+});
+const http3_headers_seed = smithSliceSeed(&.{
+    0x01, 0x03, 0x00, 0x00, 0xd1,
+});
+const qpack_encoder_seed = smithSliceSeed(&.{
+    0x3f, 0xbd, 0x01, 0xc0, 0x03, 'n', 'e', 't',
+});
+const qpack_decoder_seed = smithSliceSeed(&.{ 0x81, 0x41, 0x01 });
 
 test "fuzz bounded cross-protocol parsers" {
     try std.testing.fuzz({}, fuzzAllParsers, .{ .corpus = &.{
         &http_get_seed,
         &http_chunked_seed,
         &http_ambiguous_seed,
+        &http2_settings_seed,
+        &http2_headers_seed,
+        &hpack_seed,
+        &http3_settings_seed,
+        &http3_headers_seed,
+        &qpack_encoder_seed,
+        &qpack_decoder_seed,
         &websocket_text_seed,
         &websocket_close_seed,
         &websocket_extended_seed,
@@ -52,6 +78,13 @@ test "bounded deterministic parser mutation smoke" {
         http_get_seed[4..],
         http_chunked_seed[4..],
         http_ambiguous_seed[4..],
+        http2_settings_seed[4..],
+        http2_headers_seed[4..],
+        hpack_seed[4..],
+        http3_settings_seed[4..],
+        http3_headers_seed[4..],
+        qpack_encoder_seed[4..],
+        qpack_decoder_seed[4..],
         websocket_text_seed[4..],
         websocket_close_seed[4..],
         websocket_extended_seed[4..],
@@ -102,6 +135,12 @@ fn exerciseAll(bytes: []const u8) !void {
 }
 
 fn exerciseHttp(bytes: []const u8) !void {
+    try exerciseHttp1(bytes);
+    try exerciseHttp2(bytes);
+    try exerciseHttp3(bytes);
+}
+
+fn exerciseHttp1(bytes: []const u8) !void {
     const allocator = std.testing.allocator;
     const options = netz.http1.ParseOptions{
         .max_headers = 128,
@@ -133,6 +172,142 @@ fn exerciseHttp(bytes: []const u8) !void {
         defer decoded.deinit(allocator);
         try std.testing.expect(decoded.consumed <= bytes.len);
         try std.testing.expect(decoded.body.len <= bytes.len);
+    } else |_| {}
+}
+
+fn exerciseHttp2(bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    _ = netz.http2.validateClientPreface(bytes) catch {};
+    if (netz.http2.FrameHeader.parse(bytes)) |header| {
+        try std.testing.expectEqual(netz.http2.FrameHeader.encoded_len, 9);
+        try std.testing.expect(header.length <= std.math.maxInt(u24));
+    } else |_| {}
+    if (netz.http2.Frame.parse(bytes)) |frame| {
+        try std.testing.expect(frame.consumed() <= bytes.len);
+        try std.testing.expectEqual(@as(usize, frame.header.length), frame.payload.len);
+        _ = netz.http2.DataPayload.parse(frame) catch {};
+        _ = netz.http2.ResetStreamPayload.parse(frame) catch {};
+        _ = netz.http2.PriorityPayload.parse(frame) catch {};
+        _ = netz.http2.HeadersPayload.parse(frame) catch {};
+        _ = netz.http2.PushPromisePayload.parse(frame) catch {};
+        _ = netz.http2.PingPayload.parse(frame) catch {};
+        _ = netz.http2.GoAwayPayload.parse(frame) catch {};
+        _ = netz.http2.WindowUpdatePayload.parse(frame) catch {};
+        _ = netz.http2.PriorityUpdatePayload.parse(frame) catch {};
+        if (netz.http2.OriginPayload.parse(allocator, frame)) |value| {
+            var origins = value;
+            defer origins.deinit(allocator);
+        } else |_| {}
+    } else |_| {}
+    if (netz.http2.parseSettings(allocator, bytes)) |settings| {
+        defer allocator.free(settings);
+        try std.testing.expectEqual(@as(usize, 0), bytes.len % 6);
+        try std.testing.expectEqual(bytes.len / 6, settings.len);
+    } else |_| {}
+
+    var decoder = netz.http2.Hpack.Decoder{};
+    defer decoder.deinit(allocator);
+    if (decoder.decodeBlockOwnedWithLimit(
+        allocator,
+        bytes,
+        128,
+        max_input_bytes,
+    )) |fields| {
+        defer netz.http2.Hpack.freeOwnedFields(allocator, fields);
+        try std.testing.expect(fields.len <= 128);
+    } else |_| {}
+    if (netz.http2.Hpack.decodeHuffman(allocator, bytes)) |decoded| {
+        defer allocator.free(decoded);
+        try std.testing.expect(decoded.len <= bytes.len * 2);
+    } else |_| {}
+}
+
+fn exerciseHttp3(bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    if (netz.http3.Frame.parseHeader(bytes)) |header| {
+        try std.testing.expect(header.header_length <= bytes.len);
+        _ = header.totalLength() catch {};
+    } else |_| {}
+    if (netz.http3.Frame.parse(bytes)) |frame| {
+        try std.testing.expect(frame.consumed <= bytes.len);
+        try std.testing.expect(frame.payload.len <= bytes.len);
+        switch (frame.frame_type) {
+            netz.http3.FrameType.goaway => _ = netz.http3.parseGoAwayPayload(frame.payload) catch {},
+            netz.http3.FrameType.cancel_push => _ = netz.http3.parseCancelPushPayload(frame.payload) catch {},
+            netz.http3.FrameType.max_push_id => _ = netz.http3.parseMaxPushIdPayload(frame.payload) catch {},
+            netz.http3.FrameType.push_promise => _ = netz.http3.parsePushPromisePayload(frame.payload) catch {},
+            netz.http3.FrameType.priority_update_request,
+            netz.http3.FrameType.priority_update_push,
+            => _ = netz.http3.parsePriorityUpdatePayload(frame.payload) catch {},
+            netz.http3.FrameType.origin => {
+                if (netz.http3.OriginPayload.parse(
+                    allocator,
+                    frame.payload,
+                )) |value| {
+                    var origins = value;
+                    defer origins.deinit(allocator);
+                } else |_| {}
+            },
+            else => {},
+        }
+    } else |_| {}
+    if (netz.http3.parseSettings(allocator, bytes)) |settings| {
+        defer allocator.free(settings);
+        try std.testing.expect(settings.len <= bytes.len);
+    } else |_| {}
+    if (netz.http3.ControlStream.parse(allocator, bytes)) |value| {
+        var stream = value;
+        defer stream.deinit(allocator);
+        for (stream.frames) |frame| {
+            try std.testing.expect(frame.consumed <= bytes.len);
+        }
+    } else |_| {}
+    if (netz.http3.decodeRequest(allocator, bytes)) |value| {
+        var request = value;
+        defer request.deinit(allocator);
+        try std.testing.expect(request.consumed <= bytes.len);
+    } else |_| {}
+    if (netz.http3.decodeResponse(allocator, bytes)) |value| {
+        var response = value;
+        defer response.deinit(allocator);
+        try std.testing.expect(response.consumed <= bytes.len);
+    } else |_| {}
+    try exerciseQpack(bytes);
+}
+
+fn exerciseQpack(bytes: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const qpack = netz.http3.Qpack;
+    if (qpack.decodeEncoderInstruction(allocator, bytes)) |value| {
+        var instruction = value;
+        defer instruction.deinit(allocator);
+        try std.testing.expect(instruction.consumed <= bytes.len);
+    } else |_| {}
+    if (qpack.decodeDecoderInstruction(bytes)) |instruction| {
+        try std.testing.expect(instruction.consumed <= bytes.len);
+    } else |_| {}
+    if (qpack.decodeLiteralBlockOwnedWithLimit(
+        allocator,
+        bytes,
+        max_input_bytes,
+    )) |fields| {
+        defer qpack.freeDecodedFields(allocator, fields);
+        try std.testing.expect(fields.len <= bytes.len);
+    } else |_| {}
+
+    var table = qpack.DynamicTable.init(allocator, 4096);
+    defer table.deinit();
+    try table.setCapacity(4096);
+    _ = qpack.applyEncoderInstructions(&table, allocator, bytes) catch {};
+    if (qpack.decodeDynamicBlockOwnedWithLimit(
+        allocator,
+        bytes,
+        table,
+        max_input_bytes,
+    )) |decoded| {
+        defer qpack.freeDecodedFields(allocator, decoded.fields);
+        try std.testing.expect(decoded.fields.len <= bytes.len);
+        try std.testing.expect(decoded.required_insert_count <= table.insert_count);
     } else |_| {}
 }
 
