@@ -13,6 +13,7 @@ parity:
 
 ```sh
 zig build test
+zig build fuzz-quic-wire
 zig build run-quic-echo -Doptimize=ReleaseFast
 zig build run-quic-handshake-echo -Doptimize=ReleaseFast
 zig build run-quic-datagram-echo -Doptimize=ReleaseFast
@@ -29,6 +30,17 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=1 --verbose
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=2 --body-bytes=1048576 --mode=download --streams=4 --verbose
 ```
+
+`fuzz-quic-wire` provides a dedicated 64 KiB-bounded corpus for QUIC long
+headers, Version Negotiation, Retry parsing and integrity verification, typed
+and untyped transport parameters, owned and caller-storage frame parsing,
+packet-type frame legality, and the TLS ClientHello, ServerHello,
+EncryptedExtensions, and Finished messages carried by QUIC CRYPTO frames. The
+default test gate replays structured seeds plus deterministic truncation,
+bit-flip, and random mutations; `zig build fuzz-quic-wire --fuzz=N` enables
+coverage-guided runs, and scheduled CI preserves its corpus. This target does
+not claim encrypted packet-protection, stateful live-connection, or network-I/O
+fuzz coverage.
 
 Longer performance gates that have been used successfully include:
 

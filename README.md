@@ -17,10 +17,13 @@ Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`. These
-targets do not yet fuzz live network runtimes, context-takeover compression,
-TLS, or encrypted QUIC packets. The pinned GitHub Actions workflow replays all
-three corpora and the complete test gate on pushes and pull requests, then runs
-the three coverage-guided targets daily and on demand. Because the source
+targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
+headers, Version Negotiation, Retry integrity, transport parameters, frame
+streams, and carried TLS handshake messages. They do not yet fuzz live network
+runtimes, context-takeover compression, or encrypted QUIC packets. The pinned
+GitHub Actions workflow replays all four corpora and the complete test gate on
+pushes and pull requests, then runs the four coverage-guided targets daily and
+on demand. Because the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
 for the private `passchaos/vail` checkout.

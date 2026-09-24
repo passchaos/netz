@@ -135,6 +135,21 @@ pub fn build(b: *std.Build) void {
     fuzz_websocket_compression_step.dependOn(
         &run_websocket_compression_fuzz_tests.step,
     );
+    const quic_wire_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/quic_wire_fuzz_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_quic_wire_fuzz_tests = b.addRunArtifact(quic_wire_fuzz_tests);
+    const fuzz_quic_wire_step = b.step(
+        "fuzz-quic-wire",
+        "Fuzz bounded QUIC frames, parameters, packets, and TLS messages",
+    );
+    fuzz_quic_wire_step.dependOn(&run_quic_wire_fuzz_tests.step);
     const quic_handshake_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -362,6 +377,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_fuzz_tests.step);
     test_step.dependOn(&run_stateful_fuzz_tests.step);
     test_step.dependOn(&run_websocket_compression_fuzz_tests.step);
+    test_step.dependOn(&run_quic_wire_fuzz_tests.step);
     test_step.dependOn(&run_quic_handshake_bench_tests.step);
     test_step.dependOn(&run_quic_persistent_bench_tests.step);
     test_step.dependOn(&run_quic_quic_go_churn_tests.step);
