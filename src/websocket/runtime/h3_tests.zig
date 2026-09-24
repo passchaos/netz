@@ -599,6 +599,15 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
                                 self.expected_authority,
                                 head.request.authority.?,
                             );
+                            try std.testing.expectEqualStrings(
+                                "permessage-deflate",
+                                for (head.request.headers) |header| {
+                                    if (std.ascii.eqlIgnoreCase(
+                                        header.name,
+                                        "sec-websocket-extensions",
+                                    )) break header.value;
+                                } else return error.TestUnexpectedResult,
+                            );
                             try session.startResponse(
                                 message.stream_id,
                                 .{
@@ -644,6 +653,8 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
         .{ .ip4 = .loopback(0) },
         uri,
         .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
             .h3_limits = limits,
             .h3 = .{ .handshake = .{
                 .original_destination_connection_id = &original_dcid,
@@ -1650,7 +1661,17 @@ fn expectH3FatalPendingAbort(opcode: websocket.Opcode) !void {
             try self.client_ready.wait(
                 self.server.transport.quic_server.endpoint.io,
             );
-            const payload = if (self.opcode == .close) "\x03\xe8" else "retained h3 payload";
+            const payload: []const u8 = if (self.opcode == .close)
+                "\x03\xe8"
+            else if (self.opcode == .binary)
+                "retained h3 payload " ** 8
+            else
+                "retained h3 payload";
+            if (self.opcode == .binary) {
+                connection.permessage_deflate = true;
+                connection.compression_send_context_takeover = true;
+                connection.compression_threshold = 0;
+            }
             switch (self.opcode) {
                 .binary => try h3.testing.beginPendingMessage(
                     &connection,
@@ -1668,6 +1689,11 @@ fn expectH3FatalPendingAbort(opcode: websocket.Opcode) !void {
                     payload,
                 ),
                 else => unreachable,
+            }
+            if (self.opcode == .binary) {
+                try std.testing.expect(
+                    connection.compression_send.previewPending(),
+                );
             }
             switch (self.opcode) {
                 .binary => h3.testing.markPendingMessageCommitted(
@@ -1991,6 +2017,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 .protocols = &.{"chat"},
                 .allowed_origins = &.{"https://example.test"},
                 .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
                 .compression_threshold = 1,
                 .limits = .{
                     .max_frame_bytes = compressed_parts.len,
@@ -2007,6 +2034,12 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 connection.negotiatedAlpn(),
             );
             try std.testing.expect(connection.permessage_deflate);
+            try std.testing.expect(
+                connection.compression_send_context_takeover,
+            );
+            try std.testing.expect(
+                connection.compression_receive_context_takeover,
+            );
 
             var receive_storage: [compressed_parts.len]u8 = undefined;
             const text = try connection.receiveMessageIntoWithTimeout(
@@ -2097,6 +2130,32 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                     compressed.payload,
                 );
             }
+            var dependent = try connection.receiveFrameWithTimeout(
+                .fromSeconds(5),
+            );
+            defer dependent.deinit(allocator);
+            try std.testing.expectEqual(
+                websocket.Opcode.binary,
+                dependent.header.opcode,
+            );
+            try std.testing.expect(dependent.header.rsv1);
+            try std.testing.expectError(
+                error.InvalidFrame,
+                websocket.decompressMessage(
+                    allocator,
+                    dependent.payload,
+                    compressed_parts.len,
+                ),
+            );
+            var owned = try connection.receiveMessageWithTimeout(
+                .fromSeconds(5),
+            );
+            defer owned.deinit(allocator);
+            try std.testing.expectEqualStrings(
+                compressed_parts,
+                owned.payload,
+            );
+            try std.testing.expect(owned.was_compressed);
             try connection.sendBinarySlices(&.{});
             try connection.sendBinarySlices(&.{ "a", "", "b", "c" });
             connection.permessage_deflate = false;
@@ -2127,6 +2186,11 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                     connection.compression_send.payload.allocatedSlice().ptr,
                 );
             }
+            try connection.sendBinarySlices(&.{
+                compressed_first,
+                compressed_second,
+            });
+            try connection.sendBinary(compressed_parts);
             try h3.testing.writeFrame(&connection, .binary, "split-", false);
             try connection.sendPing("between-fragments");
             try h3.testing.writeFrame(
@@ -2269,6 +2333,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             .origin = "https://example.test",
             .protocols = &.{"chat"},
             .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
             .compression_threshold = 1,
             .limits = .{
                 .max_frame_bytes = compressed_parts.len,
@@ -2280,6 +2345,8 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     try std.testing.expectEqualStrings("chat", client.selectedProtocol().?);
     try std.testing.expectEqualStrings("h3", client.negotiatedAlpn());
     try std.testing.expect(client.permessage_deflate);
+    try std.testing.expect(client.compression_send_context_takeover);
+    try std.testing.expect(client.compression_receive_context_takeover);
 
     const sibling_stream_id = try client.h3.sendRequest(.{
         .method = "GET",
@@ -2343,6 +2410,11 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             client.compression_send.payload.allocatedSlice().ptr,
         );
     }
+    try client.sendBinarySlices(&.{
+        compressed_first,
+        compressed_second,
+    });
+    try client.sendBinary(compressed_parts);
     var receive_storage: [compressed_parts.len]u8 = undefined;
     const empty_slices = try client.receiveMessageIntoWithTimeout(
         &receive_storage,
@@ -2376,6 +2448,22 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
         try std.testing.expect(compressed.was_compressed);
         try std.testing.expectEqualStrings(compressed_parts, compressed.payload);
     }
+    var dependent = try client.receiveFrameWithTimeout(.fromSeconds(5));
+    defer dependent.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.binary, dependent.header.opcode);
+    try std.testing.expect(dependent.header.rsv1);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        websocket.decompressMessage(
+            allocator,
+            dependent.payload,
+            compressed_parts.len,
+        ),
+    );
+    var owned = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer owned.deinit(allocator);
+    try std.testing.expectEqualStrings(compressed_parts, owned.payload);
+    try std.testing.expect(owned.was_compressed);
     const fragmented = try client.receiveMessageIntoWithTimeout(
         &receive_storage,
         .fromSeconds(5),
@@ -2417,6 +2505,210 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     // Receiving Close automatically echoes its exact payload. The server's
     // typed progress event therefore owns the same code and reason inspected
     // above rather than requiring an otherwise-invalid second Close frame.
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP3 compression defaults to no context takeover" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49 };
+    const client_cid = [_]u8{ 0x52, 0x53, 0x54, 0x55 };
+    const server_cid = [_]u8{ 0x62, 0x63, 0x64, 0x65 };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0x66} ** 32,
+            .x25519_secret_key = [_]u8{0x67} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{
+                .enable_permessage_deflate = true,
+            });
+            defer connection.deinit();
+            try std.testing.expect(connection.permessage_deflate);
+            try std.testing.expect(
+                !connection.compression_send_context_takeover,
+            );
+            try std.testing.expect(
+                !connection.compression_receive_context_takeover,
+            );
+            try connection.sendText("default-no-context");
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try h3.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0x68} ** 32,
+            .x25519_secret_key = [_]u8{0x69} ** 32,
+        } },
+        .{
+            .authority = "localhost",
+            .path = "/default-no-context",
+            .enable_permessage_deflate = true,
+        },
+    );
+    defer client.deinit();
+    try std.testing.expect(client.permessage_deflate);
+    try std.testing.expect(!client.compression_send_context_takeover);
+    try std.testing.expect(!client.compression_receive_context_takeover);
+    var message = try client.receiveMessageWithTimeout(.fromSeconds(5));
+    defer message.deinit(allocator);
+    try std.testing.expectEqualStrings("default-no-context", message.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP3 client rejects unsolicited context takeover" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79 };
+    const client_cid = [_]u8{ 0x82, 0x83, 0x84, 0x85 };
+    const server_cid = [_]u8{ 0x92, 0x93, 0x94, 0x95 };
+    var server = try http3.runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{
+            .handshake = .{
+                .local_connection_id = &server_cid,
+                .random = [_]u8{0x96} ** 32,
+                .x25519_secret_key = [_]u8{0x97} ** 32,
+            },
+            .session = .{ .local_settings = .{
+                .enable_connect_protocol = true,
+            } },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http3.runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            defer session.deinit();
+            try session.ensureSettingsSent();
+            while (true) {
+                var event = try session.receiveRequestEventWithTimeout(
+                    .fromSeconds(5),
+                );
+                defer event.deinit(allocator);
+                switch (event) {
+                    .reset => return error.TestUnexpectedResult,
+                    .message => |message| switch (message.value) {
+                        .head => |head| {
+                            if (head != .request) {
+                                return error.TestUnexpectedResult;
+                            }
+                            try std.testing.expectEqualStrings(
+                                "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+                                for (head.request.headers) |header| {
+                                    if (std.ascii.eqlIgnoreCase(
+                                        header.name,
+                                        "sec-websocket-extensions",
+                                    )) break header.value;
+                                } else return error.TestUnexpectedResult,
+                            );
+                            try session.startResponse(
+                                message.stream_id,
+                                .{
+                                    .status = 200,
+                                    .headers = &.{.{
+                                        .name = "sec-websocket-extensions",
+                                        .value = "permessage-deflate",
+                                    }},
+                                    .request_method = "CONNECT",
+                                    .extended_connect = true,
+                                },
+                                null,
+                            );
+                            return;
+                        },
+                        else => return error.TestUnexpectedResult,
+                    },
+                }
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.InvalidExtension,
+        h3.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            server.address(),
+            .{},
+            .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .random = [_]u8{0x98} ** 32,
+                .x25519_secret_key = [_]u8{0x99} ** 32,
+            } },
+            .{
+                .authority = "localhost",
+                .path = "/invalid-takeover",
+                .enable_permessage_deflate = true,
+            },
+        ),
+    );
 
     thread.join();
     joined = true;
@@ -3768,6 +4060,7 @@ test "WebSocket HTTP3 message deadline resumes one masked frame" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept(.{
                 .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
                 .compression_threshold = 1,
                 .limits = .{
                     .max_frame_bytes = parts_len,
@@ -3775,6 +4068,12 @@ test "WebSocket HTTP3 message deadline resumes one masked frame" {
                 },
             });
             defer connection.deinit();
+            try std.testing.expect(
+                connection.compression_send_context_takeover,
+            );
+            try std.testing.expect(
+                connection.compression_receive_context_takeover,
+            );
             var message = try connection.receiveMessageWithTimeout(
                 .fromSeconds(10),
             );
@@ -3852,6 +4151,7 @@ test "WebSocket HTTP3 message deadline resumes one masked frame" {
             .authority = "localhost",
             .path = "/message-deadline",
             .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
             .compression_threshold = 1,
             .limits = .{
                 .max_frame_bytes = parts_len,
@@ -3860,6 +4160,8 @@ test "WebSocket HTTP3 message deadline resumes one masked frame" {
         },
     );
     defer client.deinit();
+    try std.testing.expect(client.compression_send_context_takeover);
+    try std.testing.expect(client.compression_receive_context_takeover);
 
     var invalid_progress: h3.MessageWriteProgress = .{
         .committed_bytes = 99,
@@ -3900,6 +4202,7 @@ test "WebSocket HTTP3 message deadline resumes one masked frame" {
     try std.testing.expect(progress.committed_bytes > 0);
     try std.testing.expect(progress.committed_bytes < progress.total_bytes);
     try std.testing.expect(!progress.frame_committed);
+    try std.testing.expect(client.compression_send.previewPending());
     try std.testing.expectError(
         error.WriteInProgress,
         client.sendBinaryWithTimeout(
@@ -3930,6 +4233,7 @@ test "WebSocket HTTP3 message deadline resumes one masked frame" {
     try std.testing.expect(progress.frame_committed);
     try std.testing.expectEqual(progress.total_bytes, progress.committed_bytes);
     try std.testing.expect(h3.testing.pendingMessageProgress(&client) == null);
+    try std.testing.expect(!client.compression_send.previewPending());
     try std.testing.expect(
         h3.testing.pendingAutomaticControlProgress(&client) != null,
     );
@@ -4315,6 +4619,127 @@ test "WebSocket HTTP3 sends enforce configured outbound limits before IO" {
         error.MessageTooLarge,
         client.sendClose(.normal_closure, "abc"),
     );
+}
+
+test "WebSocket HTTP3 failed unbounded compressed send clears transaction" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid =
+        [_]u8{ 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad };
+    const client_cid = [_]u8{ 0xb6, 0xb7, 0xb8, 0xb9 };
+    const server_cid = [_]u8{ 0xc6, 0xc7, 0xc8, 0xc9 };
+    var server = try h3.Server.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xca} ** 32,
+            .x25519_secret_key = [_]u8{0xcb} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *h3.Server,
+        accepted: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.accepted.set(
+                    self.server.transport.quic_server.endpoint.io,
+                );
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept(.{
+                .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
+                .compression_threshold = 0,
+            });
+            defer connection.deinit();
+            self.accepted.set(
+                self.server.transport.quic_server.endpoint.io,
+            );
+            var head = try connection.h3.receiveRequestEventForWithTimeout(
+                4,
+                .fromSeconds(3),
+            );
+            defer head.deinit(allocator);
+            try std.testing.expect(head == .message);
+            try std.testing.expect(head.message.value == .head);
+            try std.testing.expectEqualStrings(
+                "/after-failed-send",
+                head.message.value.head.request.path,
+            );
+            var finished = try connection.h3
+                .receiveRequestEventForWithTimeout(4, .fromSeconds(3));
+            defer finished.deinit(allocator);
+            try std.testing.expect(finished == .message);
+            try std.testing.expect(finished.message.value == .finished);
+            try connection.h3.sendResponse(4, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.accepted.set(io);
+        thread.join();
+    };
+
+    var client = try h3.Client.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{},
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xcc} ** 32,
+            .x25519_secret_key = [_]u8{0xcd} ** 32,
+        } },
+        .{
+            .authority = "localhost",
+            .path = "/failed-compressed-send",
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+            .compression_threshold = 0,
+        },
+    );
+    defer client.deinit();
+    try shared.accepted.wait(io);
+
+    client.h3.abandonExtendedConnect(client.stream_id);
+    try std.testing.expectError(
+        error.UnexpectedStream,
+        client.sendText("compressible payload " ** 16),
+    );
+    try std.testing.expect(h3.testing.writeAborted(&client));
+    try std.testing.expect(h3.testing.outboundStorageReleased(&client));
+    try std.testing.expect(client.h3.isReusable());
+
+    var sibling = try client.h3.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/after-failed-send",
+        .authority = "localhost",
+    }, .fromSeconds(3));
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), sibling.response.status);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "WebSocket HTTP3 failed ordinary Close does not commit close state" {

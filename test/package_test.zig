@@ -1476,6 +1476,18 @@ test "public modules are reachable" {
         netz.websocket.runtime.h3,
         "UriConnectOptions",
     ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.h3.ConnectOptions,
+        "allow_context_takeover",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.h3.UriConnectOptions,
+        "allow_context_takeover",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.h3.AcceptOptions,
+        "allow_context_takeover",
+    ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3,
         "ConnectAttempt",

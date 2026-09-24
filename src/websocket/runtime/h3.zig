@@ -2,7 +2,7 @@
 //!
 //! WebSocket bytes are carried in HTTP/3 DATA frames while QUIC continues to
 //! provide loss recovery and flow control. Complete and fragmented messages
-//! share the RFC 6455 codec and no-context-takeover permessage-deflate engine.
+//! share the RFC 6455 codec and transactional permessage-deflate engine.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -217,6 +217,52 @@ const MessageFrameReceiveState = struct {
     }
 };
 
+fn finishIncomingMessageForConnection(
+    connection: anytype,
+    message: websocket.MessageAssembler.Message,
+) Error!common.OwnedMessage {
+    if (!message.compressed or
+        !connection.compression_receive_context_takeover)
+    {
+        return message_state.finishIncomingMessage(
+            connection.allocator,
+            message,
+            connection.limits.max_message_bytes,
+        );
+    }
+    const compressed_payload = message.payload;
+    const payload = connection.compression_receive.previewContextOwned(
+        connection.allocator,
+        compressed_payload,
+        connection.limits.max_message_bytes,
+        connection.compression_receive_max_window_bits,
+    ) catch |err| {
+        connection.allocator.free(compressed_payload);
+        return switch (err) {
+            error.PreviewPending => error.InvalidFrame,
+            error.OutOfMemory => blk: {
+                _ = connection.failReceive();
+                break :blk error.OutOfMemory;
+            },
+            else => |other| @errorCast(other),
+        };
+    };
+    connection.allocator.free(compressed_payload);
+    errdefer connection.allocator.free(payload);
+    if (message.opcode == .text and
+        !std.unicode.utf8ValidateSlice(payload))
+    {
+        connection.compression_receive.discardContextPreview();
+        return error.InvalidUtf8;
+    }
+    connection.compression_receive.commitContextPreview();
+    return .{
+        .opcode = message.opcode,
+        .payload = payload,
+        .was_compressed = true,
+    };
+}
+
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
 pub const Message = common.Message;
@@ -240,6 +286,8 @@ pub const ConnectOptions = struct {
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
+    allow_context_takeover: bool = false,
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
 };
@@ -251,6 +299,8 @@ pub const UriConnectOptions = struct {
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
+    allow_context_takeover: bool = false,
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
     h3_limits: http3.runtime.Limits = .{},
@@ -264,6 +314,8 @@ pub const AcceptOptions = struct {
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http3.Qpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// Permit RFC 7692 context takeover on this Extended CONNECT stream.
+    allow_context_takeover: bool = false,
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
 };
@@ -348,11 +400,18 @@ pub const ConnectAttempt = struct {
         errdefer if (selected_protocol) |protocol| {
             self.h3.?.allocator.free(protocol);
         };
+        const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+            .enable_permessage_deflate = self.options.enable_permessage_deflate,
+            .allow_context_takeover = self.options.allow_context_takeover,
+        };
         const negotiated_extension = try websocket.ExtensionNegotiation
-            .validateResponse(try optionalHeader(
-            self.response.headers,
-            "sec-websocket-extensions",
-        ));
+            .validateResponseWithPolicy(
+            try optionalHeader(
+                self.response.headers,
+                "sec-websocket-extensions",
+            ),
+            extension_policy,
+        );
         if (negotiated_extension.permessage_deflate and
             !self.options.enable_permessage_deflate)
         {
@@ -402,8 +461,11 @@ pub fn Connection(comptime role: common.Role) type {
         incoming_frame_validated: usize = 0,
         message_frame_receive: MessageFrameReceiveState = .{},
         permessage_deflate: bool = false,
+        compression_send_context_takeover: bool = false,
+        compression_receive_context_takeover: bool = false,
         compression_threshold: usize = 32,
         compression_send_max_window_bits: u8 = 15,
+        compression_receive_max_window_bits: u8 = 15,
         compression_send: compression_scratch.SendScratch = .{},
         compression_receive: compression_scratch.Scratch = .{},
         /// Receive progress and public writers may run on separate threads.
@@ -453,10 +515,22 @@ pub fn Connection(comptime role: common.Role) type {
                 .limits = limits,
                 .selected_protocol = selected_protocol,
                 .permessage_deflate = negotiated_extension.permessage_deflate,
+                .compression_send_context_takeover = negotiated_extension.permessage_deflate and switch (role) {
+                    .client => !negotiated_extension.client_no_context_takeover,
+                    .server => !negotiated_extension.server_no_context_takeover,
+                },
+                .compression_receive_context_takeover = negotiated_extension.permessage_deflate and switch (role) {
+                    .client => !negotiated_extension.server_no_context_takeover,
+                    .server => !negotiated_extension.client_no_context_takeover,
+                },
                 .compression_threshold = compression_threshold,
                 .compression_send_max_window_bits = switch (role) {
                     .client => negotiated_extension.client_max_window_bits orelse 15,
                     .server => negotiated_extension.server_max_window_bits orelse 15,
+                },
+                .compression_receive_max_window_bits = switch (role) {
+                    .client => negotiated_extension.server_max_window_bits orelse 15,
+                    .server => negotiated_extension.client_max_window_bits orelse 15,
                 },
             };
         }
@@ -689,7 +763,10 @@ pub fn Connection(comptime role: common.Role) type {
             // The QUIC sender encodes the borrowed STREAM view into stable
             // recovery storage before returning, so caller ownership resumes
             // as soon as this synchronous operation completes.
-            try self.writeParts(&.{ header, payload }, false);
+            self.writeParts(&.{ header, payload }, false) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         }
 
         pub fn sendBinaryInPlaceWithTimeout(
@@ -870,17 +947,25 @@ pub fn Connection(comptime role: common.Role) type {
                     payload_len,
                 );
                 if (compressed.len < payload_len) {
-                    try self.writeFrameExtended(
+                    self.writeFrameExtended(
                         .binary,
                         compressed,
                         true,
                         false,
                         true,
-                    );
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    };
+                    self.commitCompressionPreviewLocked();
                     return;
                 }
+                self.discardCompressionPreviewLocked();
             }
-            try self.writeBinarySlices(parts, payload_len);
+            self.writeBinarySlices(parts, payload_len) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         }
 
         pub fn sendBinarySlicesWithTimeout(
@@ -977,36 +1062,28 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.permessage_deflate and
                 total >= self.compression_threshold)
             {
-                try self.compression_send.prepare(self.allocator, total);
-                const compressed = try websocket
-                    .compressMessageFragmentsVortIntoWindowWithEncoder(
-                    &self.compression_send.encoder.?,
-                    &self.compression_send.payload,
+                const compressed = try self.compressMessageParts(
                     fragments,
-                    self.compression_send_max_window_bits,
+                    total,
                 );
                 if (compressed.len < total) {
-                    try self.writeCompressedFragments(
+                    self.writeCompressedFragments(
                         opcode,
                         compressed,
                         fragments.len,
-                    );
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    };
+                    self.commitCompressionPreviewLocked();
                     return;
                 }
+                self.discardCompressionPreviewLocked();
             }
-            if (try self.writeFragmentBatch(
-                opcode,
-                fragments,
-                false,
-            )) return;
-            for (fragments, 0..) |fragment, index| {
-                try self.writeFrame(
-                    if (index == 0) opcode else .continuation,
-                    fragment,
-                    index + 1 == fragments.len,
-                    false,
-                );
-            }
+            self.writeUncompressedFragments(opcode, fragments) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         }
 
         pub fn sendFragmentedWithTimeout(
@@ -1080,26 +1157,26 @@ pub fn Connection(comptime role: common.Role) type {
             fragments: []const []const u8,
             plain_len: usize,
         ) Error!void {
+            std.debug.assert(self.pending_message == null);
             var pending = PendingMessage{
                 .opcode = opcode,
                 .source = .fragmented,
                 .original_ptr = @intFromPtr(fragments.ptr),
                 .original_len = fragments.len,
             };
+            errdefer self.discardCompressionPreviewLocked();
             if (self.permessage_deflate and
                 plain_len >= self.compression_threshold)
             {
-                try self.compression_send.prepare(self.allocator, plain_len);
-                const compressed = try websocket
-                    .compressMessageFragmentsVortIntoWindowWithEncoder(
-                    &self.compression_send.encoder.?,
-                    &self.compression_send.payload,
+                const compressed = try self.compressMessageParts(
                     fragments,
-                    self.compression_send_max_window_bits,
+                    plain_len,
                 );
                 pending.compressed = compressed.len < plain_len;
                 if (pending.compressed) {
                     pending.fragmented_payload_total = compressed.len;
+                } else {
+                    self.discardCompressionPreviewLocked();
                 }
             }
             pending.wire_total = try fragmentedWireLen(
@@ -1109,39 +1186,49 @@ pub fn Connection(comptime role: common.Role) type {
             );
             self.pending_message = pending;
             self.application_write_pending.store(true, .release);
-            try self.preparePendingFragmentLocked(fragments);
+            errdefer {
+                self.pending_message = null;
+                self.application_write_pending.store(false, .release);
+            }
+            try self.preparePendingFragmentLocked(fragments, 0);
         }
 
         fn preparePendingFragmentLocked(
             self: *Self,
             fragments: []const []const u8,
+            index: usize,
         ) Error!void {
             const pending = &self.pending_message.?;
+            std.debug.assert(pending.source == .fragmented);
             const range: FragmentRange = if (pending.compressed)
                 compressedFragmentRange(
                     pending.fragmented_payload_total,
                     fragments.len,
-                    pending.fragment_index,
+                    index,
                 )
             else
-                .{ .start = 0, .end = fragments[pending.fragment_index].len };
-            pending.payload_len = range.end - range.start;
-            pending.fragment_start = pending.committed;
-            pending.mask_key = if (role == .client) blk: {
+                .{ .start = 0, .end = fragments[index].len };
+            const mask_key: ?[4]u8 = if (role == .client) blk: {
                 var key: [4]u8 = undefined;
                 try std.Io.randomSecure(self.io(), &key);
                 break :blk key;
             } else null;
+            var header_storage: [websocket.max_frame_header_len]u8 = undefined;
             const header = try websocket.writeFrameHeaderForLengthInto(
-                &pending.header,
-                if (pending.fragment_index == 0) pending.opcode else .continuation,
-                pending.payload_len,
+                &header_storage,
+                if (index == 0) pending.opcode else .continuation,
+                range.end - range.start,
                 .{
-                    .fin = pending.fragment_index + 1 == fragments.len,
-                    .mask_key = pending.mask_key,
-                    .rsv1 = pending.compressed and pending.fragment_index == 0,
+                    .fin = index + 1 == fragments.len,
+                    .mask_key = mask_key,
+                    .rsv1 = pending.compressed and index == 0,
                 },
             );
+            @memcpy(pending.header[0..header.len], header);
+            pending.fragment_index = index;
+            pending.payload_len = range.end - range.start;
+            pending.fragment_start = pending.committed;
+            pending.mask_key = mask_key;
             pending.header_len = header.len;
         }
 
@@ -1223,18 +1310,24 @@ pub fn Connection(comptime role: common.Role) type {
                 if (pending.committed - pending.fragment_start ==
                     pending.header_len + pending.payload_len)
                 {
-                    pending.fragment_index += 1;
-                    if (pending.fragment_index == fragments.len) {
+                    const next_index = pending.fragment_index + 1;
+                    if (next_index == fragments.len) {
                         progress.* = .{
                             .committed_bytes = pending.committed,
                             .total_bytes = pending.wire_total,
                             .frame_committed = true,
                         };
+                        if (pending.compressed) {
+                            self.commitCompressionPreviewLocked();
+                        }
                         self.pending_message = null;
                         self.application_write_pending.store(false, .release);
                         return;
                     }
-                    try self.preparePendingFragmentLocked(fragments);
+                    try self.preparePendingFragmentLocked(
+                        fragments,
+                        next_index,
+                    );
                 }
             }
         }
@@ -1286,6 +1379,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .original_len = payload.len,
             };
             var encoded_payload = payload;
+            errdefer self.discardCompressionPreviewLocked();
             if (self.permessage_deflate and
                 payload.len >= self.compression_threshold)
             {
@@ -1293,6 +1387,8 @@ pub fn Connection(comptime role: common.Role) type {
                 if (compressed.len < payload.len) {
                     encoded_payload = compressed;
                     pending.compressed = true;
+                } else {
+                    self.discardCompressionPreviewLocked();
                 }
             }
             if (role == .client) {
@@ -1355,6 +1451,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .original_len = parts.len,
             };
             var encoded_len = payload_len;
+            errdefer self.discardCompressionPreviewLocked();
             if (self.permessage_deflate and
                 payload_len >= self.compression_threshold)
             {
@@ -1365,6 +1462,8 @@ pub fn Connection(comptime role: common.Role) type {
                 if (compressed.len < payload_len) {
                     encoded_len = compressed.len;
                     pending.compressed = true;
+                } else {
+                    self.discardCompressionPreviewLocked();
                 }
             }
             if (role == .client) {
@@ -1464,6 +1563,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .total_bytes = pending.totalLen(),
                 .frame_committed = true,
             };
+            if (pending.compressed) self.commitCompressionPreviewLocked();
             self.pending_message = null;
             self.application_write_pending.store(false, .release);
         }
@@ -1552,6 +1652,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .total_bytes = pending.totalLen(),
                 .frame_committed = true,
             };
+            if (pending.compressed) self.commitCompressionPreviewLocked();
             self.pending_message = null;
             self.application_write_pending.store(false, .release);
         }
@@ -2200,10 +2301,9 @@ pub fn Connection(comptime role: common.Role) type {
                         self.discardBuffered(frame.consumed);
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
-                        return message_state.finishIncomingMessage(
-                            self.allocator,
+                        return finishIncomingMessageForConnection(
+                            self,
                             assembled,
-                            self.limits.max_message_bytes,
                         );
                     },
                 }
@@ -2392,19 +2492,43 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.InvalidFrame;
                 const was_compressed = self.message_into.compressed;
                 const payload = if (was_compressed)
-                    try websocket.decompressMessageInto(
-                        out[0..self.limits.max_message_bytes],
-                        self.compression_receive
-                            .payload.items[0..self.message_into.written],
-                        self.compression_receive.payload.allocatedSlice(),
-                        self.compression_receive.flate_window.?,
-                    )
+                    if (self.compression_receive_context_takeover)
+                        self.compression_receive.previewContextInto(
+                            self.allocator,
+                            out[0..self.limits.max_message_bytes],
+                            self.compression_receive
+                                .payload.items[0..self.message_into.written],
+                            self.compression_receive_max_window_bits,
+                        ) catch |err| switch (err) {
+                            error.PreviewPending => return error.InvalidFrame,
+                            error.OutOfMemory => {
+                                _ = self.failReceive();
+                                return error.OutOfMemory;
+                            },
+                            else => |other| return @errorCast(other),
+                        }
+                    else
+                        try websocket.decompressMessageInto(
+                            out[0..self.limits.max_message_bytes],
+                            self.compression_receive
+                                .payload.items[0..self.message_into.written],
+                            self.compression_receive.payload.allocatedSlice(),
+                            self.compression_receive.flate_window.?,
+                        )
                 else
                     out[0..self.message_into.written];
                 if (self.message_into.payloadNeedsFinalUtf8Validation() and
                     !std.unicode.utf8ValidateSlice(payload))
                 {
+                    if (self.compression_receive_context_takeover) {
+                        self.compression_receive.discardContextPreview();
+                    }
                     return error.InvalidUtf8;
+                }
+                if (was_compressed and
+                    self.compression_receive_context_takeover)
+                {
+                    self.compression_receive.commitContextPreview();
                 }
                 self.message_into.reset();
                 return .{
@@ -2724,10 +2848,17 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         fn ensureCompressionReceiveScratch(self: *Self) Error!void {
-            try self.compression_receive.prepare(
-                self.allocator,
-                self.limits.max_message_bytes,
-            );
+            if (self.compression_receive_context_takeover) {
+                try self.compression_receive.prepareContext(
+                    self.allocator,
+                    self.limits.max_message_bytes,
+                );
+            } else {
+                try self.compression_receive.prepare(
+                    self.allocator,
+                    self.limits.max_message_bytes,
+                );
+            }
         }
 
         pub fn receiveFrame(self: *Self) Error!websocket.Frame {
@@ -2914,6 +3045,30 @@ pub fn Connection(comptime role: common.Role) type {
                 options,
             );
             self.discardBuffered(frame.consumed);
+            if (self.compression_receive_context_takeover and
+                !frame.header.opcode.isControl())
+            {
+                self.compression_receive.observeFrame(
+                    self.allocator,
+                    frame.header.opcode != .continuation,
+                    frame.header.rsv1,
+                    frame.header.opcode == .text,
+                    frame.header.fin,
+                    frame.payload,
+                    self.limits.max_message_bytes,
+                    self.compression_receive_max_window_bits,
+                ) catch |err| {
+                    frame.deinit(self.allocator);
+                    return switch (err) {
+                        error.PreviewPending => error.InvalidFrame,
+                        error.OutOfMemory => blk: {
+                            _ = self.failReceive();
+                            break :blk error.OutOfMemory;
+                        },
+                        else => |other| @errorCast(other),
+                    };
+                };
+            }
             switch (frame.header.opcode) {
                 .ping => {
                     if (self.closeSent()) return frame;
@@ -2979,6 +3134,11 @@ pub fn Connection(comptime role: common.Role) type {
                 http3.ApplicationErrorCode.request_cancelled,
             ) catch {};
             common.clearPendingOutboundLocked(self);
+        }
+
+        fn abortAfterUnboundedMessageWriteLocked(self: *Self) void {
+            self.discardCompressionPreviewLocked();
+            self.abortStreamAfterReceiveFailureLocked();
         }
 
         fn finishReceiveFailure(
@@ -3058,17 +3218,25 @@ pub fn Connection(comptime role: common.Role) type {
             {
                 const compressed = try self.compressMessage(payload);
                 if (compressed.len < payload.len) {
-                    try self.writeFrameExtended(
+                    self.writeFrameExtended(
                         opcode,
                         compressed,
                         true,
                         false,
                         true,
-                    );
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    };
+                    self.commitCompressionPreviewLocked();
                     return;
                 }
+                self.discardCompressionPreviewLocked();
             }
-            try self.writeFrame(opcode, payload, true, false);
+            self.writeFrame(opcode, payload, true, false) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         }
 
         fn sendControlFrame(
@@ -3592,6 +3760,16 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         fn compressMessage(self: *Self, payload: []const u8) Error![]const u8 {
+            if (self.compression_send_context_takeover) {
+                return self.compression_send.preview(
+                    self.allocator,
+                    payload,
+                    self.compression_send_max_window_bits,
+                ) catch |err| switch (err) {
+                    error.PreviewPending => error.WriteInProgress,
+                    else => |other| @errorCast(other),
+                };
+            }
             try self.compression_send.prepare(self.allocator, payload.len);
             return websocket.compressMessageVortIntoWindowWithEncoder(
                 &self.compression_send.encoder.?,
@@ -3606,6 +3784,17 @@ pub fn Connection(comptime role: common.Role) type {
             parts: []const []const u8,
             payload_len: usize,
         ) Error![]const u8 {
+            if (self.compression_send_context_takeover) {
+                return self.compression_send.previewFragments(
+                    self.allocator,
+                    parts,
+                    payload_len,
+                    self.compression_send_max_window_bits,
+                ) catch |err| switch (err) {
+                    error.PreviewPending => error.WriteInProgress,
+                    else => |other| @errorCast(other),
+                };
+            }
             try self.compression_send.prepare(self.allocator, payload_len);
             return websocket.compressMessageFragmentsVortIntoWindowWithEncoder(
                 &self.compression_send.encoder.?,
@@ -3613,6 +3802,18 @@ pub fn Connection(comptime role: common.Role) type {
                 parts,
                 self.compression_send_max_window_bits,
             );
+        }
+
+        fn commitCompressionPreviewLocked(self: *Self) void {
+            if (self.compression_send_context_takeover) {
+                self.compression_send.commitPreview() catch unreachable;
+            }
+        }
+
+        fn discardCompressionPreviewLocked(self: *Self) void {
+            if (self.compression_send_context_takeover) {
+                self.compression_send.discardPreview();
+            }
         }
 
         fn writeCompressedFragments(
@@ -3638,6 +3839,26 @@ pub fn Connection(comptime role: common.Role) type {
                     index + 1 == frame_count,
                     false,
                     index == 0,
+                );
+            }
+        }
+
+        fn writeUncompressedFragments(
+            self: *Self,
+            opcode: websocket.Opcode,
+            fragments: []const []const u8,
+        ) Error!void {
+            if (try self.writeFragmentBatch(
+                opcode,
+                fragments,
+                false,
+            )) return;
+            for (fragments, 0..) |fragment, index| {
+                try self.writeFrame(
+                    if (index == 0) opcode else .continuation,
+                    fragment,
+                    index + 1 == fragments.len,
+                    false,
                 );
             }
         }
@@ -4514,6 +4735,7 @@ pub const Client = struct {
                 .origin = options.origin,
                 .extra_headers = options.extra_headers,
                 .enable_permessage_deflate = options.enable_permessage_deflate,
+                .allow_context_takeover = options.allow_context_takeover,
                 .compression_threshold = options.compression_threshold,
                 .limits = options.limits,
             },
@@ -4585,10 +4807,13 @@ fn connectAttemptEstablishedBefore(
         fields[field_index] = .{ .name = "origin", .value = origin };
         field_index += 1;
     }
-    if (options.enable_permessage_deflate) {
+    if (websocket.ExtensionNegotiation.offerValue(.{
+        .enable_permessage_deflate = options.enable_permessage_deflate,
+        .allow_context_takeover = options.allow_context_takeover,
+    })) |extension_offer| {
         fields[field_index] = .{
             .name = "sec-websocket-extensions",
-            .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+            .value = extension_offer,
         };
         field_index += 1;
     }
@@ -4931,14 +5156,21 @@ fn receiveServerUpgradeBefore(
     if (options.require_subprotocol and selected_protocol == null) {
         return error.InvalidSubprotocol;
     }
+    const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+        .enable_permessage_deflate = options.enable_permessage_deflate,
+        .allow_context_takeover = options.allow_context_takeover,
+    };
     const selected_extension = try acceptExtensions(
         allocator,
         request.head.headers,
-        options.enable_permessage_deflate,
+        extension_policy,
     );
     errdefer if (selected_extension) |extension| allocator.free(extension);
     const negotiated_extension = if (selected_extension) |extension|
-        try websocket.ExtensionNegotiation.validateResponse(extension)
+        try websocket.ExtensionNegotiation.validateResponseWithPolicy(
+            extension,
+            extension_policy,
+        )
     else
         websocket.ExtensionNegotiation{};
     try validateServerExtraHeaders(options.extra_headers);
@@ -5428,18 +5660,18 @@ fn validateProtocols(protocols: []const []const u8) Error!void {
 fn acceptExtensions(
     allocator: std.mem.Allocator,
     headers: []const http3.Qpack.HeaderField,
-    enabled: bool,
+    policy: websocket.ExtensionNegotiation.Policy,
 ) Error!?[]u8 {
-    if (!enabled) return null;
+    if (!policy.enable_permessage_deflate) return null;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(
             header.name,
             "sec-websocket-extensions",
         )) continue;
-        if (try websocket.ExtensionNegotiation.accept(
+        if (try websocket.ExtensionNegotiation.acceptWithPolicy(
             allocator,
             header.value,
-            true,
+            policy,
         )) |accepted| return accepted;
     }
     return null;

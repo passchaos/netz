@@ -20,12 +20,12 @@ round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
 `zig build fuzz-websocket-context` exercises the public stateful RFC 7692
 compressor/decompressor across independent directions, retained and explicitly
 reset histories, fragmented/repeated messages, hostile input, and transactional
-output-limit failures. The HTTP/1 and HTTP/2 runtimes additionally support
-explicit
+output-limit failures. The HTTP/1, HTTP/2, and HTTP/3 runtimes additionally
+support explicit
 `allow_context_takeover` opt-in across ordinary, sliced, fragmented, and
 deadline-resumable sends plus allocating, caller-buffer, and raw-frame receive
-APIs. HTTP/3 still negotiates both `*_no_context_takeover` parameters until
-the same lifecycle is integrated into that carrier. These
+APIs. With the default opt-out policy, all three transports negotiate both
+`*_no_context_takeover` parameters. These
 targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
 headers, Version Negotiation, Retry integrity, transport parameters, frame
 streams, and carried TLS handshake messages. `zig build fuzz-quic-protection`
