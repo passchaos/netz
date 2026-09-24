@@ -2277,6 +2277,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Client"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Server"));
     try std.testing.expect(@hasDecl(netz.websocket.runtime, "H2Connection"));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.H2ConnectOptions,
+        "allow_context_takeover",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.H2AcceptOptions,
+        "allow_context_takeover",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket.runtime.H2Client, "open"));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.H2Client,

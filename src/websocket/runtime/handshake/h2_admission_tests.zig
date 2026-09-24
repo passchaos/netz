@@ -682,6 +682,89 @@ test "WebSocket RFC 8441 pending deinit resets only its stream" {
     if (shared.err) |err| return err;
 }
 
+test "WebSocket RFC 8441 client rejects unsolicited context takeover" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            var request = try h2.readExtendedConnectRequest("websocket");
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+                http2_runtime.testing.findHeader(
+                    request.headers,
+                    "sec-websocket-extensions",
+                ) orelse return error.TestUnexpectedResult,
+            );
+            _ = try h2.acceptExtendedConnect(request, &.{.{
+                .name = "sec-websocket-extensions",
+                .value = "permessage-deflate",
+            }});
+
+            var sibling = try h2.readRequest();
+            defer sibling.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/after-invalid-extension", sibling.path);
+            try h2.writeResponse(sibling.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) server_thread.join();
+
+    var client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{},
+    );
+    defer client.close();
+    try std.testing.expectError(
+        error.InvalidExtension,
+        runtime.H2Client.open(allocator, &client, .{
+            .authority = "localhost",
+            .path = "/invalid-takeover",
+            .enable_permessage_deflate = true,
+        }),
+    );
+    var sibling = try client.request(.{
+        .method = "GET",
+        .path = "/after-invalid-extension",
+        .authority = "localhost",
+    });
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), sibling.status);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WebSocket RFC 8441 rejection headers cannot negotiate or override framing" {
     try std.testing.expectError(
         error.InvalidHandshake,

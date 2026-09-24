@@ -283,18 +283,18 @@ pub fn rejectH2Legacy(
 pub fn acceptH2Extensions(
     allocator: std.mem.Allocator,
     headers: []const http2.Hpack.HeaderField,
-    enabled: bool,
+    policy: websocket.ExtensionNegotiation.Policy,
 ) !?[]u8 {
-    if (!enabled) return null;
+    if (!policy.enable_permessage_deflate) return null;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(
             header.name,
             "sec-websocket-extensions",
         )) continue;
-        if (try websocket.ExtensionNegotiation.accept(
+        if (try websocket.ExtensionNegotiation.acceptWithPolicy(
             allocator,
             header.value,
-            true,
+            policy,
         )) |accepted| return accepted;
     }
     return null;

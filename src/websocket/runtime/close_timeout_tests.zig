@@ -3275,6 +3275,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
                 &h2,
                 .{
                     .enable_permessage_deflate = true,
+                    .allow_context_takeover = true,
                     .compression_threshold = 1,
                     .limits = .{
                         .max_frame_bytes = payload.len,
@@ -3283,6 +3284,8 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
                 },
             );
             defer ws.close();
+            try std.testing.expect(ws.compression_send_context_takeover);
+            try std.testing.expect(ws.compression_receive_context_takeover);
             try self.timeout_done.wait(self.server.io);
 
             var first = try ws.tunnel.readWithTimeout(.fromSeconds(2));
@@ -3391,6 +3394,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
         .{
             .authority = "localhost",
             .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
             .compression_threshold = 1,
             .limits = .{
                 .max_frame_bytes = payload.len,
@@ -3399,6 +3403,8 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
         },
     );
     defer client.close();
+    try std.testing.expect(client.compression_send_context_takeover);
+    try std.testing.expect(client.compression_receive_context_takeover);
     http2_runtime.testing.setSendConnectionWindow(&h2, 5);
     (try http2_runtime.testing.sendStreamWindow(
         &h2,
@@ -3434,6 +3440,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     try std.testing.expectEqual(@as(usize, 5), progress.committed_bytes);
     try std.testing.expect(progress.committed_bytes < progress.total_bytes);
     try std.testing.expect(!progress.frame_committed);
+    try std.testing.expect(client.compression_send.previewPending());
     try std.testing.expectError(
         error.WriteInProgress,
         client.sendBinaryWithTimeout(
@@ -3459,6 +3466,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     try client.sendBinaryWithTimeout(payload, &progress, .fromSeconds(2));
     try std.testing.expect(progress.frame_committed);
     try std.testing.expectEqual(progress.total_bytes, progress.committed_bytes);
+    try std.testing.expect(!client.compression_send.previewPending());
     try std.testing.expect(
         runtime.testing.pendingH2MessageProgress(&client) == null,
     );
@@ -3480,6 +3488,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     try std.testing.expectEqual(@as(usize, 5), progress.committed_bytes);
     try std.testing.expect(progress.committed_bytes < progress.total_bytes);
     try std.testing.expect(!progress.frame_committed);
+    try std.testing.expect(client.compression_send.previewPending());
     const different_parts = [_][]const u8{payload};
     try std.testing.expectError(
         error.WriteInProgress,
@@ -3499,6 +3508,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     );
     try std.testing.expect(progress.frame_committed);
     try std.testing.expectEqual(progress.total_bytes, progress.committed_bytes);
+    try std.testing.expect(!client.compression_send.previewPending());
     try std.testing.expect(
         runtime.testing.pendingH2MessageProgress(&client) == null,
     );
@@ -3520,6 +3530,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     );
     try std.testing.expectEqual(@as(usize, 5), progress.committed_bytes);
     try std.testing.expect(!progress.frame_committed);
+    try std.testing.expect(client.compression_send.previewPending());
     try std.testing.expectError(
         error.WriteInProgress,
         client.sendFragmentedWithTimeout(
@@ -3539,6 +3550,7 @@ test "WebSocket RFC 8441 message deadline resumes one masked frame" {
     );
     try std.testing.expect(progress.frame_committed);
     try std.testing.expectEqual(progress.total_bytes, progress.committed_bytes);
+    try std.testing.expect(!client.compression_send.previewPending());
     var response = try client.receiveMessageWithTimeout(.fromSeconds(2));
     defer response.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.binary, response.opcode);

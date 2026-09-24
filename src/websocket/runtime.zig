@@ -6551,10 +6551,22 @@ pub const H2Connection = struct {
             .limits = limits,
             .selected_protocol = selected_protocol,
             .permessage_deflate = negotiated_extension.permessage_deflate,
+            .compression_send_context_takeover = negotiated_extension.permessage_deflate and switch (role) {
+                .client => !negotiated_extension.client_no_context_takeover,
+                .server => !negotiated_extension.server_no_context_takeover,
+            },
+            .compression_receive_context_takeover = negotiated_extension.permessage_deflate and switch (role) {
+                .client => !negotiated_extension.server_no_context_takeover,
+                .server => !negotiated_extension.client_no_context_takeover,
+            },
             .compression_threshold = compression_threshold,
             .compression_send_max_window_bits = switch (role) {
                 .client => negotiated_extension.client_max_window_bits orelse 15,
                 .server => negotiated_extension.server_max_window_bits orelse 15,
+            },
+            .compression_receive_max_window_bits = switch (role) {
+                .client => negotiated_extension.server_max_window_bits orelse 15,
+                .server => negotiated_extension.client_max_window_bits orelse 15,
             },
         };
     }
@@ -6948,14 +6960,19 @@ pub const H2Connection = struct {
                 payload_len,
             );
             if (compressed.len < payload_len) {
-                try self.writeFrameLockedExtended(
+                self.writeFrameLockedExtended(
                     .binary,
                     compressed,
                     true,
                     .{ .rsv1 = true },
-                );
+                ) catch |err| {
+                    self.abortAfterUnboundedMessageWriteLocked();
+                    return err;
+                };
+                self.commitCompressionPreviewLocked();
                 return;
             }
+            self.discardCompressionPreviewLocked();
         }
 
         const mask_key = if (self.role == .client) blk: {
@@ -6971,19 +6988,28 @@ pub const H2Connection = struct {
             .{ .mask_key = mask_key },
         );
         if (mask_key) |mask| {
-            try writeMaskedTunnelPayloadSlices(
+            writeMaskedTunnelPayloadSlices(
                 &self.tunnel,
                 header,
                 parts,
                 mask,
-            );
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         } else {
-            var writer = try self.tunnel.beginWriteSequence();
-            try writeUnmaskedTunnelPayloadSlices(
+            var writer = self.tunnel.beginWriteSequence() catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
+            writeUnmaskedTunnelPayloadSlices(
                 &writer,
                 header,
                 parts,
-            );
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
         }
     }
 
@@ -7840,6 +7866,7 @@ pub const H2Connection = struct {
             .original_len = payload.len,
         };
         var encoded_payload = payload;
+        errdefer self.discardCompressionPreviewLocked();
         if (self.permessage_deflate and
             payload.len >= self.compression_threshold)
         {
@@ -7847,6 +7874,8 @@ pub const H2Connection = struct {
             if (compressed.len < payload.len) {
                 encoded_payload = compressed;
                 pending.compressed = true;
+            } else {
+                self.discardCompressionPreviewLocked();
             }
         }
         if (self.role == .client) {
@@ -7909,6 +7938,7 @@ pub const H2Connection = struct {
             .original_len = parts.len,
         };
         var encoded_len = payload_len;
+        errdefer self.discardCompressionPreviewLocked();
         if (self.permessage_deflate and
             payload_len >= self.compression_threshold)
         {
@@ -7919,6 +7949,8 @@ pub const H2Connection = struct {
             if (compressed.len < payload_len) {
                 encoded_len = compressed.len;
                 pending.compressed = true;
+            } else {
+                self.discardCompressionPreviewLocked();
             }
         }
         if (self.role == .client) {
@@ -8007,6 +8039,7 @@ pub const H2Connection = struct {
             .total_bytes = pending.totalLen(),
             .frame_committed = true,
         };
+        if (pending.compressed) self.commitCompressionPreviewLocked();
         self.pending_message = null;
         self.application_write_pending.store(false, .release);
     }
@@ -8084,6 +8117,7 @@ pub const H2Connection = struct {
             .total_bytes = pending.totalLen(),
             .frame_committed = true,
         };
+        if (pending.compressed) self.commitCompressionPreviewLocked();
         self.pending_message = null;
         self.application_write_pending.store(false, .release);
     }
@@ -8103,16 +8137,24 @@ pub const H2Connection = struct {
         {
             const compressed = try self.compressMessageLocked(payload);
             if (compressed.len < payload.len) {
-                try self.writeFrameLockedExtended(
+                self.writeFrameLockedExtended(
                     opcode,
                     compressed,
                     true,
                     .{ .rsv1 = true },
-                );
+                ) catch |err| {
+                    self.abortAfterUnboundedMessageWriteLocked();
+                    return err;
+                };
+                self.commitCompressionPreviewLocked();
                 return;
             }
+            self.discardCompressionPreviewLocked();
         }
-        try self.writeFrameLocked(opcode, payload, true);
+        self.writeFrameLocked(opcode, payload, true) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     pub fn sendFragmented(self: *H2Connection, opcode: websocket.Opcode, fragments: []const []const u8) Error!void {
@@ -8130,37 +8172,42 @@ pub const H2Connection = struct {
             defer self.send_mutex.unlock(self.tunnel.connection.io);
             try self.ensureCanSendOpcodeLocked(opcode);
             if (plain_len >= self.compression_threshold) {
-                try self.compression_send.prepare(
-                    self.allocator,
+                const compressed = try self.compressMessagePartsLocked(
+                    fragments,
                     plain_len,
                 );
-                const compressed = try websocket
-                    .compressMessageFragmentsVortIntoWindowWithEncoder(
-                    &self.compression_send.encoder.?,
-                    &self.compression_send.payload,
-                    fragments,
-                    self.compression_send_max_window_bits,
-                );
                 if (compressed.len < plain_len) {
-                    try self.writeCompressedFragmentsLocked(
+                    self.writeCompressedFragmentsLocked(
                         opcode,
                         compressed,
                         fragments.len,
-                    );
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    };
+                    self.commitCompressionPreviewLocked();
                     return;
                 }
+                self.discardCompressionPreviewLocked();
             }
-            return self.writeUncompressedFragmentsLocked(
+            self.writeUncompressedFragmentsLocked(
                 opcode,
                 fragments,
-            );
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
+            return;
         }
 
         self.send_mutex.lockUncancelable(self.tunnel.connection.io);
         defer self.send_mutex.unlock(self.tunnel.connection.io);
         try self.ensureCanSendOpcodeLocked(opcode);
 
-        try self.writeUncompressedFragmentsLocked(opcode, fragments);
+        self.writeUncompressedFragmentsLocked(opcode, fragments) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     pub fn sendFragmentedWithTimeout(
@@ -8241,12 +8288,14 @@ pub const H2Connection = struct {
         fragments: []const []const u8,
         plain_len: usize,
     ) Error!void {
+        std.debug.assert(self.pending_message == null);
         var pending = PendingH2Message{
             .opcode = opcode,
             .source = .fragmented,
             .original_ptr = @intFromPtr(fragments.ptr),
             .original_len = fragments.len,
         };
+        errdefer self.discardCompressionPreviewLocked();
         if (self.permessage_deflate and
             plain_len >= self.compression_threshold)
         {
@@ -8257,6 +8306,8 @@ pub const H2Connection = struct {
             pending.compressed = compressed.len < plain_len;
             if (pending.compressed) {
                 pending.fragmented_payload_total = compressed.len;
+            } else {
+                self.discardCompressionPreviewLocked();
             }
         }
         pending.wire_total = try fragmentedWireLen(
@@ -8266,39 +8317,49 @@ pub const H2Connection = struct {
         );
         self.pending_message = pending;
         self.application_write_pending.store(true, .release);
-        try self.preparePendingFragmentLocked(fragments);
+        errdefer {
+            self.pending_message = null;
+            self.application_write_pending.store(false, .release);
+        }
+        try self.preparePendingFragmentLocked(fragments, 0);
     }
 
     fn preparePendingFragmentLocked(
         self: *H2Connection,
         fragments: []const []const u8,
+        index: usize,
     ) Error!void {
         const pending = &self.pending_message.?;
+        std.debug.assert(pending.source == .fragmented);
         const range: message_state.FragmentRange = if (pending.compressed)
             compressedFragmentRange(
                 pending.fragmented_payload_total,
                 fragments.len,
-                pending.fragment_index,
+                index,
             )
         else
-            .{ .start = 0, .end = fragments[pending.fragment_index].len };
-        pending.payload_len = range.end - range.start;
-        pending.fragment_start = pending.committed;
-        pending.mask_key = if (self.role == .client) blk: {
+            .{ .start = 0, .end = fragments[index].len };
+        const mask_key: ?[4]u8 = if (self.role == .client) blk: {
             var key: [4]u8 = undefined;
             try std.Io.randomSecure(self.tunnel.connection.io, &key);
             break :blk key;
         } else null;
+        var header_storage: [websocket.max_frame_header_len]u8 = undefined;
         const header = try websocket.writeFrameHeaderForLengthInto(
-            &pending.header,
-            if (pending.fragment_index == 0) pending.opcode else .continuation,
-            pending.payload_len,
+            &header_storage,
+            if (index == 0) pending.opcode else .continuation,
+            range.end - range.start,
             .{
-                .fin = pending.fragment_index + 1 == fragments.len,
-                .mask_key = pending.mask_key,
-                .rsv1 = pending.compressed and pending.fragment_index == 0,
+                .fin = index + 1 == fragments.len,
+                .mask_key = mask_key,
+                .rsv1 = pending.compressed and index == 0,
             },
         );
+        @memcpy(pending.header[0..header.len], header);
+        pending.fragment_index = index;
+        pending.payload_len = range.end - range.start;
+        pending.fragment_start = pending.committed;
+        pending.mask_key = mask_key;
         pending.header_len = header.len;
     }
 
@@ -8361,18 +8422,24 @@ pub const H2Connection = struct {
             if (pending.committed - pending.fragment_start ==
                 pending.header_len + pending.payload_len)
             {
-                pending.fragment_index += 1;
-                if (pending.fragment_index == fragments.len) {
+                const next_index = pending.fragment_index + 1;
+                if (next_index == fragments.len) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
                         .total_bytes = pending.wire_total,
                         .frame_committed = true,
                     };
+                    if (pending.compressed) {
+                        self.commitCompressionPreviewLocked();
+                    }
                     self.pending_message = null;
                     self.application_write_pending.store(false, .release);
                     return;
                 }
-                try self.preparePendingFragmentLocked(fragments);
+                try self.preparePendingFragmentLocked(
+                    fragments,
+                    next_index,
+                );
             }
         }
     }
@@ -8438,6 +8505,27 @@ pub const H2Connection = struct {
         errdefer frame.deinit(self.allocator);
         self.discardBuffered(frame.consumed);
         if (self.closeReceived() and frame.header.opcode != .close) return error.ConnectionClosed;
+        if (self.compression_receive_context_takeover and
+            !frame.header.opcode.isControl())
+        {
+            self.compression_receive.observeFrame(
+                self.allocator,
+                frame.header.opcode != .continuation,
+                frame.header.rsv1,
+                frame.header.opcode == .text,
+                frame.header.fin,
+                frame.payload,
+                self.limits.max_message_bytes,
+                self.compression_receive_max_window_bits,
+            ) catch |err| switch (err) {
+                error.PreviewPending => return error.InvalidFrame,
+                error.OutOfMemory => {
+                    _ = failReceive(self);
+                    return error.OutOfMemory;
+                },
+                else => |other| return @errorCast(other),
+            };
+        }
         if (frame.header.opcode == .close) self.close_received.store(true, .release);
         return frame;
     }
@@ -8641,10 +8729,9 @@ pub const H2Connection = struct {
                     if (maybe_message) |message| {
                         self.message_assembler.?.deinit();
                         self.message_assembler = null;
-                        return finishIncomingMessage(
-                            self.allocator,
+                        return finishIncomingMessageForConnection(
+                            self,
                             message,
-                            self.limits.max_message_bytes,
                         );
                     }
                 },
@@ -8695,16 +8782,33 @@ pub const H2Connection = struct {
     }
 
     fn ensureCompressionReceiveScratch(self: *H2Connection) Error!void {
-        try self.compression_receive.prepare(
-            self.allocator,
-            self.limits.max_message_bytes,
-        );
+        if (self.compression_receive_context_takeover) {
+            try self.compression_receive.prepareContext(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        } else {
+            try self.compression_receive.prepare(
+                self.allocator,
+                self.limits.max_message_bytes,
+            );
+        }
     }
 
     fn compressMessageLocked(
         self: *H2Connection,
         payload: []const u8,
     ) Error![]const u8 {
+        if (self.compression_send_context_takeover) {
+            return self.compression_send.preview(
+                self.allocator,
+                payload,
+                self.compression_send_max_window_bits,
+            ) catch |err| switch (err) {
+                error.PreviewPending => error.WriteInProgress,
+                else => |other| @errorCast(other),
+            };
+        }
         try self.compression_send.prepare(
             self.allocator,
             payload.len,
@@ -8722,6 +8826,17 @@ pub const H2Connection = struct {
         parts: []const []const u8,
         payload_len: usize,
     ) Error![]const u8 {
+        if (self.compression_send_context_takeover) {
+            return self.compression_send.previewFragments(
+                self.allocator,
+                parts,
+                payload_len,
+                self.compression_send_max_window_bits,
+            ) catch |err| switch (err) {
+                error.PreviewPending => error.WriteInProgress,
+                else => |other| @errorCast(other),
+            };
+        }
         try self.compression_send.prepare(
             self.allocator,
             payload_len,
@@ -8732,6 +8847,23 @@ pub const H2Connection = struct {
             parts,
             self.compression_send_max_window_bits,
         );
+    }
+
+    fn commitCompressionPreviewLocked(self: *H2Connection) void {
+        if (self.compression_send_context_takeover) {
+            self.compression_send.commitPreview() catch unreachable;
+        }
+    }
+
+    fn discardCompressionPreviewLocked(self: *H2Connection) void {
+        if (self.compression_send_context_takeover) {
+            self.compression_send.discardPreview();
+        }
+    }
+
+    fn abortAfterUnboundedMessageWriteLocked(self: *H2Connection) void {
+        self.discardCompressionPreviewLocked();
+        self.abortTunnelAfterReceiveFailureLocked(null);
     }
 
     fn writeFrameLocked(self: *H2Connection, opcode: websocket.Opcode, payload: []const u8, fin: bool) Error!void {
@@ -9550,10 +9682,13 @@ pub const H2Client = struct {
             };
             request_index += 1;
         }
-        if (options.enable_permessage_deflate) {
+        if (websocket.ExtensionNegotiation.offerValue(.{
+            .enable_permessage_deflate = options.enable_permessage_deflate,
+            .allow_context_takeover = options.allow_context_takeover,
+        })) |extension_offer| {
             request_headers[request_index] = .{
                 .name = "sec-websocket-extensions",
-                .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+                .value = extension_offer,
             };
             request_index += 1;
         }
@@ -9631,11 +9766,18 @@ pub const H2ConnectAttempt = struct {
         errdefer if (selected_protocol) |protocol| {
             self.allocator.free(protocol);
         };
+        const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+            .enable_permessage_deflate = self.options.enable_permessage_deflate,
+            .allow_context_takeover = self.options.allow_context_takeover,
+        };
         const selected_extension = try websocket.ExtensionNegotiation
-            .validateResponse(try optionalH2SingletonHeader(
-            self.response.headers,
-            "sec-websocket-extensions",
-        ));
+            .validateResponseWithPolicy(
+            try optionalH2SingletonHeader(
+                self.response.headers,
+                "sec-websocket-extensions",
+            ),
+            extension_policy,
+        );
         if (selected_extension.permessage_deflate and
             !self.options.enable_permessage_deflate)
         {
@@ -9794,10 +9936,21 @@ pub const H2Server = struct {
         if (options.require_subprotocol and selected_protocol == null) {
             return error.InvalidSubprotocol;
         }
-        const selected_extension = try acceptH2Extensions(allocator, request.headers, options.enable_permessage_deflate);
+        const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+            .enable_permessage_deflate = options.enable_permessage_deflate,
+            .allow_context_takeover = options.allow_context_takeover,
+        };
+        const selected_extension = try acceptH2Extensions(
+            allocator,
+            request.headers,
+            extension_policy,
+        );
         errdefer if (selected_extension) |extension| allocator.free(extension);
         const negotiated_extension = if (selected_extension) |extension|
-            try websocket.ExtensionNegotiation.validateResponse(extension)
+            try websocket.ExtensionNegotiation.validateResponseWithPolicy(
+                extension,
+                extension_policy,
+            )
         else
             websocket.ExtensionNegotiation{};
 
@@ -10416,6 +10569,8 @@ pub const H2ConnectOptions = struct {
     origin: ?[]const u8 = null,
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
+    allow_context_takeover: bool = false,
     /// RFC 8441 outbound compression threshold; receive negotiation is
     /// independent of this value.
     compression_threshold: usize = default_compression_threshold,
@@ -10430,6 +10585,8 @@ pub const H2AcceptOptions = struct {
     allowed_origins: []const []const u8 = &.{},
     extra_headers: []const http2.Hpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
+    /// Permit RFC 7692 context takeover on this Extended CONNECT stream.
+    allow_context_takeover: bool = false,
     /// RFC 8441 outbound compression threshold.
     compression_threshold: usize = default_compression_threshold,
     limits: Limits = .{},
@@ -11132,7 +11289,7 @@ fn validateBufferedTextRange(
 const finishIncomingMessage = message_state.finishIncomingMessage;
 
 fn finishIncomingMessageForConnection(
-    connection: *Connection,
+    connection: anytype,
     message: websocket.MessageAssembler.Message,
 ) Error!OwnedMessage {
     if (!message.compressed or
@@ -11886,7 +12043,9 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
         .{ .name = "sec-websocket-extensions", .value = "x-unknown" },
         .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; client_no_context_takeover; server_max_window_bits=15" },
     };
-    const accepted = try acceptH2Extensions(allocator, &split_offer, true);
+    const accepted = try acceptH2Extensions(allocator, &split_offer, .{
+        .enable_permessage_deflate = true,
+    });
     defer if (accepted) |value| allocator.free(value);
     try std.testing.expect(accepted != null);
 
@@ -12790,6 +12949,8 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
             defer ws.close();
             try std.testing.expectEqualStrings("chat.v1", ws.selected_protocol.?);
             try std.testing.expect(ws.permessage_deflate);
+            try std.testing.expect(!ws.compression_send_context_takeover);
+            try std.testing.expect(!ws.compression_receive_context_takeover);
 
             var compressed: std.ArrayList(u8) = .empty;
             defer compressed.deinit(server_ptr.allocator);
@@ -12907,6 +13068,8 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
     defer ws_client.close();
     try std.testing.expectEqualStrings("chat.v1", ws_client.selected_protocol.?);
     try std.testing.expect(ws_client.permessage_deflate);
+    try std.testing.expect(!ws_client.compression_send_context_takeover);
+    try std.testing.expect(!ws_client.compression_receive_context_takeover);
 
     try ws_client.sendFragmented(.text, &.{
         "hello \xe2",
@@ -12952,6 +13115,207 @@ test "WebSocket over HTTP/2 extended CONNECT exchanges messages" {
     try std.testing.expect(ws_client.close_received.load(.acquire));
 
     thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "WebSocket HTTP2 context takeover spans runtime API shapes" {
+    const allocator = std.testing.allocator;
+    const context_payload =
+        "abcdefghijklmnopqrstuvwxyz0123456789" ** 8;
+    const fallback_payload = [_]u8{
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    };
+
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_frame_payload = 4096,
+            .max_body_bytes = 4096,
+            .enable_connect_protocol = true,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *http2_runtime.Server) !void {
+            var h2 = try server_ptr.accept();
+            defer h2.close();
+            var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
+                .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
+                .compression_threshold = 0,
+                .limits = .{
+                    .max_head_bytes = 4096,
+                    .max_frame_bytes = 4096,
+                    .max_message_bytes = 4096,
+                },
+            });
+            defer ws.close();
+            try std.testing.expect(ws.permessage_deflate);
+            try std.testing.expect(ws.compression_send_context_takeover);
+            try std.testing.expect(ws.compression_receive_context_takeover);
+
+            // Expansion fallback must not enter the compression history.
+            for (0..2) |_| {
+                var frame = try ws.receiveFrame();
+                defer frame.deinit(server_ptr.allocator);
+                try std.testing.expectEqual(websocket.Opcode.binary, frame.header.opcode);
+                try std.testing.expect(!frame.header.rsv1);
+                try std.testing.expectEqualSlices(u8, &fallback_payload, frame.payload);
+            }
+
+            var first_wire: std.ArrayList(u8) = .empty;
+            defer first_wire.deinit(server_ptr.allocator);
+            for (0..3) |index| {
+                var frame = try ws.receiveFrame();
+                defer frame.deinit(server_ptr.allocator);
+                try std.testing.expectEqual(
+                    if (index == 0) websocket.Opcode.text else .continuation,
+                    frame.header.opcode,
+                );
+                try std.testing.expectEqual(index == 0, frame.header.rsv1);
+                try std.testing.expectEqual(index == 2, frame.header.fin);
+                try first_wire.appendSlice(server_ptr.allocator, frame.payload);
+            }
+            const first_plain = try websocket.decompressMessage(
+                server_ptr.allocator,
+                first_wire.items,
+                context_payload.len,
+            );
+            defer server_ptr.allocator.free(first_plain);
+            try std.testing.expectEqualStrings(context_payload, first_plain);
+
+            var dependent = try ws.receiveFrame();
+            defer dependent.deinit(server_ptr.allocator);
+            try std.testing.expect(dependent.header.rsv1);
+            try std.testing.expectError(
+                error.InvalidFrame,
+                websocket.decompressMessage(
+                    server_ptr.allocator,
+                    dependent.payload,
+                    context_payload.len,
+                ),
+            );
+
+            var progress: MessageWriteProgress = .{};
+            try ws.sendFragmentedWithDeadline(
+                .text,
+                &.{
+                    context_payload[0..71],
+                    context_payload[71..173],
+                    context_payload[173..],
+                },
+                &progress,
+                .fromNow(server_ptr.io, .{
+                    .raw = .fromSeconds(5),
+                    .clock = .awake,
+                }),
+            );
+            try std.testing.expect(progress.frame_committed);
+            try ws.sendBinarySlices(&.{
+                context_payload[0..97],
+                "",
+                context_payload[97..],
+            });
+            try ws.sendText(context_payload);
+
+            var close = try ws.receiveFrame();
+            defer close.deinit(server_ptr.allocator);
+            try std.testing.expectEqual(websocket.Opcode.close, close.header.opcode);
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h2_client = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer h2_client.close();
+    var client = try H2Client.open(allocator, &h2_client, .{
+        .authority = "localhost",
+        .path = "/context-takeover",
+        .enable_permessage_deflate = true,
+        .allow_context_takeover = true,
+        .compression_threshold = 0,
+        .limits = .{
+            .max_head_bytes = 4096,
+            .max_frame_bytes = 4096,
+            .max_message_bytes = 4096,
+        },
+    });
+    defer client.close();
+    try std.testing.expect(client.compression_send_context_takeover);
+    try std.testing.expect(client.compression_receive_context_takeover);
+
+    try client.sendBinary(&fallback_payload);
+    try client.sendBinary(&fallback_payload);
+    var send_progress: MessageWriteProgress = .{};
+    try client.sendFragmentedWithDeadline(
+        .text,
+        &.{
+            context_payload[0..83],
+            context_payload[83..199],
+            context_payload[199..],
+        },
+        &send_progress,
+        .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }),
+    );
+    try std.testing.expect(send_progress.frame_committed);
+    try client.sendBinarySlices(&.{
+        context_payload[0..101],
+        "",
+        context_payload[101..],
+    });
+
+    var first_response = try client.receiveMessage();
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, first_response.opcode);
+    try std.testing.expectEqualStrings(context_payload, first_response.payload);
+    var caller_storage: [4096]u8 = undefined;
+    const second_response = try client.receiveMessageInto(&caller_storage);
+    try std.testing.expectEqual(websocket.Opcode.binary, second_response.opcode);
+    try std.testing.expectEqualStrings(context_payload, second_response.payload);
+    try std.testing.expect(second_response.was_compressed);
+    var third_response = try client.receiveFrame();
+    defer third_response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, third_response.header.opcode);
+    try std.testing.expect(third_response.header.rsv1);
+    try std.testing.expect(third_response.header.fin);
+    try std.testing.expectError(
+        error.InvalidFrame,
+        websocket.decompressMessage(
+            allocator,
+            third_response.payload,
+            context_payload.len,
+        ),
+    );
+    try client.sendClose(.normal_closure, "bye");
+
+    thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
