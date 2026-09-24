@@ -15,6 +15,7 @@ parity:
 zig build test
 zig build fuzz-quic-wire
 zig build fuzz-quic-protection
+zig build fuzz-quic-connection
 zig build run-quic-echo -Doptimize=ReleaseFast
 zig build run-quic-handshake-echo -Doptimize=ReleaseFast
 zig build run-quic-datagram-echo -Doptimize=ReleaseFast
@@ -49,6 +50,23 @@ and next-generation key phases. Its hostile path covers arbitrary/truncated
 input, packet-number reconstruction, long-header peeking, header protection,
 owning opens, and authenticated tag mutation. It does not model loss,
 reordering, connection state, sockets, or TLS key schedule transitions.
+`fuzz-quic-connection` covers that adjacent stateful layer with two production
+`Connection` values and real loopback UDP sends. A bounded scheduler captures
+protected datagrams and drives delivery, loss, newest-first reordering,
+duplication, corruption, explicit ACKs, PTO retransmission, bidirectional
+STREAM/FIN/PING traffic, RESET_STREAM terminal delivery, application reads, and
+key updates for QUIC v1/v2 and all supported traffic ciphers. Prefix-exact
+application data, packet-number bounds, stream-count bounds, and directional
+key-generation bounds are checked after every operation. This still does not
+fuzz TLS handshakes, path migration,
+long-running connection limits, or concurrent event-loop ownership.
+The first extended run exposed an RFC 9001 Section 6.2 state conflation: netz
+rejected a valid peer update after it had sent the required new-phase ACK merely
+because that ACK packet had not itself been acknowledged. Receive-update
+confirmation is now tracked independently from the local-update initiation gate
+and clears only after a socket-committed ACK range covers the triggering packet.
+A direct regression also proves that a true second peer update before that ACK
+is rejected transactionally, without committing its STREAM or packet number.
 
 Longer performance gates that have been used successfully include:
 

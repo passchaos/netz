@@ -132,6 +132,199 @@ test "QUIC 1-RTT connection performs key update and clears ACK gate" {
     try std.testing.expectEqual(@as(u64, 2), client.localOneRttKeyUpdateCount());
 }
 
+test "QUIC peer key update gate tracks sent acknowledgement, not ACK of local phase" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer client_endpoint.deinit();
+
+    const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const server_cid = [_]u8{ 0x65, 0x66, 0x67, 0x68 };
+    const client_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x69} ** quic.protection.secret_len,
+    );
+    const next_client_keys =
+        quic.protection.nextPacketProtectionKeys(client_keys);
+    const second_client_keys =
+        quic.protection.nextPacketProtectionKeys(next_client_keys);
+    const server_keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x6a} ** quic.protection.secret_len,
+    );
+    const ping_payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .ping = {} }},
+    );
+    defer allocator.free(ping_payload);
+    const stream_payload = try one_rtt.encodeFrames(
+        allocator,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .data = "must not commit",
+        } }},
+    );
+    defer allocator.free(stream_payload);
+
+    const first_update = try quic.protection.sealShortPacket(
+        allocator,
+        next_client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 0,
+            .key_phase = true,
+            .payload = ping_payload,
+        },
+    );
+    defer allocator.free(first_update);
+    const second_update = try quic.protection.sealShortPacket(
+        allocator,
+        second_client_keys,
+        .{
+            .destination_connection_id = &server_cid,
+            .packet_number = 1,
+            .key_phase = false,
+            .payload = stream_payload,
+        },
+    );
+    defer allocator.free(second_update);
+
+    var server = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .automatic_ecn_policy = .disabled,
+    });
+    defer server.deinit();
+
+    var first = try one_rtt.testing.processReceivedBytesAt(
+        &server,
+        client_endpoint.address(),
+        first_update,
+        .not_ect,
+        1_000,
+    );
+    first.deinit(allocator);
+    try server.sendAck(0);
+    var unconfirmed_ack = try client_endpoint.receiveBytes();
+    defer unconfirmed_ack.deinit(allocator);
+    const next_server_keys =
+        quic.protection.nextPacketProtectionKeys(server_keys);
+    var opened_ack = try quic.protection.openShortPacket(
+        allocator,
+        next_server_keys,
+        unconfirmed_ack.bytes,
+        client_cid.len,
+        0,
+    );
+    defer opened_ack.deinit(allocator);
+    const ack = try quic.parseFrame(opened_ack.payload);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        ack.frame.ack.largest_acknowledged,
+    );
+    try std.testing.expectEqual(@as(u64, 0), ack.frame.ack.first_ack_range);
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        server.pendingOneRttKeyUpdateAckThreshold(),
+    );
+
+    var second = try one_rtt.testing.processReceivedBytesAt(
+        &server,
+        client_endpoint.address(),
+        second_update,
+        .not_ect,
+        2_000,
+    );
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 2), server.peerOneRttKeyUpdateCount());
+    try std.testing.expectEqual(@as(u64, 2), server.localOneRttKeyUpdateCount());
+    try std.testing.expectEqual(
+        @as(u64, "must not commit".len),
+        server.recvStreamStats(0).?.bytes_received,
+    );
+
+    var rejecting = try one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = client_keys,
+        .send_keys = server_keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .enable_pacing = false,
+        .automatic_ecn_policy = .disabled,
+    });
+    defer rejecting.deinit();
+    var first_without_ack = try one_rtt.testing.processReceivedBytesAt(
+        &rejecting,
+        client_endpoint.address(),
+        first_update,
+        .not_ect,
+        1_000,
+    );
+    first_without_ack.deinit(allocator);
+    try std.testing.expectError(
+        error.KeyUpdateError,
+        one_rtt.testing.processReceivedBytesAt(
+            &rejecting,
+            client_endpoint.address(),
+            second_update,
+            .not_ect,
+            2_000,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        rejecting.peerOneRttKeyUpdateCount(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        one_rtt.testing.expectedPacketNumber(&rejecting),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        rejecting.stats().packets_received,
+    );
+    try std.testing.expect(rejecting.recvStreamStats(0) == null);
+
+    try rejecting.sendAck(0);
+    var recovery_ack = try client_endpoint.receiveBytes();
+    defer recovery_ack.deinit(allocator);
+    var accepted_after_ack = try one_rtt.testing.processReceivedBytesAt(
+        &rejecting,
+        client_endpoint.address(),
+        second_update,
+        .not_ect,
+        3_000,
+    );
+    defer accepted_after_ack.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u64, 2),
+        rejecting.peerOneRttKeyUpdateCount(),
+    );
+    try std.testing.expectEqual(
+        @as(u64, "must not commit".len),
+        rejecting.recvStreamStats(0).?.bytes_received,
+    );
+}
+
 test "QUIC v2 1-RTT connection uses versioned key updates" {
     const allocator = std.testing.allocator;
 

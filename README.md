@@ -24,10 +24,15 @@ separately checks QUIC v1/v2 Initial, Handshake, 0-RTT, and 1-RTT packet and
 header protection: Initial uses its RFC-mandated AES-128-GCM, while the other
 packet spaces exercise AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM.
 It also covers truncation and authenticated-tamper rejection. These targets do
-not yet fuzz live network runtimes, stateful QUIC connections, or
-context-takeover compression. The pinned GitHub Actions workflow replays all
-five corpora and the complete test gate on pushes and pull requests, then runs
-the five coverage-guided targets daily and on demand. Because the source
+not yet fuzz context-takeover compression. `zig build fuzz-quic-connection`
+adds bounded stateful QUIC v1/v2 sequences over real loopback UDP: bidirectional
+STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
+and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
+and key updates across all supported traffic ciphers. It does not model TLS
+handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
+workflow replays all six corpora and the complete test gate on pushes and pull
+requests, then runs the six coverage-guided targets daily and on demand. Because
+the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
 for the private `passchaos/vail` checkout.

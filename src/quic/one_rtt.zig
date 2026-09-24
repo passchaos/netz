@@ -958,6 +958,50 @@ fn newestAckFrequencyFrame(
     return newest;
 }
 
+fn ackFrameContainsPacketNumber(ack: quic.AckFrame, packet_number: u64) bool {
+    if (ack.first_ack_range > ack.largest_acknowledged) return false;
+    var range_end = ack.largest_acknowledged;
+    var range_start = range_end - ack.first_ack_range;
+    if (packet_number >= range_start and packet_number <= range_end) {
+        return true;
+    }
+    for (ack.ranges) |range| {
+        const skipped = std.math.add(u64, range.gap, 2) catch return false;
+        if (range_start < skipped) return false;
+        range_end = range_start - skipped;
+        if (range.ack_range_length > range_end) return false;
+        range_start = range_end - range.ack_range_length;
+        if (packet_number >= range_start and packet_number <= range_end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+test "QUIC ACK membership handles sparse ranges" {
+    const ack = quic.AckFrame{
+        .largest_acknowledged = 10,
+        .ack_delay = 0,
+        .first_ack_range = 2, // 8...10.
+        .ranges = &.{
+            .{ .gap = 1, .ack_range_length = 1 }, // 4...5.
+            .{ .gap = 0, .ack_range_length = 2 }, // 0...2.
+        },
+    };
+    for ([_]u64{ 0, 1, 2, 4, 5, 8, 9, 10 }) |packet_number| {
+        try std.testing.expect(ackFrameContainsPacketNumber(
+            ack,
+            packet_number,
+        ));
+    }
+    for ([_]u64{ 3, 6, 7, 11 }) |packet_number| {
+        try std.testing.expect(!ackFrameContainsPacketNumber(
+            ack,
+            packet_number,
+        ));
+    }
+}
+
 fn appendPendingAck(
     allocator: std.mem.Allocator,
     stack: *[pending_ack_frame_stack_capacity]quic.Frame,
@@ -1067,6 +1111,11 @@ pub const Connection = struct {
     /// these connection-owned contexts are refreshed only on phase changes.
     prepared_keys: prepared_keys.Set,
     pending_key_update_ack_threshold: ?u64 = null,
+    /// First packet received in the current peer key phase until a packet
+    /// carrying an ACK for that exact packet reaches the socket. RFC 9001
+    /// section 6.2 uses this condition, rather than acknowledgement of our
+    /// sending phase, to detect an invalid second peer update.
+    unacknowledged_peer_key_update_packet_number: ?u64 = null,
     send_key_generation_encrypted_packets: u64 = 0,
     receive_authentication_failures: u64 = 0,
     stored_new_tokens: std.ArrayList([]u8) = .empty,
@@ -2871,6 +2920,7 @@ pub const Connection = struct {
             }
             if (comptime !pure_datagrams) {
                 self.noteSentStreams(packet.frames);
+                self.notePeerKeyUpdateAckSent(packet.frames);
                 self.noteAckFrequencySent(
                     packet.frames,
                     packet.packet_number,
@@ -4831,6 +4881,22 @@ pub const Connection = struct {
         );
     }
 
+    fn notePeerKeyUpdateAckSent(
+        self: *Connection,
+        frames: []const quic.Frame,
+    ) void {
+        const packet_number =
+            self.unacknowledged_peer_key_update_packet_number orelse return;
+        for (frames) |frame| {
+            if (frame != .ack) continue;
+            if (!ackFrameContainsPacketNumber(frame.ack, packet_number)) {
+                continue;
+            }
+            self.unacknowledged_peer_key_update_packet_number = null;
+            return;
+        }
+    }
+
     fn ackFrequencyRequestAcknowledged(
         self: *Connection,
         ack: quic.AckFrame,
@@ -5058,6 +5124,7 @@ pub const Connection = struct {
             automatic_ecn,
             payload_in_packet_storage,
         );
+        self.notePeerKeyUpdateAckSent(prepared.frames);
         if (prepared.contains_handshake_done) {
             self.handshake_status.onHandshakeDoneTracked(
                 recovery_group_id orelse unreachable,
@@ -12093,6 +12160,9 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
+        if (packet.peer_initiated_key_update) {
+            try self.validatePeerKeyUpdate(packet.packet.key_phase);
+        }
         var peer_address_update = try self.preparePeerAddressUpdate(
             from,
             bytes.len,
@@ -12125,7 +12195,11 @@ pub const Connection = struct {
             self.config.peer_connection_id,
         );
         if (packet.peer_initiated_key_update) {
-            try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
+            self.acceptPeerKeyUpdate(
+                packet.packet.key_phase,
+                packet.packet.packet_number,
+                now_ns,
+            );
         }
         self.commitPeerAddressUpdate(&peer_address_update);
         if (spin_connection_id_changed) {
@@ -12192,10 +12266,14 @@ pub const Connection = struct {
     fn acceptPeerKeyUpdate(
         self: *Connection,
         peer_key_phase: bool,
+        packet_number: u64,
         now_ns: ?u64,
-    ) Error!void {
+    ) void {
+        const peer_initiated =
+            self.send_key_phase.currentKeyPhase() != peer_key_phase;
         if (!self.receive_key_phase.updateAfterReceiving(peer_key_phase)) return;
         self.prepared_keys.replaceReceive(self.receive_key_phase.currentKeys());
+        self.unacknowledged_peer_key_update_packet_number = packet_number;
         if (self.config.qlog_observer) |observer| {
             observer.keyUpdated(
                 self.qlogEventTime(now_ns orelse self.monotonicNowNs()),
@@ -12206,9 +12284,21 @@ pub const Connection = struct {
         }
         // RFC 9001 §6.2 requires sending keys to reach the corresponding phase
         // before acknowledging a peer's updated-key packet.
-        if (self.send_key_phase.currentKeyPhase() != peer_key_phase) {
-            if (self.pending_key_update_ack_threshold != null) return error.KeyUpdateError;
+        if (peer_initiated) {
             self.advanceSendKeyPhase(self.next_packet_number, now_ns);
+        }
+    }
+
+    fn validatePeerKeyUpdate(
+        self: Connection,
+        peer_key_phase: bool,
+    ) error{KeyUpdateError}!void {
+        const peer_initiated =
+            self.send_key_phase.currentKeyPhase() != peer_key_phase;
+        if (peer_initiated and
+            self.unacknowledged_peer_key_update_packet_number != null)
+        {
+            return error.KeyUpdateError;
         }
     }
 
@@ -12337,6 +12427,9 @@ pub const Connection = struct {
             now_ns,
         );
         errdefer packet.deinit(self.endpoint.allocator);
+        if (packet.peer_initiated_key_update) {
+            try self.validatePeerKeyUpdate(packet.packet.key_phase);
+        }
         var peer_address_update = try self.preparePeerAddressUpdate(
             routed.datagram.from,
             routed.datagram.bytes.len,
@@ -12369,7 +12462,11 @@ pub const Connection = struct {
             self.config.peer_connection_id,
         );
         if (packet.peer_initiated_key_update) {
-            try self.acceptPeerKeyUpdate(packet.packet.key_phase, now_ns);
+            self.acceptPeerKeyUpdate(
+                packet.packet.key_phase,
+                packet.packet.packet_number,
+                now_ns,
+            );
         }
         self.commitPeerAddressUpdate(&peer_address_update);
         if (spin_connection_id_changed) {
