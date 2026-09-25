@@ -3995,6 +3995,7 @@ test "public modules are reachable" {
         "waitForRecoveryIdleWithDeadline",
     ));
     try std.testing.expectEqual(@as(u8, 5), netz.mqtt.ProtocolVersion.v5.byte());
+    try std.testing.expect(@hasDecl(netz.mqtt, "AcceptedProtocolVersions"));
     try std.testing.expect(@hasDecl(netz.mqtt, "bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Bridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "Rule"));
@@ -4818,6 +4819,10 @@ test "public modules are reachable" {
         "max_outgoing_topic_aliases",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.runtime.AcceptOptions,
+        "accepted_protocol_versions",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker.Options,
         "system_stats_interval",
     ));
@@ -5191,6 +5196,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "max_topic_alias_broker",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "accepted_protocol_versions",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,

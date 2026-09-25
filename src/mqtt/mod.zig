@@ -60,6 +60,27 @@ pub const ProtocolVersion = enum(u8) {
     }
 };
 
+/// MQTT protocol versions a server listener permits during CONNECT.
+///
+/// Both implemented versions are enabled by default. Keeping this independent
+/// of the parser's initial protocol hint lets one listener auto-detect both
+/// versions while still enforcing a listener-specific admission policy.
+pub const AcceptedProtocolVersions = struct {
+    v3_1_1: bool = true,
+    v5: bool = true,
+
+    pub fn allows(self: AcceptedProtocolVersions, version: ProtocolVersion) bool {
+        return switch (version) {
+            .v3_1_1 => self.v3_1_1,
+            .v5 => self.v5,
+        };
+    }
+
+    pub fn any(self: AcceptedProtocolVersions) bool {
+        return self.v3_1_1 or self.v5;
+    }
+};
+
 pub const PacketType = enum(u4) {
     connect = 1,
     connack = 2,
@@ -4834,6 +4855,7 @@ test {
     _ = @import("runtime/auth.zig");
     _ = @import("runtime/auth_tests.zig");
     _ = @import("runtime/connect_timeout_tests.zig");
+    _ = @import("runtime/protocol_version_tests.zig");
     _ = @import("runtime/tcp_endpoint_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/reconnect_tests.zig");

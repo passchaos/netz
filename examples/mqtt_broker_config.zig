@@ -380,6 +380,8 @@ pub fn run(
         accept.maximum_qos = configured.maximum_qos;
         accept.maximum_keep_alive_seconds =
             configured.maximum_keep_alive_seconds;
+        accept.accepted_protocol_versions =
+            configured.accepted_protocol_versions;
         accept.topic_alias_maximum = configured.max_topic_alias;
         accept.max_outgoing_topic_aliases =
             configured.max_topic_alias_broker;

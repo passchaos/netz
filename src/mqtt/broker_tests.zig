@@ -1759,6 +1759,21 @@ test "broker rejects non-positive retained expiry scan interval" {
     );
 }
 
+test "broker rejects an empty accepted protocol set" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        Broker.init(allocator, threaded.io(), .{
+            .accept = .{ .accepted_protocol_versions = .{
+                .v3_1_1 = false,
+                .v5 = false,
+            } },
+        }),
+    );
+}
+
 test "broker rejects zero persistent Session expiry cap" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

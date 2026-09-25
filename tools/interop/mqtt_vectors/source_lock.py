@@ -17,6 +17,8 @@ MOSQUITTO_HELPER_SHA256 = {
         "00a1a30e29092938eeed59240358810914a4120d1b6df08376d3fa3085304576",
 }
 MOSQUITTO_SOURCE_SHA256 = {
+    "broker/01-connect-accept-protocol.py":
+        "6fa62519cbb04bcad3e79244773d0354dfbab206b4b18f4234a96faf2ef3db11",
     "broker/01-connect-zero-length-id.py":
         "3e69a4a94622dbe6e3814d5a2457605a5f8b6b9a6affe8505be81bf64c8338cd",
     "broker/12-prop-assigned-client-identifier.py":

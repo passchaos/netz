@@ -1484,6 +1484,71 @@ test "broker auto-detects MQTT 3.1.1 and MQTT 5 on one listener" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker rejects disabled protocol version before registration" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .accepted_protocol_versions = .{
+                .v3_1_1 = false,
+            } },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var refused = try context.runtime_mod.Client.connectAttempt(
+        allocator,
+        io,
+        broker.address(),
+        .{
+            .protocol = .v3_1_1,
+            .client_id = "disabled-v311",
+        },
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.accepted());
+    try std.testing.expectEqual(
+        @as(u8, 0x01),
+        refused.connack.connack.reason_code,
+    );
+    const after_refusal = broker.stats();
+    try std.testing.expectEqual(@as(usize, 0), after_refusal.active_connections);
+    try std.testing.expectEqual(@as(usize, 0), after_refusal.sessions);
+    try std.testing.expectEqual(@as(usize, 0), after_refusal.subscriptions);
+    try std.testing.expectEqual(@as(usize, 0), after_refusal.scheduled_wills);
+
+    var allowed = try connectWithOptions(
+        allocator,
+        io,
+        broker,
+        .{ .protocol = .v5, .client_id = "allowed-v5" },
+    );
+    defer allowed.close();
+    try allowed.ping();
+    try allowed.disconnect(0);
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker applies MQTT 3.1.1 persistent and clean Session semantics" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

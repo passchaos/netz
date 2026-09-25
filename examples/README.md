@@ -97,6 +97,7 @@ autosave_interval 30
 autosave_on_changes false
 
 listener 1883 127.0.0.1
+accept_protocol_versions 4,5
 allow_anonymous false
 max_qos 1
 max_keepalive 60
@@ -122,6 +123,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `keyfile`, `cafile`, `capath`, `crlfile`, `require_certificate`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
+`accept_protocol_versions`,
 `max_qos`, `max_keepalive`, `max_topic_alias`,
 `max_topic_alias_broker`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
@@ -140,7 +142,13 @@ accept count. Global `max_packet_size` defaults to Mosquitto's 2,000,000-byte
 full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
-payloads are rejected while representable QoS flows complete. Global
+payloads are rejected while representable QoS flows complete. Each listener
+accepts MQTT 3.1.1 and MQTT 5 by default.
+`accept_protocol_versions` restricts that listener to `4`, `5`, or `4,5`;
+version-denied clients receive the protocol-specific Unsupported Protocol
+Version CONNACK before close. MQTT 3.1 (level 3), empty sets, duplicate values,
+and unknown versions fail configuration because netz does not implement MQTT
+3.1 and will not advertise a policy it cannot honor. Global
 `max_inflight_messages` defaults to 20 and bounds each client's incoming and
 outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive
 Maximum; MQTT 3.1.1 enforces the same limit without a property. A peer that

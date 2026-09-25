@@ -766,6 +766,7 @@ Current protocol coverage includes:
   heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS listener sources sharing one broker core, with
   finite deterministic batches plus a graceful-shutdown production supervisor
   that continuously replaces disconnected clients, and
+  listener-specific MQTT 3.1.1/5 admission with version-correct refusal,
   Mosquitto-compatible mount-point namespaces with inbound PUBLISH/Will and
   ordinary/shared-filter mapping plus fail-closed live/durable outbound topic
   projection,

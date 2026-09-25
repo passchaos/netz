@@ -46,6 +46,7 @@ pub const Listener = struct {
     maximum_keep_alive_seconds: ?u16 = null,
     max_topic_alias: u16 = default_max_topic_aliases,
     max_topic_alias_broker: u16 = default_max_topic_aliases,
+    accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
     use_username_as_client_id: bool = false,
     max_connections: usize = default_max_connections,
 
@@ -206,6 +207,7 @@ const ListenerSeen = struct {
     maximum_keep_alive: bool = false,
     max_topic_alias: bool = false,
     max_topic_alias_broker: bool = false,
+    accept_protocol_versions: bool = false,
     use_username_as_client_id: bool = false,
     max_connections: bool = false,
 };
@@ -552,6 +554,14 @@ fn parseSources(
                 } else if (std.mem.eql(
                     u8,
                     directive,
+                    "accept_protocol_versions",
+                )) {
+                    try markOnce(&seen.accept_protocol_versions);
+                    listener.accepted_protocol_versions =
+                        try parseAcceptedProtocolVersions(&words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
                     "use_username_as_clientid",
                 )) {
                     try markOnce(&seen.use_username_as_client_id);
@@ -657,6 +667,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "max_keepalive") or
         std.mem.eql(u8, value, "max_topic_alias") or
         std.mem.eql(u8, value, "max_topic_alias_broker") or
+        std.mem.eql(u8, value, "accept_protocol_versions") or
         std.mem.eql(u8, value, "use_username_as_clientid") or
         std.mem.eql(u8, value, "max_connections");
 }
@@ -713,6 +724,36 @@ fn parseOnePositive(
     const value = try parseOneInteger(T, words);
     if (value == 0) return error.InvalidInteger;
     return value;
+}
+
+fn parseAcceptedProtocolVersions(
+    words: anytype,
+) error{ InvalidDirective, InvalidInteger }!mqtt.AcceptedProtocolVersions {
+    var result = mqtt.AcceptedProtocolVersions{
+        .v3_1_1 = false,
+        .v5 = false,
+    };
+    var saw_version = false;
+    while (words.next()) |word| {
+        var versions = std.mem.splitScalar(u8, word, ',');
+        while (versions.next()) |version| {
+            if (version.len == 0) continue;
+            saw_version = true;
+            if (std.mem.eql(u8, version, "4")) {
+                if (result.v3_1_1) return error.InvalidInteger;
+                result.v3_1_1 = true;
+            } else if (std.mem.eql(u8, version, "5")) {
+                if (result.v5) return error.InvalidInteger;
+                result.v5 = true;
+            } else {
+                // MQTT 3.1 (level 3) is not implemented by netz. Rejecting it
+                // here avoids advertising a policy the runtime cannot honor.
+                return error.InvalidInteger;
+            }
+        }
+    }
+    if (!saw_version) return error.InvalidDirective;
+    return result;
 }
 
 fn parseExpiration(
@@ -772,6 +813,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_keepalive 30
         \\max_topic_alias 7
         \\max_topic_alias_broker 9
+        \\accept_protocol_versions 5
         \\max_connections 4
         \\listener 8080 ::1
         \\protocol websockets
@@ -831,6 +873,8 @@ test "MQTT broker config parses owned multi-listener policy" {
         @as(u16, 9),
         config.listeners[0].max_topic_alias_broker,
     );
+    try std.testing.expect(!config.listeners[0].accepted_protocol_versions.v3_1_1);
+    try std.testing.expect(config.listeners[0].accepted_protocol_versions.v5);
     try std.testing.expect(config.listeners[1].protocol == .websockets);
     try std.testing.expect(config.listeners[1].usesTls());
     try std.testing.expectEqualStrings(
@@ -1836,6 +1880,8 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         default_max_topic_aliases,
         config.listeners[0].max_topic_alias_broker,
     );
+    try std.testing.expect(config.listeners[0].accepted_protocol_versions.v3_1_1);
+    try std.testing.expect(config.listeners[0].accepted_protocol_versions.v5);
 
     var minimum = try parse(
         std.testing.allocator,
@@ -2146,6 +2192,62 @@ test "MQTT broker config scopes full-range Topic Alias limits per listener" {
     try std.testing.expectEqual(
         @as(u16, 0),
         config.listeners[1].max_topic_alias_broker,
+    );
+}
+
+test "MQTT broker config scopes accepted protocol versions per listener" {
+    const allocator = std.testing.allocator;
+    var config = try parse(allocator,
+        \\listener 1883
+        \\accept_protocol_versions 5
+        \\allow_anonymous true
+        \\listener 1884
+        \\accept_protocol_versions 4, 5
+        \\allow_anonymous true
+        \\listener 1885
+        \\accept_protocol_versions 4
+        \\allow_anonymous true
+    );
+    defer config.deinit(allocator);
+    try std.testing.expect(!config.listeners[0].accepted_protocol_versions.v3_1_1);
+    try std.testing.expect(config.listeners[0].accepted_protocol_versions.v5);
+    try std.testing.expect(config.listeners[1].accepted_protocol_versions.v3_1_1);
+    try std.testing.expect(config.listeners[1].accepted_protocol_versions.v5);
+    try std.testing.expect(config.listeners[2].accepted_protocol_versions.v3_1_1);
+    try std.testing.expect(!config.listeners[2].accepted_protocol_versions.v5);
+
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator,
+            \\accept_protocol_versions 5
+            \\listener 1883
+        ),
+    );
+    const invalid = [_][]const u8{ "", "3", "6", "4,4", "," };
+    for (invalid) |value| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "listener 1883\naccept_protocol_versions {s}\n" ++
+                "allow_anonymous true\n",
+            .{value},
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            if (value.len == 0 or std.mem.eql(u8, value, ","))
+                error.InvalidDirective
+            else
+                error.InvalidInteger,
+            parse(allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\accept_protocol_versions 4
+            \\accept_protocol_versions 5
+            \\allow_anonymous true
+        ),
     );
 }
 

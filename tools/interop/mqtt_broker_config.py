@@ -13,6 +13,7 @@ import tempfile
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
 from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
+from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_queue import run_queued_limits_case
 from mqtt_broker_config_session import run_persistent_client_expiration_case
 from mqtt_broker_config_sys import run_system_interval_case
@@ -1624,6 +1625,27 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
                 "invalid retained expiry interval did not fail closed: "
                 + result.stdout
             )
+
+    unsupported_protocol = directory / "unsupported-protocol-version.conf"
+    unsupported_protocol.write_text(
+        f"listener {free_port()} 127.0.0.1\n"
+        "accept_protocol_versions 3\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={unsupported_protocol}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "InvalidInteger" not in result.stdout:
+        raise AssertionError(
+            "unsupported MQTT 3.1 listener policy did not fail closed: "
+            + result.stdout
+        )
 
 
 def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
@@ -3747,6 +3769,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
+        run_accepted_protocol_versions_case(args.broker, directory)
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
         run_packet_and_message_size_case(args.broker, directory)
@@ -3777,7 +3800,8 @@ def main() -> None:
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
-        "listener Topic Alias, persistent-client and retained-message "
+        "listener protocol/Topic Alias policy, persistent-client and "
+        "retained-message "
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "

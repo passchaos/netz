@@ -424,7 +424,15 @@ test "MQTT enhanced auth cannot finish before explicit authorization" {
     );
     var pending = runtime.PendingAcceptedClient{
         .connection = connection,
-        .connect = undefined,
+        .connect = .{
+            .packet = undefined,
+            .connect = .{
+                .protocol = .v5,
+                .clean_start = true,
+                .keep_alive_seconds = 0,
+                .client_id = "auth-pending",
+            },
+        },
     };
     try std.testing.expectError(
         error.AuthenticationInProgress,

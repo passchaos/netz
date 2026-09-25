@@ -912,6 +912,9 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
+    /// Protocol versions admitted after CONNECT auto-detection. The protocol
+    /// field above remains only the initial parsing/encoding hint.
+    accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
     /// Reject the UTF-8 control characters and noncharacters that MQTT marks
     /// as unsuitable for interchange. The default keeps the wire codec's
     /// interoperable MUST-level validation; enable this for Mosquitto-style
@@ -1031,6 +1034,7 @@ pub const AcceptedClient = struct {
 pub const PendingAcceptedClient = struct {
     connection: Connection,
     connect: OwnedConnect,
+    protocol_allowed: bool = true,
     authentication_authorized: bool = false,
     authentication_data: ?[]u8 = null,
 
@@ -1141,9 +1145,24 @@ pub const PendingAcceptedClient = struct {
     ) Error!AcceptOptions {
         var resolved = options;
         if (resolved.max_outgoing_inflight == 0 or
-            resolved.maximum_keep_alive_seconds == 0)
+            resolved.maximum_keep_alive_seconds == 0 or
+            !resolved.accepted_protocol_versions.any())
         {
             return error.InvalidProperty;
+        }
+        const connect = self.connect.connect;
+        if (!self.protocol_allowed or
+            !resolved.accepted_protocol_versions.allows(connect.protocol))
+        {
+            resolved.reason_code = switch (connect.protocol) {
+                .v3_1_1 => 0x01,
+                .v5 => 0x84,
+            };
+            resolved.session_present = false;
+            resolved.assigned_client_identifier = null;
+            resolved.response_information = null;
+            resolved.server_keep_alive_seconds = null;
+            return resolved;
         }
         if (resolved.reason_code != 0) {
             // Refused connections cannot carry successful-negotiation state.
@@ -1155,7 +1174,6 @@ pub const PendingAcceptedClient = struct {
             resolved.server_keep_alive_seconds = null;
             return resolved;
         }
-        const connect = self.connect.connect;
         if (connect.client_id.len == 0 and
             !resolved.allow_zero_length_client_id)
         {
@@ -2666,6 +2684,9 @@ pub const Connection = struct {
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!PendingAcceptedClient {
+        if (!options.accepted_protocol_versions.any()) {
+            return error.InvalidProperty;
+        }
         self.strict_utf8 = options.strict_utf8;
         if (options.traffic_counters) |counters| {
             self.attachTrafficCounters(counters);
@@ -2678,6 +2699,20 @@ pub const Connection = struct {
             return err;
         };
         errdefer connect.deinit(self.allocator);
+        if (!options.accepted_protocol_versions.allows(
+            connect.connect.protocol,
+        )) {
+            // Preserve the parsed CONNECT solely long enough for `finish` to
+            // emit the version-specific refusal. No capability, Will, or
+            // authentication state is applied for a disabled version.
+            const owned_connection = self.*;
+            self.* = undefined;
+            return .{
+                .connection = owned_connection,
+                .connect = connect,
+                .protocol_allowed = false,
+            };
+        }
         const maximum_qos = options.maximum_qos orelse
             mqtt.QoS.exactly_once;
         if (connect.connect.will) |will| {

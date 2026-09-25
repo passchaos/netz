@@ -1042,6 +1042,9 @@ pub const Broker = struct {
         {
             return error.InvalidProperty;
         }
+        if (!options.accept.accepted_protocol_versions.any()) {
+            return error.InvalidProperty;
+        }
         try validateAutoClientIdPrefix(options.auto_client_id_prefix);
         if (options.system_stats_interval) |interval| {
             if (interval.nanoseconds <= 0) return error.InvalidProperty;
@@ -2333,6 +2336,11 @@ pub const Broker = struct {
                 listener.auto_client_id_prefix orelse
                     self.options.auto_client_id_prefix,
             );
+            if (!(listener.accept orelse self.options.accept)
+                .accepted_protocol_versions.any())
+            {
+                return error.InvalidProperty;
+            }
             connection_count = std.math.add(
                 usize,
                 connection_count,
@@ -2433,6 +2441,11 @@ pub const Broker = struct {
                 listener.auto_client_id_prefix orelse
                     self.options.auto_client_id_prefix,
             );
+            if (!(listener.accept orelse self.options.accept)
+                .accepted_protocol_versions.any())
+            {
+                return error.InvalidProperty;
+            }
             if (listener.accept_concurrency == 0) {
                 return error.InvalidProperty;
             }
