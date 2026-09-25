@@ -151,6 +151,7 @@ pub fn run(
             .max_payload_size = config.message_size_limit,
             .runtime = .{ .max_packet_size = config.max_packet_size },
         },
+        .max_inflight_payload_bytes_per_connection = config.max_inflight_bytes,
         .accept = base_accept,
         .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
         .queue_qos0_messages = config.queue_qos0_messages,
@@ -158,6 +159,7 @@ pub fn run(
         .access_control = source_access_control,
         .session = .{
             .max_inflight_per_session = max_inflight_messages,
+            .max_inflight_payload_bytes_per_session = config.max_inflight_bytes,
             .max_queued_per_session = config.effectiveMaxQueuedMessages(),
             .max_queued_payload_bytes_per_session = config.max_queued_bytes,
         },

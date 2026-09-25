@@ -857,6 +857,154 @@ test "transient Session fanout does not consume durable queue bytes" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "transient inflight payload bytes gate QoS 1 delivery" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .max_inflight_payload_bytes_per_connection = 10,
+            .accept = .{ .max_outgoing_inflight = 5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(allocator, io, broker, "byte-qos1-sub", &.{});
+    defer subscriber.close();
+    var publisher = try connect(allocator, io, broker, "byte-qos1-pub", &.{});
+    defer publisher.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "inflight/bytes/qos1", .qos = .at_least_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    for ([_][]const u8{ "123456", "789012", "third" }) |payload| {
+        try publisher.publish(
+            "inflight/bytes/qos1",
+            payload,
+            .{ .qos = .at_least_once },
+        );
+    }
+
+    var first = try subscriber.readPublish();
+    defer first.deinit(allocator);
+    var second = try subscriber.readPublish();
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("123456", first.publish.payload);
+    try std.testing.expectEqualStrings("789012", second.publish.payload);
+    try std.testing.expectError(
+        error.Timeout,
+        subscriber.readClientPacketEventWithTimeout(.fromMilliseconds(50)),
+    );
+
+    try subscriber.writePubAck(first.publish.packet_id.?, 0);
+    var third = try subscriber.readPublish();
+    defer third.deinit(allocator);
+    try std.testing.expectEqualStrings("third", third.publish.payload);
+    try subscriber.writePubAck(second.publish.packet_id.?, 0);
+    try subscriber.writePubAck(third.publish.packet_id.?, 0);
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "transient inflight payload bytes remain charged through PUBCOMP" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .max_inflight_payload_bytes_per_connection = 10,
+            .accept = .{ .max_outgoing_inflight = 5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(allocator, io, broker, "byte-qos2-sub", &.{});
+    defer subscriber.close();
+    var publisher = try connect(allocator, io, broker, "byte-qos2-pub", &.{});
+    defer publisher.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "inflight/bytes/qos2", .qos = .exactly_once }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    for ([_][]const u8{ "123456", "789012", "third" }) |payload| {
+        try publisher.publish(
+            "inflight/bytes/qos2",
+            payload,
+            .{ .qos = .exactly_once },
+        );
+    }
+
+    var first = try subscriber.readPublish();
+    defer first.deinit(allocator);
+    var second = try subscriber.readPublish();
+    defer second.deinit(allocator);
+    try subscriber.writePubRec(first.publish.packet_id.?, 0);
+    var first_pubrel = try subscriber.readPubRel();
+    defer first_pubrel.deinit(allocator);
+    try std.testing.expectEqual(
+        first.publish.packet_id.?,
+        first_pubrel.ack.packet_id,
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        subscriber.readClientPacketEventWithTimeout(.fromMilliseconds(50)),
+    );
+
+    try subscriber.writePubComp(first_pubrel.ack.packet_id, 0);
+    var third = try subscriber.readPublish();
+    defer third.deinit(allocator);
+    try std.testing.expectEqualStrings("third", third.publish.payload);
+
+    try subscriber.writePubRec(second.publish.packet_id.?, 0);
+    var second_pubrel = try subscriber.readPubRel();
+    defer second_pubrel.deinit(allocator);
+    try subscriber.writePubComp(second_pubrel.ack.packet_id, 0);
+    try subscriber.writePubRec(third.publish.packet_id.?, 0);
+    var third_pubrel = try subscriber.readPubRel();
+    defer third_pubrel.deinit(allocator);
+    try subscriber.writePubComp(third_pubrel.ack.packet_id, 0);
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker applies No Local while acknowledging the matched subscription" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

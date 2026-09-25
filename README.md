@@ -788,7 +788,8 @@ Current protocol coverage includes:
   full-packet and Application Message payload limits, global retained-message
   availability with MQTT 5 capability advertisement and version-correct
   rejection, a Mosquitto-compatible global per-client QoS 1/2 inflight limit
-  enforced in both directions with MQTT 5 Receive Maximum advertisement, and
+  enforced in both directions with MQTT 5 Receive Maximum advertisement, an
+  independent outgoing inflight payload-byte limit through PUBCOMP, and
   count/payload-byte limits for each durable Session's queued messages, plus
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks

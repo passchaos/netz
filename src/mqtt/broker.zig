@@ -101,6 +101,10 @@ pub const ChangeAutosaveOptions = struct {
 
 pub const Options = struct {
     limits: Limits = .{},
+    /// Maximum outgoing QoS 1/2 payload bytes held by each transient Network
+    /// Connection; zero is unlimited. Durable Sessions use the corresponding
+    /// `session.max_inflight_payload_bytes_per_session` option instead.
+    max_inflight_payload_bytes_per_connection: usize = 0,
     /// Prefix for broker-assigned Client Identifiers. Copied by `listen`.
     ///
     /// Mosquitto limits `auto_id_prefix` to 50 bytes; matching that cap keeps
@@ -493,6 +497,13 @@ const ClientSlot = struct {
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
     queue_head: usize = 0,
+    /// Connection-local QoS 1/2 payload ownership for transient delivery.
+    ///
+    /// Durable deliveries are accounted by `session.Store`; recording them
+    /// here as well would charge the same payload twice. This map is allocated
+    /// lazily only when the configured byte limit is non-zero.
+    transient_inflight_payloads: std.AutoHashMapUnmanaged(u16, usize) = .empty,
+    transient_inflight_payload_bytes: usize = 0,
     // Used only while `state_mutex` is held. A route can select the same
     // client through overlapping subscriptions, so capacity must account for
     // every delivery in the plan before any queue is mutated.
@@ -504,6 +515,50 @@ const ClientSlot = struct {
         }
         self.queue.clearRetainingCapacity();
         self.queue_head = 0;
+    }
+
+    fn transientInflightPayloadLimitReached(
+        self: ClientSlot,
+        limit: usize,
+    ) bool {
+        return limit != 0 and
+            self.transient_inflight_payload_bytes >= limit;
+    }
+
+    fn recordTransientInflight(
+        self: *ClientSlot,
+        packet_id: u16,
+        payload_len: usize,
+    ) void {
+        std.debug.assert(packet_id != 0);
+        std.debug.assert(!self.transient_inflight_payloads.contains(
+            packet_id,
+        ));
+        self.transient_inflight_payloads.putAssumeCapacityNoClobber(
+            packet_id,
+            payload_len,
+        );
+        self.transient_inflight_payload_bytes = std.math.add(
+            usize,
+            self.transient_inflight_payload_bytes,
+            payload_len,
+        ) catch unreachable;
+    }
+
+    fn releaseTransientInflight(
+        self: *ClientSlot,
+        packet_id: u16,
+    ) bool {
+        const removed = self.transient_inflight_payloads.fetchRemove(
+            packet_id,
+        ) orelse return false;
+        self.transient_inflight_payload_bytes -= removed.value;
+        return true;
+    }
+
+    fn clearTransientInflight(self: *ClientSlot) void {
+        self.transient_inflight_payloads.clearRetainingCapacity();
+        self.transient_inflight_payload_bytes = 0;
     }
 
     fn queuedCount(self: ClientSlot) usize {
@@ -1116,6 +1171,7 @@ pub const Broker = struct {
         for (self.slots) |*slot| {
             slot.clearQueue();
             slot.queue.deinit(self.allocator);
+            slot.transient_inflight_payloads.deinit(self.allocator);
             if (slot.connection) |*connection| connection.close();
         }
         self.allocator.free(self.slots);
@@ -3268,6 +3324,7 @@ pub const Broker = struct {
         slot.retained_source_id = null;
         slot.username = null;
         slot.will_handle = null;
+        slot.clearTransientInflight();
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);
@@ -3424,6 +3481,7 @@ pub const Broker = struct {
             _ = self.pending_qos2.removePublisher(id);
         }
         slot.clearQueue();
+        slot.clearTransientInflight();
         // Publish an idle slot only after every field from the old generation
         // has been detached. `claimSlot` observes this state under the same
         // mutex, so it can never reserve a slot that still owns a connection.
@@ -5171,8 +5229,33 @@ pub const Broker = struct {
                 self.state_mutex.unlock(self.io);
                 return;
             }
+            const inflight_payload_limit =
+                self.options.max_inflight_payload_bytes_per_connection;
+            const next_delivery = slot.queue.items[slot.queue_head];
+            if (next_delivery.qos != .at_most_once and
+                slot.transientInflightPayloadLimitReached(
+                    inflight_payload_limit,
+                ))
+            {
+                self.state_mutex.unlock(self.io);
+                return;
+            }
             var delivery = slot.popDelivery().?;
             self.state_mutex.unlock(self.io);
+
+            if (delivery.qos != .at_most_once and
+                inflight_payload_limit != 0)
+            {
+                slot.transient_inflight_payloads.ensureUnusedCapacity(
+                    self.allocator,
+                    1,
+                ) catch |err| {
+                    self.state_mutex.lockUncancelable(self.io);
+                    slot.pushFront(delivery);
+                    self.state_mutex.unlock(self.io);
+                    return err;
+                };
+            }
 
             const connection = &slot.connection.?;
             const visible_topic = connection.topic_namespace.visibleTopic(
@@ -5248,11 +5331,16 @@ pub const Broker = struct {
                     return err;
                 },
             };
+            if (packet_id) |id| {
+                if (inflight_payload_limit != 0) {
+                    slot.recordTransientInflight(
+                        id,
+                        delivery.publication.payload().len,
+                    );
+                }
+            }
             self.recordPublishSent(delivery.publication.payload().len);
             delivery.deinit();
-            // QoS 1 completion arrives later through this connection's reader;
-            // only one writer mutates its outgoing inflight table at a time.
-            _ = packet_id;
         }
     }
 
@@ -5918,6 +6006,10 @@ const ClientTask = struct {
                             owned.ack.packet_id,
                         ))
                     {
+                        const transient_owned =
+                            slot.transient_inflight_payloads.contains(
+                                owned.ack.packet_id,
+                            );
                         connection.applyPubAck(owned.ack) catch |err|
                             switch (err) {
                                 error.PublishRefused => {},
@@ -5931,6 +6023,11 @@ const ClientTask = struct {
                                     return err;
                                 },
                             };
+                        if (transient_owned) {
+                            std.debug.assert(slot.releaseTransientInflight(
+                                owned.ack.packet_id,
+                            ));
+                        }
                     }
                     slot.writer_mutex.unlock(task.broker.io);
                     try task.broker.flushSlot(
@@ -5969,10 +6066,15 @@ const ClientTask = struct {
                             return err;
                         };
                     }
+                    var transient_completed = false;
                     if (!session_ack.owned) {
                         if (connection.hasOutgoingPacketIdentifier(
                             owned.ack.packet_id,
                         )) {
+                            const transient_owned =
+                                slot.transient_inflight_payloads.contains(
+                                    owned.ack.packet_id,
+                                );
                             connection.applyPubRec(owned.ack) catch |err|
                                 switch (err) {
                                     error.PublishRefused => {},
@@ -5986,6 +6088,16 @@ const ClientTask = struct {
                                         return err;
                                     },
                                 };
+                            if (!owned.ack.accepted()) {
+                                transient_completed = true;
+                                if (transient_owned) {
+                                    std.debug.assert(
+                                        slot.releaseTransientInflight(
+                                            owned.ack.packet_id,
+                                        ),
+                                    );
+                                }
+                            }
                         } else if (owned.ack.accepted()) {
                             // An accepted PUBREC always advances the QoS 2
                             // exchange with PUBREL. If Session state was lost,
@@ -6003,7 +6115,7 @@ const ClientTask = struct {
                         }
                     }
                     slot.writer_mutex.unlock(task.broker.io);
-                    if (session_ack.owned) {
+                    if (session_ack.owned or transient_completed) {
                         try task.broker.flushSlot(
                             task.slot_index,
                             slot,
@@ -6054,6 +6166,10 @@ const ClientTask = struct {
                             owned.ack.packet_id,
                         ))
                     {
+                        const transient_owned =
+                            slot.transient_inflight_payloads.contains(
+                                owned.ack.packet_id,
+                            );
                         connection.applyPubComp(owned.ack) catch |err|
                             switch (err) {
                                 error.PublishRefused => {},
@@ -6067,6 +6183,11 @@ const ClientTask = struct {
                                     return err;
                                 },
                             };
+                        if (transient_owned) {
+                            std.debug.assert(slot.releaseTransientInflight(
+                                owned.ack.packet_id,
+                            ));
+                        }
                     }
                     slot.writer_mutex.unlock(task.broker.io);
                     try task.broker.flushSlot(
@@ -6399,6 +6520,39 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x95),
         disconnectReasonForReadViolation(error.PacketTooLarge),
+    );
+}
+
+test "transient inflight payload accounting is lazy and clears safely" {
+    var slot: ClientSlot = .{};
+    defer slot.transient_inflight_payloads.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        slot.transient_inflight_payloads.capacity(),
+    );
+    try std.testing.expect(!slot.transientInflightPayloadLimitReached(10));
+    try slot.transient_inflight_payloads.ensureUnusedCapacity(
+        std.testing.allocator,
+        2,
+    );
+    slot.recordTransientInflight(1, 6);
+    slot.recordTransientInflight(2, 6);
+    try std.testing.expect(slot.transientInflightPayloadLimitReached(10));
+    try std.testing.expect(!slot.releaseTransientInflight(99));
+    try std.testing.expect(slot.releaseTransientInflight(1));
+    try std.testing.expectEqual(
+        @as(usize, 6),
+        slot.transient_inflight_payload_bytes,
+    );
+    slot.clearTransientInflight();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        slot.transient_inflight_payload_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        slot.transient_inflight_payloads.count(),
     );
 }
 

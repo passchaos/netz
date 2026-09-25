@@ -4821,6 +4821,10 @@ test "public modules are reachable" {
         netz.mqtt.broker.Options,
         "persistent_change_autosave",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Options,
+        "max_inflight_payload_bytes_per_connection",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "persistentChangeAutosaveError",
@@ -5135,6 +5139,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
         "max_queued_messages",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "max_inflight_bytes",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,

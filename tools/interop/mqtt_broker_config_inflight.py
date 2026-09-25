@@ -218,13 +218,18 @@ def _configured_broker(
         _close_process(process)
 
 
-def _connect(port: int, client_id: str, proto_ver: int) -> socket.socket:
+def _connect(
+    port: int,
+    client_id: str,
+    proto_ver: int,
+    receive_maximum: int = 1,
+) -> socket.socket:
     client = socket.create_connection(("127.0.0.1", port), timeout=5)
     client.settimeout(5)
     client.sendall(_connect_packet(client_id, proto_ver))
     connack = _read_packet(client)
     if proto_ver == 5:
-        _assert_receive_maximum(connack, 1)
+        _assert_receive_maximum(connack, receive_maximum)
     elif connack != bytes.fromhex("20020000"):
         raise AssertionError(
             "max-inflight MQTT 3.1.1 CONNECT failed: " + connack.hex()
@@ -376,6 +381,115 @@ def _run_incoming(broker: Path, directory: Path) -> None:
                 client.close()
 
 
+def _complete_source_qos2(
+    publisher: socket.socket,
+    topic: str,
+    payload: bytes,
+    packet_id: int,
+    proto_ver: int,
+) -> None:
+    publisher.sendall(
+        _publish_packet(topic, payload, 2, packet_id, proto_ver)
+    )
+    if _ack_reason(_read_packet(publisher), 0x50, packet_id) != 0:
+        raise AssertionError("inflight-byte source PUBLISH was rejected")
+    publisher.sendall(_ack_packet(0x62, packet_id))
+    if _ack_reason(_read_packet(publisher), 0x70, packet_id) != 0:
+        raise AssertionError("inflight-byte source PUBREL failed")
+
+
+def _complete_destination_qos2(
+    subscriber: socket.socket,
+    packet_id: int,
+) -> None:
+    subscriber.sendall(_ack_packet(0x50, packet_id))
+    actual = _read_packet(subscriber)
+    expected = _ack_packet(0x62, packet_id)
+    if actual != expected:
+        raise AssertionError(
+            "inflight-byte destination PUBREL mismatch: "
+            f"expected {expected.hex()}, got {actual.hex()}"
+        )
+    subscriber.sendall(_ack_packet(0x70, packet_id))
+
+
+def _run_inflight_bytes(broker: Path, directory: Path) -> None:
+    for proto_ver in (5, 4):
+        port = _free_port()
+        config = directory / f"max-inflight-bytes-{proto_ver}.conf"
+        config.write_text(
+            "max_inflight_messages 5\n"
+            "max_inflight_bytes 10\n"
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 2\n"
+        )
+        with _configured_broker(
+            broker,
+            config,
+            "configured 1 listeners for 2 clients",
+            "max-inflight-bytes",
+        ):
+            subscriber = _connect(
+                port,
+                f"max-inflight-bytes-sub-{proto_ver}",
+                proto_ver,
+                receive_maximum=5,
+            )
+            publisher = _connect(
+                port,
+                f"max-inflight-bytes-pub-{proto_ver}",
+                proto_ver,
+                receive_maximum=5,
+            )
+            topic = f"max/inflight/bytes/{proto_ver}"
+            payloads = (b"123456", b"789012", b"third")
+            try:
+                subscriber.sendall(_subscribe_packet(1, topic, proto_ver, 2))
+                expected_suback = bytes.fromhex(
+                    "900400010002" if proto_ver == 5 else "9003000102"
+                )
+                if _read_packet(subscriber) != expected_suback:
+                    raise AssertionError(
+                        f"inflight-byte SUBACK mismatch for MQTT {proto_ver}"
+                    )
+                for source_id, payload in enumerate(payloads, 10):
+                    _complete_source_qos2(
+                        publisher, topic, payload, source_id, proto_ver
+                    )
+
+                for delivery_id, payload in enumerate(payloads[:2], 1):
+                    if _read_packet(subscriber) != _publish_packet(
+                        topic, payload, 2, delivery_id, proto_ver
+                    ):
+                        raise AssertionError(
+                            f"inflight-byte delivery mismatch for MQTT {proto_ver}"
+                        )
+                subscriber.sendall(_ack_packet(0x50, 1))
+                actual = _read_packet(subscriber)
+                expected = _ack_packet(0x62, 1)
+                if actual != expected:
+                    raise AssertionError(
+                        "inflight-byte PUBREL mismatch: "
+                        f"expected {expected.hex()}, got {actual.hex()}"
+                    )
+                _ping(subscriber)
+                subscriber.sendall(_ack_packet(0x70, 1))
+                if _read_packet(subscriber) != _publish_packet(
+                    topic, payloads[2], 2, 3, proto_ver
+                ):
+                    raise AssertionError(
+                        f"inflight-byte release mismatch for MQTT {proto_ver}"
+                    )
+                _complete_destination_qos2(subscriber, 2)
+                _complete_destination_qos2(subscriber, 3)
+                publisher.sendall(bytes.fromhex("e000"))
+                subscriber.sendall(bytes.fromhex("e000"))
+            finally:
+                publisher.close()
+                subscriber.close()
+
+
 def _run_unlimited_mapping(broker: Path, directory: Path) -> None:
     port = _free_port()
     config = directory / "max-inflight-unlimited.conf"
@@ -405,4 +519,5 @@ def run_max_inflight_messages_case(broker: Path, directory: Path) -> None:
     # Source-locked to Mosquitto 5cd254651159's max-inflight QoS 1/2 tests.
     _run_outgoing(broker, directory)
     _run_incoming(broker, directory)
+    _run_inflight_bytes(broker, directory)
     _run_unlimited_mapping(broker, directory)
