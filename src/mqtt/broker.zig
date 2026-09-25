@@ -821,6 +821,10 @@ pub const SystemMetric = enum {
 pub const Listener = struct {
     source: runtime.PendingSource,
     namespace: listener_namespace.Namespace = .{},
+    /// Optional prefix for Client Identifiers assigned on this listener.
+    /// Null inherits `Broker.Options.auto_client_id_prefix`; the bytes are
+    /// borrowed only for the duration of `serveListeners`.
+    auto_client_id_prefix: ?[]const u8 = null,
     /// Null inherits `Broker.Options.accept`; an override makes CONNECT and
     /// advertised capabilities listener-specific. Borrowed property strings
     /// must remain alive throughout `serveListeners`.
@@ -841,6 +845,9 @@ pub const Listener = struct {
 pub const ListenerEndpoint = struct {
     source: runtime.PendingSource,
     namespace: listener_namespace.Namespace = .{},
+    /// Null inherits `Broker.Options.auto_client_id_prefix`; borrowed for the
+    /// duration of `serveListenersUntil`.
+    auto_client_id_prefix: ?[]const u8 = null,
     /// Null inherits `Broker.Options.accept`; borrowed values must remain alive
     /// throughout `serveListenersUntil`.
     accept: ?runtime.AcceptOptions = null,
@@ -1025,12 +1032,11 @@ pub const Broker = struct {
             options.limits.max_pending_incoming_qos2 == 0 or
             options.limits.max_pending_incoming_qos2 >
                 std.math.maxInt(u32) or
-            std.math.cast(u32, options.will.max_wills) == null or
-            options.auto_client_id_prefix.len >
-                client_id_mod.max_prefix_len)
+            std.math.cast(u32, options.will.max_wills) == null)
         {
             return error.InvalidProperty;
         }
+        try validateAutoClientIdPrefix(options.auto_client_id_prefix);
         if (options.system_stats_interval) |interval| {
             if (interval.nanoseconds <= 0) return error.InvalidProperty;
         }
@@ -1042,7 +1048,6 @@ pub const Broker = struct {
         if (options.persistent_session_expiry_seconds == 0) {
             return error.InvalidProperty;
         }
-        try mqtt.validateUtf8String(options.auto_client_id_prefix);
         if (options.accept.response_information) |value| {
             if (value.len > std.math.maxInt(u16)) {
                 return error.InvalidProperty;
@@ -2315,6 +2320,10 @@ pub const Broker = struct {
             _ = try listener_namespace.Namespace.init(
                 listener.namespace.prefix,
             );
+            try validateAutoClientIdPrefix(
+                listener.auto_client_id_prefix orelse
+                    self.options.auto_client_id_prefix,
+            );
             connection_count = std.math.add(
                 usize,
                 connection_count,
@@ -2410,6 +2419,10 @@ pub const Broker = struct {
         for (listeners) |listener| {
             _ = try listener_namespace.Namespace.init(
                 listener.namespace.prefix,
+            );
+            try validateAutoClientIdPrefix(
+                listener.auto_client_id_prefix orelse
+                    self.options.auto_client_id_prefix,
             );
             if (listener.accept_concurrency == 0) {
                 return error.InvalidProperty;
@@ -2563,6 +2576,24 @@ pub const Broker = struct {
         accept_options: runtime.AcceptOptions,
         authorization: ListenerAuthorization,
     ) anyerror!void {
+        return self.servePendingWithListenerPolicy(
+            pending,
+            namespace,
+            accept_options,
+            authorization,
+            self.options.auto_client_id_prefix,
+        );
+    }
+
+    fn servePendingWithListenerPolicy(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        namespace: listener_namespace.Namespace,
+        accept_options: runtime.AcceptOptions,
+        authorization: ListenerAuthorization,
+        auto_client_id_prefix: []const u8,
+    ) anyerror!void {
+        try validateAutoClientIdPrefix(auto_client_id_prefix);
         pending.connection.attachTrafficCounters(&self.traffic);
         const slot_index = try self.claimSlot();
         var slot_claimed = true;
@@ -2576,6 +2607,7 @@ pub const Broker = struct {
             namespace,
             accept_options,
             authorization,
+            auto_client_id_prefix,
             &result,
         ) orelse {
             slot_claimed = false;
@@ -2616,6 +2648,7 @@ pub const Broker = struct {
         namespace: @import("listener_namespace.zig").Namespace,
         listener_accept: runtime.AcceptOptions,
         listener_authorization: ListenerAuthorization,
+        auto_client_id_prefix: []const u8,
         result: *?anyerror,
     ) Error!?ClientTask {
         var pending_owned = true;
@@ -2780,6 +2813,7 @@ pub const Broker = struct {
             effective_connect,
             listener_authorization.access_control,
             listener_authorization.retained_source_id,
+            auto_client_id_prefix,
             &registration_progress,
         ) catch |err| {
             // Registration can delete durable state before a later allocation
@@ -2891,6 +2925,7 @@ pub const Broker = struct {
         connect: mqtt.Connect,
         listener_access_control: ?ListenerAccessControlHandler,
         retained_source_id: ?u64,
+        auto_client_id_prefix: []const u8,
         progress: *RegistrationProgress,
     ) Error!Registration {
         self.state_mutex.lockUncancelable(self.io);
@@ -2943,6 +2978,7 @@ pub const Broker = struct {
         if (connect.client_id.len == 0) {
             effective_connect.client_id = self.assignClientIdLocked(
                 slot,
+                auto_client_id_prefix,
             ) catch |err| {
                 slot.active = false;
                 return err;
@@ -3083,13 +3119,14 @@ pub const Broker = struct {
     fn assignClientIdLocked(
         self: *Broker,
         slot: *ClientSlot,
+        prefix: []const u8,
     ) Error![]const u8 {
         while (true) {
             var random: [client_id_mod.random_len]u8 = undefined;
             try std.Io.randomSecure(self.io, &random);
             const id = client_id_mod.format(
                 &slot.assigned_client_id,
-                self.options.auto_client_id_prefix,
+                prefix,
                 random,
             );
             if (self.sessions.containsClientId(id)) continue;
@@ -5831,6 +5868,7 @@ test "MQTT failed Clean Start journals the durable deletion" {
             },
             null,
             null,
+            broker.options.auto_client_id_prefix,
             &progress,
         ),
     );
@@ -6283,6 +6321,8 @@ const ListenerAcceptTask = struct {
             task.listener.namespace,
             task.listener.accept orelse task.broker.options.accept,
             task.listener.authorization,
+            task.listener.auto_client_id_prefix orelse
+                task.broker.options.auto_client_id_prefix,
             task.result,
         ) catch |err| {
             // `preparePending` owns and closes the pending connection on every
@@ -6400,6 +6440,8 @@ const ListenerSupervisorAcceptTask = struct {
                 task.listener.accept orelse
                     task.supervisor.broker.options.accept,
                 task.listener.authorization,
+                task.listener.auto_client_id_prefix orelse
+                    task.supervisor.broker.options.auto_client_id_prefix,
                 &connection_error,
             ) catch |err| {
                 task.supervisor.report(
@@ -6520,6 +6562,34 @@ test "broker maps negotiated capability violations to DISCONNECT reasons" {
     try std.testing.expectEqual(
         @as(?u8, 0x95),
         disconnectReasonForReadViolation(error.PacketTooLarge),
+    );
+}
+
+test "broker rejects invalid listener Client Identifier prefixes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_connections = 1 },
+    });
+    defer broker.deinit();
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.serveListeners(&.{.{
+            .source = undefined,
+            .auto_client_id_prefix = "x" ** 51,
+            .connection_count = 0,
+        }}),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        broker.serveListeners(&.{.{
+            .source = undefined,
+            .auto_client_id_prefix = "bad\x00prefix",
+            .connection_count = 0,
+        }}),
     );
 }
 
@@ -6715,6 +6785,13 @@ fn systemMetricValue(stats_value: Stats, metric: SystemMetric) u64 {
 
 fn maxQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) >= @intFromEnum(b)) a else b;
+}
+
+fn validateAutoClientIdPrefix(prefix: []const u8) Error!void {
+    if (prefix.len > client_id_mod.max_prefix_len) {
+        return error.InvalidProperty;
+    }
+    try mqtt.validateUtf8String(prefix);
 }
 
 fn protocolReason(

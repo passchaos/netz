@@ -7,6 +7,7 @@
 const std = @import("std");
 const mqtt = @import("mod.zig");
 const broker_config_include = @import("broker_config_include.zig");
+const client_id = @import("broker/client_id.zig");
 
 const net = std.Io.net;
 
@@ -17,6 +18,7 @@ pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
 pub const default_max_topic_aliases: u16 = 10;
 pub const default_sys_interval_seconds: u16 = 10;
+pub const default_auto_id_prefix = "auto-";
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
@@ -38,6 +40,7 @@ pub const Listener = struct {
     mount_point: []u8 = &.{},
     allow_anonymous: bool = false,
     allow_zero_length_client_id: bool = true,
+    auto_id_prefix: []u8 = &.{},
     maximum_qos: ?mqtt.QoS = null,
     maximum_keep_alive_seconds: ?u16 = null,
     max_topic_alias: u16 = default_max_topic_aliases,
@@ -48,6 +51,7 @@ pub const Listener = struct {
     fn deinit(self: *Listener, allocator: std.mem.Allocator) void {
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
+        if (self.auto_id_prefix.len != 0) allocator.free(self.auto_id_prefix);
         if (self.certfile.len != 0) allocator.free(self.certfile);
         if (self.keyfile.len != 0) allocator.free(self.keyfile);
         if (self.cafile.len != 0) allocator.free(self.cafile);
@@ -78,6 +82,7 @@ pub const Config = struct {
     retain_available: bool = true,
     check_retain_source: bool = true,
     allow_zero_length_client_id: bool = true,
+    auto_id_prefix: []u8 = &.{},
     persistent_client_expiration_seconds: ?u32 = null,
     sys_interval_seconds: u16 = default_sys_interval_seconds,
     set_tcp_nodelay: bool = false,
@@ -92,6 +97,7 @@ pub const Config = struct {
         allocator.free(self.listeners);
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
+        if (self.auto_id_prefix.len != 0) allocator.free(self.auto_id_prefix);
         if (self.persistence_location.len != 0) {
             allocator.free(self.persistence_location);
         }
@@ -126,6 +132,19 @@ pub const Config = struct {
             std.math.maxInt(usize)
         else
             self.max_queued_messages;
+    }
+
+    pub fn autoIdPrefixForListener(
+        self: Config,
+        listener: Listener,
+    ) []const u8 {
+        if (listener.auto_id_prefix.len != 0) {
+            return listener.auto_id_prefix;
+        }
+        if (!self.per_listener_settings and self.auto_id_prefix.len != 0) {
+            return self.auto_id_prefix;
+        }
+        return default_auto_id_prefix;
     }
 
     /// Return an owned snapshot path using Mosquitto's location/file split.
@@ -180,6 +199,7 @@ const ListenerSeen = struct {
     mount_point: bool = false,
     allow_anonymous: bool = false,
     allow_zero_length_client_id: bool = false,
+    auto_id_prefix: bool = false,
     maximum_qos: bool = false,
     maximum_keep_alive: bool = false,
     max_topic_alias: bool = false,
@@ -203,6 +223,7 @@ const GlobalSeen = struct {
     retain_available: bool = false,
     check_retain_source: bool = false,
     allow_zero_length_client_id: bool = false,
+    auto_id_prefix: bool = false,
     persistent_client_expiration: bool = false,
     sys_interval: bool = false,
     set_tcp_nodelay: bool = false,
@@ -249,6 +270,9 @@ fn parseSources(
             allocator.free(config.password_file);
         }
         if (config.acl_file.len != 0) allocator.free(config.acl_file);
+        if (config.auto_id_prefix.len != 0) {
+            allocator.free(config.auto_id_prefix);
+        }
     }
     var global_seen: GlobalSeen = .{};
     var security_settings_seen = false;
@@ -342,6 +366,19 @@ fn parseSources(
                     try markOnce(&global_seen.allow_zero_length_client_id);
                     config.allow_zero_length_client_id =
                         try parseOneBool(&words);
+                }
+            } else if (std.mem.eql(u8, directive, "auto_id_prefix")) {
+                security_settings_seen = true;
+                if (config.per_listener_settings) {
+                    const index = current_listener[source.scope] orelse
+                        return error.DirectiveRequiresListener;
+                    try markOnce(&listener_seen.items[index].auto_id_prefix);
+                    listeners.items[index].auto_id_prefix =
+                        try parseAutoIdPrefix(allocator, &words);
+                } else {
+                    try markOnce(&global_seen.auto_id_prefix);
+                    config.auto_id_prefix =
+                        try parseAutoIdPrefix(allocator, &words);
                 }
             } else if (std.mem.eql(u8, directive, "max_packet_size")) {
                 try markOnce(&global_seen.max_packet_size);
@@ -461,6 +498,15 @@ fn parseSources(
                     security_settings_seen = true;
                     try markOnce(&seen.allow_anonymous);
                     listener.allow_anonymous = try parseOneBool(&words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "listener_auto_id_prefix",
+                )) {
+                    security_settings_seen = true;
+                    try markOnce(&seen.auto_id_prefix);
+                    listener.auto_id_prefix =
+                        try parseAutoIdPrefix(allocator, &words);
                 } else if (std.mem.eql(u8, directive, "max_qos")) {
                     try markOnce(&seen.maximum_qos);
                     listener.maximum_qos = switch (try parseOneInteger(u2, &words)) {
@@ -591,6 +637,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "use_subject_as_username") or
         std.mem.eql(u8, value, "mount_point") or
         std.mem.eql(u8, value, "allow_anonymous") or
+        std.mem.eql(u8, value, "listener_auto_id_prefix") or
         std.mem.eql(u8, value, "max_qos") or
         std.mem.eql(u8, value, "max_keepalive") or
         std.mem.eql(u8, value, "max_topic_alias") or
@@ -617,6 +664,16 @@ fn parseOneOwned(
     words: anytype,
 ) (error{InvalidDirective} || std.mem.Allocator.Error)![]u8 {
     return allocator.dupe(u8, try parseOne(words));
+}
+
+fn parseAutoIdPrefix(
+    allocator: std.mem.Allocator,
+    words: anytype,
+) (Error || std.mem.Allocator.Error)![]u8 {
+    const value = try parseOne(words);
+    if (value.len > client_id.max_prefix_len) return error.InvalidDirective;
+    try mqtt.validateUtf8String(value);
+    return allocator.dupe(u8, value);
 }
 
 fn parseOneBool(words: anytype) error{ InvalidDirective, InvalidBoolean }!bool {
@@ -682,6 +739,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\retain_available false
         \\check_retain_source false
         \\allow_zero_length_clientid false
+        \\auto_id_prefix assigned-
         \\persistent_client_expiration 2h
         \\sys_interval 17
         \\set_tcp_nodelay true
@@ -727,6 +785,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
+    try std.testing.expectEqualStrings("assigned-", config.auto_id_prefix);
     try std.testing.expectEqual(
         @as(?u32, 2 * 60 * 60),
         config.persistent_client_expiration_seconds,
@@ -775,6 +834,10 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.listeners[1].use_subject_as_username);
     try std.testing.expectEqualStrings("tenant/", config.listeners[1].mount_point);
     try std.testing.expect(config.listeners[1].use_username_as_client_id);
+    try std.testing.expectEqualStrings(
+        "assigned-",
+        config.autoIdPrefixForListener(config.listeners[1]),
+    );
     try std.testing.expectEqual(
         default_max_topic_aliases,
         config.listeners[1].max_topic_alias,
@@ -795,10 +858,12 @@ test "MQTT broker config owns per-listener security files" {
         "per_listener_settings true\n" ++
             "listener 1883 127.0.0.1\n" ++
             "password_file first.pw\nacl_file first.acl\n" ++
+            "auto_id_prefix first-\n" ++
             "allow_zero_length_clientid false\n" ++
             "allow_anonymous false\n" ++
             "listener 8080 127.0.0.1\nprotocol websockets\n" ++
             "password_file second.pw\nacl_file second.acl\n" ++
+            "listener_auto_id_prefix second-\n" ++
             "allow_zero_length_clientid true\n" ++
             "allow_anonymous false\n",
     );
@@ -828,6 +893,116 @@ test "MQTT broker config owns per-listener security files" {
     );
     try std.testing.expect(!config.listeners[0].allow_zero_length_client_id);
     try std.testing.expect(config.listeners[1].allow_zero_length_client_id);
+    try std.testing.expectEqualStrings(
+        "first-",
+        config.listeners[0].auto_id_prefix,
+    );
+    try std.testing.expectEqualStrings(
+        "second-",
+        config.listeners[1].auto_id_prefix,
+    );
+}
+
+test "MQTT broker config scopes assigned Client ID prefixes" {
+    const allocator = std.testing.allocator;
+    var global = try parse(allocator,
+        \\auto_id_prefix global-
+        \\listener 1883
+        \\allow_anonymous true
+        \\listener 1884
+        \\listener_auto_id_prefix local-
+        \\allow_anonymous true
+    );
+    defer global.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "global-",
+        global.autoIdPrefixForListener(global.listeners[0]),
+    );
+    try std.testing.expectEqualStrings(
+        "local-",
+        global.autoIdPrefixForListener(global.listeners[1]),
+    );
+
+    var isolated = try parse(allocator,
+        \\per_listener_settings true
+        \\listener 1885
+        \\auto_id_prefix first-
+        \\allow_anonymous true
+        \\listener 1886
+        \\listener_auto_id_prefix second-
+        \\allow_anonymous true
+    );
+    defer isolated.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "first-",
+        isolated.autoIdPrefixForListener(isolated.listeners[0]),
+    );
+    try std.testing.expectEqualStrings(
+        "second-",
+        isolated.autoIdPrefixForListener(isolated.listeners[1]),
+    );
+
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator,
+            \\per_listener_settings true
+            \\auto_id_prefix missing-
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator,
+            \\listener_auto_id_prefix missing-
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\listener_auto_id_prefix first-
+            \\listener_auto_id_prefix second-
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\per_listener_settings true
+            \\listener 1883
+            \\auto_id_prefix first-
+            \\listener_auto_id_prefix second-
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\auto_id_prefix first-
+            \\auto_id_prefix second-
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\auto_id_prefix 123456789012345678901234567890123456789012345678901
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        parse(
+            allocator,
+            "listener 1883\nlistener_auto_id_prefix bad\xc0\x80prefix\n" ++
+                "allow_anonymous true\n",
+        ),
+    );
 }
 
 test "MQTT broker config scopes zero-length Client ID policy" {
@@ -1532,6 +1707,7 @@ test "MQTT broker config owns strings independently of source" {
         "persistence true\npersistence_location state\n" ++
             "persistence_file broker.db\npassword_file users.pw\n" ++
             "acl_file access.acl\n" ++
+            "auto_id_prefix copied-\n" ++
             "listener 1883\n" ++
             "certfile server.pem\nkeyfile server.key\n" ++
             "cafile clients.pem\ncapath clients\n" ++
@@ -1553,6 +1729,7 @@ test "MQTT broker config owns strings independently of source" {
     try std.testing.expectEqualStrings("broker.db", config.persistence_file);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
+    try std.testing.expectEqualStrings("copied-", config.auto_id_prefix);
     try std.testing.expectEqualStrings("server.pem", config.listeners[0].certfile);
     try std.testing.expectEqualStrings("server.key", config.listeners[0].keyfile);
     try std.testing.expectEqualStrings("clients.pem", config.listeners[0].cafile);
@@ -1613,6 +1790,10 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     try std.testing.expect(config.check_retain_source);
     try std.testing.expect(!config.upgrade_outgoing_qos);
     try std.testing.expect(config.allow_zero_length_client_id);
+    try std.testing.expectEqualStrings(
+        default_auto_id_prefix,
+        config.autoIdPrefixForListener(config.listeners[0]),
+    );
     try std.testing.expectEqual(
         @as(?u32, null),
         config.persistent_client_expiration_seconds,

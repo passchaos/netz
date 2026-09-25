@@ -1263,6 +1263,7 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
     global_config = directory / "zero-client-id-global.conf"
     global_config.write_text(
         "allow_zero_length_clientid false\n"
+        "auto_id_prefix global-\n"
         f"listener {global_tcp_port} 127.0.0.1\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
@@ -1308,6 +1309,56 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
             + global_process.stdout.read()
         )
 
+    prefix_port = free_port()
+    prefix_config = directory / "zero-client-id-prefix.conf"
+    prefix_config.write_text(
+        "auto_id_prefix global-\n"
+        f"listener {prefix_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+    )
+    prefix_process = subprocess.Popen(
+        [str(broker), f"--config={prefix_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert prefix_process.stdout is not None
+    ready = prefix_process.stdout.readline().strip()
+    if "configured 1 listeners for 2 clients" not in ready:
+        raise RuntimeError(f"global client-ID prefix broker failed: {ready}")
+    global_clients = [
+        socket.create_connection(("127.0.0.1", prefix_port), timeout=5)
+        for _ in range(2)
+    ]
+    try:
+        assigned_ids: list[str] = []
+        for client in global_clients:
+            client.settimeout(5)
+            client.sendall(connect_packet(""))
+            connack = read_mqtt_packet(client)
+            if connack_reason(connack) != 0:
+                raise AssertionError("global-prefix CONNECT was refused")
+            assigned_ids.append(assigned_client_identifier(connack))
+        if any(
+            not value.startswith("global-") or len(value) != 43
+            for value in assigned_ids
+        ) or assigned_ids[0] == assigned_ids[1]:
+            raise AssertionError(
+                "global prefix did not produce unique assigned identifiers: "
+                + repr(assigned_ids)
+            )
+        for client in global_clients:
+            client.sendall(bytes.fromhex("e000"))
+    finally:
+        for client in global_clients:
+            client.close()
+    if prefix_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "global client-ID prefix broker failed: "
+            + prefix_process.stdout.read()
+        )
+
     denied_port = free_port()
     allowed_port = free_port()
     while allowed_port == denied_port:
@@ -1317,12 +1368,14 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         "per_listener_settings true\n"
         f"listener {denied_port} 127.0.0.1\n"
         "allow_zero_length_clientid false\n"
+        "auto_id_prefix denied-\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {allowed_port} 127.0.0.1\n"
         "protocol websockets\n"
+        "listener_auto_id_prefix tenant-\n"
         "allow_anonymous true\n"
-        "max_connections 3\n"
+        "max_connections 4\n"
     )
     listener_process = subprocess.Popen(
         [str(broker), f"--config={listener_config}"],
@@ -1332,7 +1385,7 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
     )
     assert listener_process.stdout is not None
     ready = listener_process.stdout.readline().strip()
-    if "configured 2 listeners for 4 clients" not in ready:
+    if "configured 2 listeners for 5 clients" not in ready:
         raise RuntimeError(f"per-listener zero-client-id broker failed: {ready}")
 
     denied = socket.create_connection(("127.0.0.1", denied_port), timeout=5)
@@ -1347,6 +1400,7 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         denied.close()
 
     allowed_v5 = websocket_connect(allowed_port)
+    second_allowed_v5 = websocket_connect(allowed_port)
     try:
         send_websocket_binary(
             allowed_v5, connect_packet("", clean_start=False)
@@ -1355,13 +1409,27 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         if connack_reason(connack) != 0:
             raise AssertionError("zero-client-id MQTT 5 CONNECT was refused")
         assigned = assigned_client_identifier(connack)
-        if not assigned.startswith("netz-") or len(assigned) != 41:
+        send_websocket_binary(
+            second_allowed_v5, connect_packet("", clean_start=False)
+        )
+        second_connack = read_websocket_binary(second_allowed_v5)
+        if connack_reason(second_connack) != 0:
+            raise AssertionError("second zero-client-id CONNECT was refused")
+        second_assigned = assigned_client_identifier(second_connack)
+        if not assigned.startswith("tenant-") or len(assigned) != 43:
             raise AssertionError(
                 f"unexpected assigned Client Identifier: {assigned!r}"
             )
+        if not second_assigned.startswith("tenant-") or assigned == second_assigned:
+            raise AssertionError(
+                "listener prefix did not produce unique assigned identifiers: "
+                f"{assigned!r}, {second_assigned!r}"
+            )
         send_websocket_binary(allowed_v5, bytes.fromhex("e000"))
+        send_websocket_binary(second_allowed_v5, bytes.fromhex("e000"))
     finally:
         allowed_v5.close()
+        second_allowed_v5.close()
 
     allowed_v311 = websocket_connect(allowed_port)
     try:

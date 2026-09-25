@@ -4829,6 +4829,14 @@ test "public modules are reachable" {
         netz.mqtt.broker.Options,
         "max_inflight_payload_bytes_per_connection",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Listener,
+        "auto_client_id_prefix",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.ListenerEndpoint,
+        "auto_client_id_prefix",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "persistentChangeAutosaveError",
@@ -5161,12 +5169,24 @@ test "public modules are reachable" {
         "set_tcp_nodelay",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "auto_id_prefix",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker_config.Config,
+        "autoIdPrefixForListener",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "max_topic_alias",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "max_topic_alias_broker",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "auto_id_prefix",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,

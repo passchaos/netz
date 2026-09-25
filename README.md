@@ -794,7 +794,8 @@ Current protocol coverage includes:
   listener-scoped inbound and broker-created Topic Alias limits, a global
   administrative expiration cap for abandoned persistent Sessions, periodic
   retained `$SYS` publication with a zero-disable policy, configurable
-  TCP_NODELAY across raw, TLS, WebSocket and WSS listeners, plus
+  TCP_NODELAY across raw, TLS, WebSocket and WSS listeners, and configurable
+  global/per-listener assigned Client ID prefixes, plus
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and

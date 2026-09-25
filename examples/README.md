@@ -79,6 +79,7 @@ one shared Broker core. For example:
 
 ```text
 queue_qos0_messages true
+auto_id_prefix auto-
 max_inflight_messages 20
 max_inflight_bytes 0
 max_queued_messages 1000
@@ -104,6 +105,7 @@ max_connections 16
 
 listener 8080 127.0.0.1
 protocol websockets
+listener_auto_id_prefix tenant-
 certfile server-chain.pem
 keyfile server-key.pem
 cafile client-ca.pem
@@ -118,7 +120,8 @@ max_connections 16
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `keyfile`, `cafile`, `capath`, `crlfile`, `require_certificate`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
-`allow_anonymous`, `max_qos`, `max_keepalive`, `max_topic_alias`,
+`allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
+`max_qos`, `max_keepalive`, `max_topic_alias`,
 `max_topic_alias_broker`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
 `message_size_limit`, `max_inflight_messages`, `max_inflight_bytes`,
@@ -180,9 +183,12 @@ available independently.
 Global `set_tcp_nodelay` defaults to false like Mosquitto. Enabling it
 disables Nagle's algorithm on accepted raw MQTT, MQTT-over-TLS, WebSocket, and
 WSS TCP connections; Unix-domain listeners are unaffected.
-`allow_zero_length_clientid` also defaults to true and follows
-`per_listener_settings`: accepted clients receive a collision-safe
-broker-generated ID, advertised through MQTT 5 Assigned Client Identifier;
+`allow_zero_length_clientid` and the legacy `auto_id_prefix` follow
+`per_listener_settings`. The newer `listener_auto_id_prefix` always applies
+to its listener and overrides the inherited prefix; both prefixes are limited
+to 50 valid MQTT UTF-8 bytes and default to Mosquitto's `auto-`. Accepted
+clients receive a collision-safe broker-generated ID, advertised through MQTT
+5 Assigned Client Identifier;
 when disabled, MQTT 5 returns 0x80 and MQTT 3.1.1 returns Identifier Rejected.
 MQTT 5 also permits this assignment with Clean Start false; an MQTT 3.1.1
 non-clean Session still requires a non-empty stable ID.

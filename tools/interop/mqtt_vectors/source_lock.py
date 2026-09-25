@@ -17,6 +17,10 @@ MOSQUITTO_HELPER_SHA256 = {
         "00a1a30e29092938eeed59240358810914a4120d1b6df08376d3fa3085304576",
 }
 MOSQUITTO_SOURCE_SHA256 = {
+    "broker/01-connect-zero-length-id.py":
+        "3e69a4a94622dbe6e3814d5a2457605a5f8b6b9a6affe8505be81bf64c8338cd",
+    "broker/12-prop-assigned-client-identifier.py":
+        "8c65d0fd5cc74901f2ebe37c7ee9433db7225219c2908276335c358ac587e5fc",
     "broker/02-subpub-b2c-topic-alias.py":
         "bd0035dfa6b66a9942749c004db129232275ebc12bbd2a8eda6e21152768a890",
     "broker/02-subpub-qos0-topic-alias.py":

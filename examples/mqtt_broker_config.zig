@@ -407,6 +407,9 @@ pub fn run(
             .namespace = try mqtt.listener_namespace.Namespace.init(
                 configured.mount_point,
             ),
+            .auto_client_id_prefix = config.autoIdPrefixForListener(
+                configured,
+            ),
             .accept = accept,
             .authorization = .{
                 .connect = if (listener_passwords != null and
