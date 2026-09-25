@@ -15,6 +15,7 @@ pub const default_max_connections: usize = 16;
 pub const default_max_packet_size: usize = 2_000_000;
 pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
+pub const default_max_topic_aliases: u16 = 10;
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
@@ -38,6 +39,8 @@ pub const Listener = struct {
     allow_zero_length_client_id: bool = true,
     maximum_qos: ?mqtt.QoS = null,
     maximum_keep_alive_seconds: ?u16 = null,
+    max_topic_alias: u16 = default_max_topic_aliases,
+    max_topic_alias_broker: u16 = default_max_topic_aliases,
     use_username_as_client_id: bool = false,
     max_connections: usize = default_max_connections,
 
@@ -175,6 +178,8 @@ const ListenerSeen = struct {
     allow_zero_length_client_id: bool = false,
     maximum_qos: bool = false,
     maximum_keep_alive: bool = false,
+    max_topic_alias: bool = false,
+    max_topic_alias_broker: bool = false,
     use_username_as_client_id: bool = false,
     max_connections: bool = false,
 };
@@ -446,6 +451,18 @@ fn parseSources(
                     try markOnce(&seen.maximum_keep_alive);
                     listener.maximum_keep_alive_seconds =
                         try parseOnePositive(u16, &words);
+                } else if (std.mem.eql(u8, directive, "max_topic_alias")) {
+                    try markOnce(&seen.max_topic_alias);
+                    listener.max_topic_alias =
+                        try parseOneInteger(u16, &words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "max_topic_alias_broker",
+                )) {
+                    try markOnce(&seen.max_topic_alias_broker);
+                    listener.max_topic_alias_broker =
+                        try parseOneInteger(u16, &words);
                 } else if (std.mem.eql(
                     u8,
                     directive,
@@ -551,6 +568,8 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "allow_anonymous") or
         std.mem.eql(u8, value, "max_qos") or
         std.mem.eql(u8, value, "max_keepalive") or
+        std.mem.eql(u8, value, "max_topic_alias") or
+        std.mem.eql(u8, value, "max_topic_alias_broker") or
         std.mem.eql(u8, value, "use_username_as_clientid") or
         std.mem.eql(u8, value, "max_connections");
 }
@@ -625,6 +644,8 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\allow_anonymous true
         \\max_qos 1
         \\max_keepalive 30
+        \\max_topic_alias 7
+        \\max_topic_alias_broker 9
         \\max_connections 4
         \\listener 8080 ::1
         \\protocol websockets
@@ -668,6 +689,11 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.listeners[0].acl_file.len == 0);
     try std.testing.expect(config.listeners[0].maximum_qos.? == .at_least_once);
     try std.testing.expectEqual(@as(?u16, 30), config.listeners[0].maximum_keep_alive_seconds);
+    try std.testing.expectEqual(@as(u16, 7), config.listeners[0].max_topic_alias);
+    try std.testing.expectEqual(
+        @as(u16, 9),
+        config.listeners[0].max_topic_alias_broker,
+    );
     try std.testing.expect(config.listeners[1].protocol == .websockets);
     try std.testing.expect(config.listeners[1].usesTls());
     try std.testing.expectEqualStrings(
@@ -691,6 +717,14 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.listeners[1].use_subject_as_username);
     try std.testing.expectEqualStrings("tenant/", config.listeners[1].mount_point);
     try std.testing.expect(config.listeners[1].use_username_as_client_id);
+    try std.testing.expectEqual(
+        default_max_topic_aliases,
+        config.listeners[1].max_topic_alias,
+    );
+    try std.testing.expectEqual(
+        default_max_topic_aliases,
+        config.listeners[1].max_topic_alias_broker,
+    );
     const path = try config.persistencePath(allocator);
     defer allocator.free(path);
     try std.testing.expectEqualStrings("state/broker.db", path);
@@ -1365,6 +1399,22 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     );
     try std.testing.expectError(
         error.InvalidInteger,
+        parse(allocator, "listener 1883\nmax_topic_alias -1"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "listener 1883\nmax_topic_alias 65536"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "listener 1883\nmax_topic_alias_broker -1"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "listener 1883\nmax_topic_alias_broker 65536"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
         parse(allocator, "max_packet_size 19\nlistener 1883"),
     );
     try std.testing.expectError(
@@ -1506,6 +1556,14 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     try std.testing.expect(!config.upgrade_outgoing_qos);
     try std.testing.expect(config.allow_zero_length_client_id);
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
+    try std.testing.expectEqual(
+        default_max_topic_aliases,
+        config.listeners[0].max_topic_alias,
+    );
+    try std.testing.expectEqual(
+        default_max_topic_aliases,
+        config.listeners[0].max_topic_alias_broker,
+    );
 
     var minimum = try parse(
         std.testing.allocator,
@@ -1547,6 +1605,60 @@ test "MQTT broker config maps zero inflight messages to protocol maximum" {
         maximum.max_inflight_messages,
     );
     try std.testing.expectEqual(@as(usize, 2), maximum.listeners.len);
+}
+
+test "MQTT broker config scopes full-range Topic Alias limits per listener" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "max_topic_alias 1\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "max_topic_alias_broker 1\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\max_topic_alias 1
+            \\max_topic_alias 2
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\max_topic_alias_broker 1
+            \\max_topic_alias_broker 2
+            \\allow_anonymous true
+        ),
+    );
+    var config = try parse(std.testing.allocator,
+        \\listener 1883
+        \\max_topic_alias 0
+        \\max_topic_alias_broker 65535
+        \\allow_anonymous true
+        \\listener 1884
+        \\max_topic_alias 65535
+        \\max_topic_alias_broker 0
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 0), config.listeners[0].max_topic_alias);
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        config.listeners[0].max_topic_alias_broker,
+    );
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        config.listeners[1].max_topic_alias,
+    );
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        config.listeners[1].max_topic_alias_broker,
+    );
 }
 
 test "MQTT broker config maps zero queued messages to unlimited" {

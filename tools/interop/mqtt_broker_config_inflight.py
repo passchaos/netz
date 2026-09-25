@@ -145,7 +145,7 @@ def _assert_receive_maximum(packet: bytes, expected: int) -> None:
 
 def _assert_receive_maximum_omitted(packet: bytes) -> None:
     properties = _connack_properties(packet)
-    expected = bytes.fromhex("27001e8480220010")
+    expected = bytes.fromhex("27001e848022000a")
     if properties != expected:
         raise AssertionError(
             "zero max_inflight_messages did not use default Receive Maximum: "

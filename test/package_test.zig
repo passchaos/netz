@@ -4814,6 +4814,10 @@ test "public modules are reachable" {
         "strict_utf8",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.runtime.AcceptOptions,
+        "max_outgoing_topic_aliases",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker.Options,
         "system_stats_interval",
     ));
@@ -5143,6 +5147,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
         "max_inflight_bytes",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "max_topic_alias",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "max_topic_alias_broker",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,

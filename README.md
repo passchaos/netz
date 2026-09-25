@@ -790,7 +790,8 @@ Current protocol coverage includes:
   rejection, a Mosquitto-compatible global per-client QoS 1/2 inflight limit
   enforced in both directions with MQTT 5 Receive Maximum advertisement, an
   independent outgoing inflight payload-byte limit through PUBCOMP, and
-  count/payload-byte limits for each durable Session's queued messages, plus
+  count/payload-byte limits for each durable Session's queued messages,
+  listener-scoped inbound and broker-created Topic Alias limits, plus
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and

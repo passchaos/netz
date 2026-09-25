@@ -940,6 +940,12 @@ pub const AcceptOptions = struct {
     /// Receive Maximum advertised to clients. MQTT 3.1.1 cannot advertise the
     /// latter, but the same local inbound safety limit is still enforced.
     max_outgoing_inflight: u16 = 16,
+    /// Local ceiling for Topic Aliases created in server-to-client PUBLISH
+    /// packets. The effective limit is the smaller of this value and the
+    /// Topic Alias Maximum supplied by the MQTT 5 client.
+    max_outgoing_topic_aliases: u16 = std.math.maxInt(u16),
+    /// Maximum Topic Alias accepted from the peer. Servers advertise non-zero
+    /// values in CONNACK; zero disables aliases and omits the property.
     topic_alias_maximum: u16 = 16,
     server_keep_alive_seconds: ?u16 = null,
     /// Optional upper bound for the Keep Alive requested by CONNECT. MQTT 5
@@ -1033,6 +1039,10 @@ pub const PendingAcceptedClient = struct {
         options: AcceptOptions,
     ) Error!AcceptedClient {
         const resolved = try self.resolvedOptions(options);
+        self.connection.peer_topic_alias_maximum = @min(
+            self.connection.peer_topic_alias_maximum,
+            resolved.max_outgoing_topic_aliases,
+        );
         var properties: [5]mqtt.Property = undefined;
         var property_count: usize = 0;
         if (self.connection.protocol == .v5 and
@@ -2229,7 +2239,9 @@ fn appendTopicAliasMaximumSetting(
     explicit_properties: []const mqtt.Property,
     configured_maximum: u16,
 ) Error!void {
-    if (mqtt.topicAliasMaximum(explicit_properties) == null) {
+    if (configured_maximum != 0 and
+        mqtt.topicAliasMaximum(explicit_properties) == null)
+    {
         try properties.append(allocator, .{
             .two_byte = .{
                 .id = .topic_alias_maximum,
@@ -3143,7 +3155,9 @@ pub const Connection = struct {
             self.keep_alive_seconds = mqtt.serverKeepAlive(
                 self.write_property_scratch.items,
             ) orelse self.keep_alive_seconds;
-            self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(self.write_property_scratch.items) orelse self.incoming_topic_alias_maximum;
+            self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(
+                self.write_property_scratch.items,
+            ) orelse options.topic_alias_maximum;
             self.local_maximum_qos = mqtt.maximumQoS(self.write_property_scratch.items) orelse self.local_maximum_qos;
             self.local_retain_available = mqtt.retainAvailable(self.write_property_scratch.items) orelse self.local_retain_available;
             self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(self.write_property_scratch.items) orelse options.wildcard_subscription_available;
@@ -5771,6 +5785,7 @@ test "MQTT runtime client and server exchange over TCP" {
             var accepted = try server_ptr.accept(.{
                 .protocol = .v5,
                 .max_outgoing_inflight = 2,
+                .max_outgoing_topic_aliases = 2,
                 .topic_alias_maximum = 4,
                 .maximum_keep_alive_seconds = 7,
                 .maximum_qos = .exactly_once,
@@ -5787,6 +5802,10 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(@as(?u32, 4096), mqtt.maximumPacketSize(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(?u16, 4), mqtt.topicAliasMaximum(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(u16, 2), accepted.connection.max_outgoing_inflight);
+            try std.testing.expectEqual(
+                @as(u16, 2),
+                accepted.connection.peer_topic_alias_maximum,
+            );
             try std.testing.expectEqual(@as(usize, 4096), accepted.connection.peer_max_packet_size);
             try std.testing.expectEqual(@as(u16, 7), accepted.connection.keep_alive_seconds);
 
@@ -8724,6 +8743,10 @@ test "MQTT runtime advertises the configured topic alias maximum" {
         @as(?u16, std.math.maxInt(u16)),
         mqtt.topicAliasMaximum(properties.items),
     );
+
+    properties.clearRetainingCapacity();
+    try appendTopicAliasMaximumSetting(&properties, allocator, &.{}, 0);
+    try std.testing.expectEqual(@as(usize, 0), properties.items.len);
 }
 
 test "MQTT connection enforces peer publish capabilities" {

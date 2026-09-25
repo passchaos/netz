@@ -95,6 +95,8 @@ listener 1883 127.0.0.1
 allow_anonymous false
 max_qos 1
 max_keepalive 60
+max_topic_alias 10
+max_topic_alias_broker 10
 max_connections 16
 
 listener 8080 127.0.0.1
@@ -111,9 +113,10 @@ max_connections 16
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
-`keyfile`, `cafile`, `crlfile`, `require_certificate`, `use_identity_as_username`,
-`mount_point`,
-`allow_anonymous`, `max_qos`, `max_keepalive`,
+`keyfile`, `cafile`, `capath`, `crlfile`, `require_certificate`,
+`use_identity_as_username`, `use_subject_as_username`, `mount_point`,
+`allow_anonymous`, `max_qos`, `max_keepalive`, `max_topic_alias`,
+`max_topic_alias_broker`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
 `message_size_limit`, `max_inflight_messages`, `max_inflight_bytes`,
 `max_queued_messages`,
@@ -151,6 +154,12 @@ usage. Global
 `retain_available` defaults to true. When false, MQTT 5 CONNACK advertises
 Retain Available 0 and rejects retained PUBLISH or retained Will use with reason
 0x9A; MQTT 3.1.1 closes the connection because it cannot represent that reason.
+Listener-local `max_topic_alias` and `max_topic_alias_broker` both default to
+10 and accept the full 0..65,535 range. The former is advertised in MQTT 5
+CONNACK and bounds aliases accepted from clients; zero omits the property and
+rejects all inbound aliases. The latter caps automatic broker-to-client alias
+creation after taking the minimum with the client's CONNECT capability; zero
+disables outgoing aliases. MQTT 3.1.1 ignores both settings.
 `allow_zero_length_clientid` also defaults to true and follows
 `per_listener_settings`: accepted clients receive a collision-safe
 broker-generated ID, advertised through MQTT 5 Assigned Client Identifier;
