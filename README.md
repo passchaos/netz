@@ -792,7 +792,8 @@ Current protocol coverage includes:
   independent outgoing inflight payload-byte limit through PUBCOMP, and
   count/payload-byte limits for each durable Session's queued messages,
   listener-scoped inbound and broker-created Topic Alias limits, a global
-  administrative expiration cap for abandoned persistent Sessions, plus
+  administrative expiration cap for abandoned persistent Sessions, periodic
+  retained `$SYS` publication with a zero-disable policy, plus
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and

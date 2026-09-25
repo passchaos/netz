@@ -84,6 +84,7 @@ max_inflight_bytes 0
 max_queued_messages 1000
 max_queued_bytes 0
 persistent_client_expiration 2m
+sys_interval 10
 password_file users.pw
 acl_file access.acl
 persistence true
@@ -124,6 +125,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `max_queued_bytes`, `retain_available`, `upgrade_outgoing_qos`,
 `check_retain_source`, `queue_qos0_messages`,
 `persistent_client_expiration`,
+`sys_interval`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
@@ -166,6 +168,10 @@ Global `persistent_client_expiration` is unset by default. When configured, it
 accepts a positive integer followed by `s`, `h`, `d`, `w`, `m`, or `y` and caps
 the offline lifetime of persistent MQTT 3.1.1 and MQTT 5 Sessions without
 lengthening a shorter client-selected MQTT 5 Session Expiry Interval.
+Global `sys_interval` defaults to 10 seconds and accepts 0..65,535;
+zero disables periodic retained `$SYS` publication. Non-zero values drive the
+broker's shared lifecycle timer, while explicit `publishSystemStats` calls remain
+available independently.
 `allow_zero_length_clientid` also defaults to true and follows
 `per_listener_settings`: accepted clients receive a collision-safe
 broker-generated ID, advertised through MQTT 5 Assigned Client Identifier;

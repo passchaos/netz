@@ -16,6 +16,7 @@ pub const default_max_packet_size: usize = 2_000_000;
 pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
 pub const default_max_topic_aliases: u16 = 10;
+pub const default_sys_interval_seconds: u16 = 10;
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
@@ -78,6 +79,7 @@ pub const Config = struct {
     check_retain_source: bool = true,
     allow_zero_length_client_id: bool = true,
     persistent_client_expiration_seconds: ?u32 = null,
+    sys_interval_seconds: u16 = default_sys_interval_seconds,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
     persistence_file: []u8 = &.{},
@@ -201,6 +203,7 @@ const GlobalSeen = struct {
     check_retain_source: bool = false,
     allow_zero_length_client_id: bool = false,
     persistent_client_expiration: bool = false,
+    sys_interval: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -371,6 +374,10 @@ fn parseSources(
                 try markOnce(&global_seen.persistent_client_expiration);
                 config.persistent_client_expiration_seconds =
                     try parseExpiration(&words);
+            } else if (std.mem.eql(u8, directive, "sys_interval")) {
+                try markOnce(&global_seen.sys_interval);
+                config.sys_interval_seconds =
+                    try parseOneInteger(u16, &words);
             } else if (std.mem.eql(u8, directive, "persistence")) {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
@@ -668,6 +675,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\check_retain_source false
         \\allow_zero_length_clientid false
         \\persistent_client_expiration 2h
+        \\sys_interval 17
         \\password_file users.pw
         \\acl_file access.acl
         \\persistence true
@@ -714,6 +722,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         @as(?u32, 2 * 60 * 60),
         config.persistent_client_expiration_seconds,
     );
+    try std.testing.expectEqual(@as(u16, 17), config.sys_interval_seconds);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
@@ -1598,6 +1607,10 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         @as(?u32, null),
         config.persistent_client_expiration_seconds,
     );
+    try std.testing.expectEqual(
+        default_sys_interval_seconds,
+        config.sys_interval_seconds,
+    );
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
     try std.testing.expectEqual(
         default_max_topic_aliases,
@@ -1677,6 +1690,54 @@ test "MQTT broker config parses persistent client expiration units" {
             config.persistent_client_expiration_seconds,
         );
     }
+}
+
+test "MQTT broker config validates global system interval" {
+    var disabled = try parse(std.testing.allocator,
+        \\sys_interval 0
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer disabled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 0), disabled.sys_interval_seconds);
+
+    var maximum = try parse(std.testing.allocator,
+        \\listener 1883
+        \\allow_anonymous true
+        \\sys_interval 65535
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer maximum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        maximum.sys_interval_seconds,
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(std.testing.allocator,
+            \\sys_interval -1
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(std.testing.allocator,
+            \\sys_interval 65536
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(std.testing.allocator,
+            \\sys_interval 1
+            \\sys_interval 2
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
 }
 
 test "MQTT broker config rejects invalid persistent client expiration" {

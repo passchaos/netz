@@ -157,6 +157,10 @@ pub fn run(
         .queue_qos0_messages = config.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
         .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
+        .system_stats_interval = if (config.sys_interval_seconds == 0)
+            null
+        else
+            .fromSeconds(config.sys_interval_seconds),
         .access_control = source_access_control,
         .session = .{
             .max_inflight_per_session = max_inflight_messages,
