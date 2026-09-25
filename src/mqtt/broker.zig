@@ -220,6 +220,10 @@ pub const ListenerAuthorization = struct {
     /// username before every authorization callback. Wire username/password
     /// are ignored; a missing or invalid certificate identity is refused.
     use_identity_as_username: bool = false,
+    /// Use the verified leaf certificate's complete OpenSSL-compatible RFC
+    /// 2253 Subject as the MQTT username. The CN-only policy takes precedence
+    /// when both options are enabled, matching Mosquitto.
+    use_subject_as_username: bool = false,
 };
 
 /// Per-listener packet policy. Every callback is optional because this is an
@@ -2584,7 +2588,9 @@ pub const Broker = struct {
                 return null;
             }
         }
-        if (listener_authorization.use_identity_as_username) {
+        if (listener_authorization.use_identity_as_username or
+            listener_authorization.use_subject_as_username)
+        {
             const chain = pending.connection.peerCertificates() orelse {
                 try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
@@ -2593,20 +2599,23 @@ pub const Broker = struct {
                 try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
             }
-            const common_name = vail.x509.identity.commonNameAlloc(
+            const certificate_username = (if (listener_authorization.use_identity_as_username) vail.x509.identity.commonNameAlloc(
                 self.allocator,
                 chain[0],
-            ) catch |err| switch (err) {
+            ) else vail.x509.identity.subjectNameAlloc(
+                self.allocator,
+                chain[0],
+            )) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {
                     try self.refuseUnauthorizedConnect(pending, &pending_owned);
                     return null;
                 },
             };
-            defer self.allocator.free(common_name);
+            defer self.allocator.free(certificate_username);
             pending.connect.replaceUsername(
                 self.allocator,
-                common_name,
+                certificate_username,
             ) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => {

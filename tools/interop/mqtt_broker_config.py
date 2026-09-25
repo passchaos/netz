@@ -1027,6 +1027,7 @@ def create_signed_certificate(
     extended_key_usage: str,
     subject_alt_name: str | None = None,
     key_algorithm: str = "ec",
+    subject: str | None = None,
 ) -> tuple[Path, Path]:
     key = directory / f"{name}.key"
     request = directory / f"{name}.csr"
@@ -1056,8 +1057,13 @@ def create_signed_certificate(
         )
     else:
         raise AssertionError(f"unsupported key algorithm {key_algorithm}")
-    subject = f"/CN={common_name}" if common_name is not None else "/O=no-common-name"
-    run_openssl("req", "-new", "-key", key, "-subj", subject, "-out", request)
+    certificate_subject = subject or (
+        f"/CN={common_name}" if common_name is not None else "/O=no-common-name"
+    )
+    run_openssl(
+        "req", "-new", "-key", key, "-subj", certificate_subject,
+        "-out", request,
+    )
     run_openssl(
         "x509",
         "-req",
@@ -1863,6 +1869,142 @@ def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_mtls_subject_username_broker(
+    broker: Path,
+    directory: Path,
+    server_ca: Path,
+    server_certificate: Path,
+    server_key: Path,
+    client_ca: Path,
+    client_certificate: Path,
+    client_key: Path,
+    subject_username: str,
+    subject_topic: str,
+) -> None:
+    acl_file = directory / "subject.acl"
+    acl_file.write_text(
+        "pattern write subject/%u/#\n"
+        "pattern write client/%c/#\n"
+    )
+    tls_port = free_port()
+    wss_port = free_port()
+    while wss_port == tls_port:
+        wss_port = free_port()
+    config = directory / "subject.conf"
+    config.write_text(
+        f"acl_file {acl_file}\n"
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "require_certificate true\n"
+        "use_subject_as_username true\n"
+        "use_username_as_clientid true\n"
+        "allow_anonymous false\n"
+        "max_connections 1\n"
+        f"listener {wss_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "require_certificate true\n"
+        "use_identity_as_username true\n"
+        "use_subject_as_username true\n"
+        "allow_anonymous false\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 2 clients" not in ready:
+        raise RuntimeError(f"subject identity broker failed to start: {ready}")
+
+    tcp = mqtt_tls_socket(tls_port, server_ca, client_certificate, client_key)
+    try:
+        tcp.sendall(connect_packet("wire-id", username="wrong-wire-user"))
+        if connack_reason(read_mqtt_packet(tcp)) != 0:
+            raise AssertionError("certificate Subject TCP CONNECT failed")
+        tcp.sendall(
+            publish_packet(
+                subject_topic, b"mapped full subject", qos=1, packet_id=61
+            )
+        )
+        if puback_reason(read_mqtt_packet(tcp), 61) != 0x10:
+            raise AssertionError("RFC2253 Subject did not reach the TCP ACL")
+        tcp.sendall(
+            publish_packet(
+                f"client/{subject_username}/status",
+                b"mapped subject client id", qos=1, packet_id=63,
+            )
+        )
+        if puback_reason(read_mqtt_packet(tcp), 63) != 0x10:
+            raise AssertionError(
+                "RFC2253 Subject did not become the effective Client ID"
+            )
+        tcp.sendall(bytes.fromhex("e000"))
+    finally:
+        tcp.close()
+
+    websocket = websocket_connect(
+        wss_port, server_ca, client_certificate, client_key
+    )
+    try:
+        send_websocket_binary(
+            websocket,
+            connect_packet("wss-wire-id", username="wrong-wire-user"),
+        )
+        if connack_reason(read_websocket_binary(websocket)) != 0:
+            raise AssertionError("certificate identity precedence CONNECT failed")
+        send_websocket_binary(
+            websocket,
+            publish_packet(
+                "subject/subject-client/status",
+                b"CN wins over full subject", qos=1, packet_id=62,
+            ),
+        )
+        if puback_reason(read_websocket_binary(websocket), 62) != 0x10:
+            raise AssertionError("CN identity did not take precedence on WSS")
+        send_websocket_binary(websocket, bytes.fromhex("e000"))
+    finally:
+        websocket.close()
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "certificate Subject identity broker failed: "
+            + process.stdout.read()
+        )
+
+
+def run_mtls_subject_username_case(broker: Path, directory: Path) -> None:
+    server_ca, server_ca_key = create_ca(
+        directory, "subject-server-ca", "Subject Server Root"
+    )
+    server_certificate, server_key = create_signed_certificate(
+        directory, "subject-server", "localhost", server_ca, server_ca_key,
+        601, "serverAuth", "DNS:localhost",
+    )
+    client_ca, client_ca_key = create_ca(
+        directory, "subject-client-ca", "Subject Client Root"
+    )
+    client_certificate, client_key = create_signed_certificate(
+        directory, "subject-client", "subject-client", client_ca,
+        client_ca_key, 602, "clientAuth",
+        subject="/C=GB/O=Netz/OU=Devices/CN=subject-client",
+    )
+    subject_username = "CN=subject-client,OU=Devices,O=Netz,C=GB"
+    subject_topic = f"subject/{subject_username}/status"
+
+    run_mtls_subject_username_broker(
+        broker, directory, server_ca, server_certificate, server_key,
+        client_ca, client_certificate, client_key, subject_username,
+        subject_topic,
+    )
+
+
 def main() -> None:
     args = parse_args()
     with tempfile.TemporaryDirectory() as temporary:
@@ -1876,6 +2018,7 @@ def main() -> None:
         run_persistence_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
         run_mtls_listener_case(args.broker, directory)
+        run_mtls_subject_username_case(args.broker, directory)
         run_rsa_crl_listener_case(args.broker, directory)
         run_unsupported_tls_key_case(args.broker, directory)
     print(
@@ -1883,7 +2026,7 @@ def main() -> None:
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
-        "certificate-CN identity mapping, P-256/RSA signed CRL revocation, strict TLS "
+        "certificate CN/full-Subject identity mapping, P-256/RSA signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, and snapshot restore "
         + RUNTIME
     )

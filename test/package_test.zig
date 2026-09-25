@@ -5065,6 +5065,14 @@ test "public modules are reachable" {
         netz.mqtt.broker.ListenerAuthorization,
         "use_username_as_client_id",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.ListenerAuthorization,
+        "use_subject_as_username",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "use_subject_as_username",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker,
         "ListenerAccessControlHandler",

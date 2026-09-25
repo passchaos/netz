@@ -25,6 +25,7 @@ pub const Listener = struct {
     crlfile: []u8 = &.{},
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
+    use_subject_as_username: bool = false,
     mount_point: []u8 = &.{},
     allow_anonymous: bool = false,
     maximum_qos: ?mqtt.QoS = null,
@@ -124,6 +125,7 @@ const ListenerSeen = struct {
     crlfile: bool = false,
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
+    use_subject_as_username: bool = false,
     mount_point: bool = false,
     allow_anonymous: bool = false,
     maximum_qos: bool = false,
@@ -271,6 +273,9 @@ pub fn parse(
             } else if (std.mem.eql(u8, directive, "use_identity_as_username")) {
                 try markOnce(&seen.use_identity_as_username);
                 listener.use_identity_as_username = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "use_subject_as_username")) {
+                try markOnce(&seen.use_subject_as_username);
+                listener.use_subject_as_username = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "mount_point")) {
                 try markOnce(&seen.mount_point);
                 const value = try parseOne(&words);
@@ -330,14 +335,16 @@ pub fn parse(
         if (listener.crlfile.len != 0 and !listener.require_certificate) {
             return error.ClientCertificateConfigurationIncomplete;
         }
-        if (listener.use_identity_as_username and
+        if ((listener.use_identity_as_username or
+            listener.use_subject_as_username) and
             !listener.require_certificate)
         {
             return error.ClientCertificateConfigurationIncomplete;
         }
         if (!listener.allow_anonymous and
             config.password_file.len == 0 and
-            !listener.use_identity_as_username)
+            !listener.use_identity_as_username and
+            !listener.use_subject_as_username)
         {
             return error.AuthenticationRequired;
         }
@@ -378,6 +385,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "crlfile") or
         std.mem.eql(u8, value, "require_certificate") or
         std.mem.eql(u8, value, "use_identity_as_username") or
+        std.mem.eql(u8, value, "use_subject_as_username") or
         std.mem.eql(u8, value, "mount_point") or
         std.mem.eql(u8, value, "allow_anonymous") or
         std.mem.eql(u8, value, "max_qos") or
@@ -455,6 +463,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\crlfile clients.crl
         \\require_certificate true
         \\use_identity_as_username true
+        \\use_subject_as_username true
         \\mount_point tenant/
         \\allow_anonymous false
         \\use_username_as_clientid true
@@ -493,6 +502,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     );
     try std.testing.expect(config.listeners[1].require_certificate);
     try std.testing.expect(config.listeners[1].use_identity_as_username);
+    try std.testing.expect(config.listeners[1].use_subject_as_username);
     try std.testing.expectEqualStrings("tenant/", config.listeners[1].mount_point);
     try std.testing.expect(config.listeners[1].use_username_as_client_id);
     const path = try config.persistencePath(allocator);
@@ -541,6 +551,23 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         ),
     );
     try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\cafile clients.pem
+            \\require_certificate true
+            \\use_subject_as_username true
+            \\use_subject_as_username true
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "use_subject_as_username true\nlistener 8883"),
+    );
+    try std.testing.expectError(
         error.ClientCertificateConfigurationIncomplete,
         parse(allocator,
             \\listener 8883
@@ -570,6 +597,16 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\use_identity_as_username true
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.ClientCertificateConfigurationIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\use_subject_as_username true
             \\allow_anonymous true
         ),
     );
@@ -731,6 +768,7 @@ test "MQTT broker config owns strings independently of source" {
             "cafile clients.pem\nrequire_certificate true\n" ++
             "crlfile clients.crl\n" ++
             "use_identity_as_username true\n" ++
+            "use_subject_as_username true\n" ++
             "mount_point tenant/\nallow_anonymous true\n",
     );
     defer allocator.free(source);
@@ -751,6 +789,7 @@ test "MQTT broker config owns strings independently of source" {
     try std.testing.expectEqualStrings("clients.crl", config.listeners[0].crlfile);
     try std.testing.expect(config.listeners[0].require_certificate);
     try std.testing.expect(config.listeners[0].use_identity_as_username);
+    try std.testing.expect(config.listeners[0].use_subject_as_username);
     try std.testing.expectEqualStrings("tenant/", config.listeners[0].mount_point);
 }
 
