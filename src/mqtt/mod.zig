@@ -1244,7 +1244,7 @@ pub const Connect = struct {
         const password = if ((connect_flags & 0x40) != 0) try readBinary(&cursor) else null;
         if (!cursor.eof()) return error.InvalidPacketType;
         const clean_start = (connect_flags & 0x02) != 0;
-        try validateConnectClientId(client_id, clean_start);
+        try validateConnectClientId(protocol, client_id, clean_start);
         return .{
             .protocol = protocol,
             .clean_start = clean_start,
@@ -2601,7 +2601,11 @@ pub fn writeConnectPacket(
 ) Error!void {
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
-    try validateConnectClientId(options.client_id, options.clean_start);
+    try validateConnectClientId(
+        protocol,
+        options.client_id,
+        options.clean_start,
+    );
     const flags = connectFlags(options);
     try validateConnectFlags(protocol, flags);
     const connect_properties_len = if (protocol == .v5) blk: {
@@ -2715,12 +2719,17 @@ fn connectFlags(options: ConnectPacketOptions) u8 {
     return flags;
 }
 
-fn validateConnectClientId(client_id: []const u8, clean_start: bool) Error!void {
-    // MQTT 3.1.1 and MQTT 5 allow a Server to assign a Client Identifier when
-    // the CONNECT packet carries an empty Client ID, but only for a clean
-    // session/start.  Persistent sessions need a stable identifier to resume;
-    // rumqtt rejects this combination before constructing connection state.
-    if (client_id.len == 0 and !clean_start) return error.InvalidClientId;
+fn validateConnectClientId(
+    protocol: ProtocolVersion,
+    client_id: []const u8,
+    clean_start: bool,
+) Error!void {
+    // MQTT 3.1.1 permits an empty Client Identifier only with CleanSession=1.
+    // MQTT 5 removed that restriction: the Server assigns the identifier and
+    // returns it in CONNACK even when Clean Start is 0.
+    if (protocol == .v3_1_1 and client_id.len == 0 and !clean_start) {
+        return error.InvalidClientId;
+    }
 }
 
 pub const PublishWriteOptions = struct {
@@ -3545,7 +3554,16 @@ test "MQTT connect and publish parse" {
     );
     connect_bytes.items[protocol_level_index - 1] = 'T';
     connect_bytes.items[protocol_level_index] = ProtocolVersion.v5.byte();
-    try std.testing.expectError(error.InvalidClientId, writeConnectPacket(&connect_bytes, allocator, .v5, .{
+    connect_bytes.clearRetainingCapacity();
+    try writeConnectPacket(&connect_bytes, allocator, .v5, .{
+        .client_id = "",
+        .clean_start = false,
+    });
+    connect.deinit(allocator);
+    connect = try Connect.parse(allocator, connect_bytes.items);
+    try std.testing.expectEqualStrings("", connect.client_id);
+    try std.testing.expect(!connect.clean_start);
+    try std.testing.expectError(error.InvalidClientId, writeConnectPacket(&connect_bytes, allocator, .v3_1_1, .{
         .client_id = "",
         .clean_start = false,
     }));
@@ -3555,10 +3573,9 @@ test "MQTT connect and publish parse" {
     var persistent_variable: std.ArrayList(u8) = .empty;
     defer persistent_variable.deinit(allocator);
     try writeUtf8(&persistent_variable, allocator, "MQTT");
-    try persistent_variable.append(allocator, ProtocolVersion.v5.byte());
+    try persistent_variable.append(allocator, ProtocolVersion.v3_1_1.byte());
     try persistent_variable.append(allocator, 0x00); // Clean Start false with an empty Client ID.
     try wire.appendInt(&persistent_variable, allocator, u16, 30, .big);
-    try writeProperties(&persistent_variable, allocator, &.{});
     try writeUtf8(&persistent_variable, allocator, "");
     try (FixedHeader{
         .packet_type = .connect,

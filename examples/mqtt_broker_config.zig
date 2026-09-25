@@ -124,6 +124,7 @@ pub fn run(
         .protocol = .v5,
         .max_outgoing_inflight = 64,
         .retain_available = config.retain_available,
+        .allow_zero_length_client_id = config.allow_zero_length_client_id,
     };
     var broker = try mqtt.broker.Broker.init(allocator, io, .{
         .limits = .{
@@ -320,6 +321,10 @@ pub fn run(
         initialized_servers += 1;
 
         var accept = base_accept;
+        if (config.per_listener_settings) {
+            accept.allow_zero_length_client_id =
+                configured.allow_zero_length_client_id;
+        }
         accept.maximum_qos = configured.maximum_qos;
         accept.maximum_keep_alive_seconds =
             configured.maximum_keep_alive_seconds;

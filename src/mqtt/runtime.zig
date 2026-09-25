@@ -946,8 +946,9 @@ pub const AcceptOptions = struct {
     /// negotiates violations down with Server Keep Alive; MQTT 3.1.1 must be
     /// refused because it has no equivalent response property.
     maximum_keep_alive_seconds: ?u16 = null,
-    /// Whether clean-start clients may request an assigned identifier by
-    /// sending an empty Client ID.
+    /// Whether clients may request an assigned identifier by sending an empty
+    /// Client ID. MQTT 3.1.1 still requires CleanSession=1; MQTT 5 permits
+    /// either Clean Start value.
     allow_zero_length_client_id: bool = true,
     maximum_qos: ?mqtt.QoS = null,
     retain_available: bool = true,
@@ -6470,7 +6471,7 @@ test "MQTT server reports version-aware CONNECT failures" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            for (0..9) |_| {
+            for (0..8) |_| {
                 const stream = self.listener.accept(self.io) catch |err| {
                     self.err = err;
                     return;
@@ -6534,13 +6535,6 @@ test "MQTT server reports version-aware CONNECT failures" {
             .expected = &.{ 0x20, 0x02, 0x00, 0x02 },
         },
         .{
-            .packet = &.{
-                0x10, 0x0d, 0x00, 0x04, 'M',  'Q',  'T',  'T',
-                0x05, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
-            },
-            .expected = &.{ 0x20, 0x03, 0x00, 0x85, 0x00 },
-        },
-        .{
             .packet = blk: {
                 const packet = try allocator.dupe(u8, valid_v5);
                 packet[0] = 0x1f;
@@ -6576,7 +6570,7 @@ test "MQTT server reports version-aware CONNECT failures" {
     };
     defer allocator.free(cases[0].packet);
     defer allocator.free(cases[1].packet);
-    defer allocator.free(cases[4].packet);
+    defer allocator.free(cases[3].packet);
     const Peer = struct {
         fn run(
             peer_io: std.Io,

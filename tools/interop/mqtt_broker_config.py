@@ -57,8 +57,9 @@ def connect_packet(
     will_topic: str | None = None,
     will_payload: bytes = b"",
     will_retain: bool = False,
+    clean_start: bool = True,
 ) -> bytes:
-    flags = 0x02
+    flags = 0x02 if clean_start else 0x00
     payload = utf8(client_id)
     if will_topic is not None:
         flags |= 0x04
@@ -195,6 +196,21 @@ def connack_properties(packet: bytes) -> bytes:
     if property_offset + property_length != len(packet):
         raise AssertionError(f"malformed MQTT 5 CONNACK properties: {packet.hex()}")
     return properties
+
+
+def assigned_client_identifier(packet: bytes) -> str:
+    properties = connack_properties(packet)
+    if len(properties) < 3 or properties[0] != 0x12:
+        raise AssertionError(
+            "CONNACK omitted leading Assigned Client Identifier: "
+            + packet.hex()
+        )
+    length = int.from_bytes(properties[1:3], "big")
+    if length == 0 or 3 + length > len(properties):
+        raise AssertionError(
+            "malformed Assigned Client Identifier: " + packet.hex()
+        )
+    return properties[3 : 3 + length].decode("utf-8")
 
 
 def acknowledgment_reason(
@@ -1225,6 +1241,150 @@ def run_retain_unavailable_case(broker: Path, directory: Path) -> None:
     if return_code == 0 or "InvalidProperty" not in output:
         raise RuntimeError(
             "retain-unavailable Will rejection was not reported: " + output
+        )
+
+
+def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
+    global_tcp_port = free_port()
+    global_websocket_port = free_port()
+    while global_websocket_port == global_tcp_port:
+        global_websocket_port = free_port()
+    global_config = directory / "zero-client-id-global.conf"
+    global_config.write_text(
+        "allow_zero_length_clientid false\n"
+        f"listener {global_tcp_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {global_websocket_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    global_process = subprocess.Popen(
+        [str(broker), f"--config={global_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert global_process.stdout is not None
+    ready = global_process.stdout.readline().strip()
+    if "configured 2 listeners for 2 clients" not in ready:
+        raise RuntimeError(f"global zero-client-id broker failed: {ready}")
+
+    tcp = socket.create_connection(("127.0.0.1", global_tcp_port), timeout=5)
+    tcp.settimeout(5)
+    try:
+        tcp.sendall(connect_packet(""))
+        if connack_reason(read_mqtt_packet(tcp)) != 0x80:
+            raise AssertionError(
+                "global zero-client-id MQTT 5 refusal reason mismatch"
+            )
+    finally:
+        tcp.close()
+
+    websocket = websocket_connect(global_websocket_port)
+    try:
+        send_websocket_binary(websocket, connect_packet("", proto_ver=4))
+        if read_websocket_binary(websocket) != bytes.fromhex("20020002"):
+            raise AssertionError(
+                "global zero-client-id MQTT 3.1.1 refusal mismatch"
+            )
+    finally:
+        websocket.close()
+    if global_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "global zero-client-id broker failed: "
+            + global_process.stdout.read()
+        )
+
+    denied_port = free_port()
+    allowed_port = free_port()
+    while allowed_port == denied_port:
+        allowed_port = free_port()
+    listener_config = directory / "zero-client-id-per-listener.conf"
+    listener_config.write_text(
+        "per_listener_settings true\n"
+        f"listener {denied_port} 127.0.0.1\n"
+        "allow_zero_length_clientid false\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {allowed_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        "allow_anonymous true\n"
+        "max_connections 3\n"
+    )
+    listener_process = subprocess.Popen(
+        [str(broker), f"--config={listener_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert listener_process.stdout is not None
+    ready = listener_process.stdout.readline().strip()
+    if "configured 2 listeners for 4 clients" not in ready:
+        raise RuntimeError(f"per-listener zero-client-id broker failed: {ready}")
+
+    denied = socket.create_connection(("127.0.0.1", denied_port), timeout=5)
+    denied.settimeout(5)
+    try:
+        denied.sendall(connect_packet(""))
+        if connack_reason(read_mqtt_packet(denied)) != 0x80:
+            raise AssertionError(
+                "per-listener zero-client-id refusal reason mismatch"
+            )
+    finally:
+        denied.close()
+
+    allowed_v5 = websocket_connect(allowed_port)
+    try:
+        send_websocket_binary(
+            allowed_v5, connect_packet("", clean_start=False)
+        )
+        connack = read_websocket_binary(allowed_v5)
+        if connack_reason(connack) != 0:
+            raise AssertionError("zero-client-id MQTT 5 CONNECT was refused")
+        assigned = assigned_client_identifier(connack)
+        if not assigned.startswith("netz-") or len(assigned) != 41:
+            raise AssertionError(
+                f"unexpected assigned Client Identifier: {assigned!r}"
+            )
+        send_websocket_binary(allowed_v5, bytes.fromhex("e000"))
+    finally:
+        allowed_v5.close()
+
+    allowed_v311 = websocket_connect(allowed_port)
+    try:
+        send_websocket_binary(
+            allowed_v311, connect_packet("", proto_ver=4)
+        )
+        if read_websocket_binary(allowed_v311) != bytes.fromhex("20020000"):
+            raise AssertionError(
+                "zero-client-id MQTT 3.1.1 CONNECT was refused"
+            )
+        send_websocket_binary(allowed_v311, bytes.fromhex("e000"))
+    finally:
+        allowed_v311.close()
+
+    persistent_v311 = websocket_connect(allowed_port)
+    try:
+        send_websocket_binary(
+            persistent_v311,
+            connect_packet("", proto_ver=4, clean_start=False),
+        )
+        if read_websocket_binary(persistent_v311) != bytes.fromhex(
+            "20020002"
+        ):
+            raise AssertionError(
+                "persistent zero-client-id MQTT 3.1.1 refusal mismatch"
+            )
+    finally:
+        persistent_v311.close()
+    return_code = listener_process.wait(timeout=5)
+    output = listener_process.stdout.read()
+    if return_code == 0 or "InvalidClientId" not in output:
+        raise RuntimeError(
+            "per-listener zero-client-id protocol rejection was not reported: "
+            + output
         )
 
 
@@ -3158,6 +3318,7 @@ def main() -> None:
         run_include_directory_case(args.broker, directory)
         run_packet_and_message_size_case(args.broker, directory)
         run_retain_unavailable_case(args.broker, directory)
+        run_zero_length_client_id_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -3174,7 +3335,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, packet/message/retain policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, packet/message/retain and zero-length Client ID policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "

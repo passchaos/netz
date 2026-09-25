@@ -33,6 +33,7 @@ pub const Listener = struct {
     use_subject_as_username: bool = false,
     mount_point: []u8 = &.{},
     allow_anonymous: bool = false,
+    allow_zero_length_client_id: bool = true,
     maximum_qos: ?mqtt.QoS = null,
     maximum_keep_alive_seconds: ?u16 = null,
     use_username_as_client_id: bool = false,
@@ -64,6 +65,7 @@ pub const Config = struct {
     max_packet_size: usize = default_max_packet_size,
     message_size_limit: usize = 0,
     retain_available: bool = true,
+    allow_zero_length_client_id: bool = true,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
     persistence_file: []u8 = &.{},
@@ -144,6 +146,7 @@ const ListenerSeen = struct {
     use_subject_as_username: bool = false,
     mount_point: bool = false,
     allow_anonymous: bool = false,
+    allow_zero_length_client_id: bool = false,
     maximum_qos: bool = false,
     maximum_keep_alive: bool = false,
     use_username_as_client_id: bool = false,
@@ -158,6 +161,7 @@ const GlobalSeen = struct {
     max_packet_size: bool = false,
     message_size_limit: bool = false,
     retain_available: bool = false,
+    allow_zero_length_client_id: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -272,6 +276,25 @@ fn parseSources(
                 } else {
                     try markOnce(&global_seen.acl_file);
                     config.acl_file = try parseOneOwned(allocator, &words);
+                }
+            } else if (std.mem.eql(
+                u8,
+                directive,
+                "allow_zero_length_clientid",
+            )) {
+                security_settings_seen = true;
+                if (config.per_listener_settings) {
+                    const index = current_listener[source.scope] orelse
+                        return error.DirectiveRequiresListener;
+                    try markOnce(
+                        &listener_seen.items[index].allow_zero_length_client_id,
+                    );
+                    listeners.items[index].allow_zero_length_client_id =
+                        try parseOneBool(&words);
+                } else {
+                    try markOnce(&global_seen.allow_zero_length_client_id);
+                    config.allow_zero_length_client_id =
+                        try parseOneBool(&words);
                 }
             } else if (std.mem.eql(u8, directive, "max_packet_size")) {
                 try markOnce(&global_seen.max_packet_size);
@@ -534,6 +557,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_packet_size 2000000
         \\message_size_limit 1048576
         \\retain_available false
+        \\allow_zero_length_clientid false
         \\password_file users.pw
         \\acl_file access.acl
         \\persistence true
@@ -565,6 +589,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
     try std.testing.expect(!config.retain_available);
+    try std.testing.expect(!config.allow_zero_length_client_id);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
@@ -614,9 +639,11 @@ test "MQTT broker config owns per-listener security files" {
         "per_listener_settings true\n" ++
             "listener 1883 127.0.0.1\n" ++
             "password_file first.pw\nacl_file first.acl\n" ++
+            "allow_zero_length_clientid false\n" ++
             "allow_anonymous false\n" ++
             "listener 8080 127.0.0.1\nprotocol websockets\n" ++
             "password_file second.pw\nacl_file second.acl\n" ++
+            "allow_zero_length_clientid true\n" ++
             "allow_anonymous false\n",
     );
     defer allocator.free(source);
@@ -642,6 +669,38 @@ test "MQTT broker config owns per-listener security files" {
     try std.testing.expectEqualStrings(
         "second.acl",
         config.listeners[1].acl_file,
+    );
+    try std.testing.expect(!config.listeners[0].allow_zero_length_client_id);
+    try std.testing.expect(config.listeners[1].allow_zero_length_client_id);
+}
+
+test "MQTT broker config scopes zero-length Client ID policy" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(
+            allocator,
+            "per_listener_settings true\n" ++
+                "allow_zero_length_clientid false\nlistener 1883",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(
+            allocator,
+            "allow_zero_length_clientid false\n" ++
+                "per_listener_settings true\n" ++
+                "listener 1883\nallow_anonymous true",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\allow_zero_length_clientid true
+            \\listener 1883
+            \\allow_zero_length_clientid false
+            \\allow_anonymous true
+        ),
     );
 }
 
@@ -1229,6 +1288,8 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     try std.testing.expectEqual(default_max_packet_size, config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 0), config.message_size_limit);
     try std.testing.expect(config.retain_available);
+    try std.testing.expect(config.allow_zero_length_client_id);
+    try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
 
     var minimum = try parse(
         std.testing.allocator,

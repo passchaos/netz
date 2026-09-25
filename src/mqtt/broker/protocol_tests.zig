@@ -2207,7 +2207,8 @@ test "broker assigned MQTT 5 Client Identifier can resume Session" {
         .{
             .protocol = .v5,
             .client_id = "",
-            .clean_start = true,
+            // MQTT 5 allows an assigned identifier even without Clean Start.
+            .clean_start = false,
             .properties = &.{.{ .four_byte = .{
                 .id = .session_expiry_interval,
                 .value = 30,
