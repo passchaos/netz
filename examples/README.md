@@ -107,6 +107,7 @@ max_connections 16
 
 listener 8080 127.0.0.1
 protocol websockets
+websockets_origin https://console.example
 listener_auto_id_prefix tenant-
 certfile server-chain.pem
 keyfile server-key.pem
@@ -124,6 +125,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
 `accept_protocol_versions`,
+`websockets_origin`,
 `max_qos`, `max_keepalive`, `max_topic_alias`,
 `max_topic_alias_broker`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
@@ -148,7 +150,11 @@ accepts MQTT 3.1.1 and MQTT 5 by default.
 version-denied clients receive the protocol-specific Unsupported Protocol
 Version CONNACK before close. MQTT 3.1 (level 3), empty sets, duplicate values,
 and unknown versions fail configuration because netz does not implement MQTT
-3.1 and will not advertise a policy it cannot honor. Global
+3.1 and will not advertise a policy it cannot honor. Repeating
+`websockets_origin` builds an exact, case-sensitive Origin allowlist for its
+WebSocket or WSS listener; once configured, a missing or unmatched Origin is
+rejected during HTTP Upgrade. Using it on a raw MQTT listener fails
+configuration. Global
 `max_inflight_messages` defaults to 20 and bounds each client's incoming and
 outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive
 Maximum; MQTT 3.1.1 enforces the same limit without a property. A peer that

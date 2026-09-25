@@ -5,6 +5,7 @@
 //! authentication or resource policy.
 
 const std = @import("std");
+const http1 = @import("../http1/mod.zig");
 const mqtt = @import("mod.zig");
 const broker_config_include = @import("broker_config_include.zig");
 const client_id = @import("broker/client_id.zig");
@@ -47,6 +48,7 @@ pub const Listener = struct {
     max_topic_alias: u16 = default_max_topic_aliases,
     max_topic_alias_broker: u16 = default_max_topic_aliases,
     accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
+    websocket_origins: std.ArrayList([]u8) = .empty,
     use_username_as_client_id: bool = false,
     max_connections: usize = default_max_connections,
 
@@ -60,6 +62,8 @@ pub const Listener = struct {
         if (self.capath.len != 0) allocator.free(self.capath);
         if (self.crlfile.len != 0) allocator.free(self.crlfile);
         if (self.mount_point.len != 0) allocator.free(self.mount_point);
+        for (self.websocket_origins.items) |origin| allocator.free(origin);
+        self.websocket_origins.deinit(allocator);
         self.* = undefined;
     }
 
@@ -562,6 +566,14 @@ fn parseSources(
                 } else if (std.mem.eql(
                     u8,
                     directive,
+                    "websockets_origin",
+                )) {
+                    const origin = try parseWebsocketOrigin(allocator, &words);
+                    errdefer allocator.free(origin);
+                    try listener.websocket_origins.append(allocator, origin);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
                     "use_username_as_clientid",
                 )) {
                     try markOnce(&seen.use_username_as_client_id);
@@ -600,6 +612,11 @@ fn parseSources(
         }
         if (listener.capath.len != 0 and listener.protocol == .websockets) {
             return error.CapathUnsupportedForWebSockets;
+        }
+        if (listener.websocket_origins.items.len != 0 and
+            listener.protocol != .websockets)
+        {
+            return error.InvalidDirective;
         }
         if (listener.crlfile.len != 0 and !has_client_ca) {
             return error.ClientCertificateConfigurationIncomplete;
@@ -668,6 +685,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "max_topic_alias") or
         std.mem.eql(u8, value, "max_topic_alias_broker") or
         std.mem.eql(u8, value, "accept_protocol_versions") or
+        std.mem.eql(u8, value, "websockets_origin") or
         std.mem.eql(u8, value, "use_username_as_clientid") or
         std.mem.eql(u8, value, "max_connections");
 }
@@ -699,6 +717,18 @@ fn parseAutoIdPrefix(
     const value = try parseOne(words);
     if (value.len > client_id.max_prefix_len) return error.InvalidDirective;
     try mqtt.validateUtf8String(value);
+    return allocator.dupe(u8, value);
+}
+
+fn parseWebsocketOrigin(
+    allocator: std.mem.Allocator,
+    words: anytype,
+) (error{InvalidDirective} || std.mem.Allocator.Error)![]u8 {
+    const value = try parseOne(words);
+    http1.validateHeader(.{
+        .name = "Origin",
+        .value = value,
+    }) catch return error.InvalidDirective;
     return allocator.dupe(u8, value);
 }
 
@@ -816,6 +846,8 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\accept_protocol_versions 5
         \\max_connections 4
         \\listener 8080 ::1
+        \\websockets_origin https://console.example
+        \\websockets_origin null
         \\protocol websockets
         \\certfile server-chain.pem
         \\keyfile server-key.pem
@@ -876,6 +908,18 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(!config.listeners[0].accepted_protocol_versions.v3_1_1);
     try std.testing.expect(config.listeners[0].accepted_protocol_versions.v5);
     try std.testing.expect(config.listeners[1].protocol == .websockets);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        config.listeners[1].websocket_origins.items.len,
+    );
+    try std.testing.expectEqualStrings(
+        "https://console.example",
+        config.listeners[1].websocket_origins.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "null",
+        config.listeners[1].websocket_origins.items[1],
+    );
     try std.testing.expect(config.listeners[1].usesTls());
     try std.testing.expectEqualStrings(
         "server-chain.pem",
@@ -2247,6 +2291,69 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
             \\accept_protocol_versions 4
             \\accept_protocol_versions 5
             \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config accumulates WebSocket Origin allowlists" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupe(
+        u8,
+        "listener 8080\n" ++
+            "websockets_origin https://first.example\n" ++
+            "websockets_origin https://second.example:8443\n" ++
+            "protocol websockets\n" ++
+            "allow_anonymous true\n",
+    );
+    defer allocator.free(source);
+    var config = try parse(allocator, source);
+    defer config.deinit(allocator);
+    @memset(source, 'x');
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        config.listeners[0].websocket_origins.items.len,
+    );
+    try std.testing.expectEqualStrings(
+        "https://first.example",
+        config.listeners[0].websocket_origins.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "https://second.example:8443",
+        config.listeners[0].websocket_origins.items[1],
+    );
+
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator,
+            \\websockets_origin https://example.org
+            \\listener 8080
+            \\protocol websockets
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 1883
+            \\websockets_origin https://example.org
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 8080
+            \\protocol websockets
+            \\websockets_origin
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(
+            allocator,
+            "listener 8080\nprotocol websockets\n" ++
+                "websockets_origin bad\x7forigin\n" ++
+                "allow_anonymous true\n",
         ),
     );
 }

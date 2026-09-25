@@ -5203,6 +5203,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
+        "websocket_origins",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
         "auto_id_prefix",
     ));
     try std.testing.expect(@hasField(

@@ -18,6 +18,7 @@ from mqtt_broker_config_queue import run_queued_limits_case
 from mqtt_broker_config_session import run_persistent_client_expiration_case
 from mqtt_broker_config_sys import run_system_interval_case
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
+from mqtt_broker_config_origin import run_websocket_origins_case
 
 
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
@@ -276,6 +277,7 @@ def websocket_connect(
     cafile: Path | None = None,
     certfile: Path | None = None,
     keyfile: Path | None = None,
+    origin: str | None = None,
 ) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
@@ -296,7 +298,9 @@ def websocket_connect(
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Key: {key}\r\n"
         "Sec-WebSocket-Version: 13\r\n"
-        "Sec-WebSocket-Protocol: mqtt\r\n\r\n"
+        "Sec-WebSocket-Protocol: mqtt\r\n"
+        + (f"Origin: {origin}\r\n" if origin is not None else "")
+        + "\r\n"
     )
     sock.sendall(request.encode())
     response = bytearray()
@@ -2195,6 +2199,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
         "protocol websockets\n"
+        "websockets_origin https://secure.example\n"
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
         "allow_anonymous true\n"
@@ -2246,7 +2251,11 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
                 + openssl.stderr.decode(errors="replace")
             )
 
-        websocket = websocket_connect(wss_port, certificate)
+        websocket = websocket_connect(
+            wss_port,
+            certificate,
+            origin="https://secure.example",
+        )
         clients.append(websocket)
         send_websocket_binary(websocket, connect_packet("wss-config"))
         if connack_reason(read_websocket_binary(websocket)) != 0:
@@ -3770,6 +3779,7 @@ def main() -> None:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
         run_accepted_protocol_versions_case(args.broker, directory)
+        run_websocket_origins_case(args.broker, directory)
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
         run_packet_and_message_size_case(args.broker, directory)
@@ -3800,7 +3810,7 @@ def main() -> None:
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
-        "listener protocol/Topic Alias policy, persistent-client and "
+        "listener protocol/Topic Alias/Origin policy, persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID and outgoing QoS "
