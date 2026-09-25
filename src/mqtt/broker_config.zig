@@ -329,10 +329,10 @@ pub fn parse(
         {
             return error.ClientCertificateConfigurationIncomplete;
         }
-        if (listener.cafile.len != 0 and !listener.require_certificate) {
+        if (listener.cafile.len != 0 and !listener.usesTls()) {
             return error.ClientCertificateConfigurationIncomplete;
         }
-        if (listener.crlfile.len != 0 and !listener.require_certificate) {
+        if (listener.crlfile.len != 0 and listener.cafile.len == 0) {
             return error.ClientCertificateConfigurationIncomplete;
         }
         if ((listener.use_identity_as_username or
@@ -637,16 +637,21 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\allow_anonymous true
         ),
     );
-    try std.testing.expectError(
-        error.ClientCertificateConfigurationIncomplete,
-        parse(allocator,
-            \\listener 8883
-            \\certfile server.pem
-            \\keyfile server.key
-            \\cafile clients.pem
-            \\require_certificate false
-            \\allow_anonymous true
-        ),
+    var optional_client_certificate = try parse(allocator,
+        \\listener 8883
+        \\certfile server.pem
+        \\keyfile server.key
+        \\cafile clients.pem
+        \\require_certificate false
+        \\allow_anonymous true
+    );
+    defer optional_client_certificate.deinit(allocator);
+    try std.testing.expect(
+        !optional_client_certificate.listeners[0].require_certificate,
+    );
+    try std.testing.expectEqualStrings(
+        "clients.pem",
+        optional_client_certificate.listeners[0].cafile,
     );
     try std.testing.expectError(
         error.DuplicateDirective,
@@ -672,15 +677,16 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\allow_anonymous true
         ),
     );
-    try std.testing.expectError(
-        error.ClientCertificateConfigurationIncomplete,
-        parse(allocator,
-            \\listener 8883
-            \\certfile server.pem
-            \\keyfile server.key
-            \\cafile clients.pem
-            \\allow_anonymous true
-        ),
+    var implicit_optional_client_certificate = try parse(allocator,
+        \\listener 8883
+        \\certfile server.pem
+        \\keyfile server.key
+        \\cafile clients.pem
+        \\allow_anonymous true
+    );
+    defer implicit_optional_client_certificate.deinit(allocator);
+    try std.testing.expect(
+        !implicit_optional_client_certificate.listeners[0].require_certificate,
     );
     try std.testing.expectError(
         error.ClientCertificateConfigurationIncomplete,

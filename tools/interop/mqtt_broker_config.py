@@ -2005,6 +2005,158 @@ def run_mtls_subject_username_case(broker: Path, directory: Path) -> None:
     )
 
 
+def run_optional_client_certificate_case(
+    broker: Path, directory: Path
+) -> None:
+    server_ca, server_ca_key = create_ca(
+        directory, "optional-server-ca", "Optional Server Root"
+    )
+    server_certificate, server_key = create_signed_certificate(
+        directory,
+        "optional-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        701,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    client_ca, client_ca_key = create_ca(
+        directory, "optional-client-ca", "Optional Client Root"
+    )
+    client_certificate, client_key = create_signed_certificate(
+        directory,
+        "optional-client",
+        "optional-client",
+        client_ca,
+        client_ca_key,
+        702,
+        "clientAuth",
+    )
+    wrong_ca, wrong_ca_key = create_ca(
+        directory, "optional-wrong-ca", "Optional Wrong Root"
+    )
+    wrong_certificate, wrong_key = create_signed_certificate(
+        directory,
+        "optional-wrong-client",
+        "optional-wrong-client",
+        wrong_ca,
+        wrong_ca_key,
+        703,
+        "clientAuth",
+    )
+
+    tls_port = free_port()
+    wss_port = free_port()
+    while wss_port == tls_port:
+        wss_port = free_port()
+    config = directory / "optional-client.conf"
+    config.write_text(
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "require_certificate false\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+        f"listener {wss_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 4 clients" not in ready:
+        raise RuntimeError(f"optional mTLS broker failed to start: {ready}")
+
+    context = ssl.create_default_context(cafile=str(server_ca))
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    raw = socket.create_connection(("127.0.0.1", tls_port), timeout=5)
+    raw.settimeout(5)
+    anonymous = context.wrap_socket(raw, server_hostname="localhost")
+    try:
+        anonymous.sendall(connect_packet("anonymous-tls"))
+        if connack_reason(read_mqtt_packet(anonymous)) != 0:
+            raise AssertionError("optional mTLS rejected anonymous client")
+        mqtt_ping(anonymous)
+        anonymous.sendall(bytes.fromhex("e000"))
+    finally:
+        anonymous.close()
+
+    authenticated = mqtt_tls_socket(
+        tls_port, server_ca, client_certificate, client_key
+    )
+    try:
+        authenticated.sendall(connect_packet("authenticated-tls"))
+        if connack_reason(read_mqtt_packet(authenticated)) != 0:
+            raise AssertionError("optional mTLS rejected trusted certificate")
+        mqtt_ping(authenticated)
+        authenticated.sendall(bytes.fromhex("e000"))
+    finally:
+        authenticated.close()
+
+    anonymous_wss = websocket_connect(wss_port, server_ca)
+    try:
+        send_websocket_binary(anonymous_wss, connect_packet("anonymous-wss"))
+        if connack_reason(read_websocket_binary(anonymous_wss)) != 0:
+            raise AssertionError("optional WSS mTLS rejected anonymous client")
+        websocket_mqtt_ping(anonymous_wss)
+        send_websocket_binary(anonymous_wss, bytes.fromhex("e000"))
+    finally:
+        anonymous_wss.close()
+
+    authenticated_wss = websocket_connect(
+        wss_port, server_ca, client_certificate, client_key
+    )
+    try:
+        send_websocket_binary(
+            authenticated_wss,
+            connect_packet("authenticated-wss"),
+        )
+        if connack_reason(read_websocket_binary(authenticated_wss)) != 0:
+            raise AssertionError("optional WSS mTLS rejected trusted certificate")
+        websocket_mqtt_ping(authenticated_wss)
+        send_websocket_binary(authenticated_wss, bytes.fromhex("e000"))
+    finally:
+        authenticated_wss.close()
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "optional client certificate broker failed: "
+            + process.stdout.read()
+        )
+
+    rejection_port = free_port()
+    rejected_config = directory / "optional-wrong-client.conf"
+    rejected_config.write_text(
+        f"listener {rejection_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        "require_certificate false\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    run_mtls_rejection_case(
+        broker,
+        rejected_config,
+        rejection_port,
+        server_ca,
+        "CertificateUntrusted",
+        wrong_certificate,
+        wrong_key,
+    )
+
+
 def main() -> None:
     args = parse_args()
     with tempfile.TemporaryDirectory() as temporary:
@@ -2019,6 +2171,7 @@ def main() -> None:
         run_tls_listener_case(args.broker, directory)
         run_mtls_listener_case(args.broker, directory)
         run_mtls_subject_username_case(args.broker, directory)
+        run_optional_client_certificate_case(args.broker, directory)
         run_rsa_crl_listener_case(args.broker, directory)
         run_unsupported_tls_key_case(args.broker, directory)
     print(
@@ -2026,7 +2179,8 @@ def main() -> None:
         "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
-        "certificate CN/full-Subject identity mapping, P-256/RSA signed CRL revocation, strict TLS "
+        "optional/required client certificates, certificate CN/full-Subject identity mapping, "
+        "P-256/RSA signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, and snapshot restore "
         + RUNTIME
     )

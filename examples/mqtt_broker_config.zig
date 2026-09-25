@@ -183,7 +183,7 @@ pub fn run(
             configured.certfile,
             configured.keyfile,
         );
-        if (configured.require_certificate) {
+        if (configured.cafile.len != 0) {
             client_cas[index] = try netz.tls.client_ca_file.load(
                 allocator,
                 io,
@@ -211,7 +211,10 @@ pub fn run(
             client_auth_policies[index] = .{
                 .verifier = verifier,
                 .certificate_authorities = ca.authorities(),
-                .requirement = .required,
+                .requirement = if (configured.require_certificate)
+                    .required
+                else
+                    .optional,
             };
         }
     }

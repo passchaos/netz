@@ -772,7 +772,8 @@ Current protocol coverage includes:
   PUBLISH/SUBSCRIBE/UNSUBSCRIBE, per-recipient outgoing-delivery, and
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
-  listener-local P-256 PEM `certfile`/`keyfile` and required mTLS through a
+  listener-local P-256 PEM `certfile`/`keyfile` and optional/required
+  mTLS through a
   strictly validated `cafile`/`require_certificate`, plus owned certificate-CN
   or OpenSSL-compatible RFC 2253 full-Subject username mapping before all MQTT
   authorization and Session policy, and bounded hashed
