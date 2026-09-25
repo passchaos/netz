@@ -2112,8 +2112,9 @@ valid MQTT 5 CONNECT/PING proves that these refusals do not poison the finite
 listener. Netz still implements only MQTT 3.1.1 and MQTT 5; the level-3 reply
 is an unambiguous negotiation response, not MQTT 3.1 support.
 The broker also exposes Mosquitto's administrative
-`persistent_client_expiration` behavior as
-`persistent_session_expiry_seconds`: it caps a longer MQTT 5 Session Expiry and
+`persistent_client_expiration` behavior through both the production config
+directive and `persistent_session_expiry_seconds`: it caps a longer MQTT 5
+Session Expiry and
 also gives MQTT 3.1.1 CleanSession=0 an otherwise unavailable finite lifetime,
 without lengthening a client's shorter or zero MQTT 5 expiry. The cap is
 applied again to MQTT 5 DISCONNECT overrides and to the Session lifetime used
@@ -2125,6 +2126,11 @@ traffic during expiry. That existing connection can then acquire and complete
 the sole QoS 2 slot, proving the shared deadline task removed the Session, its
 router entries, and pending transaction proactively rather than relying on a
 later registration or routing operation to prune it.
+The configuration gate parses Mosquitto's positive `s/h/d/w/m/y` duration
+syntax with checked u32 conversion and fail-closed duplicate, missing-unit,
+zero, negative, and overflow handling. Its real MQTT 3.1.1/5 process cases
+show Session Present on an immediate reconnect and no Session Present after
+the configured one-second offline cap elapses.
 The Clean Start/offline QoS 1 case ports Mosquitto's
 `05-clean-session-qos1.py`: a persistent subscriber disconnects after
 subscribing, receives the exact queued QoS 1 PUBLISH with Session Present on

@@ -156,6 +156,7 @@ pub fn run(
         .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
         .queue_qos0_messages = config.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
+        .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
         .access_control = source_access_control,
         .session = .{
             .max_inflight_per_session = max_inflight_messages,

@@ -5149,6 +5149,10 @@ test "public modules are reachable" {
         "max_inflight_bytes",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "persistent_client_expiration_seconds",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "max_topic_alias",
     ));

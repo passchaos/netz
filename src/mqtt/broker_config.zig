@@ -77,6 +77,7 @@ pub const Config = struct {
     retain_available: bool = true,
     check_retain_source: bool = true,
     allow_zero_length_client_id: bool = true,
+    persistent_client_expiration_seconds: ?u32 = null,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
     persistence_file: []u8 = &.{},
@@ -199,6 +200,7 @@ const GlobalSeen = struct {
     retain_available: bool = false,
     check_retain_source: bool = false,
     allow_zero_length_client_id: bool = false,
+    persistent_client_expiration: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -361,6 +363,14 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "check_retain_source")) {
                 try markOnce(&global_seen.check_retain_source);
                 config.check_retain_source = try parseOneBool(&words);
+            } else if (std.mem.eql(
+                u8,
+                directive,
+                "persistent_client_expiration",
+            )) {
+                try markOnce(&global_seen.persistent_client_expiration);
+                config.persistent_client_expiration_seconds =
+                    try parseExpiration(&words);
             } else if (std.mem.eql(u8, directive, "persistence")) {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
@@ -618,6 +628,30 @@ fn parseOnePositive(
     return value;
 }
 
+fn parseExpiration(
+    words: anytype,
+) error{ InvalidDirective, InvalidInteger }!u32 {
+    const value = try parseOne(words);
+    if (value.len < 2) return error.InvalidInteger;
+    const multiplier: u32 = switch (value[value.len - 1]) {
+        's' => 1,
+        'h' => 60 * 60,
+        'd' => 24 * 60 * 60,
+        'w' => 7 * 24 * 60 * 60,
+        'm' => 30 * 24 * 60 * 60,
+        'y' => 365 * 24 * 60 * 60,
+        else => return error.InvalidInteger,
+    };
+    const amount = std.fmt.parseInt(
+        u32,
+        value[0 .. value.len - 1],
+        10,
+    ) catch return error.InvalidInteger;
+    if (amount == 0) return error.InvalidInteger;
+    return std.math.mul(u32, amount, multiplier) catch
+        error.InvalidInteger;
+}
+
 test "MQTT broker config parses owned multi-listener policy" {
     const allocator = std.testing.allocator;
     var config = try parse(allocator,
@@ -633,6 +667,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\retain_available false
         \\check_retain_source false
         \\allow_zero_length_clientid false
+        \\persistent_client_expiration 2h
         \\password_file users.pw
         \\acl_file access.acl
         \\persistence true
@@ -675,6 +710,10 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
+    try std.testing.expectEqual(
+        @as(?u32, 2 * 60 * 60),
+        config.persistent_client_expiration_seconds,
+    );
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
@@ -1555,6 +1594,10 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     try std.testing.expect(config.check_retain_source);
     try std.testing.expect(!config.upgrade_outgoing_qos);
     try std.testing.expect(config.allow_zero_length_client_id);
+    try std.testing.expectEqual(
+        @as(?u32, null),
+        config.persistent_client_expiration_seconds,
+    );
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
     try std.testing.expectEqual(
         default_max_topic_aliases,
@@ -1605,6 +1648,66 @@ test "MQTT broker config maps zero inflight messages to protocol maximum" {
         maximum.max_inflight_messages,
     );
     try std.testing.expectEqual(@as(usize, 2), maximum.listeners.len);
+}
+
+test "MQTT broker config parses persistent client expiration units" {
+    const units = [_]struct {
+        value: []const u8,
+        seconds: u32,
+    }{
+        .{ .value = "1s", .seconds = 1 },
+        .{ .value = "2h", .seconds = 2 * 60 * 60 },
+        .{ .value = "3d", .seconds = 3 * 24 * 60 * 60 },
+        .{ .value = "4w", .seconds = 4 * 7 * 24 * 60 * 60 },
+        .{ .value = "2m", .seconds = 2 * 30 * 24 * 60 * 60 },
+        .{ .value = "1y", .seconds = 365 * 24 * 60 * 60 },
+    };
+    for (units) |case| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "persistent_client_expiration {s}\nlistener 1883\n" ++
+                "allow_anonymous true\n",
+            .{case.value},
+        );
+        defer std.testing.allocator.free(source);
+        var config = try parse(std.testing.allocator, source);
+        defer config.deinit(std.testing.allocator);
+        try std.testing.expectEqual(
+            @as(?u32, case.seconds),
+            config.persistent_client_expiration_seconds,
+        );
+    }
+}
+
+test "MQTT broker config rejects invalid persistent client expiration" {
+    const invalid = [_][]const u8{
+        "", "1", "0s", "-1s", "1S", "1x", "4294967295y",
+    };
+    for (invalid) |value| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "persistent_client_expiration {s}\nlistener 1883\n" ++
+                "allow_anonymous true\n",
+            .{value},
+        );
+        defer std.testing.allocator.free(source);
+        try std.testing.expectError(
+            if (value.len == 0)
+                error.InvalidDirective
+            else
+                error.InvalidInteger,
+            parse(std.testing.allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(std.testing.allocator,
+            \\persistent_client_expiration 1h
+            \\persistent_client_expiration 2h
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
 }
 
 test "MQTT broker config scopes full-range Topic Alias limits per listener" {

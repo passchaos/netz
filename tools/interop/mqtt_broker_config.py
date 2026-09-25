@@ -13,6 +13,7 @@ import tempfile
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
 from mqtt_broker_config_queue import run_queued_limits_case
+from mqtt_broker_config_session import run_persistent_client_expiration_case
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 
 
@@ -3660,6 +3661,7 @@ def main() -> None:
         run_max_inflight_messages_case(args.broker, directory)
         run_queued_limits_case(args.broker, directory)
         run_topic_alias_policy_case(args.broker, directory)
+        run_persistent_client_expiration_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -3678,7 +3680,8 @@ def main() -> None:
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
-        "listener Topic Alias policy, zero-length Client ID and outgoing QoS "
+        "listener Topic Alias and persistent-client expiration policy, "
+        "zero-length Client ID and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "

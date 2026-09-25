@@ -791,7 +791,8 @@ Current protocol coverage includes:
   enforced in both directions with MQTT 5 Receive Maximum advertisement, an
   independent outgoing inflight payload-byte limit through PUBCOMP, and
   count/payload-byte limits for each durable Session's queued messages,
-  listener-scoped inbound and broker-created Topic Alias limits, plus
+  listener-scoped inbound and broker-created Topic Alias limits, a global
+  administrative expiration cap for abandoned persistent Sessions, plus
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and
