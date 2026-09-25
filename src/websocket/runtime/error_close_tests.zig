@@ -29,6 +29,8 @@ const invalid_masked_text = [_]u8{
     0xc1, 0x82,
 };
 
+const UnboundedWriteOperation = enum { text, ping, in_place };
+
 fn expectCloseCode(
     allocator: std.mem.Allocator,
     connection: anytype,
@@ -401,6 +403,60 @@ test "WebSocket fatal receive aborts pending HTTP1 frame transactions" {
     try expectHttp1FatalPendingAbort(.pong);
 }
 
+test "WebSocket HTTP1 unbounded write failure is terminal" {
+    if (comptime @import("builtin").os.tag == .windows) return;
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    inline for ([_]UnboundedWriteOperation{ .text, .ping, .in_place }) |operation| {
+        const streams = try testNetworkStreams(io);
+        const abortive: std.posix.linger = .{ .onoff = 1, .linger = 0 };
+        try std.posix.setsockopt(
+            streams[1].socket.handle,
+            std.posix.SOL.SOCKET,
+            std.posix.SO.LINGER,
+            std.mem.asBytes(&abortive),
+        );
+        streams[1].close(io);
+        var byte: [1]u8 = undefined;
+        var buffers = [_][]u8{&byte};
+        try std.testing.expectError(
+            error.ConnectionResetByPeer,
+            io.vtable.netRead(
+                io.userdata,
+                streams[0].socket.handle,
+                &buffers,
+            ),
+        );
+
+        var connection = runtime.testing.initDirectConnection(
+            allocator,
+            io,
+            streams[0],
+            .client,
+            .{},
+        );
+        defer connection.close();
+        var mutable = [_]u8{ 1, 2, 3, 4 };
+        const result = switch (operation) {
+            .text => connection.sendText("terminal-write"),
+            .ping => connection.sendPing("terminal-write"),
+            .in_place => connection.sendBinaryInPlace(&mutable),
+        };
+        try std.testing.expectError(error.SocketUnconnected, result);
+        try std.testing.expect(runtime.testing.writeAborted(&connection));
+        try std.testing.expect(
+            runtime.testing.outboundStorageReleased(&connection),
+        );
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            connection.sendText("must-not-write"),
+        );
+    }
+}
+
 fn expectH2FatalPendingAbort(opcode: websocket.Opcode) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -520,6 +576,107 @@ test "WebSocket fatal receive resets pending HTTP2 tunnel transactions" {
     try expectH2FatalPendingAbort(.ping);
     try expectH2FatalPendingAbort(.close);
     try expectH2FatalPendingAbort(.pong);
+}
+
+test "WebSocket HTTP2 unbounded writes fail closed per tunnel" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .enable_connect_protocol = true },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *http2_runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h2 = try self.server.accept();
+            defer h2.close();
+            for (0..3) |_| {
+                var ws = try H2Server.accept(self.server.allocator, &h2, .{});
+                defer ws.close();
+                var reset = try h2.readResetStreamWithTimeout(
+                    .fromSeconds(2),
+                );
+                defer reset.deinit(self.server.allocator);
+                try std.testing.expectEqual(
+                    ws.tunnel.stream_id,
+                    reset.reset.stream_id,
+                );
+                try std.testing.expectEqual(
+                    @import("../../http2/mod.zig").ErrorCode.cancel,
+                    reset.reset.error_code,
+                );
+            }
+            var sibling = try h2.readRequest();
+            defer sibling.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/after-failed-writes",
+                sibling.path,
+            );
+            try h2.writeResponse(sibling.stream_id, .{ .status = 204 });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var h2 = try http2_runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .enable_connect_protocol = true },
+    );
+    defer h2.close();
+    inline for ([_]UnboundedWriteOperation{ .text, .ping, .in_place }) |operation| {
+        var client = try H2Client.open(allocator, &h2, .{
+            .authority = "localhost",
+            .path = "/failed-write",
+        });
+        defer client.close();
+        client.tunnel.abort(null);
+        var mutable = [_]u8{ 1, 2, 3, 4 };
+        const result = switch (operation) {
+            .text => client.sendText("terminal-write"),
+            .ping => client.sendPing("terminal-write"),
+            .in_place => client.sendBinaryInPlace(&mutable),
+        };
+        try std.testing.expectError(error.ConnectionClosed, result);
+        try std.testing.expect(runtime.testing.writeAborted(&client));
+        try std.testing.expect(runtime.testing.outboundStorageReleased(&client));
+        try std.testing.expectError(
+            error.ConnectionClosed,
+            client.sendText("must-not-write"),
+        );
+    }
+    var sibling = try h2.request(.{
+        .method = "GET",
+        .path = "/after-failed-writes",
+        .authority = "localhost",
+    });
+    defer sibling.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), sibling.status);
+    try std.testing.expect(h2.isReusable());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "WebSocket HTTP2 fatal Close obeys receive deadline" {

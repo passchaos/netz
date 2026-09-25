@@ -623,7 +623,7 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn sendText(self: *Self, text: []const u8) Error!void {
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             try common.validateOutgoingMessage(self.limits, .text, text);
@@ -672,7 +672,7 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn sendBinary(self: *Self, payload: []const u8) Error!void {
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             try common.validateOutgoingMessage(
@@ -746,7 +746,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
 
@@ -848,7 +848,9 @@ pub fn Connection(comptime role: common.Role) type {
             progress: *MessageWriteProgress,
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
-            if (self.receiveFailed()) return error.ConnectionClosed;
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
             const pending = &self.pending_message.?;
             while (pending.committed < pending.totalLen()) {
                 const header_offset = @min(
@@ -897,7 +899,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (role != .client or self.permessage_deflate) {
                 return error.InvalidFrame;
             }
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             try common.validateOutgoingMessageLength(
@@ -921,7 +923,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             parts: []const []const u8,
         ) Error!void {
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             const payload_len = try common.validateOutgoingMessageParts(
@@ -936,7 +938,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             if (self.permessage_deflate and
@@ -1019,7 +1021,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.pending_auto_control != null) {
                     return error.WriteInProgress;
                 }
-                if (self.closeSent() or self.closeReceived()) {
+                if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
                 try self.beginPendingMessagePartsLocked(parts, payload_len);
@@ -1040,7 +1042,7 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             fragments: []const []const u8,
         ) Error!void {
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             const total = try common.validateOutgoingFragments(
@@ -1056,7 +1058,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             if (self.permessage_deflate and
@@ -1135,7 +1137,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.pending_auto_control != null) {
                     return error.WriteInProgress;
                 }
-                if (self.closeSent() or self.closeReceived()) {
+                if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
                 try self.beginPendingFragmentedLocked(
@@ -1238,7 +1240,9 @@ pub fn Connection(comptime role: common.Role) type {
             progress: *MessageWriteProgress,
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
-            if (self.receiveFailed()) return error.ConnectionClosed;
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
             var scratch: [fragmented_write_scratch_len]u8 = undefined;
             while (self.pending_message) |*pending| {
                 const frame_committed =
@@ -1359,7 +1363,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.pending_auto_control != null) {
                     return error.WriteInProgress;
                 }
-                if (self.closeSent() or self.closeReceived()) {
+                if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
                 try self.beginPendingMessageLocked(opcode, payload);
@@ -1492,7 +1496,9 @@ pub fn Connection(comptime role: common.Role) type {
             progress: *MessageWriteProgress,
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
-            if (self.receiveFailed()) return error.ConnectionClosed;
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
             const pending = &self.pending_message.?;
             const encoded_payload = if (pending.compressed)
                 self.compression_send.payload.items[0..pending.payload_len]
@@ -1574,7 +1580,9 @@ pub fn Connection(comptime role: common.Role) type {
             progress: *MessageWriteProgress,
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
-            if (self.receiveFailed()) return error.ConnectionClosed;
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
             const pending = &self.pending_message.?;
             var scratch: [16 * 1024 + websocket.max_frame_header_len]u8 align(64) = undefined;
 
@@ -1699,7 +1707,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.pending_auto_control != null) {
                     return error.WriteInProgress;
                 }
-                if (self.closeSent() or self.closeReceived()) {
+                if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
                 try self.beginPendingPingLocked(payload);
@@ -1770,7 +1778,7 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.pending_auto_control != null) {
                     return error.WriteInProgress;
                 }
-                if (self.closeSent() or self.closeReceived()) {
+                if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                     return error.ConnectionClosed;
                 }
                 try self.beginPendingPongLocked(payload);
@@ -1828,7 +1836,7 @@ pub fn Connection(comptime role: common.Role) type {
                     if (self.pending_auto_control != null) {
                         return error.WriteInProgress;
                     }
-                    if (self.closeSent() or self.closeReceived()) {
+                    if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                         return error.ConnectionClosed;
                     }
                     try self.beginPendingPingLocked(payload);
@@ -3210,7 +3218,7 @@ pub fn Connection(comptime role: common.Role) type {
             {
                 return error.WriteInProgress;
             }
-            if (self.closeSent() or self.closeReceived()) {
+            if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
             }
             if (self.permessage_deflate and
@@ -3275,13 +3283,10 @@ pub fn Connection(comptime role: common.Role) type {
                 true,
                 opcode == .close,
             ) catch |err| {
-                // The unbounded HTTP/3 sender does not expose how much of a
-                // multi-packet frame became visible. A failed Close therefore
-                // cannot be retried safely from byte zero. Keep close_sent as
-                // an acknowledgement of success and fail this stream closed.
-                if (opcode == .close) {
-                    self.write_aborted.store(true, .release);
-                }
+                // Unbounded HTTP/3 sends do not expose how much of a
+                // multi-packet frame became visible. No opcode can safely be
+                // retried from byte zero, so cancel this request stream.
+                self.abortAfterUnboundedMessageWriteLocked();
                 return err;
             };
             if (opcode == .close) self.close_sent.store(true, .release);
@@ -3373,16 +3378,22 @@ pub fn Connection(comptime role: common.Role) type {
                 }
             } else if (!pending.complete()) {
                 switch (role) {
-                    .client => try self.h3.sendRequestBodyPaced(
+                    .client => self.h3.sendRequestBodyPaced(
                         self.stream_id,
                         bytes,
                         fin,
-                    ),
-                    .server => try self.h3.sendResponseBodyPaced(
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    },
+                    .server => self.h3.sendResponseBodyPaced(
                         self.stream_id,
                         bytes,
                         fin,
-                    ),
+                    ) catch |err| {
+                        self.abortAfterUnboundedMessageWriteLocked();
+                        return err;
+                    },
                 }
                 progress.committed_bytes = bytes.len;
                 progress.fin_committed = fin;
@@ -3432,7 +3443,9 @@ pub fn Connection(comptime role: common.Role) type {
             payload: []const u8,
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
-            if (self.receiveFailed()) return error.ConnectionClosed;
+            if (self.receiveFailed() or self.writeAborted()) {
+                return error.ConnectionClosed;
+            }
             const pending = if (self.pending_ping) |*value|
                 value
             else

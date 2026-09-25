@@ -4716,6 +4716,10 @@ test "WebSocket HTTP3 failed unbounded compressed send clears transaction" {
     );
     try std.testing.expect(h3.testing.writeAborted(&client));
     try std.testing.expect(h3.testing.outboundStorageReleased(&client));
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        client.sendText("must-not-write"),
+    );
     try std.testing.expect(client.h3.isReusable());
 
     var sibling = try client.h3.requestWithTimeout(.{

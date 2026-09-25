@@ -4102,7 +4102,10 @@ pub const Connection = struct {
             .{ .mask_key = mask_key },
         );
         websocket.applyMask(payload, mask_key, 0);
-        try self.transport().writeAllParts(header, payload);
+        self.transport().writeAllParts(header, payload) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     pub fn sendBinaryInPlaceWithTimeout(
@@ -4854,7 +4857,10 @@ pub const Connection = struct {
             return error.WriteInProgress;
         }
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
-        try self.writeFrameLocked(opcode, payload, true);
+        self.writeFrameLocked(opcode, payload, true) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
         if (opcode == .close) self.close_sent.store(true, .release);
     }
 
@@ -6462,12 +6468,19 @@ pub const Connection = struct {
             pending.committed += committed;
         } else if (!pending.complete()) {
             var committed: usize = 0;
-            try self.transport().finishPendingTimedWrite(&committed);
+            self.transport().finishPendingTimedWrite(&committed) catch |err| {
+                pending.committed += committed;
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
             pending.committed += committed;
             std.debug.assert(pending.committed <= pending.len);
-            try self.transport().writeAll(
+            self.transport().writeAll(
                 pending.bytes[pending.committed..pending.len],
-            );
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
             pending.committed = pending.len;
         }
         std.debug.assert(pending.complete());
@@ -6797,7 +6810,10 @@ pub const H2Connection = struct {
         // `Tunnel.writeParts` is synchronous: every DATA write has consumed
         // its borrowed slices before return, so ownership immediately returns
         // to the caller even when flow control split the message.
-        try self.tunnel.writeParts(header, payload, false);
+        self.tunnel.writeParts(header, payload, false) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     pub fn sendBinaryInPlaceWithTimeout(
@@ -7707,7 +7723,10 @@ pub const H2Connection = struct {
         payload: []const u8,
     ) Error!void {
         try self.ensureCanSendOpcodeLocked(opcode);
-        try self.writeFrameLocked(opcode, payload, true);
+        self.writeFrameLocked(opcode, payload, true) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
         if (opcode == .close) self.close_sent.store(true, .release);
     }
 
@@ -9506,10 +9525,13 @@ pub const H2Connection = struct {
                 return err;
             };
         } else if (!pending.complete()) {
-            try self.tunnel.write(
+            self.tunnel.write(
                 pending.bytes[pending.committed..pending.len],
                 pending.opcode == .close,
-            );
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
             progress.committed_bytes = pending.len - pending.committed;
             progress.fin_committed = pending.opcode == .close;
         }

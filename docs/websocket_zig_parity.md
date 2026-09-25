@@ -1047,6 +1047,13 @@ UTF-8. RFC 8441 retained DATA frames are released through the parent HTTP/2
 connection allocator that created them, including zero-length DATA, ordinary
 consumption, fatal receive cleanup, and connection teardown; a split-allocator
 regression guards this ownership boundary.
+Unbounded outbound operations follow the same rule: because they expose no
+cursor from which an application can safely resume after an ambiguous partial
+write, data, mutable in-place, explicit control, and automatic control failures
+retire the HTTP/1 byte stream or only the affected H2/H3 CONNECT stream. The
+bounded deadline variants retain their exact prefix cursor and remain resumable.
+Deterministic closed-peer/retired-stream regressions verify the terminal state,
+pending-storage release, and multiplexed parent-connection reuse.
 HTTP/1 WSS additionally rejects TLS KeyUpdate after protocol failure or either
 Close direction becomes terminal. RFC 8441 and RFC 9220 keep their connection-
 level KeyUpdate APIs available because healthy multiplexed siblings may still
