@@ -675,6 +675,107 @@ def run_per_listener_security_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_include_directory_case(broker: Path, directory: Path) -> None:
+    include_directory = directory / "listeners.d"
+    include_directory.mkdir()
+    first_port = free_port()
+    second_port = free_port()
+    while second_port == first_port:
+        second_port = free_port()
+    (include_directory / "ignored.txt").write_text("unsupported value\n")
+    (include_directory / "a.conf").write_text(
+        f"listener {second_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    (include_directory / "A.conf").write_text(
+        f"listener {first_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    config = directory / "include-main.conf"
+    config.write_text(f"include_dir {include_directory}\n")
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    startup_lines: list[str] = []
+    while True:
+        line = process.stdout.readline()
+        if line == "":
+            raise RuntimeError(
+                "include_dir broker failed to start: "
+                + "".join(startup_lines)
+            )
+        startup_lines.append(line)
+        if "configured 2 listeners for 2 clients" in line:
+            break
+    listener_lines: list[str] = []
+    while len(listener_lines) != 2:
+        line = process.stdout.readline()
+        if line == "":
+            raise RuntimeError(
+                "include_dir broker omitted listener records: "
+                + "".join(startup_lines + listener_lines)
+            )
+        if "mqtt " in line and "max_connections=" in line:
+            listener_lines.append(line.strip())
+    if str(first_port) not in listener_lines[0] or str(second_port) not in listener_lines[1]:
+        raise AssertionError(
+            "include_dir did not use Mosquitto filename order: "
+            + repr(listener_lines)
+        )
+    for index, port in enumerate((first_port, second_port)):
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        try:
+            client.sendall(connect_packet(f"include-dir-{index}"))
+            if connack_reason(read_mqtt_packet(client)) != 0:
+                raise AssertionError("include_dir listener rejected CONNECT")
+            client.sendall(bytes.fromhex("e000"))
+        finally:
+            client.close()
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError("include_dir broker exited with an error")
+
+    invalid_port = free_port()
+    invalid_directory = directory / "invalid-listeners.d"
+    invalid_directory.mkdir()
+    (invalid_directory / "10-listener.conf").write_text(
+        f"listener {free_port()} 127.0.0.1\nallow_anonymous true\n"
+    )
+    (invalid_directory / "20-invalid.conf").write_text(
+        "unsupported_directive true\n"
+    )
+    invalid_config = directory / "invalid-include-main.conf"
+    invalid_config.write_text(
+        f"listener {invalid_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        f"include_dir {invalid_directory}\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={invalid_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "UnsupportedDirective" not in result.stdout:
+        raise AssertionError(
+            "invalid included config did not fail closed: " + result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", invalid_port)) == 0:
+            raise AssertionError(
+                "listener bound before every included config was validated"
+            )
+
+
 def run_fail_closed_case(broker: Path, directory: Path) -> None:
     config = directory / "authentication-required.conf"
     config.write_text(
@@ -2470,6 +2571,7 @@ def main() -> None:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
         run_per_listener_security_case(args.broker, directory)
+        run_include_directory_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -2485,7 +2587,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "

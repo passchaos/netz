@@ -127,9 +127,15 @@ still rejects invalid credentials when a username is supplied. `certfile` and
 `protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
 port is opened, every identity is loaded from a leaf-first PEM certificate
 chain and an unencrypted P-256 SEC1 or PKCS#8 private key, bounded and strictly
-decoded, and checked for a matching leaf key. RSA, other curves, encrypted
-keys, include, reload, plugin, bridge, and full Mosquitto configuration remain
-outside this subset and fail closed. `cafile` and/or `capath` enable optional
+decoded, and checked for a matching leaf key. `include_dir` is supported by the
+file-loading API and only in the main file. It expands top-level regular `.conf`
+files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
+`a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
+nesting, special `.conf` files, oversized files/sets, and excessive directory/
+file counts fail closed. The in-memory `parse` API deliberately has no
+filesystem expansion. RSA, other curves, encrypted keys, reload, plugin,
+bridge, and full Mosquitto configuration remain outside this subset and fail
+closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER
 Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;

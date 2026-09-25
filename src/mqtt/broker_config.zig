@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const mqtt = @import("mod.zig");
+const broker_config_include = @import("broker_config_include.zig");
 
 const net = std.Io.net;
 
@@ -163,7 +164,17 @@ pub fn parse(
 ) Error!Config {
     if (source.len == 0) return error.EmptyConfig;
     if (source.len > max_config_bytes) return error.InvalidDirective;
+    return parseSources(allocator, &.{.{
+        .bytes = source,
+        .scope = 0,
+    }}, 1);
+}
 
+fn parseSources(
+    allocator: std.mem.Allocator,
+    sources: []const broker_config_include.Source,
+    scope_count: usize,
+) Error!Config {
     var listeners: std.ArrayList(Listener) = .empty;
     errdefer {
         for (listeners.items) |*listener| listener.deinit(allocator);
@@ -186,176 +197,178 @@ pub fn parse(
     }
     var global_seen: GlobalSeen = .{};
     var security_settings_seen = false;
+    const current_listener = try allocator.alloc(?usize, scope_count);
+    defer allocator.free(current_listener);
+    @memset(current_listener, null);
 
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    while (lines.next()) |raw_line| {
-        const without_comment = if (std.mem.findScalar(u8, raw_line, '#')) |i|
-            raw_line[0..i]
-        else
-            raw_line;
-        const line = std.mem.trim(u8, without_comment, " \t\r");
-        if (line.len == 0) continue;
-        var words = std.mem.tokenizeAny(u8, line, " \t");
-        const directive = words.next().?;
+    for (sources) |source| {
+        if (source.scope >= current_listener.len) return error.InvalidDirective;
+        var lines = std.mem.splitScalar(u8, source.bytes, '\n');
+        while (lines.next()) |raw_line| {
+            const without_comment = if (std.mem.findScalar(u8, raw_line, '#')) |i|
+                raw_line[0..i]
+            else
+                raw_line;
+            const line = std.mem.trim(u8, without_comment, " \t\r");
+            if (line.len == 0) continue;
+            var words = std.mem.tokenizeAny(u8, line, " \t");
+            const directive = words.next().?;
 
-        if (std.mem.eql(u8, directive, "listener")) {
-            const port_text = words.next() orelse return error.InvalidDirective;
-            const port = parsePort(port_text) catch return error.InvalidInteger;
-            const host = words.next() orelse "0.0.0.0";
-            if (words.next() != null) return error.InvalidDirective;
-            const address = net.IpAddress.parse(host, port) catch
-                return error.InvalidDirective;
-            for (listeners.items) |existing| {
-                if (existing.address.eql(&address)) {
-                    return error.DuplicateListener;
-                }
-            }
-            try listeners.append(allocator, .{ .address = address });
-            try listener_seen.append(allocator, .{});
-            continue;
-        }
-
-        if (std.mem.eql(u8, directive, "per_listener_settings")) {
-            try markOnce(&global_seen.per_listener_settings);
-            const enabled = try parseOneBool(&words);
-            if (enabled and security_settings_seen) {
-                return error.InvalidDirective;
-            }
-            config.per_listener_settings = enabled;
-        } else if (std.mem.eql(u8, directive, "queue_qos0_messages")) {
-            try markOnce(&global_seen.queue_qos0_messages);
-            config.queue_qos0_messages = try parseOneBool(&words);
-        } else if (std.mem.eql(u8, directive, "password_file")) {
-            security_settings_seen = true;
-            if (config.per_listener_settings) {
-                if (listeners.items.len == 0) {
-                    return error.DirectiveRequiresListener;
-                }
-                const index = listeners.items.len - 1;
-                try markOnce(&listener_seen.items[index].password_file);
-                listeners.items[index].password_file =
-                    try parseOneOwned(allocator, &words);
-            } else {
-                try markOnce(&global_seen.password_file);
-                config.password_file = try parseOneOwned(allocator, &words);
-            }
-        } else if (std.mem.eql(u8, directive, "acl_file")) {
-            security_settings_seen = true;
-            if (config.per_listener_settings) {
-                if (listeners.items.len == 0) {
-                    return error.DirectiveRequiresListener;
-                }
-                const index = listeners.items.len - 1;
-                try markOnce(&listener_seen.items[index].acl_file);
-                listeners.items[index].acl_file =
-                    try parseOneOwned(allocator, &words);
-            } else {
-                try markOnce(&global_seen.acl_file);
-                config.acl_file = try parseOneOwned(allocator, &words);
-            }
-        } else if (std.mem.eql(u8, directive, "persistence")) {
-            try markOnce(&global_seen.persistence);
-            config.persistence = try parseOneBool(&words);
-        } else if (std.mem.eql(u8, directive, "persistence_location")) {
-            try markOnce(&global_seen.persistence_location);
-            config.persistence_location = try parseOneOwned(
-                allocator,
-                &words,
-            );
-        } else if (std.mem.eql(u8, directive, "persistence_file")) {
-            try markOnce(&global_seen.persistence_file);
-            config.persistence_file = try parseOneOwned(allocator, &words);
-            if (std.mem.indexOfAny(
-                u8,
-                config.persistence_file,
-                "/\\",
-            ) != null) {
-                return error.InvalidDirective;
-            }
-        } else if (std.mem.eql(u8, directive, "autosave_interval")) {
-            try markOnce(&global_seen.autosave_interval);
-            config.autosave_interval = try parseOnePositive(u32, &words);
-        } else if (std.mem.eql(u8, directive, "autosave_on_changes")) {
-            try markOnce(&global_seen.autosave_on_changes);
-            config.autosave_on_changes = try parseOneBool(&words);
-        } else {
-            if (listeners.items.len == 0) {
-                return if (isListenerDirective(directive))
-                    error.DirectiveRequiresListener
-                else
-                    error.UnsupportedDirective;
-            }
-            const index = listeners.items.len - 1;
-            const listener = &listeners.items[index];
-            const seen = &listener_seen.items[index];
-            if (std.mem.eql(u8, directive, "protocol")) {
-                try markOnce(&seen.protocol);
-                const value = try parseOne(&words);
-                listener.protocol = if (std.mem.eql(u8, value, "mqtt"))
-                    .mqtt
-                else if (std.mem.eql(u8, value, "websockets"))
-                    .websockets
-                else
+            if (std.mem.eql(u8, directive, "listener")) {
+                const port_text = words.next() orelse return error.InvalidDirective;
+                const port = parsePort(port_text) catch return error.InvalidInteger;
+                const host = words.next() orelse "0.0.0.0";
+                if (words.next() != null) return error.InvalidDirective;
+                const address = net.IpAddress.parse(host, port) catch
                     return error.InvalidDirective;
-            } else if (std.mem.eql(u8, directive, "certfile")) {
-                try markOnce(&seen.certfile);
-                listener.certfile = try parseOneOwned(allocator, &words);
-            } else if (std.mem.eql(u8, directive, "keyfile")) {
-                try markOnce(&seen.keyfile);
-                listener.keyfile = try parseOneOwned(allocator, &words);
-            } else if (std.mem.eql(u8, directive, "cafile")) {
-                try markOnce(&seen.cafile);
-                listener.cafile = try parseOneOwned(allocator, &words);
-            } else if (std.mem.eql(u8, directive, "capath")) {
-                try markOnce(&seen.capath);
-                listener.capath = try parseOneOwned(allocator, &words);
-            } else if (std.mem.eql(u8, directive, "crlfile")) {
-                try markOnce(&seen.crlfile);
-                listener.crlfile = try parseOneOwned(allocator, &words);
-            } else if (std.mem.eql(u8, directive, "require_certificate")) {
-                try markOnce(&seen.require_certificate);
-                listener.require_certificate = try parseOneBool(&words);
-            } else if (std.mem.eql(u8, directive, "use_identity_as_username")) {
+                for (listeners.items) |existing| {
+                    if (existing.address.eql(&address)) {
+                        return error.DuplicateListener;
+                    }
+                }
+                try listeners.append(allocator, .{ .address = address });
+                try listener_seen.append(allocator, .{});
+                current_listener[source.scope] = listeners.items.len - 1;
+                continue;
+            }
+
+            if (std.mem.eql(u8, directive, "per_listener_settings")) {
+                try markOnce(&global_seen.per_listener_settings);
+                const enabled = try parseOneBool(&words);
+                if (enabled and security_settings_seen) {
+                    return error.InvalidDirective;
+                }
+                config.per_listener_settings = enabled;
+            } else if (std.mem.eql(u8, directive, "queue_qos0_messages")) {
+                try markOnce(&global_seen.queue_qos0_messages);
+                config.queue_qos0_messages = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "password_file")) {
                 security_settings_seen = true;
-                try markOnce(&seen.use_identity_as_username);
-                listener.use_identity_as_username = try parseOneBool(&words);
-            } else if (std.mem.eql(u8, directive, "use_subject_as_username")) {
+                if (config.per_listener_settings) {
+                    const index = current_listener[source.scope] orelse
+                        return error.DirectiveRequiresListener;
+                    try markOnce(&listener_seen.items[index].password_file);
+                    listeners.items[index].password_file =
+                        try parseOneOwned(allocator, &words);
+                } else {
+                    try markOnce(&global_seen.password_file);
+                    config.password_file = try parseOneOwned(allocator, &words);
+                }
+            } else if (std.mem.eql(u8, directive, "acl_file")) {
                 security_settings_seen = true;
-                try markOnce(&seen.use_subject_as_username);
-                listener.use_subject_as_username = try parseOneBool(&words);
-            } else if (std.mem.eql(u8, directive, "mount_point")) {
-                try markOnce(&seen.mount_point);
-                const value = try parseOne(&words);
-                _ = try mqtt.listener_namespace.Namespace.init(value);
-                listener.mount_point = try allocator.dupe(u8, value);
-            } else if (std.mem.eql(u8, directive, "allow_anonymous")) {
-                security_settings_seen = true;
-                try markOnce(&seen.allow_anonymous);
-                listener.allow_anonymous = try parseOneBool(&words);
-            } else if (std.mem.eql(u8, directive, "max_qos")) {
-                try markOnce(&seen.maximum_qos);
-                listener.maximum_qos = switch (try parseOneInteger(u2, &words)) {
-                    0 => .at_most_once,
-                    1 => .at_least_once,
-                    2 => .exactly_once,
-                    else => return error.InvalidInteger,
-                };
-            } else if (std.mem.eql(u8, directive, "max_keepalive")) {
-                try markOnce(&seen.maximum_keep_alive);
-                listener.maximum_keep_alive_seconds =
-                    try parseOnePositive(u16, &words);
-            } else if (std.mem.eql(
-                u8,
-                directive,
-                "use_username_as_clientid",
-            )) {
-                try markOnce(&seen.use_username_as_client_id);
-                listener.use_username_as_client_id = try parseOneBool(&words);
-            } else if (std.mem.eql(u8, directive, "max_connections")) {
-                try markOnce(&seen.max_connections);
-                listener.max_connections = try parseOnePositive(usize, &words);
+                if (config.per_listener_settings) {
+                    const index = current_listener[source.scope] orelse
+                        return error.DirectiveRequiresListener;
+                    try markOnce(&listener_seen.items[index].acl_file);
+                    listeners.items[index].acl_file =
+                        try parseOneOwned(allocator, &words);
+                } else {
+                    try markOnce(&global_seen.acl_file);
+                    config.acl_file = try parseOneOwned(allocator, &words);
+                }
+            } else if (std.mem.eql(u8, directive, "persistence")) {
+                try markOnce(&global_seen.persistence);
+                config.persistence = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "persistence_location")) {
+                try markOnce(&global_seen.persistence_location);
+                config.persistence_location = try parseOneOwned(
+                    allocator,
+                    &words,
+                );
+            } else if (std.mem.eql(u8, directive, "persistence_file")) {
+                try markOnce(&global_seen.persistence_file);
+                config.persistence_file = try parseOneOwned(allocator, &words);
+                if (std.mem.indexOfAny(
+                    u8,
+                    config.persistence_file,
+                    "/\\",
+                ) != null) {
+                    return error.InvalidDirective;
+                }
+            } else if (std.mem.eql(u8, directive, "autosave_interval")) {
+                try markOnce(&global_seen.autosave_interval);
+                config.autosave_interval = try parseOnePositive(u32, &words);
+            } else if (std.mem.eql(u8, directive, "autosave_on_changes")) {
+                try markOnce(&global_seen.autosave_on_changes);
+                config.autosave_on_changes = try parseOneBool(&words);
             } else {
-                return error.UnsupportedDirective;
+                const index = current_listener[source.scope] orelse {
+                    return if (isListenerDirective(directive))
+                        error.DirectiveRequiresListener
+                    else
+                        error.UnsupportedDirective;
+                };
+                const listener = &listeners.items[index];
+                const seen = &listener_seen.items[index];
+                if (std.mem.eql(u8, directive, "protocol")) {
+                    try markOnce(&seen.protocol);
+                    const value = try parseOne(&words);
+                    listener.protocol = if (std.mem.eql(u8, value, "mqtt"))
+                        .mqtt
+                    else if (std.mem.eql(u8, value, "websockets"))
+                        .websockets
+                    else
+                        return error.InvalidDirective;
+                } else if (std.mem.eql(u8, directive, "certfile")) {
+                    try markOnce(&seen.certfile);
+                    listener.certfile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "keyfile")) {
+                    try markOnce(&seen.keyfile);
+                    listener.keyfile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "cafile")) {
+                    try markOnce(&seen.cafile);
+                    listener.cafile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "capath")) {
+                    try markOnce(&seen.capath);
+                    listener.capath = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "crlfile")) {
+                    try markOnce(&seen.crlfile);
+                    listener.crlfile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "require_certificate")) {
+                    try markOnce(&seen.require_certificate);
+                    listener.require_certificate = try parseOneBool(&words);
+                } else if (std.mem.eql(u8, directive, "use_identity_as_username")) {
+                    security_settings_seen = true;
+                    try markOnce(&seen.use_identity_as_username);
+                    listener.use_identity_as_username = try parseOneBool(&words);
+                } else if (std.mem.eql(u8, directive, "use_subject_as_username")) {
+                    security_settings_seen = true;
+                    try markOnce(&seen.use_subject_as_username);
+                    listener.use_subject_as_username = try parseOneBool(&words);
+                } else if (std.mem.eql(u8, directive, "mount_point")) {
+                    try markOnce(&seen.mount_point);
+                    const value = try parseOne(&words);
+                    _ = try mqtt.listener_namespace.Namespace.init(value);
+                    listener.mount_point = try allocator.dupe(u8, value);
+                } else if (std.mem.eql(u8, directive, "allow_anonymous")) {
+                    security_settings_seen = true;
+                    try markOnce(&seen.allow_anonymous);
+                    listener.allow_anonymous = try parseOneBool(&words);
+                } else if (std.mem.eql(u8, directive, "max_qos")) {
+                    try markOnce(&seen.maximum_qos);
+                    listener.maximum_qos = switch (try parseOneInteger(u2, &words)) {
+                        0 => .at_most_once,
+                        1 => .at_least_once,
+                        2 => .exactly_once,
+                        else => return error.InvalidInteger,
+                    };
+                } else if (std.mem.eql(u8, directive, "max_keepalive")) {
+                    try markOnce(&seen.maximum_keep_alive);
+                    listener.maximum_keep_alive_seconds =
+                        try parseOnePositive(u16, &words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "use_username_as_clientid",
+                )) {
+                    try markOnce(&seen.use_username_as_client_id);
+                    listener.use_username_as_client_id = try parseOneBool(&words);
+                } else if (std.mem.eql(u8, directive, "max_connections")) {
+                    try markOnce(&seen.max_connections);
+                    listener.max_connections = try parseOnePositive(usize, &words);
+                } else {
+                    return error.UnsupportedDirective;
+                }
             }
         }
     }
@@ -416,16 +429,17 @@ pub fn load(
     io: std.Io,
     dir: std.Io.Dir,
     sub_path: []const u8,
-) (Error || std.Io.Dir.ReadFileAllocError)!Config {
-    const source = try dir.readFileAlloc(
-        io,
-        sub_path,
+) (Error || broker_config_include.Error || std.Io.Dir.OpenError ||
+    std.Io.Dir.Iterator.Error || std.Io.Dir.StatFileError ||
+    std.Io.Dir.ReadFileAllocError)!Config {
+    var document = try broker_config_include.load(
         allocator,
-        .limited(max_config_bytes + 1),
+        io,
+        dir,
+        sub_path,
     );
-    defer allocator.free(source);
-    if (source.len > max_config_bytes) return error.InvalidDirective;
-    return parse(allocator, source);
+    defer document.deinit();
+    return parseSources(allocator, document.sources, document.scope_count);
 }
 
 fn markOnce(flag: *bool) error{DuplicateDirective}!void {
@@ -608,8 +622,145 @@ test "MQTT broker config owns per-listener security files" {
     );
 }
 
+test "MQTT broker config loads include directories in Mosquitto order" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "one.d", .default_dir);
+    var one = try tmp.dir.openDir(io, "one.d", .{});
+    defer one.close(io);
+    try one.writeFile(io, .{
+        .sub_path = "b.conf",
+        .data = "listener 1886\nallow_anonymous true\n",
+    });
+    try one.writeFile(io, .{
+        .sub_path = "A.conf",
+        .data = "listener 1883\nallow_anonymous true\n",
+    });
+    try one.writeFile(io, .{
+        .sub_path = "a.conf",
+        .data = "listener 1884\nallow_anonymous true\n",
+    });
+    try one.writeFile(io, .{
+        .sub_path = "B.conf",
+        .data = "listener 1885\nallow_anonymous true\n",
+    });
+    try one.writeFile(io, .{
+        .sub_path = "ignored.txt",
+        .data = "unsupported value\n",
+    });
+    try tmp.dir.createDir(io, "two.d", .default_dir);
+    var two = try tmp.dir.openDir(io, "two.d", .{});
+    defer two.close(io);
+    try two.writeFile(io, .{
+        .sub_path = "00.conf",
+        .data = "listener 1887\nallow_anonymous true\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.conf",
+        .data = "listener 1882\nallow_anonymous true\n" ++
+            "include_dir one.d\ninclude_dir two.d\n" ++
+            "max_connections 7\n",
+    });
+
+    var config = try load(allocator, io, tmp.dir, "main.conf");
+    defer config.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 6), config.listeners.len);
+    const expected_ports = [_]u16{ 1882, 1883, 1884, 1885, 1886, 1887 };
+    for (config.listeners, expected_ports) |listener, expected_port| {
+        try std.testing.expectEqual(expected_port, listener.address.getPort());
+    }
+    try std.testing.expectEqual(@as(usize, 7), config.listeners[0].max_connections);
+    for (config.listeners[1..]) |listener| {
+        try std.testing.expectEqual(
+            default_max_connections,
+            listener.max_connections,
+        );
+    }
+}
+
+test "MQTT broker config isolates included file listener scopes" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "listeners.d", .default_dir);
+    var included = try tmp.dir.openDir(io, "listeners.d", .{});
+    defer included.close(io);
+    try included.writeFile(io, .{
+        .sub_path = "10-listener.conf",
+        .data = "listener 1883\nallow_anonymous true\n",
+    });
+    try included.writeFile(io, .{
+        .sub_path = "20-policy.conf",
+        .data = "max_connections 2\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.conf",
+        .data = "include_dir listeners.d\n",
+    });
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        load(allocator, io, tmp.dir, "main.conf"),
+    );
+}
+
+test "MQTT broker config rejects nested include directories" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "listeners.d", .default_dir);
+    var included = try tmp.dir.openDir(io, "listeners.d", .{});
+    defer included.close(io);
+    try included.writeFile(io, .{
+        .sub_path = "nested.conf",
+        .data = "include_dir other.d\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.conf",
+        .data = "include_dir listeners.d\n",
+    });
+    try std.testing.expectError(
+        error.NestedIncludeDirectory,
+        load(allocator, io, tmp.dir, "main.conf"),
+    );
+}
+
+test "MQTT broker config rejects duplicate globals across include files" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "settings.d", .default_dir);
+    var included = try tmp.dir.openDir(io, "settings.d", .{});
+    defer included.close(io);
+    try included.writeFile(io, .{
+        .sub_path = "10-first.conf",
+        .data = "queue_qos0_messages true\n",
+    });
+    try included.writeFile(io, .{
+        .sub_path = "20-second.conf",
+        .data = "queue_qos0_messages false\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.conf",
+        .data = "include_dir settings.d\n" ++
+            "listener 1883\nallow_anonymous true\n",
+    });
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        load(allocator, io, tmp.dir, "main.conf"),
+    );
+}
+
 test "MQTT broker config fails closed for unsupported and misplaced directives" {
     const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.UnsupportedDirective,
+        parse(allocator, "include_dir listeners.d\nlistener 1883"),
+    );
     try std.testing.expectError(
         error.DirectiveRequiresListener,
         parse(allocator, "mount_point tenant/\nlistener 1883"),
