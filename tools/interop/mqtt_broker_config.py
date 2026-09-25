@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
+from mqtt_broker_config_queue import run_queued_limits_case
 
 
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
@@ -3656,6 +3657,7 @@ def main() -> None:
         run_zero_length_client_id_case(args.broker, directory)
         run_upgrade_outgoing_qos_case(args.broker, directory)
         run_max_inflight_messages_case(args.broker, directory)
+        run_queued_limits_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -3673,7 +3675,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, packet/message/retain/inflight limits, zero-length Client ID and outgoing QoS policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, packet/message/retain/inflight/queue limits, zero-length Client ID and outgoing QoS policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "

@@ -355,6 +355,53 @@ test "session snapshot preserves QoS0 selected for a live write" {
     );
 }
 
+test "session snapshot rejects queues above configured limits without partial session" {
+    const allocator = std.testing.allocator;
+    var source = Store.init(allocator, .{
+        .max_queued_per_session = 2,
+        .max_queued_payload_bytes_per_session = 10,
+    });
+    defer source.deinit();
+    const opened = try source.open("queue-limits", false, 60, .zero);
+    for ([_][]const u8{ "123456", "789012" }) |payload| {
+        _ = try source.enqueuePublish(
+            opened.handle,
+            "snapshot/queue-limits",
+            payload,
+            .{ .qos = .at_least_once, .now = .zero },
+        );
+    }
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try source.writeSnapshot(&encoded, allocator, .zero);
+
+    var count_bounded = Store.init(allocator, .{
+        .max_queued_per_session = 1,
+    });
+    defer count_bounded.deinit();
+    var count_cursor = persistence.Cursor.init(encoded.items);
+    try std.testing.expectError(
+        error.QueueFull,
+        count_bounded.restoreSnapshot(&count_cursor, .zero, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 0), count_bounded.count());
+    try std.testing.expectEqual(@as(usize, 0), count_bounded.totalBytes());
+
+    var byte_bounded = Store.init(allocator, .{
+        .max_queued_per_session = 2,
+        .max_queued_payload_bytes_per_session = 5,
+    });
+    defer byte_bounded.deinit();
+    var byte_cursor = persistence.Cursor.init(encoded.items);
+    try std.testing.expectError(
+        error.QueueFull,
+        byte_bounded.restoreSnapshot(&byte_cursor, .zero, 0),
+    );
+    try std.testing.expectEqual(@as(usize, 0), byte_bounded.count());
+    try std.testing.expectEqual(@as(usize, 0), byte_bounded.totalBytes());
+}
+
 test "session snapshot restores inflight above a lowered send limit" {
     const allocator = std.testing.allocator;
     var source = Store.init(allocator, .{ .max_inflight_per_session = 2 });

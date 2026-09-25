@@ -80,6 +80,8 @@ one shared Broker core. For example:
 ```text
 queue_qos0_messages true
 max_inflight_messages 20
+max_queued_messages 1000
+max_queued_bytes 0
 password_file users.pw
 acl_file access.acl
 persistence true
@@ -112,7 +114,8 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
-`message_size_limit`, `max_inflight_messages`, `retain_available`, `upgrade_outgoing_qos`,
+`message_size_limit`, `max_inflight_messages`, `max_queued_messages`,
+`max_queued_bytes`, `retain_available`, `upgrade_outgoing_qos`,
 `check_retain_source`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
@@ -129,7 +132,14 @@ Maximum; MQTT 3.1.1 enforces the same limit without a property. A peer that
 exceeds it receives MQTT 5 DISCONNECT 0x93 or a 3.1.1 connection close. Zero
 disables this per-client count limit by using MQTT's default 65,535-transaction
 maximum and omitting the redundant property; independent aggregate and memory
-bounds still apply. Global
+bounds still apply. Global `max_queued_messages` defaults to 1,000 queued
+Application Messages per Session and `max_queued_bytes` defaults to zero
+(unlimited payload bytes). A zero message limit is also unlimited. The message
+that reaches or crosses a configured threshold is retained, matching
+Mosquitto; later messages are dropped until delivery or expiry releases queue
+capacity. QoS 0 uses these limits only when `queue_qos0_messages` is enabled.
+Snapshot restore applies the configured limits fail closed, so durable queues
+must be drained before lowering them below already persisted state. Global
 `retain_available` defaults to true. When false, MQTT 5 CONNACK advertises
 Retain Available 0 and rejects retained PUBLISH or retained Will use with reason
 0x9A; MQTT 3.1.1 closes the connection because it cannot represent that reason.

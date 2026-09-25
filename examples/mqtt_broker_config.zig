@@ -158,6 +158,8 @@ pub fn run(
         .access_control = source_access_control,
         .session = .{
             .max_inflight_per_session = max_inflight_messages,
+            .max_queued_per_session = config.effectiveMaxQueuedMessages(),
+            .max_queued_payload_bytes_per_session = config.max_queued_bytes,
         },
         .persistent_change_autosave = if (config.persistence and
             config.autosave_on_changes) .{

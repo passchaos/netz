@@ -14,6 +14,7 @@ pub const max_config_bytes: usize = 1024 * 1024;
 pub const default_max_connections: usize = 16;
 pub const default_max_packet_size: usize = 2_000_000;
 pub const default_max_inflight_messages: u16 = 20;
+pub const default_max_queued_messages: usize = 1_000;
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
@@ -67,6 +68,8 @@ pub const Config = struct {
     max_packet_size: usize = default_max_packet_size,
     message_size_limit: usize = 0,
     max_inflight_messages: u16 = default_max_inflight_messages,
+    max_queued_messages: usize = default_max_queued_messages,
+    max_queued_bytes: usize = 0,
     retain_available: bool = true,
     check_retain_source: bool = true,
     allow_zero_length_client_id: bool = true,
@@ -106,6 +109,15 @@ pub const Config = struct {
             std.math.maxInt(u16)
         else
             self.max_inflight_messages;
+    }
+
+    /// Convert Mosquitto's zero-as-unlimited queue count into the unbounded
+    /// value understood by the Session store.
+    pub fn effectiveMaxQueuedMessages(self: Config) usize {
+        return if (self.max_queued_messages == 0)
+            std.math.maxInt(usize)
+        else
+            self.max_queued_messages;
     }
 
     /// Return an owned snapshot path using Mosquitto's location/file split.
@@ -175,6 +187,8 @@ const GlobalSeen = struct {
     max_packet_size: bool = false,
     message_size_limit: bool = false,
     max_inflight_messages: bool = false,
+    max_queued_messages: bool = false,
+    max_queued_bytes: bool = false,
     retain_available: bool = false,
     check_retain_source: bool = false,
     allow_zero_length_client_id: bool = false,
@@ -325,6 +339,12 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "max_inflight_messages")) {
                 try markOnce(&global_seen.max_inflight_messages);
                 config.max_inflight_messages = try parseOneInteger(u16, &words);
+            } else if (std.mem.eql(u8, directive, "max_queued_messages")) {
+                try markOnce(&global_seen.max_queued_messages);
+                config.max_queued_messages = try parseOneInteger(u31, &words);
+            } else if (std.mem.eql(u8, directive, "max_queued_bytes")) {
+                try markOnce(&global_seen.max_queued_bytes);
+                config.max_queued_bytes = try parseOneInteger(u31, &words);
             } else if (std.mem.eql(u8, directive, "retain_available")) {
                 try markOnce(&global_seen.retain_available);
                 config.retain_available = try parseOneBool(&words);
@@ -583,6 +603,8 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_packet_size 2000000
         \\message_size_limit 1048576
         \\max_inflight_messages 7
+        \\max_queued_messages 23
+        \\max_queued_bytes 4096
         \\retain_available false
         \\check_retain_source false
         \\allow_zero_length_clientid false
@@ -619,6 +641,9 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
     try std.testing.expectEqual(@as(u16, 7), config.max_inflight_messages);
     try std.testing.expectEqual(@as(u16, 7), config.effectiveMaxInflightMessages());
+    try std.testing.expectEqual(@as(usize, 23), config.max_queued_messages);
+    try std.testing.expectEqual(@as(usize, 23), config.effectiveMaxQueuedMessages());
+    try std.testing.expectEqual(@as(usize, 4096), config.max_queued_bytes);
     try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
@@ -731,6 +756,24 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\allow_zero_length_clientid true
             \\listener 1883
             \\allow_zero_length_clientid false
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\max_queued_messages 1
+            \\max_queued_messages 2
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\max_queued_bytes 1
+            \\max_queued_bytes 2
+            \\listener 1883
             \\allow_anonymous true
         ),
     );
@@ -1254,6 +1297,38 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     );
     try std.testing.expectError(
         error.InvalidInteger,
+        parse(allocator,
+            \\max_queued_messages 2147483648
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator,
+            \\max_queued_messages -1
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator,
+            \\max_queued_bytes 2147483648
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator,
+            \\max_queued_bytes -1
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
         parse(allocator, "listener 1883\nmax_qos 3"),
     );
     try std.testing.expectError(
@@ -1384,6 +1459,15 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         default_max_inflight_messages,
         config.effectiveMaxInflightMessages(),
     );
+    try std.testing.expectEqual(
+        default_max_queued_messages,
+        config.max_queued_messages,
+    );
+    try std.testing.expectEqual(
+        default_max_queued_messages,
+        config.effectiveMaxQueuedMessages(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), config.max_queued_bytes);
     try std.testing.expect(config.retain_available);
     try std.testing.expect(config.check_retain_source);
     try std.testing.expect(!config.upgrade_outgoing_qos);
@@ -1430,4 +1514,36 @@ test "MQTT broker config maps zero inflight messages to protocol maximum" {
         maximum.max_inflight_messages,
     );
     try std.testing.expectEqual(@as(usize, 2), maximum.listeners.len);
+}
+
+test "MQTT broker config maps zero queued messages to unlimited" {
+    var config = try parse(std.testing.allocator,
+        \\max_queued_messages 0
+        \\max_queued_bytes 0
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), config.max_queued_messages);
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        config.effectiveMaxQueuedMessages(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), config.max_queued_bytes);
+}
+
+test "MQTT broker config keeps queued limits global" {
+    var config = try parse(std.testing.allocator,
+        \\per_listener_settings true
+        \\listener 1883
+        \\allow_anonymous true
+        \\max_queued_messages 11
+        \\max_queued_bytes 4096
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 11), config.max_queued_messages);
+    try std.testing.expectEqual(@as(usize, 4096), config.max_queued_bytes);
+    try std.testing.expectEqual(@as(usize, 2), config.listeners.len);
 }

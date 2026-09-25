@@ -39,10 +39,16 @@ MOSQUITTO_SOURCE_SHA256 = {
         "d94ceeaaec1733b19f8dd3270dc57f4945455b7c3f23fc518c580c48b20a5c8c",
     "broker/03-pattern-matching.py":
         "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
+    "broker/03-publish-qos1-max-inflight.py":
+        "4863181b3799b1dd8c7d469d30e9d838ec0f3cf444cab142ec7d7bb4dd373bdc",
     "broker/03-publish-qos1-queued-bytes.conf":
         "81264cf8b5af7d7248c2e968ff373e20d07d6b414c4770cca275a38c02beea6a",
     "broker/03-publish-qos1-queued-bytes.py":
         "d320a78b93a39c8ea02e2b5c57e13b2c4d558e39fb4f0be8ce52e70b6dc9980d",
+    "broker/03-publish-qos2-max-inflight-exceeded.py":
+        "5bd529a2ca44c64967bf4276e70b6bf9262c38f0bb0860b375829593a31a73ca",
+    "broker/03-publish-qos2-max-inflight.py":
+        "37d431fc2c663fd3d35b083c829a3b73125322a356f2122e17ad851c94705256",
     "broker/03-publish-b2c-disconnect-qos1.py":
         "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
     "broker/03-publish-c2b-disconnect-qos2.py":

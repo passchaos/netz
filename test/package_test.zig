@@ -5134,6 +5134,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
+        "max_queued_messages",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "max_queued_bytes",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker_config.Config,
+        "effectiveMaxQueuedMessages",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
         "allow_zero_length_client_id",
     ));
     try std.testing.expect(@hasField(

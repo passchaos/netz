@@ -733,7 +733,10 @@ pub const Store = struct {
             return error.SessionLimitExceeded;
         }
         const client_owned = try self.allocator.dupe(u8, client_id);
-        errdefer self.allocator.free(client_owned);
+        var client_owned_by_local = true;
+        errdefer if (client_owned_by_local) {
+            self.allocator.free(client_owned);
+        };
         if (client_owned.len > self.options.max_session_bytes or
             client_owned.len > self.options.max_total_bytes -|
                 self.total_bytes)
@@ -772,6 +775,8 @@ pub const Store = struct {
             .next_packet_id = next_packet_id,
             .allocation_bytes = client_owned.len,
         };
+        errdefer self.removeAt(index);
+        client_owned_by_local = false;
         self.client_index.putAssumeCapacityNoClobber(client_owned, index);
         self.route_index.putAssumeCapacityNoClobber(route_id, index);
         self.session_count += 1;
@@ -783,7 +788,6 @@ pub const Store = struct {
             self.next_route_id = 1;
         }
         const session = &self.sessions.items[index].?;
-        errdefer self.removeAt(index);
 
         const subscription_count = try cursor.readInt(u32);
         if (subscription_count >
