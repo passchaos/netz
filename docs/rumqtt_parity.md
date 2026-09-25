@@ -1702,8 +1702,13 @@ observation, and independent accept/connection failure policies.
 
 The production broker example's exclusive `--config=PATH` path now exercises
 the public strict parser rather than translating configuration into CLI flags.
-One loaded Mosquitto-style `password_file` is shared by listener-local CONNECT
-policies: `allow_anonymous false` requires a valid username/password, while an
+By default one loaded Mosquitto-style `password_file` and `acl_file` are
+shared by all listener policies. With `per_listener_settings true`, each file
+directive belongs to its preceding listener and is loaded into stable,
+listener-indexed storage before any socket is bound. Cross-listener process
+tests prove that credentials and write ACLs cannot leak between ports, and an
+invalid later listener file prevents every earlier listener from opening.
+`allow_anonymous false` requires a valid username/password, while an
 anonymous-capable listener permits absent credentials but rejects credentials
 that are supplied and invalid. `mqtt.password_file` recognizes current
 Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 records. It
@@ -1733,8 +1738,8 @@ CA Name. The process gate verifies MQTT/TLS and its CA-name advertisement
 through OpenSSL, WSS through a hostname-verifying Python TLS client, and
 missing/wrong-CA/wrong-EKU rejection before MQTT CONNECT. A separate process
 case accepts both anonymous and trusted-certificate clients through one
-optional-certificate listener. Reload, `capath`, Ed25519/indirect/delta CRLs, plugins and
-hot reload remain explicit gaps. `use_identity_as_username`
+optional-certificate listener. `capath`, Ed25519/indirect/delta CRLs, plugins,
+and hot reload remain explicit gaps. `use_identity_as_username`
 strictly extracts one owned UTF-8 Subject CN before every broker/listener
 authorization callback; `use_subject_as_username` uses the complete Subject in
 OpenSSL's RFC 2253 form, including reverse RDN order and escaping. Both ignore

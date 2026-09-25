@@ -1097,8 +1097,9 @@ zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
-# policy, global/per-listener Mosquitto password hashes, authentication rejection, ACL read/write/
-# deny/pattern behavior, OpenSSL-verified TLS/mTLS, acceptable CA names and
+# policy, global/per-listener Mosquitto password hashes, authentication
+# rejection, isolated ACL read/write/deny/pattern behavior, OpenSSL-verified
+# optional/required TLS client authentication, acceptable CA names and
 # certificate CN/full-Subject username/Client-ID mapping, P-256/RSA signed CRL revocation, strict
 # key/CA/EKU/identity/CRL rejection, and snapshot restore through the example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
