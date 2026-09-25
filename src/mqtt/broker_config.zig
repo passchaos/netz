@@ -62,6 +62,7 @@ pub const Config = struct {
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
     queue_qos0_messages: bool = false,
+    upgrade_outgoing_qos: bool = false,
     max_packet_size: usize = default_max_packet_size,
     message_size_limit: usize = 0,
     retain_available: bool = true,
@@ -156,6 +157,7 @@ const ListenerSeen = struct {
 const GlobalSeen = struct {
     per_listener_settings: bool = false,
     queue_qos0_messages: bool = false,
+    upgrade_outgoing_qos: bool = false,
     password_file: bool = false,
     acl_file: bool = false,
     max_packet_size: bool = false,
@@ -253,6 +255,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "queue_qos0_messages")) {
                 try markOnce(&global_seen.queue_qos0_messages);
                 config.queue_qos0_messages = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "upgrade_outgoing_qos")) {
+                try markOnce(&global_seen.upgrade_outgoing_qos);
+                config.upgrade_outgoing_qos = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "password_file")) {
                 security_settings_seen = true;
                 if (config.per_listener_settings) {
@@ -554,6 +559,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     var config = try parse(allocator,
         \\# strict supported subset
         \\queue_qos0_messages true
+        \\upgrade_outgoing_qos true
         \\max_packet_size 2000000
         \\message_size_limit 1048576
         \\retain_available false
@@ -586,6 +592,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     );
     defer config.deinit(allocator);
     try std.testing.expect(config.queue_qos0_messages);
+    try std.testing.expect(config.upgrade_outgoing_qos);
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
     try std.testing.expect(!config.retain_available);
@@ -699,6 +706,15 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\allow_zero_length_clientid true
             \\listener 1883
             \\allow_zero_length_clientid false
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\upgrade_outgoing_qos true
+            \\upgrade_outgoing_qos false
+            \\listener 1883
             \\allow_anonymous true
         ),
     );
@@ -1288,6 +1304,7 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     try std.testing.expectEqual(default_max_packet_size, config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 0), config.message_size_limit);
     try std.testing.expect(config.retain_available);
+    try std.testing.expect(!config.upgrade_outgoing_qos);
     try std.testing.expect(config.allow_zero_length_client_id);
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
 

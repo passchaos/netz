@@ -5121,6 +5121,10 @@ test "public modules are reachable" {
         "allow_zero_length_client_id",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "upgrade_outgoing_qos",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "allow_zero_length_client_id",
     ));

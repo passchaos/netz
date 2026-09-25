@@ -111,7 +111,8 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
-`message_size_limit`, `retain_available`, `queue_qos0_messages`,
+`message_size_limit`, `retain_available`, `upgrade_outgoing_qos`,
+`queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
@@ -130,6 +131,10 @@ broker-generated ID, advertised through MQTT 5 Assigned Client Identifier;
 when disabled, MQTT 5 returns 0x80 and MQTT 3.1.1 returns Identifier Rejected.
 MQTT 5 also permits this assignment with Clean Start false; an MQTT 3.1.1
 non-clean Session still requires a non-empty stable ID.
+Global `upgrade_outgoing_qos` defaults to false, preserving MQTT's required
+minimum of publication and subscription QoS. Enabling this non-standard
+Mosquitto compatibility option instead delivers live, retained, and durable
+messages at the subscription QoS.
 `password_file`
 accepts Mosquitto's current Argon2id hashes, `$7$`
 PBKDF2-SHA512 hashes, and legacy `$6$` salted SHA-512 hashes. Plaintext, unknown

@@ -87,14 +87,17 @@ def connect_packet(
 
 
 def subscribe_packet(
-    packet_id: int, topic_filter: str, proto_ver: int = 5
+    packet_id: int,
+    topic_filter: str,
+    proto_ver: int = 5,
+    qos: int = 0,
 ) -> bytes:
     return mqtt_packet(
         0x82,
         packet_id.to_bytes(2, "big")
         + (b"\x00" if proto_ver == 5 else b"")
         + utf8(topic_filter)
-        + b"\x00",
+        + bytes((qos,)),
     )
 
 
@@ -1385,6 +1388,117 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         raise RuntimeError(
             "per-listener zero-client-id protocol rejection was not reported: "
             + output
+        )
+
+
+def run_upgrade_outgoing_qos_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    config = directory / "upgrade-outgoing-qos.conf"
+    config.write_text(
+        "upgrade_outgoing_qos true\n"
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 6\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 6 clients" not in ready:
+        raise RuntimeError(f"QoS-upgrade broker failed to start: {ready}")
+
+    for proto_ver in (5, 4):
+        retained = socket.create_connection(("127.0.0.1", port), timeout=5)
+        retained.settimeout(5)
+        try:
+            retained.sendall(
+                connect_packet(f"qos-upgrade-retained-{proto_ver}", proto_ver=proto_ver)
+            )
+            if connack_reason(read_mqtt_packet(retained)) != 0:
+                raise AssertionError("QoS-upgrade retained CONNECT failed")
+            topic = f"qos/upgrade/retained/{proto_ver}"
+            payload = b"retained qos zero"
+            retained.sendall(
+                publish_packet(
+                    topic, payload, proto_ver=proto_ver, retain=True
+                )
+            )
+            retained.sendall(
+                subscribe_packet(1, topic, proto_ver=proto_ver, qos=1)
+            )
+            suback = read_mqtt_packet(retained)
+            expected_suback = bytes.fromhex(
+                "900400010001" if proto_ver == 5 else "9003000101"
+            )
+            if suback != expected_suback:
+                raise AssertionError("QoS-upgrade retained SUBACK mismatch")
+            expected = publish_packet(
+                topic,
+                payload,
+                qos=1,
+                packet_id=1,
+                proto_ver=proto_ver,
+                retain=True,
+            )
+            if read_mqtt_packet(retained) != expected:
+                raise AssertionError(
+                    f"retained QoS upgrade mismatch for MQTT {proto_ver}"
+                )
+            retained.sendall(bytes.fromhex("40020001"))
+            retained.sendall(bytes.fromhex("e000"))
+        finally:
+            retained.close()
+
+        subscriber = socket.create_connection(("127.0.0.1", port), timeout=5)
+        publisher = socket.create_connection(("127.0.0.1", port), timeout=5)
+        subscriber.settimeout(5)
+        publisher.settimeout(5)
+        try:
+            subscriber.sendall(
+                connect_packet(f"qos-upgrade-sub-{proto_ver}", proto_ver=proto_ver)
+            )
+            if connack_reason(read_mqtt_packet(subscriber)) != 0:
+                raise AssertionError("QoS-upgrade subscriber CONNECT failed")
+            topic = f"qos/upgrade/live/{proto_ver}"
+            subscriber.sendall(
+                subscribe_packet(2, topic, proto_ver=proto_ver, qos=1)
+            )
+            suback = read_mqtt_packet(subscriber)
+            expected_suback = bytes.fromhex(
+                "900400020001" if proto_ver == 5 else "9003000201"
+            )
+            if suback != expected_suback:
+                raise AssertionError("QoS-upgrade live SUBACK mismatch")
+            publisher.sendall(
+                connect_packet(f"qos-upgrade-pub-{proto_ver}", proto_ver=proto_ver)
+            )
+            if connack_reason(read_mqtt_packet(publisher)) != 0:
+                raise AssertionError("QoS-upgrade publisher CONNECT failed")
+            payload = b"live qos zero"
+            publisher.sendall(
+                publish_packet(topic, payload, proto_ver=proto_ver)
+            )
+            expected = publish_packet(
+                topic, payload, qos=1, packet_id=1, proto_ver=proto_ver
+            )
+            if read_mqtt_packet(subscriber) != expected:
+                raise AssertionError(
+                    f"live QoS upgrade mismatch for MQTT {proto_ver}"
+                )
+            subscriber.sendall(bytes.fromhex("40020001"))
+            publisher.sendall(bytes.fromhex("e000"))
+            subscriber.sendall(bytes.fromhex("e000"))
+        finally:
+            publisher.close()
+            subscriber.close()
+
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "QoS-upgrade broker failed: " + process.stdout.read()
         )
 
 
@@ -3319,6 +3433,7 @@ def main() -> None:
         run_packet_and_message_size_case(args.broker, directory)
         run_retain_unavailable_case(args.broker, directory)
         run_zero_length_client_id_case(args.broker, directory)
+        run_upgrade_outgoing_qos_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -3335,7 +3450,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, packet/message/retain and zero-length Client ID policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, packet/message/retain, zero-length Client ID and outgoing QoS policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "

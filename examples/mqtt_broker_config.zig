@@ -133,6 +133,7 @@ pub fn run(
             .runtime = .{ .max_packet_size = config.max_packet_size },
         },
         .accept = base_accept,
+        .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
         .queue_qos0_messages = config.queue_qos0_messages,
         .persistent_change_autosave = if (config.persistence and
             config.autosave_on_changes) .{
