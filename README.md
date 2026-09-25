@@ -94,7 +94,8 @@ Current protocol coverage includes:
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation
 - Strict owned TLS server-identity loading from PEM certificate chains and
-  unencrypted P-256 SEC1 or PKCS#8 private keys, with bounded input, canonical
+  unencrypted P-256/P-384 SEC1 or PKCS#8 and RFC 8410 Ed25519 private keys,
+  with bounded input, canonical
   DER validation, secret-buffer clearing, and leaf certificate/key matching
 - Strict owned PEM CA-file loading for TLS client authentication, with bounded
   certificate counts, validity and clientAuth CA-usage checks, duplicate-name
@@ -773,7 +774,8 @@ Current protocol coverage includes:
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
-  listener-local P-256 PEM `certfile`/`keyfile` and optional/required
+  listener-local P-256/P-384/Ed25519 PEM `certfile`/`keyfile` and
+  optional/required
   mTLS through strictly validated `cafile` and bounded TCP/TLS `capath` trust
   sources with `require_certificate`, plus owned certificate-CN
   or OpenSSL-compatible RFC 2253 full-Subject username mapping before all MQTT

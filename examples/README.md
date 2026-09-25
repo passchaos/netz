@@ -126,7 +126,8 @@ still rejects invalid credentials when a username is supplied. `certfile` and
 `keyfile` are listener-local and must occur together. Their presence upgrades
 `protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
 port is opened, every identity is loaded from a leaf-first PEM certificate
-chain and an unencrypted P-256 SEC1 or PKCS#8 private key, bounded and strictly
+chain and an unencrypted P-256/P-384 SEC1 or PKCS#8, or RFC 8410 Ed25519
+private key, bounded and strictly
 decoded, and checked for a matching leaf key. `include_dir` is supported by the
 file-loading API and only in the main file. It expands top-level regular `.conf`
 files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,

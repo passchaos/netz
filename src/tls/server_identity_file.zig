@@ -1,14 +1,15 @@
 //! Strict file-backed TLS server identities.
 //!
-//! This loader intentionally supports one production profile: a PEM X.509
-//! certificate chain and an unencrypted P-256 private key encoded as SEC1 or
-//! PKCS#8. Unsupported PEM labels, ambiguous DER, and certificate/key
-//! mismatches fail closed.
+//! This loader supports PEM X.509 chains with unencrypted P-256/P-384 SEC1 or
+//! PKCS#8 keys and RFC 8410 Ed25519 PKCS#8 keys. Unsupported PEM labels,
+//! ambiguous DER, and certificate/key mismatches fail closed.
 
 const std = @import("std");
 const vail = @import("vail");
 
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
+const Ed25519 = std.crypto.sign.Ed25519;
 const ServerIdentity = vail.tls.auth.ServerIdentity;
 
 pub const max_certificate_file_bytes: usize = 4 * 1024 * 1024;
@@ -32,7 +33,13 @@ pub const Error = std.mem.Allocator.Error || error{
 pub const Identity = struct {
     allocator: std.mem.Allocator,
     certificate_chain: [][]const u8,
-    key_pair: EcdsaP256Sha256.KeyPair,
+    key_pair: KeyPair,
+
+    pub const KeyPair = union(enum) {
+        ecdsa_p256_sha256: EcdsaP256Sha256.KeyPair,
+        ecdsa_p384_sha384: EcdsaP384Sha384.KeyPair,
+        ed25519: Ed25519.KeyPair,
+    };
 
     pub fn deinit(self: *Identity) void {
         for (self.certificate_chain) |certificate| {
@@ -48,9 +55,17 @@ pub const Identity = struct {
     pub fn serverIdentity(self: *const Identity) ServerIdentity {
         return .{
             .certificate_chain = self.certificate_chain,
-            .signer = .{ .ecdsa_p256_sha256 = .{
-                .key_pair = self.key_pair,
-            } },
+            .signer = switch (self.key_pair) {
+                .ecdsa_p256_sha256 => |key_pair| .{
+                    .ecdsa_p256_sha256 = .{ .key_pair = key_pair },
+                },
+                .ecdsa_p384_sha384 => |key_pair| .{
+                    .ecdsa_p384_sha384 = .{ .key_pair = key_pair },
+                },
+                .ed25519 => |key_pair| .{
+                    .ed25519 = .{ .key_pair = key_pair },
+                },
+            },
         };
     }
 };
@@ -113,19 +128,8 @@ pub fn parse(
         std.crypto.secureZero(u8, key_der.bytes);
         allocator.free(key_der.bytes);
     }
-    var scalar = try parsePrivateKeyDer(key_der.label, key_der.bytes);
-    defer std.crypto.secureZero(u8, &scalar);
-    const parsed_scalar = std.crypto.ecc.P256.scalar.Scalar.fromBytes(
-        scalar,
-        .big,
-    ) catch return error.InvalidPrivateKey;
-    if (parsed_scalar.isZero()) return error.InvalidPrivateKey;
-    const secret_key = EcdsaP256Sha256.SecretKey.fromBytes(scalar) catch {
-        return error.InvalidPrivateKey;
-    };
-    const key_pair = EcdsaP256Sha256.KeyPair.fromSecretKey(secret_key) catch {
-        return error.InvalidPrivateKey;
-    };
+    var key_pair = try parsePrivateKeyDer(key_der.label, key_der.bytes);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
 
     const owned_chain = try certificates.toOwnedSlice(allocator);
     errdefer {
@@ -139,7 +143,9 @@ pub fn parse(
     };
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(&identity.key_pair));
     identity.serverIdentity().validate() catch |err| switch (err) {
-        error.InvalidCertificate => return error.CertificateKeyMismatch,
+        error.InvalidCertificate,
+        error.UnsupportedCertificateKey,
+        => return error.CertificateKeyMismatch,
         else => return error.InvalidCertificate,
     };
     return identity;
@@ -351,18 +357,20 @@ const DerReader = struct {
 
 const oid_ec_public_key = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 };
 const oid_prime256v1 = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
+const oid_secp384r1 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
+const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
 
-fn parsePrivateKeyDer(label: PemLabel, der: []const u8) Error![32]u8 {
+fn parsePrivateKeyDer(label: PemLabel, der: []const u8) Error!Identity.KeyPair {
     if (der.len == 0 or der.len > max_private_key_der_bytes) {
         return error.InvalidPrivateKey;
     }
     return switch (label) {
-        .sec1 => parseSec1PrivateKey(der, true),
+        .sec1 => parseSec1PrivateKey(der, null, true),
         .pkcs8 => parsePkcs8PrivateKey(der),
     };
 }
 
-fn parsePkcs8PrivateKey(der: []const u8) Error![32]u8 {
+fn parsePkcs8PrivateKey(der: []const u8) Error!Identity.KeyPair {
     var outer = DerReader{ .bytes = der };
     const sequence = try outer.read(0x30);
     if (!outer.done()) return error.InvalidPrivateKey;
@@ -372,21 +380,39 @@ fn parsePkcs8PrivateKey(der: []const u8) Error![32]u8 {
     }
     const algorithm = try fields.read(0x30);
     var algorithm_fields = DerReader{ .bytes = algorithm };
-    if (!std.mem.eql(u8, try algorithm_fields.read(0x06), &oid_ec_public_key) or
-        !std.mem.eql(u8, try algorithm_fields.read(0x06), &oid_prime256v1) or
-        !algorithm_fields.done())
-    {
-        return error.InvalidPrivateKey;
-    }
+    const algorithm_oid = try algorithm_fields.read(0x06);
+    const key_kind: KeyKind = if (std.mem.eql(
+        u8,
+        algorithm_oid,
+        &oid_ec_public_key,
+    )) blk: {
+        const curve_oid = try algorithm_fields.read(0x06);
+        break :blk if (std.mem.eql(u8, curve_oid, &oid_prime256v1))
+            .p256
+        else if (std.mem.eql(u8, curve_oid, &oid_secp384r1))
+            .p384
+        else
+            return error.InvalidPrivateKey;
+    } else if (std.mem.eql(u8, algorithm_oid, &oid_ed25519))
+        .ed25519
+    else
+        return error.UnsupportedPrivateKey;
+    if (!algorithm_fields.done()) return error.InvalidPrivateKey;
     const inner = try fields.read(0x04);
     if (!fields.done()) return error.InvalidPrivateKey;
-    return parseSec1PrivateKey(inner, false);
+    return switch (key_kind) {
+        .p256, .p384 => parseSec1PrivateKey(inner, key_kind, false),
+        .ed25519 => parseEd25519PrivateKey(inner),
+    };
 }
+
+const KeyKind = enum { p256, p384, ed25519 };
 
 fn parseSec1PrivateKey(
     der: []const u8,
+    expected_kind: ?KeyKind,
     require_parameters: bool,
-) Error![32]u8 {
+) Error!Identity.KeyPair {
     var outer = DerReader{ .bytes = der };
     const sequence = try outer.read(0x30);
     if (!outer.done()) return error.InvalidPrivateKey;
@@ -395,58 +421,96 @@ fn parseSec1PrivateKey(
         return error.InvalidPrivateKey;
     }
     const private_key = try fields.read(0x04);
-    if (private_key.len != 32) return error.InvalidPrivateKey;
-    var scalar: [32]u8 = undefined;
-    @memcpy(&scalar, private_key);
-    errdefer std.crypto.secureZero(u8, &scalar);
 
-    var has_parameters = false;
+    var parameter_kind: ?KeyKind = null;
     if (!fields.done() and fields.bytes[fields.offset] == 0xa0) {
         const parameters = try fields.read(0xa0);
         var parameter_fields = DerReader{ .bytes = parameters };
-        if (!std.mem.eql(
-            u8,
-            try parameter_fields.read(0x06),
-            &oid_prime256v1,
-        ) or !parameter_fields.done()) {
+        const curve_oid = try parameter_fields.read(0x06);
+        parameter_kind = if (std.mem.eql(u8, curve_oid, &oid_prime256v1))
+            .p256
+        else if (std.mem.eql(u8, curve_oid, &oid_secp384r1))
+            .p384
+        else
             return error.InvalidPrivateKey;
-        }
-        has_parameters = true;
+        if (!parameter_fields.done()) return error.InvalidPrivateKey;
     }
-    if (require_parameters and !has_parameters) return error.InvalidPrivateKey;
+    if (require_parameters and parameter_kind == null) {
+        return error.InvalidPrivateKey;
+    }
+    const kind = expected_kind orelse parameter_kind.?;
+    if (parameter_kind) |actual| {
+        if (actual != kind) return error.InvalidPrivateKey;
+    }
 
-    var encoded_public_key: ?[65]u8 = null;
+    var encoded_public_key: ?[]const u8 = null;
     if (!fields.done() and fields.bytes[fields.offset] == 0xa1) {
         const public_wrapper = try fields.read(0xa1);
         var public_fields = DerReader{ .bytes = public_wrapper };
         const bit_string = try public_fields.read(0x03);
-        if (!public_fields.done() or bit_string.len != 66 or
-            bit_string[0] != 0)
-        {
+        if (!public_fields.done() or bit_string.len == 0 or bit_string[0] != 0) {
             return error.InvalidPrivateKey;
         }
-        var public_key: [65]u8 = undefined;
-        @memcpy(&public_key, bit_string[1..]);
-        encoded_public_key = public_key;
+        encoded_public_key = bit_string[1..];
     }
     if (!fields.done()) return error.InvalidPrivateKey;
 
+    return switch (kind) {
+        .p256 => .{ .ecdsa_p256_sha256 = try parseEcKeyPair(
+            EcdsaP256Sha256,
+            std.crypto.ecc.P256,
+            private_key,
+            encoded_public_key,
+        ) },
+        .p384 => .{ .ecdsa_p384_sha384 = try parseEcKeyPair(
+            EcdsaP384Sha384,
+            std.crypto.ecc.P384,
+            private_key,
+            encoded_public_key,
+        ) },
+        .ed25519 => return error.InvalidPrivateKey,
+    };
+}
+
+fn parseEcKeyPair(
+    comptime Scheme: type,
+    comptime Curve: type,
+    bytes: []const u8,
+    encoded_public_key: ?[]const u8,
+) Error!Scheme.KeyPair {
+    if (bytes.len != Scheme.SecretKey.encoded_length) {
+        return error.InvalidPrivateKey;
+    }
+    var scalar: [Scheme.SecretKey.encoded_length]u8 = undefined;
+    @memcpy(&scalar, bytes);
+    defer std.crypto.secureZero(u8, &scalar);
+    const parsed_scalar = Curve.scalar.Scalar.fromBytes(scalar, .big) catch
+        return error.InvalidPrivateKey;
+    if (parsed_scalar.isZero()) return error.InvalidPrivateKey;
+    const secret_key = Scheme.SecretKey.fromBytes(scalar) catch
+        return error.InvalidPrivateKey;
+    const key_pair = Scheme.KeyPair.fromSecretKey(secret_key) catch
+        return error.InvalidPrivateKey;
     if (encoded_public_key) |encoded| {
-        const secret = EcdsaP256Sha256.SecretKey.fromBytes(scalar) catch {
-            return error.InvalidPrivateKey;
-        };
-        const pair = EcdsaP256Sha256.KeyPair.fromSecretKey(secret) catch {
-            return error.InvalidPrivateKey;
-        };
-        if (!std.mem.eql(
-            u8,
-            &encoded,
-            &pair.public_key.toUncompressedSec1(),
-        )) {
+        const actual = key_pair.public_key.toUncompressedSec1();
+        if (!std.mem.eql(u8, encoded, &actual)) {
             return error.InvalidPrivateKey;
         }
     }
-    return scalar;
+    return key_pair;
+}
+
+fn parseEd25519PrivateKey(inner: []const u8) Error!Identity.KeyPair {
+    var seed_reader = DerReader{ .bytes = inner };
+    const seed_bytes = try seed_reader.read(0x04);
+    if (!seed_reader.done() or seed_bytes.len != Ed25519.KeyPair.seed_length) {
+        return error.InvalidPrivateKey;
+    }
+    var seed: [Ed25519.KeyPair.seed_length]u8 = undefined;
+    @memcpy(&seed, seed_bytes);
+    defer std.crypto.secureZero(u8, &seed);
+    return .{ .ed25519 = Ed25519.KeyPair.generateDeterministic(seed) catch
+        return error.InvalidPrivateKey };
 }
 
 fn validateCertificateDer(der: []const u8) Error!void {
@@ -496,6 +560,76 @@ test "server identity file parses SEC1 and PKCS8 P-256 keys" {
         try std.testing.expectEqual(@as(usize, 1), identity.certificate_chain.len);
         try identity.serverIdentity().validate();
     }
+}
+
+test "server identity file parses P-384 and Ed25519 PKCS8 keys" {
+    const p384_der_hex =
+        "3081b6020100301006072a8648ce3d020106052b8104002204819e" ++
+        "30819b0201010430f70d151aad5ced2202849b19e262d2bfa65ead" ++
+        "11d8a025e7657c6e8b004ea0b37f79ac927be2bc1c06a0ce607da" ++
+        "62b46a164036200046221b2d856a7fe4295357509134a3eabae4f7" ++
+        "8889e1244a2158c19c10dab58c3269cc5b467396a2093b5dfa3e3" ++
+        "635106215c5586c1d99be9087fb2448f2dd4e4a061f5556884e028" ++
+        "ee2b5d095ec2a897f3a588e1238e7c62160313e6cd8c65d8";
+    var p384_der: [p384_der_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&p384_der, p384_der_hex);
+    var p384 = try parsePrivateKeyDer(.pkcs8, &p384_der);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&p384));
+    try std.testing.expect(p384 == .ecdsa_p384_sha384);
+
+    const ed25519_der_hex =
+        "302e020100300506032b657004220420" ++
+        "85aefc9f41a80df3cad89138c8dfa7f4f33b3b8485a60092b833a08640c903b6";
+    var ed25519_der: [ed25519_der_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&ed25519_der, ed25519_der_hex);
+    var ed25519 = try parsePrivateKeyDer(.pkcs8, &ed25519_der);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&ed25519));
+    try std.testing.expect(ed25519 == .ed25519);
+}
+
+test "server identity file parses a P-384 SEC1 key" {
+    const der_hex =
+        "3081a40201010430fd54b21ecf364a932c6e4aff7c014767c08ee4c2" ++
+        "133451524423b6192bcb8088d097018dd6cd279fe8589841aac20167" ++
+        "a00706052b81040022a164036200049aedd7293ee3a6be895ecc021a" ++
+        "ee391ce0951a360c26f58b863cb8fa0a815d7f6ab1dc2a67858a55" ++
+        "3b1e084f698abaafc841f103b475ec7eb33a4f1e1041d18d92008c" ++
+        "5b10de8d6317bd44ff1214f00a6da9acc864a16dc14293bb380497c" ++
+        "48d";
+    var der: [der_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&der, der_hex);
+    var key = try parsePrivateKeyDer(.sec1, &der);
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&key));
+    try std.testing.expect(key == .ecdsa_p384_sha384);
+}
+
+test "server identity file rejects unsupported and malformed modern private keys" {
+    const ed25519_der_hex =
+        "302e020100300506032b657004220420" ++
+        "85aefc9f41a80df3cad89138c8dfa7f4f33b3b8485a60092b833a08640c903b6";
+    var ed25519_der: [ed25519_der_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&ed25519_der, ed25519_der_hex);
+    ed25519_der[10] = 0x05;
+    try std.testing.expectError(
+        error.UnsupportedPrivateKey,
+        parsePrivateKeyDer(.pkcs8, &ed25519_der),
+    );
+
+    const p384_der_hex =
+        "3081b6020100301006072a8648ce3d020106052b8104002204819e" ++
+        "30819b0201010430f70d151aad5ced2202849b19e262d2bfa65ead" ++
+        "11d8a025e7657c6e8b004ea0b37f79ac927be2bc1c06a0ce607da" ++
+        "62b46a164036200046221b2d856a7fe4295357509134a3eabae4f7" ++
+        "8889e1244a2158c19c10dab58c3269cc5b467396a2093b5dfa3e3" ++
+        "635106215c5586c1d99be9087fb2448f2dd4e4a061f5556884e028" ++
+        "ee2b5d095ec2a897f3a588e1238e7c62160313e6cd8c65d8";
+    var p384_der: [p384_der_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&p384_der, p384_der_hex);
+    p384_der[33] ^= 1;
+    try std.testing.expectError(
+        error.InvalidPrivateKey,
+        parsePrivateKeyDer(.pkcs8, &p384_der),
+    );
 }
 
 test "server identity file preserves a leaf-first certificate chain" {

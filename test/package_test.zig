@@ -216,6 +216,18 @@ test "public modules are reachable" {
         "Identity",
     ));
     try std.testing.expect(@hasDecl(
+        netz.tls.server_identity_file.Identity,
+        "KeyPair",
+    ));
+    try std.testing.expect(@hasField(
+        netz.tls.server_identity_file.Identity.KeyPair,
+        "ecdsa_p384_sha384",
+    ));
+    try std.testing.expect(@hasField(
+        netz.tls.server_identity_file.Identity.KeyPair,
+        "ed25519",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.tls.server_identity_file,
         "load",
     ));

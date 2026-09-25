@@ -1203,6 +1203,135 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_modern_tls_identity_case(broker: Path, directory: Path) -> None:
+    cases = (
+        ("p384", "EC", "P-384", "ecdsa_secp384r1_sha384"),
+        ("ed25519", "ED25519", None, "ed25519"),
+    )
+    for name, algorithm, curve, signature_algorithm in cases:
+        certificate = directory / f"{name}-server-cert.pem"
+        private_key = directory / f"{name}-server-key.pem"
+        key_command = ["genpkey", "-algorithm", algorithm]
+        if curve is not None:
+            key_command.extend(("-pkeyopt", f"ec_paramgen_curve:{curve}"))
+        key_command.extend(("-out", str(private_key)))
+        run_openssl(*key_command)
+        websocket_private_key = private_key
+        if name == "p384":
+            websocket_private_key = directory / "p384-server-sec1-key.pem"
+            run_openssl(
+                "pkey",
+                "-in",
+                private_key,
+                "-traditional",
+                "-out",
+                websocket_private_key,
+            )
+        run_openssl(
+            "req",
+            "-new",
+            "-x509",
+            "-key",
+            private_key,
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+            "-out",
+            certificate,
+        )
+        port = free_port()
+        websocket_port = free_port()
+        while websocket_port == port:
+            websocket_port = free_port()
+        config = directory / f"{name}-server.conf"
+        config.write_text(
+            f"listener {port} 127.0.0.1\n"
+            f"certfile {certificate}\n"
+            f"keyfile {private_key}\n"
+            "allow_anonymous true\n"
+            "max_connections 1\n"
+            f"listener {websocket_port} 127.0.0.1\n"
+            "protocol websockets\n"
+            f"certfile {certificate}\n"
+            f"keyfile {websocket_private_key}\n"
+            "allow_anonymous true\n"
+            "max_connections 1\n"
+        )
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        startup_lines: list[str] = []
+        while True:
+            line = process.stdout.readline()
+            if line == "":
+                raise RuntimeError(
+                    f"{name} TLS broker failed to start: "
+                    + "".join(startup_lines)
+                )
+            startup_lines.append(line)
+            if "configured 2 listeners for 2 clients" in line:
+                break
+        result = openssl_mqtt_client(
+            port,
+            certificate,
+            signature_algorithms=signature_algorithm,
+        )
+        assert_openssl_mqtt_success(result)
+        websocket = websocket_connect(websocket_port, certificate)
+        try:
+            send_websocket_binary(
+                websocket,
+                connect_packet(f"{name}-wss"),
+            )
+            if connack_reason(read_websocket_binary(websocket)) != 0:
+                raise AssertionError(f"{name} WSS CONNECT failed")
+            send_websocket_binary(websocket, bytes.fromhex("e000"))
+        finally:
+            websocket.close()
+        if process.wait(timeout=5) != 0:
+            raise RuntimeError(
+                f"{name} TLS broker failed: " + process.stdout.read()
+            )
+
+    mismatch_port = free_port()
+    mismatch_config = directory / "modern-server-mismatch.conf"
+    mismatch_config.write_text(
+        f"listener {mismatch_port} 127.0.0.1\n"
+        f"certfile {directory / 'p384-server-cert.pem'}\n"
+        f"keyfile {directory / 'ed25519-server-key.pem'}\n"
+        "allow_anonymous true\n"
+    )
+    mismatch_result = subprocess.run(
+        [str(broker), f"--config={mismatch_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if (
+        mismatch_result.returncode == 0
+        or "CertificateKeyMismatch" not in mismatch_result.stdout
+    ):
+        raise AssertionError(
+            "cross-algorithm certificate/key mismatch was accepted: "
+            + mismatch_result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", mismatch_port)) == 0:
+            raise AssertionError(
+                "listener bound before modern identity mismatch validation"
+            )
+
+
 def run_openssl(*arguments: object) -> None:
     subprocess.run(
         ["openssl", *(str(argument) for argument in arguments)],
@@ -1397,6 +1526,7 @@ def openssl_mqtt_client(
     server_ca: Path,
     client_certificate: Path | None = None,
     client_key: Path | None = None,
+    signature_algorithms: str | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     command = [
         "openssl",
@@ -1413,6 +1543,8 @@ def openssl_mqtt_client(
         "-verify_return_error",
         "-quiet",
     ]
+    if signature_algorithms is not None:
+        command.extend(("-sigalgs", signature_algorithms))
     if client_certificate is not None:
         if client_key is None:
             raise AssertionError("client certificate requires a key")
@@ -2263,7 +2395,7 @@ def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
         timeout=5,
         check=False,
     )
-    if result.returncode == 0 or "InvalidPrivateKey" not in result.stdout:
+    if result.returncode == 0 or "UnsupportedPrivateKey" not in result.stdout:
         raise AssertionError(
             "unsupported RSA TLS key did not fail before listen: "
             + result.stdout
@@ -2579,6 +2711,7 @@ def main() -> None:
         run_authentication_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
+        run_modern_tls_identity_case(args.broker, directory)
         run_mtls_listener_case(args.broker, directory)
         run_capath_listener_case(args.broker, directory)
         run_mtls_subject_username_case(args.broker, directory)
@@ -2589,7 +2722,7 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
-        "policies, TLS/WSS and required mTLS with OpenSSL verification, "
+        "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/RSA signed CRL revocation, strict TLS "
