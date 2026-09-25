@@ -86,8 +86,10 @@ pub fn loadCombined(
         if (candidates.items.len == max_certificate_files) {
             return error.TooManyCertificateFiles;
         }
+        const name = try allocator.dupe(u8, entry.name);
+        errdefer allocator.free(name);
         try candidates.append(allocator, .{
-            .name = try allocator.dupe(u8, entry.name),
+            .name = name,
             .kind = kind,
         });
     }
