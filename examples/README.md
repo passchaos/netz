@@ -79,6 +79,7 @@ one shared Broker core. For example:
 
 ```text
 queue_qos0_messages true
+max_inflight_messages 20
 password_file users.pw
 acl_file access.acl
 persistence true
@@ -111,7 +112,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
-`message_size_limit`, `retain_available`, `upgrade_outgoing_qos`,
+`message_size_limit`, `max_inflight_messages`, `retain_available`, `upgrade_outgoing_qos`,
 `check_retain_source`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
@@ -122,6 +123,13 @@ full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
 payloads are rejected while representable QoS flows complete. Global
+`max_inflight_messages` defaults to 20 and bounds each client's incoming and
+outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive
+Maximum; MQTT 3.1.1 enforces the same limit without a property. A peer that
+exceeds it receives MQTT 5 DISCONNECT 0x93 or a 3.1.1 connection close. Zero
+disables this per-client count limit by using MQTT's default 65,535-transaction
+maximum and omitting the redundant property; independent aggregate and memory
+bounds still apply. Global
 `retain_available` defaults to true. When false, MQTT 5 CONNACK advertises
 Retain Available 0 and rejects retained PUBLISH or retained Will use with reason
 0x9A; MQTT 3.1.1 closes the connection because it cannot represent that reason.

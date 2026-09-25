@@ -13,6 +13,7 @@ const net = std.Io.net;
 pub const max_config_bytes: usize = 1024 * 1024;
 pub const default_max_connections: usize = 16;
 pub const default_max_packet_size: usize = 2_000_000;
+pub const default_max_inflight_messages: u16 = 20;
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
@@ -65,6 +66,7 @@ pub const Config = struct {
     upgrade_outgoing_qos: bool = false,
     max_packet_size: usize = default_max_packet_size,
     message_size_limit: usize = 0,
+    max_inflight_messages: u16 = default_max_inflight_messages,
     retain_available: bool = true,
     check_retain_source: bool = true,
     allow_zero_length_client_id: bool = true,
@@ -95,6 +97,15 @@ pub const Config = struct {
                 return error.IntegerOverflow;
         }
         return total;
+    }
+
+    /// Convert Mosquitto's zero-as-unlimited configuration value into the
+    /// largest window MQTT can represent on the wire.
+    pub fn effectiveMaxInflightMessages(self: Config) u16 {
+        return if (self.max_inflight_messages == 0)
+            std.math.maxInt(u16)
+        else
+            self.max_inflight_messages;
     }
 
     /// Return an owned snapshot path using Mosquitto's location/file split.
@@ -163,6 +174,7 @@ const GlobalSeen = struct {
     acl_file: bool = false,
     max_packet_size: bool = false,
     message_size_limit: bool = false,
+    max_inflight_messages: bool = false,
     retain_available: bool = false,
     check_retain_source: bool = false,
     allow_zero_length_client_id: bool = false,
@@ -310,6 +322,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "message_size_limit")) {
                 try markOnce(&global_seen.message_size_limit);
                 config.message_size_limit = try parseOneInteger(u28, &words);
+            } else if (std.mem.eql(u8, directive, "max_inflight_messages")) {
+                try markOnce(&global_seen.max_inflight_messages);
+                config.max_inflight_messages = try parseOneInteger(u16, &words);
             } else if (std.mem.eql(u8, directive, "retain_available")) {
                 try markOnce(&global_seen.retain_available);
                 config.retain_available = try parseOneBool(&words);
@@ -567,6 +582,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\upgrade_outgoing_qos true
         \\max_packet_size 2000000
         \\message_size_limit 1048576
+        \\max_inflight_messages 7
         \\retain_available false
         \\check_retain_source false
         \\allow_zero_length_clientid false
@@ -601,6 +617,8 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.upgrade_outgoing_qos);
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
+    try std.testing.expectEqual(@as(u16, 7), config.max_inflight_messages);
+    try std.testing.expectEqual(@as(u16, 7), config.effectiveMaxInflightMessages());
     try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
@@ -713,6 +731,15 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\allow_zero_length_clientid true
             \\listener 1883
             \\allow_zero_length_clientid false
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\max_inflight_messages 1
+            \\max_inflight_messages 2
+            \\listener 1883
             \\allow_anonymous true
         ),
     );
@@ -1219,6 +1246,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     );
     try std.testing.expectError(
         error.InvalidInteger,
+        parse(allocator,
+            \\max_inflight_messages 65536
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
         parse(allocator, "listener 1883\nmax_qos 3"),
     );
     try std.testing.expectError(
@@ -1341,6 +1376,14 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(default_max_packet_size, config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 0), config.message_size_limit);
+    try std.testing.expectEqual(
+        default_max_inflight_messages,
+        config.max_inflight_messages,
+    );
+    try std.testing.expectEqual(
+        default_max_inflight_messages,
+        config.effectiveMaxInflightMessages(),
+    );
     try std.testing.expect(config.retain_available);
     try std.testing.expect(config.check_retain_source);
     try std.testing.expect(!config.upgrade_outgoing_qos);
@@ -1358,4 +1401,33 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         @as(usize, 268_435_455),
         minimum.message_size_limit,
     );
+}
+
+test "MQTT broker config maps zero inflight messages to protocol maximum" {
+    var config = try parse(std.testing.allocator,
+        \\max_inflight_messages 0
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 0), config.max_inflight_messages);
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        config.effectiveMaxInflightMessages(),
+    );
+
+    var maximum = try parse(std.testing.allocator,
+        \\per_listener_settings true
+        \\listener 1883
+        \\allow_anonymous true
+        \\max_inflight_messages 65535
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer maximum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        maximum.max_inflight_messages,
+    );
+    try std.testing.expectEqual(@as(usize, 2), maximum.listeners.len);
 }

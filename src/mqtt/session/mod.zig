@@ -31,6 +31,10 @@ pub const Options = struct {
     /// `max_queued_bytes` convention. Topic/property ownership remains covered
     /// by `max_session_bytes` and `max_total_bytes`.
     max_queued_payload_bytes_per_session: usize = 0,
+    /// Administrative cap for new outgoing QoS 1/2 transactions. Snapshot
+    /// restore may retain more transactions after a configuration decrease;
+    /// `drainInto` then releases no new work until acknowledgements bring the
+    /// Session back below this limit.
     max_inflight_per_session: usize = std.math.maxInt(u16),
     /// Maximum payload bytes occupying outgoing QoS 1/2 inflight state. Zero
     /// disables the byte bound. Like Mosquitto, admission inspects the current
@@ -832,9 +836,7 @@ pub const Store = struct {
         }
 
         const inflight_count = try cursor.readInt(u32);
-        if (inflight_count > self.options.max_inflight_per_session or
-            inflight_count > std.math.maxInt(u16))
-        {
+        if (inflight_count > std.math.maxInt(u16)) {
             return error.InflightFull;
         }
         try session.packet_index.ensureUnusedCapacity(

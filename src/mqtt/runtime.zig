@@ -3064,7 +3064,11 @@ pub const Connection = struct {
         // refusal, preserve only caller-supplied diagnostic properties so a
         // bare error CONNACK stays byte-compatible with common brokers.
         const accepted = options.reason_code == 0;
-        if (accepted and self.protocol == .v5 and mqtt.receiveMaximum(options.properties) == null) {
+        if (accepted and
+            self.protocol == .v5 and
+            mqtt.receiveMaximum(options.properties) == null and
+            options.max_outgoing_inflight != std.math.maxInt(u16))
+        {
             try self.write_property_scratch.append(self.allocator, .{ .two_byte = .{ .id = .receive_maximum, .value = options.max_outgoing_inflight } });
         }
         if (accepted and self.protocol == .v5 and mqtt.maximumPacketSize(options.properties) == null and self.limits.max_packet_size <= std.math.maxInt(u32)) {
@@ -3125,10 +3129,9 @@ pub const Connection = struct {
             // This is the Server's own inbound QoS 1/2 limit. MQTT 5 also
             // advertises it as Receive Maximum; MQTT 3.1.1 has no property,
             // but the configured resource bound must still be enforced.
-            self.max_incoming_inflight = if (self.protocol == .v5)
-                mqtt.receiveMaximum(self.write_property_scratch.items).?
-            else
-                options.max_outgoing_inflight;
+            self.max_incoming_inflight = mqtt.receiveMaximum(
+                self.write_property_scratch.items,
+            ) orelse options.max_outgoing_inflight;
         }
         self.local_maximum_qos = options.maximum_qos orelse .exactly_once;
         self.local_retain_available = options.retain_available;
@@ -8009,6 +8012,14 @@ test "MQTT server applies the effective inbound QoS limit" {
     });
     try std.testing.expectEqual(
         @as(u16, 2),
+        connection.max_incoming_inflight,
+    );
+
+    try connection.writeConnAck(.{
+        .max_outgoing_inflight = std.math.maxInt(u16),
+    });
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
         connection.max_incoming_inflight,
     );
 }

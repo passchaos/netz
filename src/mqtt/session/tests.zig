@@ -355,6 +355,100 @@ test "session snapshot preserves QoS0 selected for a live write" {
     );
 }
 
+test "session snapshot restores inflight above a lowered send limit" {
+    const allocator = std.testing.allocator;
+    var source = Store.init(allocator, .{ .max_inflight_per_session = 2 });
+    defer source.deinit();
+    const opened = try source.open("lower-limit", false, 60, .zero);
+    for ([_][]const u8{ "one", "two", "three" }) |payload| {
+        _ = try source.enqueuePublish(
+            opened.handle,
+            "snapshot/lower-limit",
+            payload,
+            .{ .qos = .at_least_once, .now = .zero },
+        );
+    }
+    var source_output: [2]Transmission = undefined;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        (try source.drainInto(
+            opened.handle,
+            .zero,
+            2,
+            &source_output,
+        )).len,
+    );
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try source.writeSnapshot(&encoded, allocator, .zero);
+
+    var restored = Store.init(allocator, .{ .max_inflight_per_session = 1 });
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(&cursor, .zero, 0);
+    try cursor.finish();
+    const resumed = try restored.open("lower-limit", false, 60, .zero);
+    const restored_stats = try restored.stats(resumed.handle);
+    try std.testing.expectEqual(@as(usize, 2), restored_stats.inflight_count);
+    try std.testing.expectEqual(@as(usize, 1), restored_stats.queued_count);
+
+    var output: [3]Transmission = undefined;
+    const first = try restored.drainInto(
+        resumed.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expect(first[0].publish.dup);
+    try std.testing.expectEqualStrings("one", first[0].publish.payload);
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try restored.handleAck(
+            resumed.handle,
+            .puback,
+            first[0].publish.packet_id,
+            0,
+        ),
+    );
+
+    const second = try restored.drainInto(
+        resumed.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expect(second[0].publish.dup);
+    try std.testing.expectEqualStrings("two", second[0].publish.payload);
+    try std.testing.expectEqual(@as(usize, 0), (try restored.drainInto(
+        resumed.handle,
+        .zero,
+        1,
+        &output,
+    )).len);
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try restored.handleAck(
+            resumed.handle,
+            .puback,
+            second[0].publish.packet_id,
+            0,
+        ),
+    );
+
+    const third = try restored.drainInto(
+        resumed.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), third.len);
+    try std.testing.expect(!third[0].publish.dup);
+    try std.testing.expectEqualStrings("three", third[0].publish.payload);
+}
+
 test "session takeover lets the original writer resolve pending QoS0" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});

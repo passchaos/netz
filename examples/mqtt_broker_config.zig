@@ -138,9 +138,10 @@ pub fn run(
         }
         break :blk null;
     };
+    const max_inflight_messages = config.effectiveMaxInflightMessages();
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
-        .max_outgoing_inflight = 64,
+        .max_outgoing_inflight = max_inflight_messages,
         .retain_available = config.retain_available,
         .allow_zero_length_client_id = config.allow_zero_length_client_id,
     };
@@ -155,6 +156,9 @@ pub fn run(
         .queue_qos0_messages = config.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
         .access_control = source_access_control,
+        .session = .{
+            .max_inflight_per_session = max_inflight_messages,
+        },
         .persistent_change_autosave = if (config.persistence and
             config.autosave_on_changes) .{
             .dir = std.Io.Dir.cwd(),

@@ -787,7 +787,9 @@ Current protocol coverage includes:
   deny precedence and `%u`/`%c` patterns, global
   full-packet and Application Message payload limits, global retained-message
   availability with MQTT 5 capability advertisement and version-correct
-  rejection, and opt-in Mosquitto-compatible outgoing QoS upgrades across live,
+  rejection, a Mosquitto-compatible global per-client QoS 1/2 inflight limit
+  enforced in both directions with MQTT 5 Receive Maximum advertisement, and
+  opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and
   performs version-correct property/ACK downgrades, including securely
