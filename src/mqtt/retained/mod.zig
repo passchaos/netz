@@ -48,10 +48,12 @@ pub const Match = struct {
     qos: mqtt.QoS,
     properties: []const mqtt.Property,
     publisher_id: ?ClientId,
-    /// Client Identifier of the original retained publisher. Unlike
-    /// `publisher_id`, this identity remains meaningful after its Session is
-    /// removed and can therefore be re-authorized at replay time.
+    /// Identity of the original retained publisher. Unlike `publisher_id`,
+    /// these values remain meaningful after its Session is removed and can
+    /// therefore be re-authorized at replay time.
     source_client_id: ?[]const u8,
+    source_username: ?[]const u8 = null,
+    source_listener_id: ?u64 = null,
     /// Remaining MQTT 5 Message Expiry Interval at this lookup instant.
     message_expiry_interval: ?u32,
 };
@@ -64,6 +66,8 @@ pub const Delivery = struct {
     retain: bool,
     properties: []const mqtt.Property,
     source_client_id: ?[]const u8,
+    source_username: ?[]const u8 = null,
+    source_listener_id: ?u64 = null,
     subscription_identifier: ?usize,
     /// Remaining MQTT 5 Message Expiry Interval at this delivery instant.
     /// Encoders can replace the stored property value with this value.
@@ -129,6 +133,8 @@ const Entry = struct {
     properties: []mqtt.Property,
     publisher_id: ?ClientId,
     source_client_id: ?[]u8,
+    source_username: ?[]u8,
+    source_listener_id: ?u64,
     stored_at_ns: i96,
     expiry_interval: ?u32,
     allocation_bytes: usize,
@@ -136,6 +142,7 @@ const Entry = struct {
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         owned_properties.deinit(allocator, self.properties);
         if (self.source_client_id) |value| allocator.free(value);
+        if (self.source_username) |value| allocator.free(value);
         allocator.free(self.payload);
         allocator.free(self.topic);
         self.* = undefined;
@@ -225,6 +232,24 @@ pub const Store = struct {
                     source_client_id,
                 );
             }
+            try persistence.appendBool(
+                out,
+                allocator,
+                entry.source_username != null,
+            );
+            if (entry.source_username) |source_username| {
+                try persistence.appendBlob(
+                    out,
+                    allocator,
+                    source_username,
+                );
+            }
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                entry.source_listener_id,
+            );
             try persistence.appendOptionalInt(
                 out,
                 allocator,
@@ -260,6 +285,11 @@ pub const Store = struct {
                 try cursor.readBlob()
             else
                 null;
+            const source_username = if (try cursor.readBool())
+                try cursor.readBlob()
+            else
+                null;
+            const source_listener_id = try cursor.readOptionalInt(u64);
             const saved_remaining_ns = try cursor.readOptionalInt(u64);
             const properties = try cursor.readProperties(self.allocator);
             defer self.allocator.free(properties);
@@ -286,6 +316,8 @@ pub const Store = struct {
                     .properties = properties,
                     .publisher_id = publisher_id,
                     .source_client_id = source_client_id,
+                    .source_username = source_username,
+                    .source_listener_id = source_listener_id,
                     .now = restore_now,
                 },
             );
@@ -326,12 +358,28 @@ pub const Store = struct {
             properties: []const mqtt.Property = &.{},
             publisher_id: ?ClientId = null,
             source_client_id: ?[]const u8 = null,
+            source_username: ?[]const u8 = null,
+            source_listener_id: ?u64 = null,
             now: std.Io.Timestamp,
         },
     ) Error!StoreResult {
         try mqtt.validateTopicName(topic);
         if (!options.retain) return .ignored;
         try mqtt.validatePublishProperties(options.properties);
+        if (options.source_client_id == null and
+            (options.source_username != null or
+                options.source_listener_id != null))
+        {
+            return error.InvalidProperty;
+        }
+        if (options.source_client_id) |client_id| {
+            if (client_id.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+            try mqtt.validateUtf8String(client_id);
+        }
+        if (options.source_username) |username| {
+            if (username.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+            try mqtt.validateUtf8String(username);
+        }
         if (mqtt.subscriptionIdentifier(options.properties) != null) {
             // MQTT 5 forbids a Client-to-Server PUBLISH from carrying this
             // server-generated delivery property.
@@ -354,6 +402,8 @@ pub const Store = struct {
             options.properties,
             options.publisher_id,
             options.source_client_id,
+            options.source_username,
+            options.source_listener_id,
             options.now.nanoseconds,
         );
         errdefer new_entry.deinit(self.allocator);
@@ -426,6 +476,25 @@ pub const Store = struct {
         source_client_id: ?[]const u8,
         now: std.Io.Timestamp,
     ) Error!StoreResult {
+        return self.applyParsedPublishWithSource(
+            publish,
+            publisher_id,
+            source_client_id,
+            null,
+            null,
+            now,
+        );
+    }
+
+    pub fn applyParsedPublishWithSource(
+        self: *Store,
+        publish: mqtt.Publish,
+        publisher_id: ?ClientId,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+    ) Error!StoreResult {
         return self.applyPublish(
             publish.topic,
             publish.payload,
@@ -435,6 +504,8 @@ pub const Store = struct {
                 .properties = publish.properties,
                 .publisher_id = publisher_id,
                 .source_client_id = source_client_id,
+                .source_username = source_username,
+                .source_listener_id = source_listener_id,
                 .now = now,
             },
         );
@@ -708,6 +779,8 @@ fn cloneEntry(
     properties: []const mqtt.Property,
     publisher_id: ?ClientId,
     source_client_id: ?[]const u8,
+    source_username: ?[]const u8,
+    source_listener_id: ?u64,
     now_ns: i96,
 ) Error!Entry {
     const topic_owned = try allocator.dupe(u8, topic);
@@ -719,6 +792,11 @@ fn cloneEntry(
     else
         null;
     errdefer if (source_client_id_owned) |value| allocator.free(value);
+    const source_username_owned = if (source_username) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (source_username_owned) |value| allocator.free(value);
     const property_result = owned_properties.clone(
         allocator,
         properties,
@@ -734,7 +812,8 @@ fn cloneEntry(
     const allocation_bytes = std.math.add(
         usize,
         topic_owned.len + payload_owned.len +
-            if (source_client_id_owned) |value| value.len else 0,
+            (if (source_client_id_owned) |value| value.len else 0) +
+            (if (source_username_owned) |value| value.len else 0),
         property_result.allocation_bytes,
     ) catch return error.RetainedLimitExceeded;
     return .{
@@ -744,6 +823,8 @@ fn cloneEntry(
         .properties = property_result.properties,
         .publisher_id = publisher_id,
         .source_client_id = source_client_id_owned,
+        .source_username = source_username_owned,
+        .source_listener_id = source_listener_id,
         .stored_at_ns = now_ns,
         .expiry_interval = mqtt.messageExpiryInterval(properties),
         .allocation_bytes = allocation_bytes,
@@ -799,6 +880,8 @@ fn matchForEntry(entry: Entry, remaining: ?u32) Match {
         .properties = entry.properties,
         .publisher_id = entry.publisher_id,
         .source_client_id = entry.source_client_id,
+        .source_username = entry.source_username,
+        .source_listener_id = entry.source_listener_id,
         .message_expiry_interval = remaining,
     };
 }
@@ -823,6 +906,8 @@ fn deliveryForEntry(
         .retain = true,
         .properties = entry.properties,
         .source_client_id = entry.source_client_id,
+        .source_username = entry.source_username,
+        .source_listener_id = entry.source_listener_id,
         .subscription_identifier = subscription_identifier,
         .message_expiry_interval = remaining,
     };

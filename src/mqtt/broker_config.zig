@@ -66,6 +66,7 @@ pub const Config = struct {
     max_packet_size: usize = default_max_packet_size,
     message_size_limit: usize = 0,
     retain_available: bool = true,
+    check_retain_source: bool = true,
     allow_zero_length_client_id: bool = true,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
@@ -163,6 +164,7 @@ const GlobalSeen = struct {
     max_packet_size: bool = false,
     message_size_limit: bool = false,
     retain_available: bool = false,
+    check_retain_source: bool = false,
     allow_zero_length_client_id: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
@@ -311,6 +313,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "retain_available")) {
                 try markOnce(&global_seen.retain_available);
                 config.retain_available = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "check_retain_source")) {
+                try markOnce(&global_seen.check_retain_source);
+                config.check_retain_source = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "persistence")) {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
@@ -563,6 +568,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_packet_size 2000000
         \\message_size_limit 1048576
         \\retain_available false
+        \\check_retain_source false
         \\allow_zero_length_clientid false
         \\password_file users.pw
         \\acl_file access.acl
@@ -596,6 +602,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
     try std.testing.expect(!config.retain_available);
+    try std.testing.expect(!config.check_retain_source);
     try std.testing.expect(!config.allow_zero_length_client_id);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
@@ -712,12 +719,35 @@ test "MQTT broker config scopes zero-length Client ID policy" {
     try std.testing.expectError(
         error.DuplicateDirective,
         parse(allocator,
+            \\check_retain_source true
+            \\check_retain_source false
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
             \\upgrade_outgoing_qos true
             \\upgrade_outgoing_qos false
             \\listener 1883
             \\allow_anonymous true
         ),
     );
+}
+
+test "MQTT broker config keeps retained source policy global" {
+    var config = try parse(std.testing.allocator,
+        \\per_listener_settings true
+        \\listener 1883
+        \\allow_anonymous true
+        \\check_retain_source false
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expect(!config.check_retain_source);
+    try std.testing.expectEqual(@as(usize, 2), config.listeners.len);
 }
 
 test "MQTT broker config loads include directories in Mosquitto order" {
@@ -1180,6 +1210,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator, "listener 1883\nallow_anonymous yes"),
     );
     try std.testing.expectError(
+        error.InvalidBoolean,
+        parse(allocator,
+            \\check_retain_source maybe
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
         error.InvalidInteger,
         parse(allocator, "listener 1883\nmax_qos 3"),
     );
@@ -1304,6 +1342,7 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     try std.testing.expectEqual(default_max_packet_size, config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 0), config.message_size_limit);
     try std.testing.expect(config.retain_available);
+    try std.testing.expect(config.check_retain_source);
     try std.testing.expect(!config.upgrade_outgoing_qos);
     try std.testing.expect(config.allow_zero_length_client_id);
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);

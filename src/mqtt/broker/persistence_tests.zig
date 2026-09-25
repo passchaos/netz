@@ -740,6 +740,8 @@ test "MQTT broker snapshot restores retained and durable Session state" {
             .retain = true,
             .qos = .at_least_once,
             .source_client_id = "persist-retained-writer",
+            .source_username = "writer",
+            .source_listener_id = 1883,
             .now = now,
         },
     );
@@ -770,6 +772,14 @@ test "MQTT broker snapshot restores retained and durable Session state" {
     try std.testing.expectEqualStrings(
         "persist-retained-writer",
         matches[0].source_client_id.?,
+    );
+    try std.testing.expectEqualStrings(
+        "writer",
+        matches[0].source_username.?,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 1883),
+        matches[0].source_listener_id,
     );
 
     const handle = restored.sessions.find(
@@ -828,6 +838,48 @@ test "MQTT broker snapshot corruption preserves current state" {
         .limited(1024 * 1024),
     );
     defer allocator.free(bytes);
+    const version_offset = "netz-mqtt-db\x00\x01".len;
+    try std.testing.expectEqual(
+        @as(u32, 7),
+        std.mem.readInt(
+            u32,
+            bytes[version_offset..][0..@sizeOf(u32)],
+            .big,
+        ),
+    );
+    std.mem.writeInt(
+        u32,
+        bytes[version_offset..][0..@sizeOf(u32)],
+        6,
+        .big,
+    );
+    std.mem.writeInt(
+        u32,
+        bytes[bytes.len - @sizeOf(u32) ..][0..@sizeOf(u32)],
+        std.hash.crc.Crc32.hash(bytes[0 .. bytes.len - @sizeOf(u32)]),
+        .big,
+    );
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "broker.db",
+        .data = bytes,
+        .flags = .{ .truncate = true },
+    });
+    try std.testing.expectError(
+        error.UnsupportedSnapshotVersion,
+        broker.restoreSnapshot(tmp.dir, "broker.db"),
+    );
+    std.mem.writeInt(
+        u32,
+        bytes[version_offset..][0..@sizeOf(u32)],
+        7,
+        .big,
+    );
+    std.mem.writeInt(
+        u32,
+        bytes[bytes.len - @sizeOf(u32) ..][0..@sizeOf(u32)],
+        std.hash.crc.Crc32.hash(bytes[0 .. bytes.len - @sizeOf(u32)]),
+        .big,
+    );
     bytes[bytes.len - 1] ^= 0xff;
     try tmp.dir.writeFile(io, .{
         .sub_path = "broker.db",
@@ -1370,9 +1422,11 @@ test "MQTT live snapshot checkpoints connected durable state" {
     try std.testing.expectEqual(@as(usize, 1), transmissions.len);
     const packet_id = transmissions[0].publish.packet_id;
 
-    const will_handle = try source.wills.set(
+    const will_handle = try source.wills.setWithSource(
         "live-checkpoint",
         delayedWill(10, true),
+        "will-writer",
+        8883,
         60,
     );
     try source.will_publishers.put(
@@ -1455,9 +1509,11 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
     const saved_realtime = std.Io.Timestamp.fromNanoseconds(
         1_000 * std.time.ns_per_s,
     );
-    const handle = try wills.set(
+    const handle = try wills.setWithSource(
         "live-will-source",
         delayedWill(10, true),
+        "will-writer",
+        8883,
         60,
     );
     try publishers.put(allocator, handle, 91);
@@ -1508,6 +1564,17 @@ test "MQTT live snapshot Will delay deducts deterministic downtime" {
         before_due.will_publishers.get(
             before_due.wills.handleForClient("live-will-source").?,
         ).?,
+    );
+    const restored_will = try before_due.wills.view(
+        before_due.wills.handleForClient("live-will-source").?,
+    );
+    try std.testing.expectEqualStrings(
+        "will-writer",
+        restored_will.source_username.?,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 8883),
+        restored_will.source_listener_id,
     );
 
     var overdue = try mqtt.persistence.decode(

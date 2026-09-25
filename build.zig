@@ -324,6 +324,20 @@ pub fn build(b: *std.Build) void {
     const run_websocket_send_shape_tests = b.addRunArtifact(
         websocket_send_shape_tests,
     );
+    const mqtt_source_acl_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "examples/support/mqtt_source_acl.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_mqtt_source_acl_tests = b.addRunArtifact(
+        mqtt_source_acl_tests,
+    );
     const webtransport_wtransport_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -451,6 +465,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_websocket_h3_quic_go_bench_tests.step);
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
+    test_step.dependOn(&run_mqtt_source_acl_tests.step);
     test_step.dependOn(&run_webtransport_wtransport_bench_tests.step);
     test_step.dependOn(&run_webtransport_churn_protocol_tests.step);
     test_step.dependOn(&websocket_slices_benchmark_checker_tests.step);

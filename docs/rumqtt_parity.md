@@ -24,7 +24,7 @@ and equal-wire broker results are kept separate.
 | Broker configuration | Public `mqtt.broker_config` parses and deep-owns a strict Mosquitto-style subset for TCP/TLS/WebSocket/WSS listeners, bounded ordered main-file `include_dir` expansion, listener-local P-256/P-384/Ed25519 PEM `certfile`/`keyfile`, optional or required client certificates through strict `cafile` and bounded TCP/TLS `capath` trust sources plus `require_certificate`, P-256 ECDSA or 1024-4096-bit RSA PKCS#1 v1.5 SHA-256 `crlfile`, verified certificate-CN and OpenSSL-compatible RFC 2253 full-Subject usernames through `use_identity_as_username`/`use_subject_as_username`, mount points, anonymous and zero-length Client ID policy, Maximum QoS/Keep Alive, username-derived Client IDs, connection bounds, offline QoS 0, global outgoing QoS upgrade policy, global or `per_listener_settings`-isolated password/ACL/zero-length-ID settings, and snapshot/autosave settings. All config and security files, server identities, CA bundles/directories and CRLs are validated before any listener is opened. Public `mqtt.password_file` validates and verifies Mosquitto Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, rejects plaintext/malformed/duplicate/unreasonably expensive input before listening, uses constant-time hash comparison, and serializes KDF work to bound concurrent Argon2 memory. Public `mqtt.acl_file` implements anonymous/user topic rules, global `%u`/`%c` patterns, read/write/readwrite access, default deny and deny precedence. The production example's exclusive `--config=PATH` mode creates all listeners over one shared Broker and enforces each transport/authentication/ACL policy | Mosquitto supports a substantially broader configuration language, reload, encrypted/RSA server keys, Ed25519/indirect/delta CRLs, plugins, bridges, persistence, and many additional listener/global controls; rumqttd uses its own structured configuration |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route and durable commit before PUBACK; a self-matched PUBLISH is written first on the shared connection, while unrelated slow subscribers cannot delay PUBACK; MQTT 5 reason `0x10` when no subscription matches | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
-| Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers. Original Client ID provenance is deep-owned and persisted so replay can recheck the publisher's current write authorization; this Mosquitto-compatible check is enabled by default and explicitly configurable | Both production brokers integrate retained delivery; Mosquitto defaults `check_retain_source` on to prevent revoked publishers' stored messages from replaying |
+| Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers. Original effective Client ID, username, and stable source-listener identity are deep-owned and persisted so replay can recheck the publisher's current global or per-listener write authorization; Mosquitto-compatible `check_retain_source` defaults on and can be disabled explicitly | Both production brokers integrate retained delivery; Mosquitto defaults `check_retain_source` on to prevent revoked publishers' stored messages from replaying and persists source ID, username, and listener port |
 | Broker sessions | Live Session Present/Clean Start/Expiry/takeover, including an active deadline task that atomically retires idle expired Sessions from routing and inbound QoS 2 state without waiting for later client traffic; pre-registration CONNECT authorization with transport source, PROXY metadata and verified peer chains, pre-mutation PUBLISH/SUBSCRIBE/UNSUBSCRIBE access control, per-recipient delivery authorization before live/retained/offline queue mutation plus reconnect-time rechecks, unique assigned identifiers with an allow/deny policy for zero-length Client IDs, persistent subscriptions, offline QoS 1/2 queues and reconnect retransmission, plus Mosquitto-compatible opt-in offline QoS 0 queueing. SUBSCRIBE capacity is enforced per filter: MQTT 5 now returns `0x97` and MQTT 3.1.1 `0x80` only for over-limit new filters while same-packet authorized filters still succeed, existing filters still replace in place at capacity, and ACL-denied filters keep their distinct failure reason. | rumqttd graveyard/datalog and Mosquitto persisted sessions are integrated; Mosquitto exposes `allow_zero_length_clientid`, password files, certificate identity/subject usernames, distinct read/write/subscribe/unsubscribe ACLs and `queue_qos0_messages` |
 | Will lifecycle | Indexed scheduler integrated into live Broker: abnormal close, DISCONNECT 0x04, Delay/Session Expiry, reconnect cancellation, retained Will, and publication-time write authorization | Both production brokers integrate Will publication; Mosquitto rechecks its write ACL when the Will becomes due |
 | Keep Alive | Broker enforces the negotiated 1.5x inbound inactivity deadline with exact half-second precision, zero-disable semantics and Will/Session cleanup; optional maximum accepts MQTT 5 with Server Keep Alive replacement and refuses over-limit/zero MQTT 3.1.1 CONNECTs | Mosquitto uses a broker-wide deadline ring and disconnects clients that exceed Keep Alive x 1.5; `max_keepalive` has the same version-specific negotiation/refusal behavior |
@@ -358,24 +358,28 @@ than hand-written temporary-name logic.
 The versioned binary format has whole-file and per-section CRC32 checks and
 persists:
 
-- unexpired retained messages, forwarding properties and publisher identity,
+- unexpired retained messages, forwarding properties, publisher identity,
+  source username, and stable source-listener identity,
 - durable ClientID Session metadata and stable router identity,
 - complete subscription options and Subscription Identifier,
 - offline queued QoS 1/2 messages and opt-in queued QoS 0 messages,
 - outgoing inflight QoS 1/2 state, Packet Identifier and PUBREL continuation,
-- scheduled Wills with ClientID, full Application Message properties, canonical
-  publisher identity and exact remaining delay,
-- inbound QoS 2 Application Message bodies awaiting PUBREL, keyed by stable
-  Session route identity rather than a short-lived connection slot,
+- scheduled Wills with ClientID, source username/listener identity, full
+  Application Message properties, canonical publisher identity and exact
+  remaining delay,
+- inbound QoS 2 Application Message bodies and source identity awaiting PUBREL,
+  keyed by stable Session route identity rather than a short-lived connection
+  slot,
 - staged inbound bridge QoS 2 messages and released tombstones, keyed by a
   stable bridge identity, upstream Session epoch, and Packet Identifier.
 
 Adding the bridge transaction section advanced the on-disk snapshot version
 from 4 to 5; persisting the bridge Session epoch independently of active
 transactions advances it to 6. Restore deliberately rejects older versions
-rather than guessing at absent transaction state; deployments carrying a
-version-4/5 snapshot or commit log must migrate or start from a fresh state
-file before upgrading.
+rather than guessing at absent transaction state. Persisting the complete
+retained-source ACL identity advances it to 7 for the same fail-closed reason;
+deployments carrying a version-4/5/6 snapshot or commit log must migrate or
+start from a fresh state file before upgrading.
 
 `Broker.saveSnapshot` is a quiescent shutdown/admin operation: it holds the
 broker state lock and rejects live clients, pending broker QoS 2 transactions

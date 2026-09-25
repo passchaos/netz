@@ -26,6 +26,12 @@ pub const Pending = struct {
     bytes: []u8,
     topic_len: usize,
     retain: bool,
+    /// Retained-source identity captured from the first PUBLISH. The strings
+    /// are MQTT u16-bounded and the Store's transaction count bounds their
+    /// aggregate memory even if a peer stalls before PUBREL.
+    source_client_id: ?[]u8,
+    source_username: ?[]u8,
+    source_listener_id: ?u64,
     properties: []mqtt.Property,
     stored_at_ns: i96,
     expiry_interval: ?u32,
@@ -35,6 +41,30 @@ pub const Pending = struct {
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
     ) Error!Pending {
+        return createWithSource(allocator, publish, null, null, null, now);
+    }
+
+    pub fn createWithSource(
+        allocator: std.mem.Allocator,
+        publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+    ) Error!Pending {
+        if (source_client_id == null and
+            (source_username != null or source_listener_id != null))
+        {
+            return error.InvalidProperty;
+        }
+        if (source_client_id) |value| {
+            if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+            try mqtt.validateUtf8String(value);
+        }
+        if (source_username) |value| {
+            if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+            try mqtt.validateUtf8String(value);
+        }
         const bytes_len = std.math.add(
             usize,
             publish.topic.len,
@@ -44,6 +74,16 @@ pub const Pending = struct {
         errdefer allocator.free(bytes);
         @memcpy(bytes[0..publish.topic.len], publish.topic);
         @memcpy(bytes[publish.topic.len..], publish.payload);
+        const source_client_id_owned = if (source_client_id) |value|
+            try allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (source_client_id_owned) |value| allocator.free(value);
+        const source_username_owned = if (source_username) |value|
+            try allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (source_username_owned) |value| allocator.free(value);
         const property_result = owned_properties.clone(
             allocator,
             publish.properties,
@@ -57,6 +97,9 @@ pub const Pending = struct {
             .bytes = bytes,
             .topic_len = publish.topic.len,
             .retain = publish.retain,
+            .source_client_id = source_client_id_owned,
+            .source_username = source_username_owned,
+            .source_listener_id = source_listener_id,
             .properties = property_result.properties,
             .stored_at_ns = now.nanoseconds,
             .expiry_interval = mqtt.messageExpiryInterval(
@@ -67,6 +110,8 @@ pub const Pending = struct {
 
     pub fn deinit(self: *Pending) void {
         owned_properties.deinit(self.allocator, self.properties);
+        if (self.source_username) |value| self.allocator.free(value);
+        if (self.source_client_id) |value| self.allocator.free(value);
         self.allocator.free(self.bytes);
         self.* = undefined;
     }
@@ -158,6 +203,25 @@ pub const Store = struct {
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
     ) !bool {
+        return self.recordWithSource(
+            publisher_id,
+            publish,
+            null,
+            null,
+            null,
+            now,
+        );
+    }
+
+    pub fn recordWithSource(
+        self: *Store,
+        publisher_id: router.SubscriberId,
+        publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+    ) !bool {
         const packet_id = publish.packet_id orelse
             return error.InvalidPacketIdentifier;
         const key = Key{
@@ -168,9 +232,12 @@ pub const Store = struct {
         if (self.entries.count() >= self.maximum) {
             return error.ReceiveMaximumExceeded;
         }
-        const pending = try Pending.create(
+        const pending = try Pending.createWithSource(
             self.allocator,
             publish,
+            source_client_id,
+            source_username,
+            source_listener_id,
             now,
         );
         self.entries.putAssumeCapacityNoClobber(key, pending);
@@ -314,6 +381,28 @@ pub const Store = struct {
                 pending.bytes[pending.topic_len..],
             );
             try persistence.appendBool(out, allocator, pending.retain);
+            try persistence.appendBool(
+                out,
+                allocator,
+                pending.source_client_id != null,
+            );
+            if (pending.source_client_id) |value| {
+                try persistence.appendBlob(out, allocator, value);
+            }
+            try persistence.appendBool(
+                out,
+                allocator,
+                pending.source_username != null,
+            );
+            if (pending.source_username) |value| {
+                try persistence.appendBlob(out, allocator, value);
+            }
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                pending.source_listener_id,
+            );
             try persistence.appendOptionalInt(
                 out,
                 allocator,
@@ -346,6 +435,15 @@ pub const Store = struct {
             const topic = try cursor.readBlob();
             const payload = try cursor.readBlob();
             const retain = try cursor.readBool();
+            const source_client_id = if (try cursor.readBool())
+                try cursor.readBlob()
+            else
+                null;
+            const source_username = if (try cursor.readBool())
+                try cursor.readBlob()
+            else
+                null;
+            const source_listener_id = try cursor.readOptionalInt(u64);
             const saved_remaining_ns = try cursor.readOptionalInt(u64);
             const properties = try cursor.readProperties(self.allocator);
             defer self.allocator.free(properties);
@@ -374,7 +472,14 @@ pub const Store = struct {
                 .properties = properties,
                 .payload = payload,
             };
-            _ = try self.record(publisher_id, publish, restore_now);
+            _ = try self.recordWithSource(
+                publisher_id,
+                publish,
+                source_client_id,
+                source_username,
+                source_listener_id,
+                restore_now,
+            );
             if (remaining_ns) |remaining| {
                 const stored = self.entries.getPtr(.{
                     .publisher_id = publisher_id,
@@ -458,6 +563,8 @@ test "QoS 2 store owns bytes and preserves the first duplicate PUBLISH" {
 
     var topic = [_]u8{ 'q', '/', '2' };
     var payload = [_]u8{ 'o', 'n', 'e' };
+    var source_client_id = [_]u8{ 'c', 'l', 'i', 'e', 'n', 't' };
+    var source_username = [_]u8{ 'u', 's', 'e', 'r' };
     const publish = mqtt.Publish{
         .dup = false,
         .qos = .exactly_once,
@@ -466,13 +573,18 @@ test "QoS 2 store owns bytes and preserves the first duplicate PUBLISH" {
         .packet_id = 7,
         .payload = &payload,
     };
-    try std.testing.expect(try store.record(
+    try std.testing.expect(try store.recordWithSource(
         10,
         publish,
+        &source_client_id,
+        &source_username,
+        1883,
         std.Io.Timestamp.zero,
     ));
     @memset(&topic, 'x');
     @memset(&payload, 'x');
+    @memset(&source_client_id, 'x');
+    @memset(&source_username, 'x');
 
     var retry = publish;
     retry.dup = true;
@@ -515,6 +627,12 @@ test "QoS 2 store owns bytes and preserves the first duplicate PUBLISH" {
     try std.testing.expectEqualStrings("q/2", restored.topic);
     try std.testing.expectEqualStrings("one", restored.payload);
     try std.testing.expect(restored.retain);
+    try std.testing.expectEqualStrings(
+        "client",
+        pending.source_client_id.?,
+    );
+    try std.testing.expectEqualStrings("user", pending.source_username.?);
+    try std.testing.expectEqual(@as(?u64, 1883), pending.source_listener_id);
 }
 
 test "QoS 2 snapshot deducts downtime expiry" {
@@ -570,4 +688,64 @@ test "QoS 2 snapshot deducts downtime expiry" {
     );
     try cursor.finish();
     try std.testing.expectEqual(@as(usize, 0), restored.count());
+}
+
+test "QoS 2 snapshot preserves retained source identity" {
+    const allocator = std.testing.allocator;
+    const publisher_id: router.SubscriberId =
+        (@as(u64, 1) << 63) | 11;
+    var store = try Store.init(allocator, 1);
+    defer store.deinit();
+    _ = try store.recordWithSource(
+        publisher_id,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = true,
+            .topic = "qos2/source",
+            .packet_id = 9,
+            .payload = "value",
+        },
+        "publisher",
+        "writer",
+        1883,
+        .zero,
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try store.writeSnapshot(
+        &encoded,
+        allocator,
+        .zero,
+        {},
+        struct {
+            fn exists(_: void, _: router.SubscriberId) bool {
+                return true;
+            }
+        }.exists,
+    );
+
+    var restored = try Store.init(allocator, 1);
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(
+        &cursor,
+        .zero,
+        0,
+        {},
+        struct {
+            fn exists(_: void, _: router.SubscriberId) bool {
+                return true;
+            }
+        }.exists,
+    );
+    try cursor.finish();
+    var pending = restored.take(publisher_id, 9).?;
+    defer pending.deinit();
+    try std.testing.expectEqualStrings(
+        "publisher",
+        pending.source_client_id.?,
+    );
+    try std.testing.expectEqualStrings("writer", pending.source_username.?);
+    try std.testing.expectEqual(@as(?u64, 1883), pending.source_listener_id);
 }

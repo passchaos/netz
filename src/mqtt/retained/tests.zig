@@ -364,12 +364,16 @@ test "retained store owns and exposes source client identity" {
     var store = Store.init(allocator, .{});
     defer store.deinit();
     var source = [_]u8{ 'w', 'r', 'i', 't', 'e', 'r' };
+    var username = [_]u8{ 'a', 'l', 'i', 'c', 'e' };
     _ = try store.applyPublish("source/state", "value", .{
         .retain = true,
         .source_client_id = &source,
+        .source_username = &username,
+        .source_listener_id = 1883,
         .now = .zero,
     });
     source[0] = 'X';
+    username[0] = 'X';
 
     var matches: [1]Match = undefined;
     const matched = try store.matchInto(
@@ -381,6 +385,11 @@ test "retained store owns and exposes source client identity" {
         "writer",
         matched[0].source_client_id.?,
     );
+    try std.testing.expectEqualStrings(
+        "alice",
+        matched[0].source_username.?,
+    );
+    try std.testing.expectEqual(@as(?u64, 1883), matched[0].source_listener_id);
     var deliveries: [1]Delivery = undefined;
     const replay = try store.deliveriesInto(
         .{ .topic_filter = "source/#" },
@@ -392,9 +401,35 @@ test "retained store owns and exposes source client identity" {
         "writer",
         replay[0].source_client_id.?,
     );
+    try std.testing.expectEqualStrings(
+        "alice",
+        replay[0].source_username.?,
+    );
+    try std.testing.expectEqual(@as(?u64, 1883), replay[0].source_listener_id);
     try std.testing.expectEqual(
         mqtt.QoS.at_most_once,
         replay[0].source_qos,
+    );
+}
+
+test "retained store rejects source context without a client identity" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        store.applyPublish("source/invalid", "value", .{
+            .retain = true,
+            .source_username = "alice",
+            .now = .zero,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        store.applyPublish("source/invalid", "value", .{
+            .retain = true,
+            .source_listener_id = 1883,
+            .now = .zero,
+        }),
     );
 }
 
@@ -583,6 +618,9 @@ fn testRetainedAllocationFailures(
                 .value = "value",
             } },
         },
+        .source_client_id = "allocated-client",
+        .source_username = "allocated-user",
+        .source_listener_id = 1883,
         .now = std.Io.Timestamp.zero,
     });
 }

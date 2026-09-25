@@ -16,7 +16,7 @@ pub const codec = @import("codec.zig");
 pub const commit_log = @import("commit_log.zig");
 
 const magic = "netz-mqtt-db\x00\x01";
-const version: u32 = 6;
+const version: u32 = 7;
 const max_section_bytes: usize = 1024 * 1024 * 1024;
 pub const max_snapshot_bytes: usize = 5 *| max_section_bytes +| 224;
 

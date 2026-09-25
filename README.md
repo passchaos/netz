@@ -788,7 +788,8 @@ Current protocol coverage includes:
   full-packet and Application Message payload limits, global retained-message
   availability with MQTT 5 capability advertisement and version-correct
   rejection, and opt-in Mosquitto-compatible outgoing QoS upgrades across live,
-  retained and durable delivery, and
+  retained and durable delivery, plus default-on retained-source ACL rechecks
+  with persisted Client ID, username and source-listener identity, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, generation-safe duplicate-ClientID takeover that

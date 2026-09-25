@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const netz = @import("netz");
+const source_acl = @import("support/mqtt_source_acl.zig");
 
 const mqtt = netz.mqtt;
 
@@ -120,6 +121,23 @@ pub fn run(
             );
         }
     }
+    var source_acl_policy = source_acl.Policy{
+        .per_listener_settings = config.per_listener_settings,
+        .listeners = config.listeners,
+        .acl_files = acl_files,
+    };
+    const source_access_control: ?mqtt.broker.AccessControlHandler = blk: {
+        for (acl_files) |maybe_file| {
+            if (maybe_file != null) break :blk .{
+                .context = &source_acl_policy,
+                .authorize_publish = source_acl.Policy.authorizePublish,
+                .authorize_subscribe = source_acl.Policy.authorizeSubscribe,
+                .authorize_will = source_acl.Policy.authorizeWill,
+                .authorize_retained_source = source_acl.Policy.authorizeRetainedSource,
+            };
+        }
+        break :blk null;
+    };
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -135,6 +153,8 @@ pub fn run(
         .accept = base_accept,
         .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
         .queue_qos0_messages = config.queue_qos0_messages,
+        .check_retain_source = config.check_retain_source,
+        .access_control = source_access_control,
         .persistent_change_autosave = if (config.persistence and
             config.autosave_on_changes) .{
             .dir = std.Io.Dir.cwd(),
@@ -369,6 +389,7 @@ pub fn run(
                 .use_username_as_client_id = configured.use_username_as_client_id,
                 .use_identity_as_username = configured.use_identity_as_username,
                 .use_subject_as_username = configured.use_subject_as_username,
+                .retained_source_id = configured.address.getPort(),
             },
             .connection_count = configured.max_connections,
         };

@@ -224,6 +224,10 @@ pub const ListenerAuthorization = struct {
     /// 2253 Subject as the MQTT username. The CN-only policy takes precedence
     /// when both options are enabled, matching Mosquitto.
     use_subject_as_username: bool = false,
+    /// Stable caller-defined identity persisted with retained publications so
+    /// replay-time source authorization can select the originating listener's
+    /// policy. Mosquitto's configuration adapter uses the listener port.
+    retained_source_id: ?u64 = null,
 };
 
 /// Per-listener packet policy. Every callback is optional because this is an
@@ -314,6 +318,8 @@ pub const DeliveryAuthorization = struct {
 /// so a policy update during Will Delay can suppress publication.
 pub const WillAuthorization = struct {
     client_id: []const u8,
+    username: ?[]const u8 = null,
+    listener_id: ?u64 = null,
     topic: []const u8,
     payload: []const u8,
     qos: mqtt.QoS,
@@ -322,10 +328,13 @@ pub const WillAuthorization = struct {
 };
 
 /// Original retained publisher and Application Message metadata for replay-
-/// time write authorization. The Client Identifier is owned by retained state
-/// and remains available after disconnect, Session expiry, and snapshot load.
+/// time write authorization. Identity strings and the caller-defined listener
+/// ID are owned by retained state and remain available after disconnect,
+/// Session expiry, and snapshot load.
 pub const RetainedSourceAuthorization = struct {
     client_id: []const u8,
+    username: ?[]const u8 = null,
+    listener_id: ?u64 = null,
     topic: []const u8,
     payload: []const u8,
     qos: mqtt.QoS,
@@ -478,6 +487,7 @@ const ClientSlot = struct {
     /// Borrowed from the active listener descriptor. It is cleared before the
     /// slot can be reused and is never persisted with a durable Session.
     listener_access_control: ?ListenerAccessControlHandler = null,
+    retained_source_id: ?u64 = null,
     /// Borrowed from `ClientTask.connect` while this slot is active.
     username: ?[]const u8 = null,
     writer_mutex: std.Io.Mutex = .init,
@@ -1246,6 +1256,8 @@ pub const Broker = struct {
             null,
             publish,
             null,
+            null,
+            null,
             std.Io.Clock.awake.now(self.io),
             &persistent_changed,
             null,
@@ -1372,6 +1384,8 @@ pub const Broker = struct {
         const plan = self.enqueuePublishLocked(
             null,
             publish,
+            null,
+            null,
             null,
             release_now,
             &persistent_changed,
@@ -1600,6 +1614,8 @@ pub const Broker = struct {
                     .properties = &.{},
                     .payload = payload,
                 },
+                null,
+                null,
                 null,
                 std.Io.Clock.awake.now(self.io),
                 null,
@@ -2707,6 +2723,7 @@ pub const Broker = struct {
             index,
             effective_connect,
             listener_authorization.access_control,
+            listener_authorization.retained_source_id,
             &registration_progress,
         ) catch |err| {
             // Registration can delete durable state before a later allocation
@@ -2724,15 +2741,17 @@ pub const Broker = struct {
             mapped.deinit();
             mapped_will = null;
         }
-        // OwnedConnect keeps all original packet storage alive; changing this
-        // borrowed view makes downstream ACLs and Will cleanup observe the
-        // same effective identity used for Session registration.
-        pending.connect.connect.client_id = effective_connect.client_id;
         accept_options.session_present = self.slots[index].session_present;
         if (self.slots[index].assigned_client_id_len != 0) {
-            accept_options.assigned_client_identifier =
-                self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
+            const assigned_client_id = self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
+            effective_connect.client_id = assigned_client_id;
+            accept_options.assigned_client_identifier = assigned_client_id;
         }
+        // OwnedConnect keeps all original packet storage alive; changing this
+        // borrowed view makes downstream ACLs, retained-source tracking, and
+        // Will cleanup observe the same effective identity used for Session
+        // registration. Assigned IDs borrow stable storage from this slot.
+        pending.connect.connect.client_id = effective_connect.client_id;
         self.appendProvisionalCommitIfEnabled() catch |err| {
             self.abortRegistration(
                 index,
@@ -2815,6 +2834,7 @@ pub const Broker = struct {
         slot_index: usize,
         connect: mqtt.Connect,
         listener_access_control: ?ListenerAccessControlHandler,
+        retained_source_id: ?u64,
         progress: *RegistrationProgress,
     ) Error!Registration {
         self.state_mutex.lockUncancelable(self.io);
@@ -2834,6 +2854,8 @@ pub const Broker = struct {
         slot.graceful_disconnect = false;
         slot.listener_access_control = listener_access_control;
         errdefer slot.listener_access_control = null;
+        slot.retained_source_id = retained_source_id;
+        errdefer slot.retained_source_id = null;
         // `preparePending` passes the effective CONNECT after any
         // username-as-client-id transformation; its username remains the
         // authenticated wire identity used by listener read ACLs.
@@ -2951,8 +2973,10 @@ pub const Broker = struct {
         const previous_handle = self.wills.handleForClient(
             effective_connect.client_id,
         );
-        const accepted_will = self.wills.acceptConnectWithSessionExpiry(
+        const accepted_will = self.wills.acceptConnectWithSource(
             effective_connect,
+            effective_connect.username,
+            retained_source_id,
             self.sessionExpiryForConnect(effective_connect),
             now,
         ) catch |err| {
@@ -3241,6 +3265,7 @@ pub const Broker = struct {
         slot.session_present = false;
         slot.session_persistent = false;
         slot.listener_access_control = null;
+        slot.retained_source_id = null;
         slot.username = null;
         slot.will_handle = null;
         self.recordPersistentChangeLocked(persistent_changed);
@@ -3409,6 +3434,7 @@ pub const Broker = struct {
         slot.session_present = false;
         slot.session_persistent = false;
         slot.listener_access_control = null;
+        slot.retained_source_id = null;
         slot.username = null;
         slot.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
@@ -3940,6 +3966,7 @@ pub const Broker = struct {
             return self.recordQoS2Publish(
                 publisher_id,
                 publisher,
+                connect,
                 canonical_publish,
             );
         }
@@ -3948,6 +3975,8 @@ pub const Broker = struct {
             publisher,
             canonical_publish,
             connect.client_id,
+            connect.username,
+            publisher_slot.retained_source_id,
             true,
         );
     }
@@ -4017,6 +4046,7 @@ pub const Broker = struct {
         self: *Broker,
         publisher_id: router_mod.SubscriberId,
         publisher: *runtime.Connection,
+        connect: mqtt.Connect,
         publish: mqtt.Publish,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
@@ -4026,9 +4056,13 @@ pub const Broker = struct {
         const persistent_publisher = self.publisherIsPersistentLocked(
             durable_publisher_id,
         );
-        const record_changed = self.pending_qos2.record(
+        const publisher_slot = try self.slotForSubscriber(publisher_id);
+        const record_changed = self.pending_qos2.recordWithSource(
             durable_publisher_id,
             publish,
+            connect.client_id,
+            connect.username,
+            publisher_slot.retained_source_id,
             std.Io.Clock.awake.now(self.io),
         ) catch |err| {
             self.state_mutex.unlock(self.io);
@@ -4038,7 +4072,6 @@ pub const Broker = struct {
             // not malformed client behavior. Reject this transaction with the
             // standard QoS 2 response and release the runtime receive slot so
             // the connection can continue.
-            const publisher_slot = try self.slotForSubscriber(publisher_id);
             publisher_slot.writer_mutex.lockUncancelable(self.io);
             defer publisher_slot.writer_mutex.unlock(self.io);
             // MQTT 3.1.1 has no PUBREC reason field. Mosquitto emits the same
@@ -4071,7 +4104,6 @@ pub const Broker = struct {
         // Mosquitto stores the inbound QoS 2 base message before PUBREC and
         // routes only when PUBREL arrives. A retransmitted PUBLISH receives the
         // same PUBREC without replacing or duplicating the stored message.
-        const publisher_slot = try self.slotForSubscriber(publisher_id);
         publisher_slot.writer_mutex.lockUncancelable(self.io);
         defer publisher_slot.writer_mutex.unlock(self.io);
         try publisher.writePubRec(publish.packet_id.?, 0);
@@ -4141,7 +4173,9 @@ pub const Broker = struct {
                 publisher_id,
                 publisher,
                 publish,
-                source_client_id,
+                pending.source_client_id orelse source_client_id,
+                pending.source_username,
+                pending.source_listener_id,
                 false,
                 false,
                 false,
@@ -4182,6 +4216,8 @@ pub const Broker = struct {
         publisher: *runtime.Connection,
         publish: mqtt.Publish,
         source_client_id: []const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
         acknowledge_qos1: bool,
     ) Error!void {
         return self.routeReleasedPublishMode(
@@ -4189,6 +4225,8 @@ pub const Broker = struct {
             publisher,
             publish,
             source_client_id,
+            source_username,
+            source_listener_id,
             acknowledge_qos1,
             true,
             true,
@@ -4202,6 +4240,8 @@ pub const Broker = struct {
         publisher: *runtime.Connection,
         publish: mqtt.Publish,
         source_client_id: []const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
         acknowledge_qos1: bool,
         count_persistent_change: bool,
         flush_routed_deliveries: bool,
@@ -4223,6 +4263,8 @@ pub const Broker = struct {
             publisher_id,
             publish,
             source_client_id,
+            source_username,
+            source_listener_id,
             std.Io.Clock.awake.now(self.io),
             &persistent_changed,
             null,
@@ -4291,6 +4333,8 @@ pub const Broker = struct {
         publisher_id: ?router_mod.SubscriberId,
         publish: mqtt.Publish,
         source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
         now: std.Io.Timestamp,
         persistent_changed: ?*bool,
         publication_effect_committed: ?*bool,
@@ -4302,10 +4346,12 @@ pub const Broker = struct {
             self.canonicalPublisherId(id)
         else
             null;
-        const retained_result = self.retained.applyParsedPublish(
+        const retained_result = self.retained.applyParsedPublishWithSource(
             publish,
             route_publisher_id,
             source_client_id,
+            source_username,
+            source_listener_id,
             now,
         ) catch |err| return err;
         if (retained_result != .ignored) {
@@ -4907,6 +4953,8 @@ pub const Broker = struct {
         const authorize = access.authorize_retained_source orelse return true;
         return authorize(access.context, .{
             .client_id = source_client_id,
+            .username = delivery.source_username,
+            .listener_id = delivery.source_listener_id,
             .topic = delivery.topic,
             .payload = delivery.payload,
             .qos = delivery.source_qos,
@@ -5520,6 +5568,8 @@ pub const Broker = struct {
             if (access.authorize_will) |authorize| {
                 if (!authorize(access.context, .{
                     .client_id = will.client_id,
+                    .username = will.source_username,
+                    .listener_id = will.source_listener_id,
                     .topic = publish.topic,
                     .payload = publish.payload,
                     .qos = publish.qos,
@@ -5537,6 +5587,8 @@ pub const Broker = struct {
             publisher_id,
             publish,
             will.client_id,
+            will.source_username,
+            will.source_listener_id,
             now,
             &progress.persistent_changed,
             &progress.publication_effect_committed,
@@ -5689,6 +5741,7 @@ test "MQTT failed Clean Start journals the durable deletion" {
                 .keep_alive_seconds = 30,
                 .client_id = "failed-clean-start",
             },
+            null,
             null,
             &progress,
         ),

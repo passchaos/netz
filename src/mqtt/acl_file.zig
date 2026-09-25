@@ -123,6 +123,17 @@ pub const Policy = struct {
         const self: *const Policy = @ptrCast(@alignCast(context));
         return self.acl.allows(.write, identityForConnect(connect), will.topic);
     }
+
+    pub fn authorizeRetainedSource(
+        context: *anyopaque,
+        publication: mqtt.broker.RetainedSourceAuthorization,
+    ) bool {
+        const self: *const Policy = @ptrCast(@alignCast(context));
+        return self.acl.allows(.write, .{
+            .client_id = publication.client_id,
+            .username = publication.username,
+        }, publication.topic);
+    }
 };
 
 pub fn parse(allocator: std.mem.Allocator, source: []const u8) Error!File {

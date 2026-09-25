@@ -1795,6 +1795,225 @@ def run_persistence_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_retain_source_case(broker: Path, directory: Path) -> None:
+    for proto_ver in (5, 4):
+        for per_listener in (False, True):
+            run_retain_source_scope_case(
+                broker, directory, proto_ver, per_listener
+            )
+
+
+def run_retain_source_scope_case(
+    broker: Path,
+    directory: Path,
+    proto_ver: int,
+    per_listener: bool,
+) -> None:
+    scope = "listener" if per_listener else "global"
+    source_port = free_port()
+    reader_port = free_port()
+    while reader_port == source_port:
+        reader_port = free_port()
+    snapshot = directory / f"retain-source-{scope}-{proto_ver}.db"
+    source_acl = directory / f"retain-source-{scope}-{proto_ver}.acl"
+    reader_acl = directory / f"retain-reader-{scope}-{proto_ver}.acl"
+    config = directory / f"retain-source-{scope}-{proto_ver}.conf"
+    topic = f"retain/source/{scope}/{proto_ver}"
+    payload = b"persisted retained source"
+    reader_acl.write_text(f"topic read {topic}\n")
+
+    def write_acl(write_allowed: bool) -> None:
+        source_acl.write_text(
+            ("" if per_listener else f"topic read {topic}\n")
+            + "user writer\n"
+            + f"topic {'readwrite' if write_allowed else 'read'} {topic}\n"
+        )
+
+    def write_config(check_source: bool | None) -> None:
+        check = (
+            ""
+            if check_source is None
+            else f"check_retain_source {'true' if check_source else 'false'}\n"
+        )
+        config.write_text(
+            ("per_listener_settings true\n" if per_listener else "")
+            + check
+            + (f"acl_file {source_acl}\n" if not per_listener else "")
+            + "persistence true\n"
+            + f"persistence_location {directory}\n"
+            + f"persistence_file {snapshot.name}\n"
+            + f"listener {source_port} 127.0.0.1\n"
+            + (f"acl_file {source_acl}\n" if per_listener else "")
+            + "allow_anonymous true\n"
+            + "max_connections 1\n"
+            + f"listener {reader_port} 127.0.0.1\n"
+            + "protocol websockets\n"
+            + (f"acl_file {reader_acl}\n" if per_listener else "")
+            + "allow_anonymous true\n"
+            + "max_connections 1\n"
+        )
+
+    def start(label: str) -> subprocess.Popen[str]:
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        ready = process.stdout.readline().strip()
+        if "configured 2 listeners for 2 clients" not in ready:
+            raise RuntimeError(f"{label} broker failed: {ready}")
+        return process
+
+    def connect_source(client_id: str) -> socket.socket:
+        client = socket.create_connection(
+            ("127.0.0.1", source_port), timeout=5
+        )
+        client.settimeout(5)
+        client.sendall(
+            connect_packet(
+                client_id, username="writer", proto_ver=proto_ver
+            )
+        )
+        if connack_reason(read_mqtt_packet(client)) != 0:
+            client.close()
+            raise AssertionError("retained-source publisher CONNECT failed")
+        return client
+
+    def connect_reader(client_id: str) -> socket.socket:
+        client = websocket_connect(reader_port)
+        send_websocket_binary(
+            client, connect_packet(client_id, proto_ver=proto_ver)
+        )
+        if connack_reason(read_websocket_binary(client)) != 0:
+            client.close()
+            raise AssertionError("retained-source reader CONNECT failed")
+        return client
+
+    write_acl(True)
+    write_config(None)
+    initial_process = start("retained-source initial")
+    publisher = connect_source(f"retain-source-writer-{scope}-{proto_ver}")
+    reader = connect_reader(f"retain-source-reader-{scope}-{proto_ver}")
+    try:
+        publisher.sendall(
+            publish_packet(topic, payload, proto_ver=proto_ver, retain=True)
+        )
+        mqtt_ping(publisher)
+        send_websocket_binary(
+            reader, subscribe_packet(1, topic, proto_ver=proto_ver)
+        )
+        expected_suback = bytes.fromhex(
+            "900400010000" if proto_ver == 5 else "9003000100"
+        )
+        if read_websocket_binary(reader) != expected_suback:
+            raise AssertionError("retained-source initial SUBACK mismatch")
+        expected_publish = publish_packet(
+            topic, payload, proto_ver=proto_ver, retain=True
+        )
+        if read_websocket_binary(reader) != expected_publish:
+            raise AssertionError("initial retained replay mismatch")
+        publisher.sendall(bytes.fromhex("e000"))
+        send_websocket_binary(reader, bytes.fromhex("e000"))
+    finally:
+        publisher.close()
+        reader.close()
+    if initial_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "retained-source initial broker failed: "
+            + initial_process.stdout.read()
+        )
+    if not snapshot.is_file() or snapshot.stat().st_size == 0:
+        raise AssertionError("retained-source snapshot was not written")
+
+    write_config(None)
+    restored_process = start("retained-source restored")
+    source_probe = connect_source(f"retain-source-restored-probe-{scope}-{proto_ver}")
+    restored = connect_reader(f"retain-source-restored-{scope}-{proto_ver}")
+    try:
+        source_probe.sendall(bytes.fromhex("e000"))
+        send_websocket_binary(
+            restored, subscribe_packet(2, topic, proto_ver=proto_ver)
+        )
+        expected_suback = bytes.fromhex(
+            "900400020000" if proto_ver == 5 else "9003000200"
+        )
+        if read_websocket_binary(restored) != expected_suback:
+            raise AssertionError("retained-source restored SUBACK mismatch")
+        expected_publish = publish_packet(
+            topic, payload, proto_ver=proto_ver, retain=True
+        )
+        if read_websocket_binary(restored) != expected_publish:
+            raise AssertionError("restored retained source identity mismatch")
+        send_websocket_binary(restored, bytes.fromhex("e000"))
+    finally:
+        source_probe.close()
+        restored.close()
+    if restored_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "retained-source restored broker failed: "
+            + restored_process.stdout.read()
+        )
+
+    write_acl(False)
+    write_config(None)
+    checked_process = start("retained-source checked")
+    source_probe = connect_source(f"retain-source-probe-{scope}-{proto_ver}")
+    checked = connect_reader(f"retain-source-checked-{scope}-{proto_ver}")
+    try:
+        source_probe.sendall(bytes.fromhex("e000"))
+        send_websocket_binary(
+            checked, subscribe_packet(2, topic, proto_ver=proto_ver)
+        )
+        expected_suback = bytes.fromhex(
+            "900400020000" if proto_ver == 5 else "9003000200"
+        )
+        if read_websocket_binary(checked) != expected_suback:
+            raise AssertionError("retained-source checked SUBACK mismatch")
+        websocket_mqtt_ping(checked)
+        send_websocket_binary(checked, bytes.fromhex("e000"))
+    finally:
+        source_probe.close()
+        checked.close()
+    if checked_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "retained-source checked broker failed: "
+            + checked_process.stdout.read()
+        )
+
+    write_config(False)
+    unchecked_process = start("retained-source unchecked")
+    source_probe = connect_source(
+        f"retain-source-unchecked-probe-{scope}-{proto_ver}"
+    )
+    unchecked = connect_reader(f"retain-source-unchecked-{scope}-{proto_ver}")
+    try:
+        source_probe.sendall(bytes.fromhex("e000"))
+        send_websocket_binary(
+            unchecked, subscribe_packet(3, topic, proto_ver=proto_ver)
+        )
+        expected_suback = bytes.fromhex(
+            "900400030000" if proto_ver == 5 else "9003000300"
+        )
+        if read_websocket_binary(unchecked) != expected_suback:
+            raise AssertionError("retained-source unchecked SUBACK mismatch")
+        expected_publish = publish_packet(
+            topic, payload, proto_ver=proto_ver, retain=True
+        )
+        if read_websocket_binary(unchecked) != expected_publish:
+            raise AssertionError("disabled source check suppressed replay")
+        send_websocket_binary(unchecked, bytes.fromhex("e000"))
+    finally:
+        source_probe.close()
+        unchecked.close()
+    if unchecked_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "retained-source unchecked broker failed: "
+            + unchecked_process.stdout.read()
+        )
+
+
 def run_tls_listener_case(broker: Path, directory: Path) -> None:
     tls_port = free_port()
     wss_port = free_port()
@@ -3440,6 +3659,7 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
+        run_retain_source_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
         run_modern_tls_identity_case(args.broker, directory)
         run_mtls_listener_case(args.broker, directory)
@@ -3456,7 +3676,7 @@ def main() -> None:
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/RSA signed CRL revocation, strict TLS "
-        "key/CA/EKU/identity/CRL rejection, and snapshot restore "
+        "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, and snapshot restore "
         + RUNTIME
     )
 

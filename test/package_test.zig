@@ -5085,6 +5085,10 @@ test "public modules are reachable" {
         "use_subject_as_username",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker.ListenerAuthorization,
+        "retained_source_id",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "use_subject_as_username",
     ));
@@ -5115,6 +5119,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
         "retain_available",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "check_retain_source",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
@@ -5182,8 +5190,32 @@ test "public modules are reachable" {
         "RetainedSourceAuthorization",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker.RetainedSourceAuthorization,
+        "username",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.RetainedSourceAuthorization,
+        "listener_id",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.retained.Match,
         "source_client_id",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.retained.Match,
+        "source_username",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.retained.Match,
+        "source_listener_id",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.retained.Delivery,
+        "source_username",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.retained.Delivery,
+        "source_listener_id",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Server,

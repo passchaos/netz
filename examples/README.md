@@ -112,7 +112,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
 `message_size_limit`, `retain_available`, `upgrade_outgoing_qos`,
-`queue_qos0_messages`,
+`check_retain_source`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
@@ -135,6 +135,12 @@ Global `upgrade_outgoing_qos` defaults to false, preserving MQTT's required
 minimum of publication and subscription QoS. Enabling this non-standard
 Mosquitto compatibility option instead delivers live, retained, and durable
 messages at the subscription QoS.
+Global `check_retain_source` defaults to true and rechecks the original
+publisher's current write ACL before retained replay. The broker persists the
+effective Client ID, username, and source listener port, so this remains exact
+after restart and with `per_listener_settings true`; an unknown or ambiguous
+source listener fails closed. Set it to false only when intentionally retaining
+messages after their publisher loses write permission.
 `password_file`
 accepts Mosquitto's current Argon2id hashes, `$7$`
 PBKDF2-SHA512 hashes, and legacy `$6$` salted SHA-512 hashes. Plaintext, unknown

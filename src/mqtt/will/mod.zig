@@ -58,6 +58,8 @@ pub const AcceptResult = struct {
 
 pub const Due = struct {
     client_id: []const u8,
+    source_username: ?[]const u8 = null,
+    source_listener_id: ?u64 = null,
     topic: []const u8,
     payload: []const u8,
     qos: mqtt.QoS,
@@ -117,6 +119,8 @@ const State = enum {
 const Entry = struct {
     generation: u64,
     client_id: []u8,
+    source_username: ?[]u8,
+    source_listener_id: ?u64,
     topic: []u8,
     payload: []u8,
     qos: mqtt.QoS,
@@ -132,6 +136,7 @@ const Entry = struct {
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
         owned_properties.deinit(allocator, self.properties);
+        if (self.source_username) |value| allocator.free(value);
         allocator.free(self.payload);
         allocator.free(self.topic);
         allocator.free(self.client_id);
@@ -263,6 +268,20 @@ pub const Scheduler = struct {
             const publisher_id = publishers.get(handle) orelse
                 return error.CorruptSnapshot;
             try persistence.appendBlob(out, allocator, entry.client_id);
+            try persistence.appendBool(
+                out,
+                allocator,
+                entry.source_username != null,
+            );
+            if (entry.source_username) |value| {
+                try persistence.appendBlob(out, allocator, value);
+            }
+            try persistence.appendOptionalInt(
+                out,
+                allocator,
+                u64,
+                entry.source_listener_id,
+            );
             try persistence.appendBlob(out, allocator, entry.topic);
             try persistence.appendBlob(out, allocator, entry.payload);
             try persistence.appendInt(
@@ -337,6 +356,11 @@ pub const Scheduler = struct {
         );
         for (0..snapshot_count) |_| {
             const client_id = try cursor.readBlob();
+            const source_username = if (try cursor.readBool())
+                try cursor.readBlob()
+            else
+                null;
+            const source_listener_id = try cursor.readOptionalInt(u64);
             const topic = try cursor.readBlob();
             const payload = try cursor.readBlob();
             const qos = try persistence.qosFromByte(
@@ -371,7 +395,7 @@ pub const Scheduler = struct {
             {
                 return error.CorruptSnapshot;
             }
-            const handle = try self.set(
+            const handle = try self.setWithSource(
                 client_id,
                 .{
                     .topic = topic,
@@ -380,6 +404,8 @@ pub const Scheduler = struct {
                     .retain = retain,
                     .properties = properties,
                 },
+                source_username,
+                source_listener_id,
                 session_expiry_interval,
             );
             const entry = try self.getEntry(handle);
@@ -413,12 +439,35 @@ pub const Scheduler = struct {
         will: mqtt.LastWill,
         session_expiry_interval: u32,
     ) Error!Handle {
+        return self.setWithSource(
+            client_id,
+            will,
+            null,
+            null,
+            session_expiry_interval,
+        );
+    }
+
+    pub fn setWithSource(
+        self: *Scheduler,
+        client_id: []const u8,
+        will: mqtt.LastWill,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        session_expiry_interval: u32,
+    ) Error!Handle {
         if (self.client_index.contains(client_id)) {
             return error.InvalidClientId;
+        }
+        if (source_username) |value| {
+            if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+            try mqtt.validateUtf8String(value);
         }
         var entry = try self.prepare(
             client_id,
             will,
+            source_username,
+            source_listener_id,
             session_expiry_interval,
             self.count_value + 1,
             self.total_bytes,
@@ -469,6 +518,23 @@ pub const Scheduler = struct {
         session_expiry_interval: u32,
         now: std.Io.Timestamp,
     ) Error!AcceptResult {
+        return self.acceptConnectWithSource(
+            connect,
+            null,
+            null,
+            session_expiry_interval,
+            now,
+        );
+    }
+
+    pub fn acceptConnectWithSource(
+        self: *Scheduler,
+        connect: mqtt.Connect,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        session_expiry_interval: u32,
+        now: std.Io.Timestamp,
+    ) Error!AcceptResult {
         const previous_index = self.client_index.get(connect.client_id);
         const previous_handle = if (previous_index) |index| blk: {
             const entry = self.entries.items[index].?;
@@ -501,6 +567,8 @@ pub const Scheduler = struct {
             break :blk try self.prepare(
                 connect.client_id,
                 message,
+                source_username,
+                source_listener_id,
                 session_expiry_interval,
                 final_count,
                 final_base_bytes,
@@ -761,6 +829,8 @@ pub const Scheduler = struct {
         const entry = try self.getEntry(handle);
         return .{
             .client_id = entry.client_id,
+            .source_username = entry.source_username,
+            .source_listener_id = entry.source_listener_id,
             .topic = entry.topic,
             .payload = entry.payload,
             .qos = entry.qos,
@@ -784,6 +854,8 @@ pub const Scheduler = struct {
         self: *Scheduler,
         client_id: []const u8,
         will: mqtt.LastWill,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
         session_expiry_interval: u32,
         final_count: usize,
         final_base_bytes: usize,
@@ -796,6 +868,11 @@ pub const Scheduler = struct {
 
         const client_owned = try self.allocator.dupe(u8, client_id);
         errdefer self.allocator.free(client_owned);
+        const source_username_owned = if (source_username) |value|
+            try self.allocator.dupe(u8, value)
+        else
+            null;
+        errdefer if (source_username_owned) |value| self.allocator.free(value);
         const topic_owned = try self.allocator.dupe(u8, will.topic);
         errdefer self.allocator.free(topic_owned);
         const payload_owned = try self.allocator.dupe(u8, will.payload);
@@ -815,10 +892,15 @@ pub const Scheduler = struct {
         const bytes = std.math.add(
             usize,
             client_owned.len + topic_owned.len + payload_owned.len,
+            if (source_username_owned) |value| value.len else 0,
+        ) catch return error.WillByteLimitExceeded;
+        const total_bytes = std.math.add(
+            usize,
+            bytes,
             property_result.allocation_bytes,
         ) catch return error.WillByteLimitExceeded;
-        if (bytes > self.options.max_will_bytes or
-            bytes > self.options.max_total_bytes -| final_base_bytes)
+        if (total_bytes > self.options.max_will_bytes or
+            total_bytes > self.options.max_total_bytes -| final_base_bytes)
         {
             return error.WillByteLimitExceeded;
         }
@@ -828,6 +910,8 @@ pub const Scheduler = struct {
             // has been reserved and the entry can be committed.
             .generation = 0,
             .client_id = client_owned,
+            .source_username = source_username_owned,
+            .source_listener_id = source_listener_id,
             .topic = topic_owned,
             .payload = payload_owned,
             .qos = will.qos,
@@ -836,7 +920,7 @@ pub const Scheduler = struct {
             .will_delay_interval = mqtt.willDelayInterval(will.properties) orelse 0,
             .message_expiry_interval = mqtt.messageExpiryInterval(will.properties),
             .session_expiry_interval = session_expiry_interval,
-            .allocation_bytes = bytes,
+            .allocation_bytes = total_bytes,
         };
     }
 

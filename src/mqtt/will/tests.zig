@@ -355,7 +355,15 @@ test "will setConnect owns parsed bytes and forwards publish properties" {
             .properties = &properties,
         },
     };
-    const handle = (try scheduler.setConnect(connect)).?;
+    var source_username = [_]u8{ 'a', 'l', 'i', 'c', 'e' };
+    const handle = (try scheduler.acceptConnectWithSource(
+        connect,
+        &source_username,
+        1883,
+        60,
+        .zero,
+    )).current.?;
+    source_username[0] = 'X';
     _ = try scheduler.close(handle, .ungraceful, .zero);
     var due_storage: [1]will.Handle = undefined;
     const due = try scheduler.pollDue(
@@ -363,6 +371,11 @@ test "will setConnect owns parsed bytes and forwards publish properties" {
         &due_storage,
     );
     const publish = try scheduler.view(due[0]);
+    try std.testing.expectEqualStrings(
+        "alice",
+        publish.source_username.?,
+    );
+    try std.testing.expectEqual(@as(?u64, 1883), publish.source_listener_id);
     try std.testing.expectEqual(@as(?u32, 30), publish.message_expiry_interval);
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -565,9 +578,11 @@ test "will limits and allocation failures leak nothing" {
 fn testWillAllocationFailures(allocator: std.mem.Allocator) !void {
     var scheduler = Scheduler.init(allocator, .{});
     defer scheduler.deinit();
-    const handle = try scheduler.set(
+    const handle = try scheduler.setWithSource(
         "allocated",
         sampleWill(2, 30),
+        "allocated-user",
+        1883,
         60,
     );
     _ = try scheduler.close(handle, .ungraceful, .zero);
