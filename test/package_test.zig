@@ -4823,6 +4823,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker.Options,
+        "retained_expiry_interval",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.Options,
         "persistent_change_autosave",
     ));
     try std.testing.expect(@hasField(
@@ -5159,6 +5163,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
         "persistent_client_expiration_seconds",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "retain_expiry_interval_seconds",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,

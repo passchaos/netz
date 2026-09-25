@@ -157,6 +157,10 @@ pub fn run(
         .queue_qos0_messages = config.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
         .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
+        .retained_expiry_interval = if (config.retain_expiry_interval_seconds == 0)
+            null
+        else
+            .fromSeconds(config.retain_expiry_interval_seconds),
         .system_stats_interval = if (config.sys_interval_seconds == 0)
             null
         else

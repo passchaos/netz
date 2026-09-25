@@ -18,6 +18,7 @@ pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
 pub const default_max_topic_aliases: u16 = 10;
 pub const default_sys_interval_seconds: u16 = 10;
+pub const maximum_retain_expiry_interval_minutes: u32 = 10_000_000;
 pub const default_auto_id_prefix = "auto-";
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
@@ -84,6 +85,7 @@ pub const Config = struct {
     allow_zero_length_client_id: bool = true,
     auto_id_prefix: []u8 = &.{},
     persistent_client_expiration_seconds: ?u32 = null,
+    retain_expiry_interval_seconds: u32 = 0,
     sys_interval_seconds: u16 = default_sys_interval_seconds,
     set_tcp_nodelay: bool = false,
     persistence: bool = false,
@@ -225,6 +227,7 @@ const GlobalSeen = struct {
     allow_zero_length_client_id: bool = false,
     auto_id_prefix: bool = false,
     persistent_client_expiration: bool = false,
+    retain_expiry_interval: bool = false,
     sys_interval: bool = false,
     set_tcp_nodelay: bool = false,
     persistence: bool = false,
@@ -413,6 +416,18 @@ fn parseSources(
                 try markOnce(&global_seen.persistent_client_expiration);
                 config.persistent_client_expiration_seconds =
                     try parseExpiration(&words);
+            } else if (std.mem.eql(
+                u8,
+                directive,
+                "retain_expiry_interval",
+            )) {
+                try markOnce(&global_seen.retain_expiry_interval);
+                const minutes = try parseOnePositive(u32, &words);
+                if (minutes > maximum_retain_expiry_interval_minutes) {
+                    return error.InvalidInteger;
+                }
+                config.retain_expiry_interval_seconds =
+                    minutes * std.time.s_per_min;
             } else if (std.mem.eql(u8, directive, "sys_interval")) {
                 try markOnce(&global_seen.sys_interval);
                 config.sys_interval_seconds =
@@ -741,6 +756,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\allow_zero_length_clientid false
         \\auto_id_prefix assigned-
         \\persistent_client_expiration 2h
+        \\retain_expiry_interval 37
         \\sys_interval 17
         \\set_tcp_nodelay true
         \\password_file users.pw
@@ -789,6 +805,10 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(
         @as(?u32, 2 * 60 * 60),
         config.persistent_client_expiration_seconds,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 37 * std.time.s_per_min),
+        config.retain_expiry_interval_seconds,
     );
     try std.testing.expectEqual(@as(u16, 17), config.sys_interval_seconds);
     try std.testing.expect(config.set_tcp_nodelay);
@@ -1799,6 +1819,10 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         config.persistent_client_expiration_seconds,
     );
     try std.testing.expectEqual(
+        @as(u32, 0),
+        config.retain_expiry_interval_seconds,
+    );
+    try std.testing.expectEqual(
         default_sys_interval_seconds,
         config.sys_interval_seconds,
     );
@@ -1926,6 +1950,54 @@ test "MQTT broker config validates global system interval" {
         parse(std.testing.allocator,
             \\sys_interval 1
             \\sys_interval 2
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config validates retained expiry scan interval" {
+    var minimum = try parse(std.testing.allocator,
+        \\retain_expiry_interval 1
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer minimum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        @as(u32, std.time.s_per_min),
+        minimum.retain_expiry_interval_seconds,
+    );
+
+    var maximum = try parse(std.testing.allocator,
+        \\listener 1883
+        \\allow_anonymous true
+        \\retain_expiry_interval 10000000
+    );
+    defer maximum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        @as(u32, 10_000_000 * std.time.s_per_min),
+        maximum.retain_expiry_interval_seconds,
+    );
+
+    const invalid = [_][]const u8{ "-1", "0", "10000001", "1m" };
+    for (invalid) |value| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "retain_expiry_interval {s}\nlistener 1883\n" ++
+                "allow_anonymous true\n",
+            .{value},
+        );
+        defer std.testing.allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(std.testing.allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(std.testing.allocator,
+            \\retain_expiry_interval 1
+            \\retain_expiry_interval 2
             \\listener 1883
             \\allow_anonymous true
         ),

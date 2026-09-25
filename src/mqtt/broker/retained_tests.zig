@@ -2,6 +2,7 @@ const std = @import("std");
 const context = @import("../broker_tests.zig").TestContext;
 
 const mqtt = context.mqtt_mod;
+const Broker = context.BrokerType;
 const ServeState = context.ServeStateType;
 const testBroker = context.testBrokerFn;
 const connect = context.connectFn;
@@ -334,6 +335,78 @@ test "broker drops retained replay that expired before subscribe" {
     try subscriber.ping();
 
     try disconnectAll(&.{ &publisher, &subscriber });
+    try joinServer(thread, &joined, &serve);
+}
+
+test "broker periodically removes expired retained state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 1,
+                .max_queued_deliveries_per_connection = 8,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .retained_expiry_interval = .fromMilliseconds(25),
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "retained-periodic-expiry",
+        &.{},
+    );
+    defer publisher.close();
+    try publisher.publish(
+        "expiry/periodic",
+        "short",
+        .{
+            .retain = true,
+            .properties = &.{.{ .four_byte = .{
+                .id = .message_expiry_interval,
+                .value = 1,
+            } }},
+        },
+    );
+    try publisher.ping();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        broker.stats().retained_messages,
+    );
+
+    const deadline = std.Io.Clock.awake.now(io).addDuration(
+        .fromSeconds(2),
+    );
+    while (broker.stats().retained_messages != 0 and
+        std.Io.Clock.awake.now(io).nanoseconds < deadline.nanoseconds)
+    {
+        try std.Io.sleep(io, .fromMilliseconds(5), .awake);
+    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        broker.stats().retained_messages,
+    );
+
+    try publisher.disconnect(0);
     try joinServer(thread, &joined, &serve);
 }
 

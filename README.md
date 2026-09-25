@@ -745,6 +745,7 @@ Current protocol coverage includes:
   per-group/filter shared-subscription RoundRobin/Random/Sticky selection plus
   stable low-remapping Rendezvous hashing, plus a bounded retained-message
   store with exact O(1) lookup, wildcard matching, MQTT 5 expiry countdown,
+  optional broker-driven periodic expiry pruning with persisted removals,
   Retain Handling 0/1/2, shared-subscription suppression, QoS downgrade and
   connection-scoped property stripping, plus a bounded persistent Session
   Store with full subscription restoration, Session Expiry, offline QoS 1/2
@@ -793,6 +794,7 @@ Current protocol coverage includes:
   count/payload-byte limits for each durable Session's queued messages,
   listener-scoped inbound and broker-created Topic Alias limits, a global
   administrative expiration cap for abandoned persistent Sessions, periodic
+  retained-message expiry pruning with durable journal/autosave updates,
   retained `$SYS` publication with a zero-disable policy, configurable
   TCP_NODELAY across raw, TLS, WebSocket and WSS listeners, and configurable
   global/per-listener assigned Client ID prefixes, plus

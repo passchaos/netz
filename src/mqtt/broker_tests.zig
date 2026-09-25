@@ -1747,6 +1747,18 @@ test "broker rejects non-positive system statistics interval" {
     );
 }
 
+test "broker rejects non-positive retained expiry scan interval" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        Broker.init(allocator, threaded.io(), .{
+            .retained_expiry_interval = .zero,
+        }),
+    );
+}
+
 test "broker rejects zero persistent Session expiry cap" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

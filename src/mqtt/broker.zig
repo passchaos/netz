@@ -141,6 +141,11 @@ pub const Options = struct {
     /// Zero is rejected because it would silently turn every persistent
     /// request into a transient Session.
     persistent_session_expiry_seconds: ?u32 = null,
+    /// Periodically remove retained Application Messages whose MQTT 5 Message
+    /// Expiry Interval has elapsed. Null leaves expiry cleanup lazy: expired
+    /// entries are ignored on replay and snapshot but may retain memory until
+    /// accessed or replaced.
+    retained_expiry_interval: ?std.Io.Duration = null,
     /// Publish retained `$SYS` gauge snapshots at this interval. Null disables
     /// periodic publication. Explicit `publishSystemStats` remains available.
     system_stats_interval: ?std.Io.Duration = null,
@@ -998,6 +1003,7 @@ pub const Broker = struct {
     publish_payload_bytes_sent: usize = 0,
     started_at_ns: i96,
     load_tracker: load_metrics.Tracker = .{},
+    next_retained_expiry_ns: ?i96 = null,
     next_system_stats_ns: ?i96 = null,
 
     pub fn listen(
@@ -1038,6 +1044,9 @@ pub const Broker = struct {
         }
         try validateAutoClientIdPrefix(options.auto_client_id_prefix);
         if (options.system_stats_interval) |interval| {
+            if (interval.nanoseconds <= 0) return error.InvalidProperty;
+        }
+        if (options.retained_expiry_interval) |interval| {
             if (interval.nanoseconds <= 0) return error.InvalidProperty;
         }
         if (options.persistent_change_autosave) |autosave| {
@@ -5537,8 +5546,15 @@ pub const Broker = struct {
                 self.wills.nextDeadline(),
                 self.sessions.nextExpiryDeadline(),
             );
-            const deadline = earliestDeadline(
+            const retained_deadline = earliestDeadline(
                 lifecycle_deadline,
+                if (self.next_retained_expiry_ns) |value|
+                    .{ .nanoseconds = value }
+                else
+                    null,
+            );
+            const deadline = earliestDeadline(
+                retained_deadline,
                 if (self.next_system_stats_ns) |value|
                     .{ .nanoseconds = value }
                 else
@@ -5573,9 +5589,26 @@ pub const Broker = struct {
         now: std.Io.Timestamp,
     ) Error!void {
         self.state_mutex.lockUncancelable(self.io);
-        const expired_count = self.pruneExpiredSessionRoutesLocked(now);
+        var expired_retained_count: usize = 0;
+        if (self.options.retained_expiry_interval) |interval| {
+            if (self.next_retained_expiry_ns) |deadline| {
+                if (now.nanoseconds >= deadline) {
+                    expired_retained_count = self.retained.pruneExpired(now);
+                    // Skip missed ticks instead of repeatedly scanning after a
+                    // long scheduler pause.
+                    self.next_retained_expiry_ns =
+                        now.addDuration(interval).nanoseconds;
+                }
+            } else {
+                self.next_retained_expiry_ns =
+                    now.addDuration(interval).nanoseconds;
+            }
+        }
+        const expired_session_count =
+            self.pruneExpiredSessionRoutesLocked(now);
         var published_any = false;
-        var persistent_changed = expired_count != 0;
+        var persistent_changed =
+            expired_retained_count != 0 or expired_session_count != 0;
         self.publishDueWillsLocked(
             now,
             &published_any,
@@ -5596,7 +5629,7 @@ pub const Broker = struct {
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
 
-        if (published_any or expired_count != 0) {
+        if (published_any or persistent_changed) {
             try self.finalizePersistentChange(
                 persistent_changed,
                 persistent_changed,
@@ -6887,4 +6920,69 @@ test {
     _ = load_metrics;
     _ = @import("broker_tests.zig");
     _ = @import("broker/persistence_tests.zig");
+}
+
+test "broker retained expiry scan persists physical removal" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var source = try Broker.init(allocator, io, .{
+        .retained_expiry_interval = .fromMilliseconds(10),
+        .persistent_change_autosave = .{
+            .dir = tmp.dir,
+            .sub_path = "expiry.db",
+            .max_changes = 1,
+        },
+    });
+    var source_owned = true;
+    defer if (source_owned) source.deinit();
+    const stored_at = std.Io.Clock.awake.now(io);
+    const expiry = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .message_expiry_interval,
+        .value = 1,
+    } }};
+    _ = try source.retained.applyPublish(
+        "expiry/persisted",
+        "value",
+        .{
+            .retain = true,
+            .properties = &expiry,
+            .now = stored_at,
+        },
+    );
+    try source.createCommitLog(tmp.dir, "expiry.log", .{});
+
+    // The first lifecycle pass establishes the periodic scan deadline. The
+    // second crosses both that deadline and the retained message's lifetime.
+    try source.processDueLifecycle(stored_at);
+    try source.processDueLifecycle(
+        stored_at.addDuration(.fromSeconds(2)),
+    );
+    try std.testing.expectEqual(@as(usize, 0), source.stats().retained_messages);
+    try std.testing.expectEqual(@as(?anyerror, null), source.persistentChangeAutosaveError());
+    _ = try tmp.dir.statFile(io, "expiry.db", .{});
+    // Initial state is record 1 and periodic removal is record 2.
+    try std.testing.expectEqual(@as(u64, 3), try source.appendCommit());
+    source.deinit();
+    source_owned = false;
+
+    var journal_restored = try Broker.init(allocator, io, .{});
+    defer journal_restored.deinit();
+    try journal_restored.restoreCommitLog(tmp.dir, "expiry.log", .{});
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        journal_restored.stats().retained_messages,
+    );
+
+    var snapshot_restored = try Broker.init(allocator, io, .{});
+    defer snapshot_restored.deinit();
+    try snapshot_restored.restoreSnapshot(tmp.dir, "expiry.db");
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        snapshot_restored.stats().retained_messages,
+    );
 }

@@ -385,6 +385,7 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
     config = directory / "broker.conf"
     config.write_text(
         "queue_qos0_messages true\n"
+        "retain_expiry_interval 1\n"
         "set_tcp_nodelay true\n"
         f"password_file {password_file}\n"
         f"acl_file {acl_file}\n"
@@ -1601,6 +1602,28 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
             "allow_anonymous false did not fail closed without credentials: "
             + result.stdout
         )
+
+    for value in ("0", "10000001"):
+        invalid_expiry = directory / f"invalid-retain-expiry-{value}.conf"
+        invalid_expiry.write_text(
+            f"retain_expiry_interval {value}\n"
+            f"listener {free_port()} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 1\n"
+        )
+        result = subprocess.run(
+            [str(broker), f"--config={invalid_expiry}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode == 0 or "InvalidInteger" not in result.stdout:
+            raise AssertionError(
+                "invalid retained expiry interval did not fail closed: "
+                + result.stdout
+            )
 
 
 def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
@@ -3754,8 +3777,8 @@ def main() -> None:
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
-        "listener Topic Alias, persistent-client expiration, and periodic "
-        "$SYS policy, "
+        "listener Topic Alias, persistent-client and retained-message "
+        "expiration, and periodic $SYS policy, "
         "zero-length Client ID and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
         "mixed anonymous policy, shared TCP/WebSocket "
