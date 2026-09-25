@@ -65,40 +65,6 @@ pub fn run(
     );
     defer config.deinit(allocator);
 
-    var passwords: ?mqtt.password_file.File = if (config.password_file.len != 0)
-        try mqtt.password_file.load(
-            allocator,
-            io,
-            std.Io.Dir.cwd(),
-            config.password_file,
-        )
-    else
-        null;
-    defer if (passwords) |*file| file.deinit();
-    var acl: ?mqtt.acl_file.File = if (config.acl_file.len != 0)
-        try mqtt.acl_file.load(
-            allocator,
-            io,
-            std.Io.Dir.cwd(),
-            config.acl_file,
-        )
-    else
-        null;
-    defer if (acl) |*file| file.deinit();
-    var acl_policy: mqtt.acl_file.Policy = undefined;
-    const access_control: ?mqtt.broker.ListenerAccessControlHandler =
-        if (acl) |*file| blk: {
-            acl_policy = .{ .acl = file };
-            break :blk .{
-                .context = &acl_policy,
-                .authorize_publish = mqtt.acl_file.Policy.authorizePublish,
-                .authorize_subscribe = mqtt.acl_file.Policy.authorizeSubscribe,
-                .authorize_unsubscribe = mqtt.acl_file.Policy.authorizeUnsubscribe,
-                .authorize_delivery = mqtt.acl_file.Policy.authorizeDelivery,
-                .authorize_will = mqtt.acl_file.Policy.authorizeWill,
-            };
-        } else null;
-
     const connection_count = try config.totalMaxConnections();
     const persistence_path = if (config.persistence)
         try config.persistencePath(allocator)
@@ -106,6 +72,54 @@ pub fn run(
         null;
     defer if (persistence_path) |path| allocator.free(path);
 
+    const security_file_count = if (config.per_listener_settings)
+        config.listeners.len
+    else
+        1;
+    const password_files = try allocator.alloc(
+        ?mqtt.password_file.File,
+        security_file_count,
+    );
+    defer allocator.free(password_files);
+    @memset(password_files, null);
+    defer for (password_files) |*file| {
+        if (file.*) |*loaded| loaded.deinit();
+    };
+    const acl_files = try allocator.alloc(
+        ?mqtt.acl_file.File,
+        security_file_count,
+    );
+    defer allocator.free(acl_files);
+    @memset(acl_files, null);
+    defer for (acl_files) |*file| {
+        if (file.*) |*loaded| loaded.deinit();
+    };
+    for (0..security_file_count) |index| {
+        const password_path = if (config.per_listener_settings)
+            config.listeners[index].password_file
+        else
+            config.password_file;
+        if (password_path.len != 0) {
+            password_files[index] = try mqtt.password_file.load(
+                allocator,
+                io,
+                std.Io.Dir.cwd(),
+                password_path,
+            );
+        }
+        const acl_path = if (config.per_listener_settings)
+            config.listeners[index].acl_file
+        else
+            config.acl_file;
+        if (acl_path.len != 0) {
+            acl_files[index] = try mqtt.acl_file.load(
+                allocator,
+                io,
+                std.Io.Dir.cwd(),
+                acl_path,
+            );
+        }
+    }
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
@@ -241,6 +255,11 @@ pub fn run(
         config.listeners.len,
     );
     defer allocator.free(authorizations);
+    const acl_policies = try allocator.alloc(
+        mqtt.acl_file.Policy,
+        config.listeners.len,
+    );
+    defer allocator.free(acl_policies);
 
     for (config.listeners, 0..) |configured, index| {
         servers[index] = if (identities[index]) |*identity|
@@ -288,12 +307,29 @@ pub fn run(
         accept.maximum_qos = configured.maximum_qos;
         accept.maximum_keep_alive_seconds =
             configured.maximum_keep_alive_seconds;
-        if (passwords) |*file| {
+        const security_index = if (config.per_listener_settings) index else 0;
+        const listener_passwords = if (password_files[security_index]) |*file|
+            file
+        else
+            null;
+        if (listener_passwords) |file| {
             authorizations[index] = .{
                 .passwords = file,
                 .allow_anonymous = configured.allow_anonymous,
             };
         }
+        const listener_access_control: ?mqtt.broker.ListenerAccessControlHandler =
+            if (acl_files[security_index]) |*file| blk: {
+                acl_policies[index] = .{ .acl = file };
+                break :blk .{
+                    .context = &acl_policies[index],
+                    .authorize_publish = mqtt.acl_file.Policy.authorizePublish,
+                    .authorize_subscribe = mqtt.acl_file.Policy.authorizeSubscribe,
+                    .authorize_unsubscribe = mqtt.acl_file.Policy.authorizeUnsubscribe,
+                    .authorize_delivery = mqtt.acl_file.Policy.authorizeDelivery,
+                    .authorize_will = mqtt.acl_file.Policy.authorizeWill,
+                };
+            } else null;
         listeners[index] = .{
             .source = servers[index].pendingSource(),
             .namespace = try mqtt.listener_namespace.Namespace.init(
@@ -301,13 +337,13 @@ pub fn run(
             ),
             .accept = accept,
             .authorization = .{
-                .connect = if (passwords != null and
+                .connect = if (listener_passwords != null and
                     !configured.use_identity_as_username and
                     !configured.use_subject_as_username) .{
                     .context = &authorizations[index],
                     .authorize = mqtt.password_file.Authorization.authorize,
                 } else null,
-                .access_control = access_control,
+                .access_control = listener_access_control,
                 .use_username_as_client_id = configured.use_username_as_client_id,
                 .use_identity_as_username = configured.use_identity_as_username,
                 .use_subject_as_username = configured.use_subject_as_username,

@@ -779,8 +779,8 @@ Current protocol coverage includes:
   authorization and Session policy, and bounded hashed
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
-  Mosquitto ACL files with anonymous/user scopes, deny precedence and `%u`/`%c`
-  patterns, and
+  global or `per_listener_settings`-isolated Mosquitto password/ACL files
+  with anonymous/user scopes, deny precedence and `%u`/`%c` patterns, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, generation-safe duplicate-ClientID takeover that
@@ -1097,7 +1097,7 @@ zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
-# policy, Mosquitto password hashes, authentication rejection, ACL read/write/
+# policy, global/per-listener Mosquitto password hashes, authentication rejection, ACL read/write/
 # deny/pattern behavior, OpenSSL-verified TLS/mTLS, acceptable CA names and
 # certificate CN/full-Subject username/Client-ID mapping, P-256/RSA signed CRL revocation, strict
 # key/CA/EKU/identity/CRL rejection, and snapshot restore through the example.

@@ -535,6 +535,146 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_per_listener_security_case(broker: Path, directory: Path) -> None:
+    first_passwords = directory / "listener-first.pwfile"
+    first_passwords.write_text(
+        "first:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
+    second_passwords = directory / "listener-second.pwfile"
+    second_passwords.write_text(
+        "second:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
+    first_acl = directory / "listener-first.acl"
+    first_acl.write_text("user first\ntopic write first/#\n")
+    second_acl = directory / "listener-second.acl"
+    second_acl.write_text("user second\ntopic write second/#\n")
+    first_port = free_port()
+    second_port = free_port()
+    while second_port == first_port:
+        second_port = free_port()
+    config = directory / "per-listener.conf"
+    config.write_text(
+        "per_listener_settings true\n"
+        f"listener {first_port} 127.0.0.1\n"
+        f"password_file {first_passwords}\n"
+        f"acl_file {first_acl}\n"
+        "allow_anonymous false\n"
+        "max_connections 3\n"
+        f"listener {second_port} 127.0.0.1\n"
+        f"password_file {second_passwords}\n"
+        f"acl_file {second_acl}\n"
+        "allow_anonymous false\n"
+        "max_connections 2\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 5 clients" not in ready:
+        raise RuntimeError(f"per-listener broker failed to start: {ready}")
+
+    cases = (
+        (first_port, "first", "first/allowed", 0x10),
+        (second_port, "first", None, 0x87),
+        (second_port, "second", "second/allowed", 0x10),
+        (first_port, "second", None, 0x87),
+    )
+    for index, (port, username, topic, expected_reason) in enumerate(cases):
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        try:
+            client.sendall(
+                connect_packet(
+                    f"per-listener-{index}",
+                    username=username,
+                    password="password",
+                )
+            )
+            reason = connack_reason(read_mqtt_packet(client))
+            if topic is None:
+                if reason != expected_reason:
+                    raise AssertionError(
+                        f"listener accepted foreign credentials: {reason:#x}"
+                    )
+                continue
+            if reason != 0:
+                raise AssertionError(
+                    f"listener rejected local credentials: {reason:#x}"
+                )
+            client.sendall(
+                publish_packet(topic, b"isolated ACL", qos=1, packet_id=81)
+            )
+            if puback_reason(read_mqtt_packet(client), 81) != expected_reason:
+                raise AssertionError("listener-local ACL did not authorize topic")
+            client.sendall(bytes.fromhex("e000"))
+        finally:
+            client.close()
+
+    acl_denied = socket.create_connection(
+        ("127.0.0.1", first_port), timeout=5
+    )
+    acl_denied.settimeout(5)
+    try:
+        acl_denied.sendall(
+            connect_packet(
+                "per-listener-acl-denied",
+                username="first",
+                password="password",
+            )
+        )
+        if connack_reason(read_mqtt_packet(acl_denied)) != 0:
+            raise AssertionError("listener-local ACL client failed CONNECT")
+        acl_denied.sendall(
+            publish_packet("second/denied", b"isolated", qos=1, packet_id=82)
+        )
+        if puback_reason(read_mqtt_packet(acl_denied), 82) != 0x87:
+            raise AssertionError("listener inherited another listener's ACL")
+        acl_denied.sendall(bytes.fromhex("e000"))
+    finally:
+        acl_denied.close()
+
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "per-listener security broker failed: " + process.stdout.read()
+        )
+
+    invalid_port = free_port()
+    invalid_config = directory / "per-listener-invalid.conf"
+    invalid_config.write_text(
+        "per_listener_settings true\n"
+        f"listener {invalid_port} 127.0.0.1\n"
+        f"password_file {first_passwords}\n"
+        "allow_anonymous false\n"
+        f"listener {free_port()} 127.0.0.1\n"
+        f"password_file {directory / 'missing.pwfile'}\n"
+        "allow_anonymous false\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={invalid_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0:
+        raise AssertionError("missing listener-local password file was accepted")
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", invalid_port)) == 0:
+            raise AssertionError(
+                "listener bound before every local security file was loaded"
+            )
+
+
 def run_fail_closed_case(broker: Path, directory: Path) -> None:
     config = directory / "authentication-required.conf"
     config.write_text(
@@ -2162,6 +2302,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
+        run_per_listener_security_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -2176,7 +2317,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, certificate CN/full-Subject identity mapping, "

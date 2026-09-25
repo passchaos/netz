@@ -5073,6 +5073,18 @@ test "public modules are reachable" {
         netz.mqtt.broker_config.Listener,
         "use_subject_as_username",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "password_file",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "acl_file",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "per_listener_settings",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker,
         "ListenerAccessControlHandler",

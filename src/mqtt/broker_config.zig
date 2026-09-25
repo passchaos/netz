@@ -19,6 +19,8 @@ pub const Protocol = enum { mqtt, websockets };
 pub const Listener = struct {
     address: net.IpAddress,
     protocol: Protocol = .mqtt,
+    password_file: []u8 = &.{},
+    acl_file: []u8 = &.{},
     certfile: []u8 = &.{},
     keyfile: []u8 = &.{},
     cafile: []u8 = &.{},
@@ -34,6 +36,8 @@ pub const Listener = struct {
     max_connections: usize = default_max_connections,
 
     fn deinit(self: *Listener, allocator: std.mem.Allocator) void {
+        if (self.password_file.len != 0) allocator.free(self.password_file);
+        if (self.acl_file.len != 0) allocator.free(self.acl_file);
         if (self.certfile.len != 0) allocator.free(self.certfile);
         if (self.keyfile.len != 0) allocator.free(self.keyfile);
         if (self.cafile.len != 0) allocator.free(self.cafile);
@@ -49,6 +53,7 @@ pub const Listener = struct {
 
 pub const Config = struct {
     listeners: []Listener,
+    per_listener_settings: bool = false,
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
     queue_qos0_messages: bool = false,
@@ -118,6 +123,8 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
 } || std.mem.Allocator.Error;
 
 const ListenerSeen = struct {
+    password_file: bool = false,
+    acl_file: bool = false,
     protocol: bool = false,
     certfile: bool = false,
     keyfile: bool = false,
@@ -135,6 +142,7 @@ const ListenerSeen = struct {
 };
 
 const GlobalSeen = struct {
+    per_listener_settings: bool = false,
     queue_qos0_messages: bool = false,
     password_file: bool = false,
     acl_file: bool = false,
@@ -173,6 +181,7 @@ pub fn parse(
         if (config.acl_file.len != 0) allocator.free(config.acl_file);
     }
     var global_seen: GlobalSeen = .{};
+    var security_settings_seen = false;
 
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |raw_line| {
@@ -202,15 +211,44 @@ pub fn parse(
             continue;
         }
 
-        if (std.mem.eql(u8, directive, "queue_qos0_messages")) {
+        if (std.mem.eql(u8, directive, "per_listener_settings")) {
+            try markOnce(&global_seen.per_listener_settings);
+            const enabled = try parseOneBool(&words);
+            if (enabled and security_settings_seen) {
+                return error.InvalidDirective;
+            }
+            config.per_listener_settings = enabled;
+        } else if (std.mem.eql(u8, directive, "queue_qos0_messages")) {
             try markOnce(&global_seen.queue_qos0_messages);
             config.queue_qos0_messages = try parseOneBool(&words);
         } else if (std.mem.eql(u8, directive, "password_file")) {
-            try markOnce(&global_seen.password_file);
-            config.password_file = try parseOneOwned(allocator, &words);
+            security_settings_seen = true;
+            if (config.per_listener_settings) {
+                if (listeners.items.len == 0) {
+                    return error.DirectiveRequiresListener;
+                }
+                const index = listeners.items.len - 1;
+                try markOnce(&listener_seen.items[index].password_file);
+                listeners.items[index].password_file =
+                    try parseOneOwned(allocator, &words);
+            } else {
+                try markOnce(&global_seen.password_file);
+                config.password_file = try parseOneOwned(allocator, &words);
+            }
         } else if (std.mem.eql(u8, directive, "acl_file")) {
-            try markOnce(&global_seen.acl_file);
-            config.acl_file = try parseOneOwned(allocator, &words);
+            security_settings_seen = true;
+            if (config.per_listener_settings) {
+                if (listeners.items.len == 0) {
+                    return error.DirectiveRequiresListener;
+                }
+                const index = listeners.items.len - 1;
+                try markOnce(&listener_seen.items[index].acl_file);
+                listeners.items[index].acl_file =
+                    try parseOneOwned(allocator, &words);
+            } else {
+                try markOnce(&global_seen.acl_file);
+                config.acl_file = try parseOneOwned(allocator, &words);
+            }
         } else if (std.mem.eql(u8, directive, "persistence")) {
             try markOnce(&global_seen.persistence);
             config.persistence = try parseOneBool(&words);
@@ -271,9 +309,11 @@ pub fn parse(
                 try markOnce(&seen.require_certificate);
                 listener.require_certificate = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "use_identity_as_username")) {
+                security_settings_seen = true;
                 try markOnce(&seen.use_identity_as_username);
                 listener.use_identity_as_username = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "use_subject_as_username")) {
+                security_settings_seen = true;
                 try markOnce(&seen.use_subject_as_username);
                 listener.use_subject_as_username = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "mount_point")) {
@@ -282,6 +322,7 @@ pub fn parse(
                 _ = try mqtt.listener_namespace.Namespace.init(value);
                 listener.mount_point = try allocator.dupe(u8, value);
             } else if (std.mem.eql(u8, directive, "allow_anonymous")) {
+                security_settings_seen = true;
                 try markOnce(&seen.allow_anonymous);
                 listener.allow_anonymous = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "max_qos")) {
@@ -341,8 +382,11 @@ pub fn parse(
         {
             return error.ClientCertificateConfigurationIncomplete;
         }
-        if (!listener.allow_anonymous and
-            config.password_file.len == 0 and
+        const password_file = if (config.per_listener_settings)
+            listener.password_file
+        else
+            config.password_file;
+        if (!listener.allow_anonymous and password_file.len == 0 and
             !listener.use_identity_as_username and
             !listener.use_subject_as_username)
         {
@@ -471,6 +515,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     );
     defer config.deinit(allocator);
     try std.testing.expect(config.queue_qos0_messages);
+    try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
     try std.testing.expect(config.persistence);
@@ -480,6 +525,8 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 2), config.listeners.len);
     try std.testing.expect(config.listeners[0].protocol == .mqtt);
     try std.testing.expect(config.listeners[0].allow_anonymous);
+    try std.testing.expect(config.listeners[0].password_file.len == 0);
+    try std.testing.expect(config.listeners[0].acl_file.len == 0);
     try std.testing.expect(config.listeners[0].maximum_qos.? == .at_least_once);
     try std.testing.expectEqual(@as(?u16, 30), config.listeners[0].maximum_keep_alive_seconds);
     try std.testing.expect(config.listeners[1].protocol == .websockets);
@@ -510,11 +557,98 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqualStrings("state/broker.db", path);
 }
 
+test "MQTT broker config owns per-listener security files" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupe(
+        u8,
+        "per_listener_settings true\n" ++
+            "listener 1883 127.0.0.1\n" ++
+            "password_file first.pw\nacl_file first.acl\n" ++
+            "allow_anonymous false\n" ++
+            "listener 8080 127.0.0.1\nprotocol websockets\n" ++
+            "password_file second.pw\nacl_file second.acl\n" ++
+            "allow_anonymous false\n",
+    );
+    defer allocator.free(source);
+    var config = try parse(allocator, source);
+    defer config.deinit(allocator);
+    @memset(source, 'x');
+
+    try std.testing.expect(config.per_listener_settings);
+    try std.testing.expect(config.password_file.len == 0);
+    try std.testing.expect(config.acl_file.len == 0);
+    try std.testing.expectEqualStrings(
+        "first.pw",
+        config.listeners[0].password_file,
+    );
+    try std.testing.expectEqualStrings(
+        "first.acl",
+        config.listeners[0].acl_file,
+    );
+    try std.testing.expectEqualStrings(
+        "second.pw",
+        config.listeners[1].password_file,
+    );
+    try std.testing.expectEqualStrings(
+        "second.acl",
+        config.listeners[1].acl_file,
+    );
+}
+
 test "MQTT broker config fails closed for unsupported and misplaced directives" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(
         error.DirectiveRequiresListener,
         parse(allocator, "mount_point tenant/\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(
+            allocator,
+            "per_listener_settings true\npassword_file users.pw\n" ++
+                "listener 1883",
+        ),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(
+            allocator,
+            "per_listener_settings true\nacl_file access.acl\n" ++
+                "listener 1883",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(
+            allocator,
+            "password_file users.pw\nper_listener_settings true\n" ++
+                "listener 1883\nallow_anonymous true",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(
+            allocator,
+            "listener 1883\nallow_anonymous true\n" ++
+                "per_listener_settings true",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(
+            allocator,
+            "per_listener_settings true\nper_listener_settings true\n" ++
+                "listener 1883\nallow_anonymous true",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(
+            allocator,
+            "per_listener_settings true\nlistener 1883\n" ++
+                "password_file first.pw\npassword_file second.pw\n" ++
+                "allow_anonymous false",
+        ),
     );
     try std.testing.expectError(
         error.AuthenticationRequired,
