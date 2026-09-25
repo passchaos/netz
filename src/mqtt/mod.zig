@@ -266,6 +266,26 @@ pub fn validateUtf8String(value: []const u8) Error!void {
     return validateMqttUtf8String(value);
 }
 
+/// Apply Mosquitto's stricter application policy to an MQTT UTF-8 Encoded
+/// String. The wire codec intentionally accepts the specification's
+/// discouraged C0/C1 controls; brokers that need Mosquitto-compatible input
+/// rejection can opt into this additional check at the connection boundary.
+pub fn validateStrictUtf8String(value: []const u8) Error!void {
+    try validateMqttUtf8String(value);
+    var view = std.unicode.Utf8View.init(value) catch return error.InvalidUtf8;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |codepoint| {
+        if (codepoint <= 0x001f or
+            (codepoint >= 0x007f and codepoint <= 0x009f) or
+            (codepoint >= 0xfdd0 and codepoint <= 0xfdef) or
+            (codepoint & 0xffff == 0xfffe) or
+            (codepoint & 0xffff == 0xffff))
+        {
+            return error.InvalidUtf8;
+        }
+    }
+}
+
 pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     if (value.len > std.math.maxInt(u16)) return error.InvalidProperty;
     try wire.appendInt(list, allocator, u16, @intCast(value.len), .big);
@@ -3286,6 +3306,26 @@ test "MQTT UTF-8 strings reject NUL but allow discouraged controls" {
     var del = [_]u8{ 0, 3, 'b', 0x7f, 'd' };
     cursor = wire.Cursor.init(&del);
     try std.testing.expectEqualStrings("b\x7fd", try readUtf8(&cursor));
+}
+
+test "MQTT strict UTF-8 policy rejects controls and noncharacters" {
+    for ([_][]const u8{
+        "bad\x01value",
+        "bad\x1fvalue",
+        "bad\x7fvalue",
+        "bad\xc2\x9fvalue",
+        "bad\xef\xb7\x90value",
+        "bad\xef\xbf\xbevalue",
+        "bad\xef\xbf\xbfvalue",
+        "bad\xf4\x8f\xbf\xbevalue",
+        "bad\xf4\x8f\xbf\xbfvalue",
+    }) |value| {
+        try std.testing.expectError(
+            error.InvalidUtf8,
+            validateStrictUtf8String(value),
+        );
+    }
+    try validateStrictUtf8String("valid\xf0\xaa\x9b\x94value");
 }
 
 test "MQTT ping packets reject trailing bytes" {

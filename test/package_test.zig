@@ -4781,6 +4781,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.mqtt.broker.Stats, "load"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficStats"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime, "TrafficCounters"));
+    try std.testing.expect(@hasDecl(netz.mqtt, "validateStrictUtf8String"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "trafficStats",
@@ -4792,6 +4793,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.runtime.AcceptOptions,
         "traffic_counters",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.runtime.AcceptOptions,
+        "strict_utf8",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker.Options,

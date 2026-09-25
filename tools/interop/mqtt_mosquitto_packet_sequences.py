@@ -54,8 +54,12 @@ SEQUENCE_FILES = {
         "5edf48213e6a9c85254b6255618fa5c67b47bfe59bf84b3b09307b8691cea225",
     "SUBACK.json":
         "1894d26a0f79718055ea1135cdeed5632a470ce6968dc9ef2810cfb83e15d3ae",
+    "SUBSCRIBE.json":
+        "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
     "UNSUBACK.json":
         "593719885cb1fa474c252449c11f2f1183fa432ee389737dca45beca225ac1a0",
+    "UNSUBSCRIBE.json":
+        "32a8618e6f74fb02df944bc528e9b4ff258e5e920473b7d7ea81ac107374b825",
 }
 SEQUENCE_SUBSET_FILES = {
     "CONNECT.json":
@@ -64,10 +68,6 @@ SEQUENCE_SUBSET_FILES = {
         "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
     "PUBLISH.json":
         "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
-    "SUBSCRIBE.json":
-        "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
-    "UNSUBSCRIBE.json":
-        "32a8618e6f74fb02df944bc528e9b4ff258e5e920473b7d7ea81ac107374b825",
 }
 
 # Each exclusion is an audited divergence from the selected upstream fixture,
@@ -82,10 +82,6 @@ EXCLUSION_REASONS = {
         "Mosquitto disconnects after its second pre-PUBREL non-DUP reuse; "
         "MQTT 5 section 4.3.3 requires PUBREC for every same-identifier "
         "PUBLISH until PUBREL, without replacing the first message"
-    ),
-    "optional_utf8_control_policy": (
-        "MQTT permits receivers to reject U+0001/U+001F/U+007F/U+009F, "
-        "while netz intentionally accepts these valid UTF-8 code points"
     ),
 }
 SEQUENCE_EXCLUSIONS = {
@@ -103,21 +99,6 @@ SEQUENCE_EXCLUSIONS = {
                 "10 remaining length 5 bytes",
             )
         },
-        **{
-            (group, f"10 {field} with {codepoint}"):
-                "optional_utf8_control_policy"
-            for group, field, prefix in (
-                ("v3.1.1 CONNECT", "Will topic", "U+"),
-                ("v3.1.1 CONNECT", "Client ID", "U+"),
-                ("v3.1.1 CONNECT", "Username", "0x"),
-                ("v5.0   CONNECT", "Client ID", "U+"),
-                ("v5.0   CONNECT", "Username", "0x"),
-            )
-            for codepoint in (
-                f"{prefix}0001", f"{prefix}001F",
-                f"{prefix}007F", f"{prefix}009F",
-            )
-        },
     },
     "CONNACK.json": {
         ("v3.1.1 CONNACK", "issue 2163 v3"):
@@ -128,50 +109,6 @@ SEQUENCE_EXCLUSIONS = {
             "mosquitto_qos2_reuse_limit",
         ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"):
             "mosquitto_qos2_reuse_limit",
-        ("v3.1.1 PUBLISH", "30 topic with U+0001"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 PUBLISH", "30 topic with U+001F"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 PUBLISH", "30 topic with U+007F"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 PUBLISH", "30 topic with U+009F"):
-            "optional_utf8_control_policy",
-        ("v5.0   PUBLISH", "30 topic with U+0001"):
-            "optional_utf8_control_policy",
-        ("v5.0   PUBLISH", "30 topic with U+001F"):
-            "optional_utf8_control_policy",
-        ("v5.0   PUBLISH", "30 topic with U+007F"):
-            "optional_utf8_control_policy",
-        ("v5.0   PUBLISH", "30 topic with U+009F"):
-            "optional_utf8_control_policy",
-    },
-    "SUBSCRIBE.json": {
-        ("v3.1.1 SUBSCRIBE", "82 topic with U+0001"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 SUBSCRIBE", "82 topic with U+001F"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 SUBSCRIBE", "82 topic with U+007F"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 SUBSCRIBE", "82 topic with U+009F"):
-            "optional_utf8_control_policy",
-    },
-    "UNSUBSCRIBE.json": {
-        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+0001"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+001F"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+007F"):
-            "optional_utf8_control_policy",
-        ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+009F"):
-            "optional_utf8_control_policy",
-        ("v5.0   UNSUBSCRIBE", "A2 topic with U+0001"):
-            "optional_utf8_control_policy",
-        ("v5.0   UNSUBSCRIBE", "A2 topic with U+001F"):
-            "optional_utf8_control_policy",
-        ("v5.0   UNSUBSCRIBE", "A2 topic with U+007F"):
-            "optional_utf8_control_policy",
-        ("v5.0   UNSUBSCRIBE", "A2 topic with U+009F"):
-            "optional_utf8_control_policy",
     },
 }
 
@@ -436,6 +373,10 @@ EXPECTATION_OVERRIDES["CONNECT.json"] = {
         for test in (
             "10 Client ID with 0x0000",
             "10 Client ID with U+D800",
+            "10 Client ID with U+0001",
+            "10 Client ID with U+001F",
+            "10 Client ID with U+007F",
+            "10 Client ID with U+009F",
             "10 Client ID with U+FFFF",
         )
     },
@@ -545,19 +486,17 @@ EXPECTATION_OVERRIDES["DISCONNECT.json"].update({
         for header in ("E1", "E2", "E4", "E8")
     },
 })
-EXPECTED_COMPLETE_SEQUENCE_COUNT = 949
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 1212
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
-    "CONNECT.json": 279,
+    "CONNECT.json": 299,
     "CONNACK.json": 145,
-    "PUBLISH.json": 150,
-    "SUBSCRIBE.json": 151,
-    "UNSUBSCRIBE.json": 100,
+    "PUBLISH.json": 158,
 }
 EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
 EXPECTED_SEQUENCE_COUNT = (
     EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
 )
-EXPECTED_EXPECTATION_OVERRIDE_COUNT = 255
+EXPECTED_EXPECTATION_OVERRIDE_COUNT = 259
 CONNECT_REFUSAL_DIAGNOSTICS = {
     ("CONNECT.json", group, test): bytes.fromhex("20 03 00 81 00")
     for group, test in (
@@ -568,15 +507,20 @@ CONNECT_REFUSAL_DIAGNOSTICS = {
         ("v5.0   CONNECT", "10 [MQTT-3.1.2-17]"),
         ("v5.0   CONNECT", "10 Username with 0x0000"),
         ("v5.0   CONNECT", "10 Username with 0xD800"),
+        ("v5.0   CONNECT", "10 Username with 0x0001"),
+        ("v5.0   CONNECT", "10 Username with 0x001F"),
+        ("v5.0   CONNECT", "10 Username with 0x007F"),
+        ("v5.0   CONNECT", "10 Username with 0x009F"),
         ("v5.0   CONNECT", "10 Username with 0xFFFF"),
         ("v5.0   CONNECT", "10 [MQTT-3.1.2-19]"),
     )
 }
-EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT = 8
+EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT = 12
 PACKET_SEQUENCE_BROKER_ARGS = (
     "--max-outgoing-inflight=20",
     "--max-packet-size=2000000",
     "--topic-alias-maximum=10",
+    "--strict-utf8",
 )
 MQTT_PACKETS_SHA256 = (
     "0024fcebd421a3286cea021ed64083f906d9b457004786b05f8a74abae5bfb37"

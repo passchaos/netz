@@ -912,6 +912,11 @@ fn ServeTask(comptime HandlerContext: type) type {
 
 pub const AcceptOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
+    /// Reject the UTF-8 control characters and noncharacters that MQTT marks
+    /// as unsuitable for interchange. The default keeps the wire codec's
+    /// interoperable MUST-level validation; enable this for Mosquitto-style
+    /// broker admission.
+    strict_utf8: bool = false,
     /// Optional process-wide wire counter sink. Every complete MQTT Control
     /// Packet is charged after a successful transport read or write, including
     /// CONNECT/CONNACK and packets later rejected by semantic validation.
@@ -2249,6 +2254,7 @@ pub const Connection = struct {
     traffic: TrafficCounters = .{},
     traffic_sink: ?*TrafficCounters = null,
     protocol: mqtt.ProtocolVersion = .v5,
+    strict_utf8: bool = false,
     endpoint_role: EndpointRole = .unestablished,
     connect_session_expiry: u32 = 0,
     incoming_connect_level: ?u8 = null,
@@ -2647,6 +2653,7 @@ pub const Connection = struct {
         options: AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!PendingAcceptedClient {
+        self.strict_utf8 = options.strict_utf8;
         if (options.traffic_counters) |counters| {
             self.attachTrafficCounters(counters);
         }
@@ -2992,6 +2999,7 @@ pub const Connection = struct {
             packet.bytes,
         ) catch |err| return err;
         errdefer connect.deinit(self.allocator);
+        try self.validateIncomingConnectUtf8(connect);
         self.protocol = connect.protocol;
         self.endpoint_role = .server;
         self.connect_session_expiry = mqtt.sessionExpiryInterval(
@@ -3575,6 +3583,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .publish) return error.UnexpectedPacket;
         var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
         errdefer publish_packet.deinit(self.allocator);
+        try self.validateIncomingUtf8(publish_packet.topic);
         try self.commitIncomingPublish(&publish_packet);
         return .{ .packet = packet, .publish = publish_packet };
     }
@@ -3862,6 +3871,9 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .subscribe) return error.UnexpectedPacket;
         var subscribe_packet = try mqtt.Subscribe.parse(self.allocator, self.protocol, packet.bytes);
         errdefer subscribe_packet.deinit(self.allocator);
+        try self.validateIncomingSubscriptionsUtf8(
+            subscribe_packet.subscriptions,
+        );
         try self.validateIncomingSubscribe(subscribe_packet.subscriptions, subscribe_packet.properties);
         return .{ .packet = packet, .subscribe = subscribe_packet };
     }
@@ -3930,6 +3942,9 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .unsubscribe) return error.UnexpectedPacket;
         var unsubscribe_packet = try mqtt.Unsubscribe.parse(self.allocator, self.protocol, packet.bytes);
         errdefer unsubscribe_packet.deinit(self.allocator);
+        try self.validateIncomingTopicFiltersUtf8(
+            unsubscribe_packet.topic_filters,
+        );
         return .{ .packet = packet, .unsubscribe = unsubscribe_packet };
     }
 
@@ -4596,6 +4611,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingUtf8(value.topic);
                 try self.commitIncomingPublish(&value);
                 break :blk .{ .publish = .{
                     .packet = packet,
@@ -4685,6 +4701,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingUtf8(value.topic);
                 try self.commitIncomingPublish(&value);
                 break :blk .{ .publish = .{
                     .packet = packet,
@@ -4698,6 +4715,9 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingSubscriptionsUtf8(
+                    value.subscriptions,
+                );
                 try self.validateIncomingSubscribe(
                     value.subscriptions,
                     value.properties,
@@ -4714,6 +4734,9 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingTopicFiltersUtf8(
+                    value.topic_filters,
+                );
                 break :blk .{ .unsubscribe = .{
                     .packet = packet,
                     .unsubscribe = value,
@@ -4883,6 +4906,47 @@ pub const Connection = struct {
         // InvalidProperty failure as an unsupported feature.
         if (@intFromEnum(publish_packet.qos) > @intFromEnum(self.local_maximum_qos)) return error.QoSNotSupported;
         if (publish_packet.retain and !self.local_retain_available) return error.RetainNotSupported;
+    }
+
+    fn validateIncomingConnectUtf8(
+        self: Connection,
+        connect: mqtt.Connect,
+    ) Error!void {
+        if (!self.strict_utf8) return;
+        try mqtt.validateStrictUtf8String(connect.client_id);
+        if (connect.username) |username| {
+            try mqtt.validateStrictUtf8String(username);
+        }
+        if (connect.will) |will| {
+            try mqtt.validateStrictUtf8String(will.topic);
+        }
+    }
+
+    fn validateIncomingUtf8(
+        self: Connection,
+        value: []const u8,
+    ) Error!void {
+        if (self.strict_utf8) try mqtt.validateStrictUtf8String(value);
+    }
+
+    fn validateIncomingSubscriptionsUtf8(
+        self: Connection,
+        subscriptions: []const mqtt.Subscription,
+    ) Error!void {
+        if (!self.strict_utf8) return;
+        for (subscriptions) |subscription| {
+            try mqtt.validateStrictUtf8String(subscription.topic_filter);
+        }
+    }
+
+    fn validateIncomingTopicFiltersUtf8(
+        self: Connection,
+        topic_filters: []const []const u8,
+    ) Error!void {
+        if (!self.strict_utf8) return;
+        for (topic_filters) |filter| {
+            try mqtt.validateStrictUtf8String(filter);
+        }
     }
 
     const PublishDirection = enum { incoming, outgoing };
@@ -5472,6 +5536,49 @@ test "owned CONNECT can replace username with a policy identity" {
     try std.testing.expectEqualStrings(
         "replacement-user",
         owned.connect.username.?,
+    );
+}
+
+test "MQTT runtime strict UTF-8 policy covers broker input fields" {
+    var connection = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+    };
+    const accepted_control = "value\xc2\x9f";
+    const connect = mqtt.Connect{
+        .protocol = .v5,
+        .clean_start = true,
+        .keep_alive_seconds = 60,
+        .client_id = accepted_control,
+        .username = accepted_control,
+        .will = .{ .topic = accepted_control, .payload = "payload" },
+    };
+    const subscriptions = [_]mqtt.Subscription{.{
+        .topic_filter = accepted_control,
+    }};
+    const filters = [_][]const u8{accepted_control};
+
+    try connection.validateIncomingConnectUtf8(connect);
+    try connection.validateIncomingUtf8(accepted_control);
+    try connection.validateIncomingSubscriptionsUtf8(&subscriptions);
+    try connection.validateIncomingTopicFiltersUtf8(&filters);
+
+    connection.strict_utf8 = true;
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.validateIncomingConnectUtf8(connect),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.validateIncomingUtf8(accepted_control),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.validateIncomingSubscriptionsUtf8(&subscriptions),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.validateIncomingTopicFiltersUtf8(&filters),
     );
 }
 

@@ -130,7 +130,9 @@ class SequenceLoadingTests(unittest.TestCase):
                 "PUBREL.json",
                 "REGRESSION.json",
                 "SUBACK.json",
+                "SUBSCRIBE.json",
                 "UNSUBACK.json",
+                "UNSUBSCRIBE.json",
             },
         )
         self.assertEqual(
@@ -154,32 +156,26 @@ class SequenceLoadingTests(unittest.TestCase):
                     "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
                 "PUBLISH.json":
                     "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
-                "SUBSCRIBE.json":
-                    "f3feba6c933d43dc7be5397a42afd616e5f4a21824cf5289c986166ec6c0e60c",
-                "UNSUBSCRIBE.json":
-                    "32a8618e6f74fb02df944bc528e9b4ff258e5e920473b7d7ea81ac107374b825",
             },
         )
         self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS),
             set(sequences.SEQUENCE_SUBSET_FILES),
         )
-        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 949)
+        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 1212)
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
             {
-                "CONNECT.json": 279,
+                "CONNECT.json": 299,
                 "CONNACK.json": 145,
-                "PUBLISH.json": 150,
-                "SUBSCRIBE.json": 151,
-                "UNSUBSCRIBE.json": 100,
+                "PUBLISH.json": 158,
             },
         )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 825)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1774)
-        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 255)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 602)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1814)
+        self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 259)
         self.assertEqual(
-            sequences.EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT, 8,
+            sequences.EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT, 12,
         )
         self.assertEqual(
             set(sequences.CONNECT_REFUSAL_DIAGNOSTICS),
@@ -197,6 +193,14 @@ class SequenceLoadingTests(unittest.TestCase):
                 ("CONNECT.json", "v5.0   CONNECT",
                  "10 Username with 0xD800"),
                 ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0x0001"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0x001F"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0x007F"),
+                ("CONNECT.json", "v5.0   CONNECT",
+                 "10 Username with 0x009F"),
+                ("CONNECT.json", "v5.0   CONNECT",
                  "10 Username with 0xFFFF"),
                 ("CONNECT.json", "v5.0   CONNECT",
                  "10 [MQTT-3.1.2-19]"),
@@ -209,33 +213,17 @@ class SequenceLoadingTests(unittest.TestCase):
         self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS["CONNECT.json"]),
             {
-                *(
-                    ("v3.1   CONNECT", test)
-                    for test in (
-                        "10 ok ",
-                        "14 ok ",
-                        "10 proto ver 2",
-                        "10 proto ver 4",
-                        "10 proto ver 6",
-                        "10 empty client ID",
-                        "10 ok",
-                        "10 remaining length 5 bytes",
-                    )
-                ),
-                *(
-                    (group, f"10 {field} with {codepoint}")
-                    for group, field, prefix in (
-                        ("v3.1.1 CONNECT", "Will topic", "U+"),
-                        ("v3.1.1 CONNECT", "Client ID", "U+"),
-                        ("v3.1.1 CONNECT", "Username", "0x"),
-                        ("v5.0   CONNECT", "Client ID", "U+"),
-                        ("v5.0   CONNECT", "Username", "0x"),
-                    )
-                    for codepoint in (
-                        f"{prefix}0001", f"{prefix}001F",
-                        f"{prefix}007F", f"{prefix}009F",
-                    )
-                ),
+                ("v3.1   CONNECT", test)
+                for test in (
+                    "10 ok ",
+                    "14 ok ",
+                    "10 proto ver 2",
+                    "10 proto ver 4",
+                    "10 proto ver 6",
+                    "10 empty client ID",
+                    "10 ok",
+                    "10 remaining length 5 bytes",
+                )
             },
         )
         self.assertEqual(
@@ -244,44 +232,10 @@ class SequenceLoadingTests(unittest.TestCase):
                 "unsupported_mqtt_3_1"},
         )
         self.assertEqual(
-            len(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
-            10,
-        )
-        self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
             {
                 ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"),
                 ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"),
-                ("v3.1.1 PUBLISH", "30 topic with U+0001"),
-                ("v3.1.1 PUBLISH", "30 topic with U+001F"),
-                ("v3.1.1 PUBLISH", "30 topic with U+007F"),
-                ("v3.1.1 PUBLISH", "30 topic with U+009F"),
-                ("v5.0   PUBLISH", "30 topic with U+0001"),
-                ("v5.0   PUBLISH", "30 topic with U+001F"),
-                ("v5.0   PUBLISH", "30 topic with U+007F"),
-                ("v5.0   PUBLISH", "30 topic with U+009F"),
-            },
-        )
-        self.assertEqual(
-            set(sequences.SEQUENCE_EXCLUSIONS["SUBSCRIBE.json"]),
-            {
-                ("v3.1.1 SUBSCRIBE", "82 topic with U+0001"),
-                ("v3.1.1 SUBSCRIBE", "82 topic with U+001F"),
-                ("v3.1.1 SUBSCRIBE", "82 topic with U+007F"),
-                ("v3.1.1 SUBSCRIBE", "82 topic with U+009F"),
-            },
-        )
-        self.assertEqual(
-            set(sequences.SEQUENCE_EXCLUSIONS["UNSUBSCRIBE.json"]),
-            {
-                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+0001"),
-                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+001F"),
-                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+007F"),
-                ("v3.1.1 UNSUBSCRIBE", "A2 topic with U+009F"),
-                ("v5.0   UNSUBSCRIBE", "A2 topic with U+0001"),
-                ("v5.0   UNSUBSCRIBE", "A2 topic with U+001F"),
-                ("v5.0   UNSUBSCRIBE", "A2 topic with U+007F"),
-                ("v5.0   UNSUBSCRIBE", "A2 topic with U+009F"),
             },
         )
         self.assertEqual(
@@ -296,12 +250,11 @@ class SequenceLoadingTests(unittest.TestCase):
             {
                 "unsupported_mqtt_3_1": 9,
                 "mosquitto_qos2_reuse_limit": 2,
-                "optional_utf8_control_policy": 40,
             },
         )
         expected_override_counts = {
             "AUTH.json": 5,
-            "CONNECT.json": 83,
+            "CONNECT.json": 87,
             "CONNACK.json": 5,
             "DISCONNECT.json": 27,
             "PUBACK.json": 24,
@@ -357,6 +310,10 @@ class SequenceLoadingTests(unittest.TestCase):
                   for test in sequences.WILL_DISALLOWED_PROPERTY_CASES),
                 ("v5.0   CONNECT", "10 Client ID with 0x0000", 0, 1),
                 ("v5.0   CONNECT", "10 Client ID with U+D800", 0, 1),
+                ("v5.0   CONNECT", "10 Client ID with U+0001", 0, 1),
+                ("v5.0   CONNECT", "10 Client ID with U+001F", 0, 1),
+                ("v5.0   CONNECT", "10 Client ID with U+007F", 0, 1),
+                ("v5.0   CONNECT", "10 Client ID with U+009F", 0, 1),
                 ("v5.0   CONNECT", "10 Client ID with U+FFFF", 0, 1),
             },
         )
@@ -517,7 +474,7 @@ class SequenceLoadingTests(unittest.TestCase):
             },
             {
                 "mqtt5_property_context_malformed": 186,
-                "mqtt5_invalid_utf8_malformed": 3,
+                "mqtt5_invalid_utf8_malformed": 7,
                 "mqtt5_publish_protocol_error": 3,
                 "mqtt5_subscribe_protocol_error": 9,
                 "mqtt5_unsubscribe_protocol_error": 4,
@@ -563,6 +520,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 "--max-outgoing-inflight=20",
                 "--max-packet-size=2000000",
                 "--topic-alias-maximum=10",
+                "--strict-utf8",
             ),
         )
         self.assertEqual(len(sequences.MQTT_PACKETS_SHA256), 64)
@@ -588,7 +546,7 @@ class SequenceLoadingTests(unittest.TestCase):
                     selected,
                     {"TEST.json": {
                         ("portable", "missing"):
-                            "optional_utf8_control_policy",
+                            "unsupported_mqtt_3_1",
                     }},
                 )
 

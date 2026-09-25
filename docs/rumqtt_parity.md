@@ -2198,22 +2198,20 @@ source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `AUTH.json`, `DISCONNECT.json`, `FLOW.json`, `FORBIDDEN.json`, `OTHER.json`,
 `PINGREQ.json`, `PINGRESP.json`,
 `PUBACK.json`, `PUBREC.json`, `PUBREL.json`, `PUBCOMP.json`, `REGRESSION.json`,
-`SUBACK.json`, and `UNSUBACK.json` files: 949 upstream scenarios across MQTT
-3.1.1 and MQTT 5.
+`SUBACK.json`, `SUBSCRIBE.json`, `UNSUBACK.json`, and `UNSUBSCRIBE.json` files:
+1,212 upstream scenarios across MQTT 3.1.1 and MQTT 5.
 It additionally runs 145 of 146 scenarios in the complete, hash-locked
-`CONNACK.json`, 279 of 307 in `CONNECT.json`, 150 of 160 in `PUBLISH.json`,
-151 of 155 in `SUBSCRIBE.json`, and 100 of 108 in `UNSUBSCRIBE.json`, for 1,774
-source-derived sequences total. The fifty-one exclusions are exact
-`(group, test)` identities rather than pattern skips: forty use MQTT's optional
-rejection of U+0001/U+001F/U+007F/U+009F, two exercise Mosquitto's finite
-non-DUP QoS 2 reuse tolerance instead of MQTT 5 section 4.3.3's repeat-PUBREC
-rule, and nine use obsolete MQTT protocol level 3 outside netz's declared
-3.1.1/5 scope.
+`CONNACK.json`, 299 of 307 in `CONNECT.json`, and 158 of 160 in
+`PUBLISH.json`, for 1,814 source-derived sequences total. The eleven
+exclusions are exact `(group, test)` identities rather than pattern skips: two
+exercise Mosquitto's finite non-DUP QoS 2 reuse tolerance instead of MQTT 5
+section 4.3.3's repeat-PUBREC rule, and nine use obsolete MQTT protocol level 3
+outside netz's declared 3.1.1/5 scope.
 The entire upstream file hashes, exclusion identities, reason vocabulary, and
 per-file included counts are independently asserted, so upstream fixture
 additions or renamed exclusions fail closed.
 
-The gate also retains 255 upstream scenarios whose packets are portable but
+The gate also retains 259 upstream scenarios whose packets are portable but
 whose expected DISCONNECT reason conflicts with the MQTT 5 text. Each audited
 override names the exact `(file, group, test, action index)`, verifies the
 hash-locked source action still expects its original bytes, and substitutes one
@@ -2233,16 +2231,22 @@ Packet Identifier zero (`MQTT-2.2.1-3`) retain Protocol Error `0x82` where
 Mosquitto expects `0x81`. Thus these are still executed byte-level scenarios,
 not exclusions or permissive comparisons. Two further exact replacements cover
 the semantically equivalent deterministic ordering of configured CONNACK
-properties. The CONNECT subset adds 50 Property Context corrections, three
-malformed UTF-8 Client Identifier corrections, and 30 equivalent successful
-CONNACK property-order replacements. Seven source cases that only require EOF
-also accept one exact pre-close `CONNACK 0x81`, as permitted by MQTT 5 section
-3.1.4; these are separately enumerated rather than accepted through a wildcard.
+properties. The CONNECT subset adds 50 Property Context corrections, seven
+malformed or strict-policy UTF-8 Client Identifier corrections, and 30
+equivalent successful CONNACK property-order replacements. Eleven source cases
+that only require EOF also accept one exact pre-close `CONNACK 0x81`, as
+permitted by MQTT 5 section 3.1.4; these are separately enumerated rather than
+accepted through a wildcard.
 All source bytes, replacement bytes, identities, reasons, and the aggregate
-255-replacement count are locked. The gate launches netz with the
+259-replacement count are locked. The gate launches netz with the
 fixture's Receive Maximum 20, Maximum Packet Size 2,000,000, and Topic Alias
-Maximum 10, so both formerly configuration-dependent PUBLISH scenarios and the
-DISCONNECT Session Expiry transition execute instead of being excluded.
+Maximum 10, plus the explicit Mosquitto-compatible strict UTF-8 policy. That
+policy rejects C0/C1 controls and Unicode noncharacters on CONNECT identity and
+Will fields and on later PUBLISH/SUBSCRIBE/UNSUBSCRIBE topic fields, while the
+default runtime policy continues to accept the specification's discouraged
+control characters. Both formerly configuration-dependent PUBLISH scenarios
+and the DISCONNECT Session Expiry transition therefore execute instead of
+being excluded.
 The adapter preserves the upstream payload DSL, group/test inheritance,
 explicit response bytes, connection-liveness expectations, and MQTT 3.1.1
 helper publications with full QoS 0/1/2 handshakes; it rejects other
@@ -2340,29 +2344,21 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
   --mosquitto-test-root=/nav_env/Work/mosquitto/test
 ```
 
-The manifest pins SHA-256 hashes for all fourteen complete JSON inputs, the
-audited `CONNECT.json`, `CONNACK.json`, `PUBLISH.json`, `SUBSCRIBE.json`, and
-`UNSUBSCRIBE.json`
-subset sources, and the imported `mqtt_packets.py` generator, so a changed
+The manifest pins SHA-256 hashes for all sixteen complete JSON inputs, the
+audited `CONNECT.json`, `CONNACK.json`, and `PUBLISH.json` subset sources,
+and the imported `mqtt_packets.py` generator, so a changed
 upstream fixture cannot silently reuse the recorded scenario count.
 The adapter intentionally does not claim complete-file coverage for
-`CONNECT.json`, `CONNACK.json`, `PUBLISH.json`, `SUBSCRIBE.json`, or
-`UNSUBSCRIBE.json` yet.
-`PUBLISH.json`, `SUBSCRIBE.json`, and `UNSUBSCRIBE.json` additionally contain
-the explicitly enumerated configuration, optional-Unicode, QoS 2 reuse, and
-reason-code differences described above; all other scenarios in those
-hash-locked files are executed. `CONNECT.json` and
+`CONNECT.json`, `CONNACK.json`, or `PUBLISH.json` yet. `PUBLISH.json`
+additionally contains the explicitly enumerated QoS 2 reuse and reason-code
+differences described above; all other scenarios in that hash-locked file are
+executed. `CONNECT.json` and
 `CONNACK.json` also contain MQTT 3.1 protocol-level cases, outside netz's
 declared MQTT 3.1.1/5 scope.
-The CONNECT subset also permits eight exact MQTT 5 Malformed Packet
+The CONNECT subset also permits twelve exact MQTT 5 Malformed Packet
 diagnostics where Mosquitto's fixture only requires EOF, including the case
 whose group label says v3.1.1 but whose wire-level protocol byte is `05`.
-The audited subsets require rejection of otherwise valid UTF-8 control
-characters such as U+0001. MQTT makes rejection of these disallowed Unicode
-code points optional, and netz retains its documented interoperable acceptance
-policy instead of pretending that Mosquitto's stricter choice is mandatory.
-This is
-deliberately described as a selected
+This is deliberately described as a selected
 wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on configuration outside netz's strict subset,
 logs, reload, persistence details or plugins, so passing these vectors is not
@@ -2413,11 +2409,10 @@ proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked gate beyond its current 1,774 upstream packet
+3. Expand the source-hash-locked gate beyond its current 1,814 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining reload/full-subject/general-CRL/persistence semantics.
    The 225
-   curated scenarios, fourteen complete portable JSON files, audited 279/307
-   `CONNECT.json`, 145/146 `CONNACK.json`, 150/160 `PUBLISH.json`, 151/155
-   `SUBSCRIBE.json`, and 100/108 `UNSUBSCRIBE.json` subsets still do not cover the full
-   protocol/conformance suite.
+   curated scenarios, sixteen complete portable JSON files, audited 299/307
+   `CONNECT.json`, 145/146 `CONNACK.json`, and 158/160 `PUBLISH.json`
+   subsets still do not cover the full protocol/conformance suite.
