@@ -111,7 +111,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
 `use_username_as_clientid`, `max_connections`, `max_packet_size`,
-`message_size_limit`, `queue_qos0_messages`,
+`message_size_limit`, `retain_available`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
@@ -120,7 +120,11 @@ accept count. Global `max_packet_size` defaults to Mosquitto's 2,000,000-byte
 full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
-payloads are rejected while representable QoS flows complete. `password_file`
+payloads are rejected while representable QoS flows complete. Global
+`retain_available` defaults to true. When false, MQTT 5 CONNACK advertises
+Retain Available 0 and rejects retained PUBLISH or retained Will use with reason
+0x9A; MQTT 3.1.1 closes the connection because it cannot represent that reason.
+`password_file`
 accepts Mosquitto's current Argon2id hashes, `$7$`
 PBKDF2-SHA512 hashes, and legacy `$6$` salted SHA-512 hashes. Plaintext, unknown
 or malformed hashes, duplicate usernames, files over 1 MiB, more than 4,096

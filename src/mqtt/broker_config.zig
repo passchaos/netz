@@ -63,6 +63,7 @@ pub const Config = struct {
     queue_qos0_messages: bool = false,
     max_packet_size: usize = default_max_packet_size,
     message_size_limit: usize = 0,
+    retain_available: bool = true,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
     persistence_file: []u8 = &.{},
@@ -156,6 +157,7 @@ const GlobalSeen = struct {
     acl_file: bool = false,
     max_packet_size: bool = false,
     message_size_limit: bool = false,
+    retain_available: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -278,6 +280,9 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "message_size_limit")) {
                 try markOnce(&global_seen.message_size_limit);
                 config.message_size_limit = try parseOneInteger(u28, &words);
+            } else if (std.mem.eql(u8, directive, "retain_available")) {
+                try markOnce(&global_seen.retain_available);
+                config.retain_available = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "persistence")) {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
@@ -528,6 +533,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\queue_qos0_messages true
         \\max_packet_size 2000000
         \\message_size_limit 1048576
+        \\retain_available false
         \\password_file users.pw
         \\acl_file access.acl
         \\persistence true
@@ -558,6 +564,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.queue_qos0_messages);
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
+    try std.testing.expect(!config.retain_available);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
@@ -862,6 +869,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile second.pem
             \\keyfile server.key
             \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\retain_available true
+            \\retain_available false
+            \\listener 1883
         ),
     );
     try std.testing.expectError(
@@ -1213,6 +1228,7 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(default_max_packet_size, config.max_packet_size);
     try std.testing.expectEqual(@as(usize, 0), config.message_size_limit);
+    try std.testing.expect(config.retain_available);
 
     var minimum = try parse(
         std.testing.allocator,

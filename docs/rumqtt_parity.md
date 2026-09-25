@@ -16,6 +16,7 @@ and equal-wire broker results are kept separate.
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills |
 | Packet and Application Message size policy | Mosquitto-style global `max_packet_size` defaults to 2,000,000 bytes, caps complete inbound MQTT Control Packets across TCP/TLS/WS/WSS, and is advertised in MQTT 5 CONNACK. The independent `message_size_limit` payload-byte cap covers live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto exposes both `max_packet_size` and `message_size_limit`; rumqttd exposes `max_payload_size` |
+| Retain availability policy | Mosquitto-style global `retain_available` defaults true. When disabled, MQTT 5 CONNACK advertises Retain Available 0 and retained PUBLISH or Will use receives reason 0x9A; MQTT 3.1.1 closes because it cannot represent that reason. The policy is shared by TCP/TLS/WS/WSS listeners | Mosquitto exposes global `retain_available`; rumqttd has retained-message storage but no equivalent audited configuration switch |
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups. Network-client PUBLISH and Will writes to broker-owned `$SYS` and `$share` namespaces are denied by default, with Mosquitto's `$SYS/broker/connection/+/state` exception and an explicit opt-out; trusted local producers retain `$SYS` access | Both references provide production topic indexes; Mosquitto applies the same built-in `$SYS`/`$share` write protection before configured ACLs |
@@ -1730,6 +1731,10 @@ patterns, default deny and deny precedence over real TCP/WebSocket traffic.
 It also checks an exact 50-byte full-packet boundary, MQTT 5 Maximum Packet
 Size advertisement and 0x95 disconnect, MQTT 3.1.1 close behavior, WebSocket
 1009 translation, plus version-correct QoS 0/1 and Will payload-limit handling.
+The same real-process gate covers `retain_available false`: MQTT 5 TCP and
+WebSocket CONNACK packets advertise Retain Available 0, retained PUBLISH receives
+0x9A, retained Will CONNECT is refused with 0x9A, and MQTT 3.1.1 closes both
+unrepresentable violation paths.
 Like Mosquitto's current ACL-file plugin, SUBSCRIBE and UNSUBSCRIBE themselves
 are admitted while `read` rules filter every concrete live/retained/resumed
 delivery. Listener-local `certfile` and `keyfile` select the native TLS/WSS

@@ -123,6 +123,7 @@ pub fn run(
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
         .max_outgoing_inflight = 64,
+        .retain_available = config.retain_available,
     };
     var broker = try mqtt.broker.Broker.init(allocator, io, .{
         .limits = .{

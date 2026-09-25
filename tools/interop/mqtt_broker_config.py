@@ -56,11 +56,14 @@ def connect_packet(
     proto_ver: int = 5,
     will_topic: str | None = None,
     will_payload: bytes = b"",
+    will_retain: bool = False,
 ) -> bytes:
     flags = 0x02
     payload = utf8(client_id)
     if will_topic is not None:
         flags |= 0x04
+        if will_retain:
+            flags |= 0x20
         if proto_ver == 5:
             payload += b"\x00"
         payload += utf8(will_topic)
@@ -100,12 +103,13 @@ def publish_packet(
     qos: int = 0,
     packet_id: int = 0,
     proto_ver: int = 5,
+    retain: bool = False,
 ) -> bytes:
     body = utf8(topic)
     if qos:
         body += packet_id.to_bytes(2, "big")
     return mqtt_packet(
-        0x30 | (qos << 1),
+        0x30 | (qos << 1) | int(retain),
         body + (b"\x00" if proto_ver == 5 else b"") + payload,
     )
 
@@ -1093,6 +1097,134 @@ def run_packet_and_message_size_case(broker: Path, directory: Path) -> None:
     if message_process.wait(timeout=5) != 0:
         raise RuntimeError(
             "message-size broker failed: " + message_process.stdout.read()
+        )
+
+
+def run_retain_unavailable_case(broker: Path, directory: Path) -> None:
+    tcp_port = free_port()
+    websocket_port = free_port()
+    while websocket_port == tcp_port:
+        websocket_port = free_port()
+    config = directory / "retain-unavailable.conf"
+    config.write_text(
+        "retain_available false\n"
+        f"listener {tcp_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 4\n"
+        f"listener {websocket_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 5 clients" not in ready:
+        raise RuntimeError(f"retain-unavailable broker failed to start: {ready}")
+
+    v5 = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
+    v5.settimeout(5)
+    try:
+        v5.sendall(connect_packet("retain-v5"))
+        connack = read_mqtt_packet(v5)
+        if bytes((0x25, 0)) not in connack_properties(connack):
+            raise AssertionError("CONNACK omitted Retain Available=0")
+        v5.sendall(
+            publish_packet(
+                "retain/topic",
+                b"blocked",
+                qos=1,
+                packet_id=1,
+                retain=True,
+            )
+        )
+        if read_mqtt_packet(v5) != bytes.fromhex("e0019a"):
+            raise AssertionError("retained MQTT 5 PUBLISH reason mismatch")
+    finally:
+        v5.close()
+
+    v311 = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
+    v311.settimeout(5)
+    try:
+        v311.sendall(connect_packet("retain-v311", proto_ver=4))
+        if read_mqtt_packet(v311) != bytes.fromhex("20020000"):
+            raise AssertionError("retain-unavailable MQTT 3.1.1 CONNECT failed")
+        v311.sendall(
+            publish_packet(
+                "retain/topic",
+                b"blocked",
+                qos=1,
+                packet_id=1,
+                proto_ver=4,
+                retain=True,
+            )
+        )
+        try:
+            closed = v311.recv(1) == b""
+        except ConnectionError:
+            closed = True
+        if not closed:
+            raise AssertionError("retained MQTT 3.1.1 PUBLISH was not closed")
+    finally:
+        v311.close()
+
+    websocket = websocket_connect(websocket_port)
+    try:
+        send_websocket_binary(websocket, connect_packet("retain-ws"))
+        connack = read_websocket_binary(websocket)
+        if bytes((0x25, 0)) not in connack_properties(connack):
+            raise AssertionError("WebSocket CONNACK omitted Retain Available=0")
+        send_websocket_binary(
+            websocket,
+            publish_packet(
+                "retain/topic",
+                b"blocked",
+                qos=1,
+                packet_id=1,
+                retain=True,
+            ),
+        )
+        if read_websocket_binary(websocket) != bytes.fromhex("e0019a"):
+            raise AssertionError("retained WebSocket PUBLISH reason mismatch")
+    finally:
+        websocket.close()
+
+    for proto_ver, expected_reason in ((5, 0x9A), (4, 0x05)):
+        client = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
+        client.settimeout(5)
+        try:
+            client.sendall(
+                connect_packet(
+                    f"retain-will-{proto_ver}",
+                    proto_ver=proto_ver,
+                    will_topic="retain/will",
+                    will_payload=b"blocked",
+                    will_retain=True,
+                )
+            )
+            if proto_ver == 5:
+                if connack_reason(read_mqtt_packet(client)) != expected_reason:
+                    raise AssertionError("retained Will CONNACK reason mismatch")
+            else:
+                try:
+                    closed = client.recv(1) == b""
+                except ConnectionError:
+                    closed = True
+                if not closed:
+                    raise AssertionError("retained MQTT 3.1.1 Will was not closed")
+        finally:
+            client.close()
+
+    return_code = process.wait(timeout=5)
+    output = process.stdout.read()
+    if return_code == 0 or "InvalidProperty" not in output:
+        raise RuntimeError(
+            "retain-unavailable Will rejection was not reported: " + output
         )
 
 
@@ -3025,6 +3157,7 @@ def main() -> None:
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
         run_packet_and_message_size_case(args.broker, directory)
+        run_retain_unavailable_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -3041,7 +3174,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, packet/message size policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, packet/message/retain policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
