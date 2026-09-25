@@ -2160,7 +2160,15 @@ fn websocketLimits(
         .max_head_bytes = max_head_bytes,
         .max_frame_bytes = limits.max_packet_size,
         .max_message_bytes = limits.max_packet_size,
+        .tcp_nodelay = limits.tcp_nodelay,
     };
+}
+
+test "MQTT WebSocket limits preserve TCP no-delay policy" {
+    try std.testing.expect(websocketLimits(.{ .tcp_nodelay = true }, 1234)
+        .tcp_nodelay);
+    try std.testing.expect(!websocketLimits(.{ .tcp_nodelay = false }, 1234)
+        .tcp_nodelay);
 }
 
 fn websocketConnectOptions(

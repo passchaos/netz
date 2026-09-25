@@ -384,6 +384,7 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
     config = directory / "broker.conf"
     config.write_text(
         "queue_qos0_messages true\n"
+        "set_tcp_nodelay true\n"
         f"password_file {password_file}\n"
         f"acl_file {acl_file}\n"
         f"listener {tcp_port} 127.0.0.1\n"
@@ -2072,6 +2073,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
     )
     config = directory / "tls.conf"
     config.write_text(
+        "set_tcp_nodelay true\n"
         f"listener {tls_port} 127.0.0.1\n"
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"

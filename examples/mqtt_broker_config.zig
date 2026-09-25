@@ -320,7 +320,11 @@ pub fn run(
                     .{
                         .identity = identity.serverIdentity(),
                         .client_auth = client_auth_policies[index],
-                        .limits = .{ .max_packet_size = config.max_packet_size },
+                        .limits = .{
+                            .max_packet_size = config.max_packet_size,
+                            .tcp_nodelay = config.set_tcp_nodelay,
+                        },
+                        .tcp_nodelay = config.set_tcp_nodelay,
                     },
                 ) },
                 .websockets => .{
@@ -331,7 +335,11 @@ pub fn run(
                         .{
                             .identity = identity.serverIdentity(),
                             .client_auth = client_auth_policies[index],
-                            .limits = .{ .max_packet_size = config.max_packet_size },
+                            .limits = .{
+                                .max_packet_size = config.max_packet_size,
+                                .tcp_nodelay = config.set_tcp_nodelay,
+                            },
+                            .tcp_nodelay = config.set_tcp_nodelay,
                         },
                     ),
                 },
@@ -341,14 +349,20 @@ pub fn run(
                 allocator,
                 io,
                 configured.address,
-                .{ .max_packet_size = config.max_packet_size },
+                .{
+                    .max_packet_size = config.max_packet_size,
+                    .tcp_nodelay = config.set_tcp_nodelay,
+                },
             ) },
             .websockets => .{
                 .websockets = try mqtt.websocket_runtime.Server.listen(
                     allocator,
                     io,
                     configured.address,
-                    .{ .limits = .{ .max_packet_size = config.max_packet_size } },
+                    .{ .limits = .{
+                        .max_packet_size = config.max_packet_size,
+                        .tcp_nodelay = config.set_tcp_nodelay,
+                    } },
                 ),
             },
         };

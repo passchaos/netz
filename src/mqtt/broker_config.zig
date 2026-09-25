@@ -80,6 +80,7 @@ pub const Config = struct {
     allow_zero_length_client_id: bool = true,
     persistent_client_expiration_seconds: ?u32 = null,
     sys_interval_seconds: u16 = default_sys_interval_seconds,
+    set_tcp_nodelay: bool = false,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
     persistence_file: []u8 = &.{},
@@ -204,6 +205,7 @@ const GlobalSeen = struct {
     allow_zero_length_client_id: bool = false,
     persistent_client_expiration: bool = false,
     sys_interval: bool = false,
+    set_tcp_nodelay: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -378,6 +380,9 @@ fn parseSources(
                 try markOnce(&global_seen.sys_interval);
                 config.sys_interval_seconds =
                     try parseOneInteger(u16, &words);
+            } else if (std.mem.eql(u8, directive, "set_tcp_nodelay")) {
+                try markOnce(&global_seen.set_tcp_nodelay);
+                config.set_tcp_nodelay = try parseOneBool(&words);
             } else if (std.mem.eql(u8, directive, "persistence")) {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
@@ -676,6 +681,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\allow_zero_length_clientid false
         \\persistent_client_expiration 2h
         \\sys_interval 17
+        \\set_tcp_nodelay true
         \\password_file users.pw
         \\acl_file access.acl
         \\persistence true
@@ -723,6 +729,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         config.persistent_client_expiration_seconds,
     );
     try std.testing.expectEqual(@as(u16, 17), config.sys_interval_seconds);
+    try std.testing.expect(config.set_tcp_nodelay);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
@@ -1611,6 +1618,7 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         default_sys_interval_seconds,
         config.sys_interval_seconds,
     );
+    try std.testing.expect(!config.set_tcp_nodelay);
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
     try std.testing.expectEqual(
         default_max_topic_aliases,
@@ -1734,6 +1742,37 @@ test "MQTT broker config validates global system interval" {
         parse(std.testing.allocator,
             \\sys_interval 1
             \\sys_interval 2
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config validates global TCP no-delay policy" {
+    var enabled = try parse(std.testing.allocator,
+        \\set_tcp_nodelay true
+        \\listener 1883
+        \\allow_anonymous true
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer enabled.deinit(std.testing.allocator);
+    try std.testing.expect(enabled.set_tcp_nodelay);
+    try std.testing.expectEqual(@as(usize, 2), enabled.listeners.len);
+
+    try std.testing.expectError(
+        error.InvalidBoolean,
+        parse(std.testing.allocator,
+            \\set_tcp_nodelay yes
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(std.testing.allocator,
+            \\set_tcp_nodelay true
+            \\set_tcp_nodelay false
             \\listener 1883
             \\allow_anonymous true
         ),

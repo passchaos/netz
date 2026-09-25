@@ -22,3 +22,37 @@ pub fn setTcpNoDelay(
         std.mem.asBytes(&enabled),
     ) catch return error.SocketOptionFailed;
 }
+
+test "TCP no-delay is enabled on a live stream" {
+    if (comptime builtin.os.tag == .windows) return;
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    const server = try listener.accept(io);
+    defer server.close(io);
+
+    try setTcpNoDelay(server);
+    var enabled: c_int = 0;
+    var enabled_len: std.posix.socklen_t = @sizeOf(c_int);
+    const result = std.posix.system.getsockopt(
+        server.socket.handle,
+        std.posix.IPPROTO.TCP,
+        std.posix.TCP.NODELAY,
+        @ptrCast(&enabled),
+        &enabled_len,
+    );
+    try std.testing.expectEqual(std.posix.E.SUCCESS, std.posix.errno(result));
+    try std.testing.expectEqual(@as(std.posix.socklen_t, @sizeOf(c_int)), enabled_len);
+    try std.testing.expectEqual(@as(c_int, 1), enabled);
+}

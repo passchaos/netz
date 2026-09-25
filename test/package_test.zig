@@ -5157,6 +5157,10 @@ test "public modules are reachable" {
         "sys_interval_seconds",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "set_tcp_nodelay",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "max_topic_alias",
     ));
