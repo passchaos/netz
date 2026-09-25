@@ -1863,6 +1863,173 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_capath_listener_case(broker: Path, directory: Path) -> None:
+    server_ca, server_ca_key = create_ca(
+        directory, "capath-server-ca", "Capath Server Root"
+    )
+    server_certificate, server_key = create_signed_certificate(
+        directory,
+        "capath-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        701,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    first_ca, first_ca_key = create_ca(
+        directory, "capath-client-a-ca", "Capath Client Root A"
+    )
+    second_ca, second_ca_key = create_ca(
+        directory, "capath-client-b-ca", "Capath Client Root B"
+    )
+    first_certificate, first_key = create_signed_certificate(
+        directory,
+        "capath-client-a",
+        "capath-client-a",
+        first_ca,
+        first_ca_key,
+        702,
+        "clientAuth",
+    )
+    second_certificate, second_key = create_signed_certificate(
+        directory,
+        "capath-client-b",
+        "capath-client-b",
+        second_ca,
+        second_ca_key,
+        703,
+        "clientAuth",
+    )
+    wrong_ca, wrong_ca_key = create_ca(
+        directory, "capath-wrong-ca", "Capath Wrong Root"
+    )
+    wrong_certificate, wrong_key = create_signed_certificate(
+        directory,
+        "capath-wrong-client",
+        "capath-wrong-client",
+        wrong_ca,
+        wrong_ca_key,
+        704,
+        "clientAuth",
+    )
+
+    ca_directory = directory / "trusted-client-capath"
+    ca_directory.mkdir()
+    (ca_directory / "a.pem").write_bytes(first_ca.read_bytes())
+    (ca_directory / "b.pem").write_bytes(second_ca.read_bytes())
+    run_openssl("rehash", ca_directory)
+    if not any(entry.is_symlink() for entry in ca_directory.iterdir()):
+        raise AssertionError("openssl rehash did not create capath links")
+
+    port = free_port()
+    config = directory / "capath.conf"
+    config.write_text(
+        f"listener {port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"capath {ca_directory}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 3\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    startup_lines: list[str] = []
+    while True:
+        line = process.stdout.readline()
+        if line == "":
+            raise RuntimeError(
+                "capath broker failed to start: " + "".join(startup_lines)
+            )
+        startup_lines.append(line)
+        if "configured 1 listeners for 3 clients" in line:
+            break
+    for certificate, key in (
+        (first_certificate, first_key),
+        (second_certificate, second_key),
+    ):
+        result = openssl_mqtt_client(port, server_ca, certificate, key)
+        assert_openssl_mqtt_success(result)
+    rejected = openssl_mqtt_client(
+        port, server_ca, wrong_certificate, wrong_key
+    )
+    if rejected.stdout.startswith(b"\x20"):
+        raise AssertionError("capath accepted an untrusted client certificate")
+    if process.wait(timeout=5) == 0:
+        raise AssertionError("capath untrusted-client failure was not reported")
+    if "CertificateUntrusted" not in process.stdout.read():
+        raise AssertionError("capath rejection omitted CertificateUntrusted")
+
+    websocket_config = directory / "capath-websocket.conf"
+    websocket_config.write_text(
+        f"listener {free_port()} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"capath {ca_directory}\n"
+        "allow_anonymous true\n"
+    )
+    websocket_result = subprocess.run(
+        [str(broker), f"--config={websocket_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if (
+        websocket_result.returncode == 0
+        or "CapathUnsupportedForWebSockets" not in websocket_result.stdout
+    ):
+        raise AssertionError(
+            "WebSocket capath was not rejected explicitly: "
+            + websocket_result.stdout
+        )
+
+    first_port = free_port()
+    invalid_directory = directory / "invalid-client-capath"
+    invalid_directory.mkdir()
+    (invalid_directory / "broken.pem").write_text("not a certificate\n")
+    invalid_config = directory / "invalid-capath.conf"
+    invalid_config.write_text(
+        f"listener {first_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {free_port()} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"capath {invalid_directory}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    invalid_result = subprocess.run(
+        [str(broker), f"--config={invalid_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if invalid_result.returncode == 0 or "InvalidPem" not in invalid_result.stdout:
+        raise AssertionError(
+            "malformed later capath did not fail before listen: "
+            + invalid_result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", first_port)) == 0:
+            raise AssertionError(
+                "an earlier listener was bound before capath validation"
+            )
+
+
 def run_rsa_crl_listener_case(broker: Path, directory: Path) -> None:
     server_ca = directory / "server-ca.crt"
     server_certificate = directory / "mtls-server.crt"
@@ -2311,6 +2478,7 @@ def main() -> None:
         run_persistence_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
         run_mtls_listener_case(args.broker, directory)
+        run_capath_listener_case(args.broker, directory)
         run_mtls_subject_username_case(args.broker, directory)
         run_optional_client_certificate_case(args.broker, directory)
         run_rsa_crl_listener_case(args.broker, directory)
@@ -2320,7 +2488,8 @@ def main() -> None:
         "Mosquitto hashes, global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, TLS/WSS and required mTLS with OpenSSL verification, "
-        "optional/required client certificates, certificate CN/full-Subject identity mapping, "
+        "optional/required client certificates, bounded capath trust, "
+        "certificate CN/full-Subject identity mapping, "
         "P-256/RSA signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, and snapshot restore "
         + RUNTIME

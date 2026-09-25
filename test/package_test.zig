@@ -207,6 +207,9 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));
     try std.testing.expect(@hasDecl(netz.tls, "client_ca_file"));
+    try std.testing.expect(@hasDecl(netz.tls, "client_ca_dir"));
+    try std.testing.expect(@hasDecl(netz.tls.client_ca_dir, "load"));
+    try std.testing.expect(@hasDecl(netz.tls.client_ca_dir, "loadCombined"));
     try std.testing.expect(@hasDecl(netz.tls, "client_crl_file"));
     try std.testing.expect(@hasDecl(
         netz.tls.server_identity_file,
@@ -5080,6 +5083,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
         "acl_file",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "capath",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,

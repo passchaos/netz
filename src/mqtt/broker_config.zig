@@ -24,6 +24,7 @@ pub const Listener = struct {
     certfile: []u8 = &.{},
     keyfile: []u8 = &.{},
     cafile: []u8 = &.{},
+    capath: []u8 = &.{},
     crlfile: []u8 = &.{},
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
@@ -41,6 +42,7 @@ pub const Listener = struct {
         if (self.certfile.len != 0) allocator.free(self.certfile);
         if (self.keyfile.len != 0) allocator.free(self.keyfile);
         if (self.cafile.len != 0) allocator.free(self.cafile);
+        if (self.capath.len != 0) allocator.free(self.capath);
         if (self.crlfile.len != 0) allocator.free(self.crlfile);
         if (self.mount_point.len != 0) allocator.free(self.mount_point);
         self.* = undefined;
@@ -119,6 +121,7 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     AuthenticationRequired,
     TlsIdentityIncomplete,
     ClientCertificateConfigurationIncomplete,
+    CapathUnsupportedForWebSockets,
     IntegerOverflow,
 } || std.mem.Allocator.Error;
 
@@ -129,6 +132,7 @@ const ListenerSeen = struct {
     certfile: bool = false,
     keyfile: bool = false,
     cafile: bool = false,
+    capath: bool = false,
     crlfile: bool = false,
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
@@ -302,6 +306,9 @@ pub fn parse(
             } else if (std.mem.eql(u8, directive, "cafile")) {
                 try markOnce(&seen.cafile);
                 listener.cafile = try parseOneOwned(allocator, &words);
+            } else if (std.mem.eql(u8, directive, "capath")) {
+                try markOnce(&seen.capath);
+                listener.capath = try parseOneOwned(allocator, &words);
             } else if (std.mem.eql(u8, directive, "crlfile")) {
                 try markOnce(&seen.crlfile);
                 listener.crlfile = try parseOneOwned(allocator, &words);
@@ -362,18 +369,23 @@ pub fn parse(
         return error.PersistenceRequired;
     }
     for (listeners.items) |listener| {
+        const has_client_ca = listener.cafile.len != 0 or
+            listener.capath.len != 0;
         if ((listener.certfile.len == 0) != (listener.keyfile.len == 0)) {
             return error.TlsIdentityIncomplete;
         }
         if (listener.require_certificate and
-            (listener.cafile.len == 0 or !listener.usesTls()))
+            (!has_client_ca or !listener.usesTls()))
         {
             return error.ClientCertificateConfigurationIncomplete;
         }
-        if (listener.cafile.len != 0 and !listener.usesTls()) {
+        if (has_client_ca and !listener.usesTls()) {
             return error.ClientCertificateConfigurationIncomplete;
         }
-        if (listener.crlfile.len != 0 and listener.cafile.len == 0) {
+        if (listener.capath.len != 0 and listener.protocol == .websockets) {
+            return error.CapathUnsupportedForWebSockets;
+        }
+        if (listener.crlfile.len != 0 and !has_client_ca) {
             return error.ClientCertificateConfigurationIncomplete;
         }
         if ((listener.use_identity_as_username or
@@ -426,6 +438,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "certfile") or
         std.mem.eql(u8, value, "keyfile") or
         std.mem.eql(u8, value, "cafile") or
+        std.mem.eql(u8, value, "capath") or
         std.mem.eql(u8, value, "crlfile") or
         std.mem.eql(u8, value, "require_certificate") or
         std.mem.eql(u8, value, "use_identity_as_username") or
@@ -758,8 +771,51 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         ),
     );
     try std.testing.expectError(
-        error.UnsupportedDirective,
+        error.ClientCertificateConfigurationIncomplete,
         parse(allocator, "listener 1883\ncapath clients"),
+    );
+    try std.testing.expectError(
+        error.CapathUnsupportedForWebSockets,
+        parse(allocator,
+            \\listener 8080
+            \\protocol websockets
+            \\certfile server.pem
+            \\keyfile server.key
+            \\capath clients
+            \\allow_anonymous true
+        ),
+    );
+    var capath_client_certificate = try parse(allocator,
+        \\listener 8883
+        \\certfile server.pem
+        \\keyfile server.key
+        \\cafile common.pem
+        \\capath clients
+        \\require_certificate true
+        \\allow_anonymous true
+    );
+    defer capath_client_certificate.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "common.pem",
+        capath_client_certificate.listeners[0].cafile,
+    );
+    try std.testing.expectEqualStrings(
+        "clients",
+        capath_client_certificate.listeners[0].capath,
+    );
+    try std.testing.expect(
+        capath_client_certificate.listeners[0].require_certificate,
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\capath first
+            \\capath second
+            \\allow_anonymous true
+        ),
     );
     try std.testing.expectError(
         error.ClientCertificateConfigurationIncomplete,
@@ -905,7 +961,8 @@ test "MQTT broker config owns strings independently of source" {
             "acl_file access.acl\n" ++
             "listener 1883\n" ++
             "certfile server.pem\nkeyfile server.key\n" ++
-            "cafile clients.pem\nrequire_certificate true\n" ++
+            "cafile clients.pem\ncapath clients\n" ++
+            "require_certificate true\n" ++
             "crlfile clients.crl\n" ++
             "use_identity_as_username true\n" ++
             "use_subject_as_username true\n" ++
@@ -926,6 +983,7 @@ test "MQTT broker config owns strings independently of source" {
     try std.testing.expectEqualStrings("server.pem", config.listeners[0].certfile);
     try std.testing.expectEqualStrings("server.key", config.listeners[0].keyfile);
     try std.testing.expectEqualStrings("clients.pem", config.listeners[0].cafile);
+    try std.testing.expectEqualStrings("clients", config.listeners[0].capath);
     try std.testing.expectEqualStrings("clients.crl", config.listeners[0].crlfile);
     try std.testing.expect(config.listeners[0].require_certificate);
     try std.testing.expect(config.listeners[0].use_identity_as_username);

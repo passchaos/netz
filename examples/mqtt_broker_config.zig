@@ -197,13 +197,22 @@ pub fn run(
             configured.certfile,
             configured.keyfile,
         );
-        if (configured.cafile.len != 0) {
-            client_cas[index] = try netz.tls.client_ca_file.load(
-                allocator,
-                io,
-                std.Io.Dir.cwd(),
-                configured.cafile,
-            );
+        if (configured.cafile.len != 0 or configured.capath.len != 0) {
+            client_cas[index] = if (configured.capath.len != 0)
+                try netz.tls.client_ca_dir.loadCombined(
+                    allocator,
+                    io,
+                    std.Io.Dir.cwd(),
+                    if (configured.cafile.len != 0) configured.cafile else null,
+                    configured.capath,
+                )
+            else
+                try netz.tls.client_ca_file.load(
+                    allocator,
+                    io,
+                    std.Io.Dir.cwd(),
+                    configured.cafile,
+                );
             const ca = &client_cas[index].?;
             client_verifiers[index] = ca.verifier(
                 std.Io.Timestamp.now(io, .real).toSeconds(),

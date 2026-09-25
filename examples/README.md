@@ -129,16 +129,21 @@ port is opened, every identity is loaded from a leaf-first PEM certificate
 chain and an unencrypted P-256 SEC1 or PKCS#8 private key, bounded and strictly
 decoded, and checked for a matching leaf key. RSA, other curves, encrypted
 keys, include, reload, plugin, bridge, and full Mosquitto configuration remain
-outside this subset and fail closed. `cafile` and `require_certificate true`
-must occur together on a TLS listener. Every PEM CA is bounded, unique by DER
+outside this subset and fail closed. `cafile` and/or `capath` enable optional
+client certificates on a TLS listener; `require_certificate true` makes the
+certificate mandatory. Every PEM CA is bounded, unique by DER
 Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;
-its exact DER Subject is advertised in TLS 1.3 CertificateRequest. Optional
-`crlfile` PEM lists must be signed by a unique CA in `cafile`; P-256 ECDSA or
+its exact DER Subject is advertised in TLS 1.3 CertificateRequest. `capath` is
+non-recursive and deterministically loads bounded `.pem` regular files plus
+OpenSSL `rehash` certificate links; empty, malformed, duplicate-subject, and
+oversized directories fail before any listener is opened. Matching Mosquitto's
+transport limitation without silently weakening authentication, `capath` is
+rejected for WebSocket listeners. Optional
+`crlfile` PEM lists must be signed by a unique configured CA; P-256 ECDSA or
 1024-4096-bit RSA PKCS#1 v1.5 signatures with SHA-256, cRLSign,
 thisUpdate/nextUpdate, extensions and leaf serials are validated before bind.
 Revoked clients are rejected during TLS. Ed25519-signed, indirect, delta,
-expired, future, malformed and unmatched CRLs fail closed. Optional client
-certificates and `capath` are not accepted. When
+expired, future, malformed and unmatched CRLs fail closed. When
 `use_identity_as_username true` is also set, the verified leaf's unique Subject
 CN replaces any wire username and the wire password is ignored before password,
 ACL, Session, Client ID, or Will policy. The CN is converted from supported
