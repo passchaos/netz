@@ -125,7 +125,11 @@ pub fn run(
         .max_outgoing_inflight = 64,
     };
     var broker = try mqtt.broker.Broker.init(allocator, io, .{
-        .limits = .{ .max_connections = connection_count },
+        .limits = .{
+            .max_connections = connection_count,
+            .max_payload_size = config.message_size_limit,
+            .runtime = .{ .max_packet_size = config.max_packet_size },
+        },
         .accept = base_accept,
         .queue_qos0_messages = config.queue_qos0_messages,
         .persistent_change_autosave = if (config.persistence and
@@ -280,6 +284,7 @@ pub fn run(
                     .{
                         .identity = identity.serverIdentity(),
                         .client_auth = client_auth_policies[index],
+                        .limits = .{ .max_packet_size = config.max_packet_size },
                     },
                 ) },
                 .websockets => .{
@@ -290,6 +295,7 @@ pub fn run(
                         .{
                             .identity = identity.serverIdentity(),
                             .client_auth = client_auth_policies[index],
+                            .limits = .{ .max_packet_size = config.max_packet_size },
                         },
                     ),
                 },
@@ -299,14 +305,14 @@ pub fn run(
                 allocator,
                 io,
                 configured.address,
-                .{},
+                .{ .max_packet_size = config.max_packet_size },
             ) },
             .websockets => .{
                 .websockets = try mqtt.websocket_runtime.Server.listen(
                     allocator,
                     io,
                     configured.address,
-                    .{},
+                    .{ .limits = .{ .max_packet_size = config.max_packet_size } },
                 ),
             },
         };

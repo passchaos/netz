@@ -110,12 +110,18 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `keyfile`, `cafile`, `crlfile`, `require_certificate`, `use_identity_as_username`,
 `mount_point`,
 `allow_anonymous`, `max_qos`, `max_keepalive`,
-`use_username_as_clientid`, `max_connections`, `queue_qos0_messages`,
+`use_username_as_clientid`, `max_connections`, `max_packet_size`,
+`message_size_limit`, `queue_qos0_messages`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
 bounded example interprets each listener's `max_connections` as its finite
-accept count. `password_file` accepts Mosquitto's current Argon2id hashes, `$7$`
+accept count. Global `max_packet_size` defaults to Mosquitto's 2,000,000-byte
+full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
+MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
+Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
+payloads are rejected while representable QoS flows complete. `password_file`
+accepts Mosquitto's current Argon2id hashes, `$7$`
 PBKDF2-SHA512 hashes, and legacy `$6$` salted SHA-512 hashes. Plaintext, unknown
 or malformed hashes, duplicate usernames, files over 1 MiB, more than 4,096
 users, and excessive KDF parameters fail closed before any listener is opened.

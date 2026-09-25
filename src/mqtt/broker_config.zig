@@ -12,6 +12,7 @@ const net = std.Io.net;
 
 pub const max_config_bytes: usize = 1024 * 1024;
 pub const default_max_connections: usize = 16;
+pub const default_max_packet_size: usize = 2_000_000;
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
@@ -60,6 +61,8 @@ pub const Config = struct {
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
     queue_qos0_messages: bool = false,
+    max_packet_size: usize = default_max_packet_size,
+    message_size_limit: usize = 0,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
     persistence_file: []u8 = &.{},
@@ -151,6 +154,8 @@ const GlobalSeen = struct {
     queue_qos0_messages: bool = false,
     password_file: bool = false,
     acl_file: bool = false,
+    max_packet_size: bool = false,
+    message_size_limit: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
     persistence_file: bool = false,
@@ -266,6 +271,13 @@ fn parseSources(
                     try markOnce(&global_seen.acl_file);
                     config.acl_file = try parseOneOwned(allocator, &words);
                 }
+            } else if (std.mem.eql(u8, directive, "max_packet_size")) {
+                try markOnce(&global_seen.max_packet_size);
+                config.max_packet_size = try parseOneInteger(u31, &words);
+                if (config.max_packet_size < 20) return error.InvalidInteger;
+            } else if (std.mem.eql(u8, directive, "message_size_limit")) {
+                try markOnce(&global_seen.message_size_limit);
+                config.message_size_limit = try parseOneInteger(u28, &words);
             } else if (std.mem.eql(u8, directive, "persistence")) {
                 try markOnce(&global_seen.persistence);
                 config.persistence = try parseOneBool(&words);
@@ -514,6 +526,8 @@ test "MQTT broker config parses owned multi-listener policy" {
     var config = try parse(allocator,
         \\# strict supported subset
         \\queue_qos0_messages true
+        \\max_packet_size 2000000
+        \\message_size_limit 1048576
         \\password_file users.pw
         \\acl_file access.acl
         \\persistence true
@@ -542,6 +556,8 @@ test "MQTT broker config parses owned multi-listener policy" {
     );
     defer config.deinit(allocator);
     try std.testing.expect(config.queue_qos0_messages);
+    try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
+    try std.testing.expectEqual(@as(usize, 1_048_576), config.message_size_limit);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
     try std.testing.expectEqualStrings("access.acl", config.acl_file);
@@ -1078,6 +1094,34 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator, "listener 1883\nmax_qos 3"),
     );
     try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "max_packet_size 19\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "max_packet_size 2147483648\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, "message_size_limit 268435456\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\max_packet_size 50
+            \\max_packet_size 51
+            \\listener 1883
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\message_size_limit 1
+            \\message_size_limit 2
+            \\listener 1883
+        ),
+    );
+    try std.testing.expectError(
         error.InvalidDirective,
         parse(allocator,
             \\persistence true
@@ -1159,4 +1203,26 @@ test "MQTT broker config accepts certificate identity authentication" {
     try std.testing.expect(config.password_file.len == 0);
     try std.testing.expect(config.listeners[0].require_certificate);
     try std.testing.expect(config.listeners[0].use_identity_as_username);
+}
+
+test "MQTT broker config uses bounded packet and unlimited message defaults" {
+    var config = try parse(
+        std.testing.allocator,
+        "listener 1883\nallow_anonymous true\n",
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(default_max_packet_size, config.max_packet_size);
+    try std.testing.expectEqual(@as(usize, 0), config.message_size_limit);
+
+    var minimum = try parse(
+        std.testing.allocator,
+        "max_packet_size 20\nmessage_size_limit 268435455\n" ++
+            "listener 1884\nallow_anonymous true\n",
+    );
+    defer minimum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 20), minimum.max_packet_size);
+    try std.testing.expectEqual(
+        @as(usize, 268_435_455),
+        minimum.message_size_limit,
+    );
 }

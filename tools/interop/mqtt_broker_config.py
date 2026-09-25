@@ -180,15 +180,38 @@ def connack_reason(packet: bytes) -> int:
     return packet[offset + 1]
 
 
-def puback_reason(packet: bytes, packet_id: int) -> int:
-    if packet[0] != 0x40:
-        raise AssertionError(f"expected PUBACK, got {packet.hex()}")
+def connack_properties(packet: bytes) -> bytes:
+    if packet[0] != 0x20:
+        raise AssertionError(f"expected CONNACK, got {packet.hex()}")
+    remaining, offset = decode_variable_integer(packet, 1)
+    if remaining < 3 or offset + remaining != len(packet):
+        raise AssertionError(f"malformed MQTT 5 CONNACK: {packet.hex()}")
+    property_length, property_offset = decode_variable_integer(packet, offset + 2)
+    properties = packet[property_offset : property_offset + property_length]
+    if property_offset + property_length != len(packet):
+        raise AssertionError(f"malformed MQTT 5 CONNACK properties: {packet.hex()}")
+    return properties
+
+
+def acknowledgment_reason(
+    packet: bytes, packet_type: int, packet_id: int
+) -> int:
+    if packet[0] != packet_type:
+        raise AssertionError(
+            f"expected acknowledgment {packet_type:#x}, got {packet.hex()}"
+        )
     remaining, offset = decode_variable_integer(packet, 1)
     if remaining < 2 or offset + remaining != len(packet):
-        raise AssertionError(f"malformed PUBACK: {packet.hex()}")
+        raise AssertionError(f"malformed acknowledgment: {packet.hex()}")
     if int.from_bytes(packet[offset : offset + 2], "big") != packet_id:
-        raise AssertionError(f"wrong PUBACK packet identifier: {packet.hex()}")
+        raise AssertionError(
+            f"wrong acknowledgment packet identifier: {packet.hex()}"
+        )
     return packet[offset + 2] if remaining > 2 else 0
+
+
+def puback_reason(packet: bytes, packet_id: int) -> int:
+    return acknowledgment_reason(packet, 0x40, packet_id)
 
 
 def expect_no_packet(sock: socket.socket, label: str) -> None:
@@ -295,6 +318,16 @@ def read_websocket_binary(sock: socket.socket) -> bytes:
     elif length == 127:
         length = int.from_bytes(recv_exact(sock, 8), "big")
     return recv_exact(sock, length)
+
+
+def read_websocket_close_code(sock: socket.socket) -> int:
+    first, second = recv_exact(sock, 2)
+    if first != 0x88 or second & 0x80:
+        raise AssertionError(f"expected WebSocket close, got {first:02x}{second:02x}")
+    length = second & 0x7F
+    if length != 2:
+        raise AssertionError(f"unexpected WebSocket close length {length}")
+    return int.from_bytes(recv_exact(sock, 2), "big")
 
 
 def run_shared_listener_case(broker: Path, directory: Path) -> None:
@@ -774,6 +807,293 @@ def run_include_directory_case(broker: Path, directory: Path) -> None:
             raise AssertionError(
                 "listener bound before every included config was validated"
             )
+
+
+def run_packet_and_message_size_case(broker: Path, directory: Path) -> None:
+    packet_port = free_port()
+    websocket_port = free_port()
+    while websocket_port == packet_port:
+        websocket_port = free_port()
+    tls_port = free_port()
+    while tls_port in (packet_port, websocket_port):
+        tls_port = free_port()
+    wss_port = free_port()
+    while wss_port in (packet_port, websocket_port, tls_port):
+        wss_port = free_port()
+    server_ca, server_ca_key = create_ca(
+        directory,
+        "size-server-ca",
+        "Size Server Root",
+    )
+    server_certificate, server_key = create_signed_certificate(
+        directory,
+        "size-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        801,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    packet_config = directory / "max-packet-size.conf"
+    packet_config.write_text(
+        "max_packet_size 50\n"
+        f"listener {packet_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+        f"listener {websocket_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {wss_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    packet_process = subprocess.Popen(
+        [str(broker), f"--config={packet_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert packet_process.stdout is not None
+    ready = packet_process.stdout.readline().strip()
+    if "configured 4 listeners for 5 clients" not in ready:
+        raise RuntimeError(f"max-packet-size broker failed to start: {ready}")
+
+    v5 = socket.create_connection(("127.0.0.1", packet_port), timeout=5)
+    v5.settimeout(5)
+    try:
+        v5.sendall(connect_packet("packet-v5"))
+        connack = read_mqtt_packet(v5)
+        if connack_reason(connack) != 0:
+            raise AssertionError("max-packet-size MQTT 5 CONNECT failed")
+        expected_property = bytes((0x27, 0, 0, 0, 50))
+        if expected_property not in connack_properties(connack):
+            raise AssertionError(
+                "CONNACK omitted configured Maximum Packet Size: "
+                + connack.hex()
+            )
+        exact = publish_packet("t", b"x" * 44, proto_ver=5)
+        oversized = publish_packet("t", b"x" * 45, proto_ver=5)
+        if len(exact) != 50 or len(oversized) != 51:
+            raise AssertionError("max packet fixture sizes drifted")
+        v5.sendall(exact)
+        mqtt_ping(v5)
+        v5.sendall(oversized)
+        disconnect = read_mqtt_packet(v5)
+        if disconnect != bytes.fromhex("e00195"):
+            raise AssertionError(
+                "oversized MQTT 5 packet disconnect mismatch: "
+                + disconnect.hex()
+            )
+    finally:
+        v5.close()
+
+    v311 = socket.create_connection(("127.0.0.1", packet_port), timeout=5)
+    v311.settimeout(5)
+    try:
+        v311.sendall(connect_packet("packet-v311", proto_ver=4))
+        if read_mqtt_packet(v311) != bytes.fromhex("20020000"):
+            raise AssertionError("max-packet-size MQTT 3.1.1 CONNECT failed")
+        oversized = publish_packet("t", b"x" * 46, proto_ver=4)
+        if len(oversized) != 51:
+            raise AssertionError("MQTT 3.1.1 max packet fixture size drifted")
+        v311.sendall(oversized)
+        try:
+            closed = v311.recv(1) == b""
+        except ConnectionError:
+            closed = True
+        if not closed:
+            raise AssertionError("oversized MQTT 3.1.1 packet was not closed")
+    finally:
+        v311.close()
+
+    websocket = websocket_connect(websocket_port)
+    try:
+        send_websocket_binary(websocket, connect_packet("packet-ws"))
+        connack = read_websocket_binary(websocket)
+        if bytes((0x27, 0, 0, 0, 50)) not in connack_properties(connack):
+            raise AssertionError("WebSocket CONNACK omitted Maximum Packet Size")
+        send_websocket_binary(
+            websocket,
+            publish_packet("t", b"x" * 45, proto_ver=5),
+        )
+        if read_websocket_close_code(websocket) != 1009:
+            raise AssertionError("WebSocket oversized packet close code mismatch")
+    finally:
+        websocket.close()
+
+    context = ssl.create_default_context(cafile=str(server_ca))
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    raw_tls = socket.create_connection(("127.0.0.1", tls_port), timeout=5)
+    raw_tls.settimeout(5)
+    tls = context.wrap_socket(raw_tls, server_hostname="localhost")
+    try:
+        tls.sendall(connect_packet("packet-tls"))
+        connack = read_mqtt_packet(tls)
+        if bytes((0x27, 0, 0, 0, 50)) not in connack_properties(connack):
+            raise AssertionError("TLS CONNACK omitted Maximum Packet Size")
+        tls.sendall(publish_packet("t", b"x" * 45, proto_ver=5))
+        if read_mqtt_packet(tls) != bytes.fromhex("e00195"):
+            raise AssertionError("TLS oversized packet reason mismatch")
+    finally:
+        tls.close()
+
+    secure_websocket = websocket_connect(wss_port, server_ca)
+    try:
+        send_websocket_binary(
+            secure_websocket,
+            connect_packet("packet-wss"),
+        )
+        connack = read_websocket_binary(secure_websocket)
+        if bytes((0x27, 0, 0, 0, 50)) not in connack_properties(connack):
+            raise AssertionError("WSS CONNACK omitted Maximum Packet Size")
+        send_websocket_binary(
+            secure_websocket,
+            publish_packet("t", b"x" * 45, proto_ver=5),
+        )
+        if read_websocket_close_code(secure_websocket) != 1009:
+            raise AssertionError("WSS oversized packet close code mismatch")
+    finally:
+        secure_websocket.close()
+    packet_return_code = packet_process.wait(timeout=5)
+    packet_output = packet_process.stdout.read()
+    if packet_return_code == 0 or "MessageTooLarge" not in packet_output:
+        raise RuntimeError(
+            "max-packet-size violations were not reported: " + packet_output
+        )
+
+    message_port = free_port()
+    message_config = directory / "message-size-limit.conf"
+    message_config.write_text(
+        "message_size_limit 1\n"
+        f"listener {message_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 6\n"
+    )
+    message_process = subprocess.Popen(
+        [str(broker), f"--config={message_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert message_process.stdout is not None
+    ready = message_process.stdout.readline().strip()
+    if "configured 1 listeners for 6 clients" not in ready:
+        raise RuntimeError(f"message-size broker failed to start: {ready}")
+
+    for proto_ver in (5, 4):
+        subscriber = socket.create_connection(
+            ("127.0.0.1", message_port), timeout=5
+        )
+        publisher = socket.create_connection(
+            ("127.0.0.1", message_port), timeout=5
+        )
+        subscriber.settimeout(5)
+        publisher.settimeout(5)
+        try:
+            subscriber.sendall(connect_packet(f"size-sub-{proto_ver}", proto_ver=proto_ver))
+            if connack_reason(read_mqtt_packet(subscriber)) != 0:
+                raise AssertionError("message-size subscriber CONNECT failed")
+            subscriber.sendall(subscribe_packet(1, "size/topic", proto_ver))
+            suback = read_mqtt_packet(subscriber)
+            if suback[0] != 0x90:
+                raise AssertionError("message-size SUBACK missing")
+            publisher.sendall(connect_packet(f"size-pub-{proto_ver}", proto_ver=proto_ver))
+            if connack_reason(read_mqtt_packet(publisher)) != 0:
+                raise AssertionError("message-size publisher CONNECT failed")
+
+            allowed = publish_packet("size/topic", b"A", proto_ver=proto_ver)
+            publisher.sendall(allowed)
+            if read_mqtt_packet(subscriber) != allowed:
+                raise AssertionError("at-limit payload was not delivered")
+
+            publisher.sendall(
+                publish_packet("size/topic", b"AB", proto_ver=proto_ver)
+            )
+            mqtt_ping(publisher)
+            expect_no_packet(subscriber, "oversized QoS 0 payload")
+            publisher.sendall(
+                publish_packet(
+                    "size/topic",
+                    b"AB",
+                    qos=1,
+                    packet_id=2,
+                    proto_ver=proto_ver,
+                )
+            )
+            expected_reason = 0x95 if proto_ver == 5 else 0
+            if puback_reason(read_mqtt_packet(publisher), 2) != expected_reason:
+                raise AssertionError("oversized QoS 1 PUBACK reason mismatch")
+            publisher.sendall(
+                publish_packet(
+                    "size/topic",
+                    b"AB",
+                    qos=2,
+                    packet_id=3,
+                    proto_ver=proto_ver,
+                )
+            )
+            if acknowledgment_reason(
+                read_mqtt_packet(publisher), 0x50, 3
+            ) != expected_reason:
+                raise AssertionError("oversized QoS 2 PUBREC reason mismatch")
+            if proto_ver == 4:
+                publisher.sendall(bytes.fromhex("62020003"))
+                if acknowledgment_reason(
+                    read_mqtt_packet(publisher), 0x70, 3
+                ) != 0:
+                    raise AssertionError("oversized QoS 2 PUBCOMP mismatch")
+            publisher.sendall(
+                publish_packet(
+                    "size/topic",
+                    b"AB",
+                    qos=1,
+                    packet_id=3,
+                    proto_ver=proto_ver,
+                )
+            )
+            if puback_reason(read_mqtt_packet(publisher), 3) != expected_reason:
+                raise AssertionError(
+                    "reused packet identifier was not released after rejection"
+                )
+            mqtt_ping(publisher)
+            expect_no_packet(subscriber, "oversized QoS 1/2 payload")
+            publisher.sendall(bytes.fromhex("e000"))
+            subscriber.sendall(bytes.fromhex("e000"))
+        finally:
+            publisher.close()
+            subscriber.close()
+
+    for proto_ver, expected_reason in ((5, 0x95), (4, 0x05)):
+        client = socket.create_connection(("127.0.0.1", message_port), timeout=5)
+        client.settimeout(5)
+        try:
+            client.sendall(
+                connect_packet(
+                    f"size-will-{proto_ver}",
+                    proto_ver=proto_ver,
+                    will_topic="size/will",
+                    will_payload=b"AB",
+                )
+            )
+            if connack_reason(read_mqtt_packet(client)) != expected_reason:
+                raise AssertionError("oversized Will CONNACK reason mismatch")
+        finally:
+            client.close()
+    if message_process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "message-size broker failed: " + message_process.stdout.read()
+        )
 
 
 def run_fail_closed_case(broker: Path, directory: Path) -> None:
@@ -2704,6 +3024,7 @@ def main() -> None:
         run_shared_listener_case(args.broker, directory)
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
+        run_packet_and_message_size_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -2720,7 +3041,7 @@ def main() -> None:
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
-        "Mosquitto hashes, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
+        "Mosquitto hashes, packet/message size policy, ordered include_dir and global/per-listener security files, mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
