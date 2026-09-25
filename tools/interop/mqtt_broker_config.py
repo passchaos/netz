@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
+from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
 from mqtt_broker_config_queue import run_queued_limits_case
 from mqtt_broker_config_session import run_persistent_client_expiration_case
 from mqtt_broker_config_sys import run_system_interval_case
@@ -3662,6 +3663,7 @@ def main() -> None:
         run_zero_length_client_id_case(args.broker, directory)
         run_upgrade_outgoing_qos_case(args.broker, directory)
         run_max_inflight_messages_case(args.broker, directory)
+        run_zero_maximum_keep_alive_case(args.broker, directory)
         run_queued_limits_case(args.broker, directory)
         run_topic_alias_policy_case(args.broker, directory)
         run_persistent_client_expiration_case(args.broker, directory)

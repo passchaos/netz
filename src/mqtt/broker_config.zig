@@ -471,8 +471,11 @@ fn parseSources(
                     };
                 } else if (std.mem.eql(u8, directive, "max_keepalive")) {
                     try markOnce(&seen.maximum_keep_alive);
-                    listener.maximum_keep_alive_seconds =
-                        try parseOnePositive(u16, &words);
+                    const maximum = try parseOneInteger(u16, &words);
+                    listener.maximum_keep_alive_seconds = if (maximum == 0)
+                        null
+                    else
+                        maximum;
                 } else if (std.mem.eql(u8, directive, "max_topic_alias")) {
                     try markOnce(&seen.max_topic_alias);
                     listener.max_topic_alias =
@@ -1774,6 +1777,35 @@ test "MQTT broker config validates global TCP no-delay policy" {
             \\set_tcp_nodelay true
             \\set_tcp_nodelay false
             \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config maps zero maximum Keep Alive to unlimited" {
+    var config = try parse(std.testing.allocator,
+        \\listener 1883
+        \\max_keepalive 0
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        @as(?u16, null),
+        config.listeners[0].maximum_keep_alive_seconds,
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(std.testing.allocator,
+            \\listener 1883
+            \\max_keepalive -1
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(std.testing.allocator,
+            \\listener 1883
+            \\max_keepalive 65536
             \\allow_anonymous true
         ),
     );

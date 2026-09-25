@@ -165,6 +165,10 @@ CONNACK and bounds aliases accepted from clients; zero omits the property and
 rejects all inbound aliases. The latter caps automatic broker-to-client alias
 creation after taking the minimum with the client's CONNECT capability; zero
 disables outgoing aliases. MQTT 3.1.1 ignores both settings.
+Listener-local `max_keepalive` defaults to zero, meaning no administrative
+maximum. A positive value caps MQTT 5 clients with Server Keep Alive and
+refuses MQTT 3.1.1 clients that request a larger value; zero also permits a
+client to disable its own Keep Alive.
 Global `persistent_client_expiration` is unset by default. When configured, it
 accepts a positive integer followed by `s`, `h`, `d`, `w`, `m`, or `y` and caps
 the offline lifetime of persistent MQTT 3.1.1 and MQTT 5 Sessions without

@@ -42,6 +42,7 @@ def connect_packet(
     client_id: str, *, clean_start: bool,
     protocol: int = 5,
     session_expiry: int = 60,
+    keep_alive: int = 60,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
 ) -> bytes:
@@ -74,7 +75,7 @@ def connect_packet(
     variable_header = (
         mqtt_string("MQTT")
         + bytes((protocol, connect_flags))
-        + (60).to_bytes(2, "big")
+        + keep_alive.to_bytes(2, "big")
     )
     if protocol == 5:
         variable_header += remaining_length(len(properties)) + properties
