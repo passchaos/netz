@@ -854,9 +854,11 @@ stream registration, FIN/reset/stop/priority transitions, HTTP/3 control-stream
 fragmentation, and QPACK table mutation. Authenticated QUIC/TLS HTTP/3
 connection scheduling is additionally covered by `fuzz-http3-connection`,
 including streaming and multiplexed requests, trailers, cancellation, HEAD
-body suppression, and two-phase GOAWAY. Multi-session routing through a shared
-endpoint remains outside these fuzz surfaces and retains its focused
-protocol/fault gates.
+body suppression, and two-phase GOAWAY. The dedicated
+`fuzz-webtransport-endpoint` target then establishes two authenticated sessions
+through one production UDP endpoint and mutates cross-session DATAGRAM, paired
+DATAGRAM, bidirectional-stream, DRAIN and CLOSE ordering while verifying exact
+handle routing, both-session progress and payload isolation.
 
 1. The endpoint also exposes a synchronous `serveUntil` callback loop with
    bounded receive polling and external shutdown. Add independent per-session
