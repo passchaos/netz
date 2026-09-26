@@ -2004,16 +2004,18 @@ pub const ConnectAttempt = struct {
         errdefer if (selected_protocol) |protocol| {
             self.allocator.free(protocol);
         };
+        const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+            .enable_permessage_deflate = self.enable_permessage_deflate,
+            .allow_context_takeover = self.allow_context_takeover,
+        };
         const selected_extension = try websocket.ExtensionNegotiation
-            .validateResponseWithPolicy(
+            .validateResponseForOfferWithPolicy(
             try optionalSingletonHeader(
                 self.response.headers,
                 "sec-websocket-extensions",
             ),
-            .{
-                .enable_permessage_deflate = self.enable_permessage_deflate,
-                .allow_context_takeover = self.allow_context_takeover,
-            },
+            websocket.ExtensionNegotiation.offerValue(extension_policy),
+            extension_policy,
         );
         if (selected_extension.permessage_deflate and
             !self.enable_permessage_deflate)
@@ -9793,11 +9795,12 @@ pub const H2ConnectAttempt = struct {
             .allow_context_takeover = self.options.allow_context_takeover,
         };
         const selected_extension = try websocket.ExtensionNegotiation
-            .validateResponseWithPolicy(
+            .validateResponseForOfferWithPolicy(
             try optionalH2SingletonHeader(
                 self.response.headers,
                 "sec-websocket-extensions",
             ),
+            websocket.ExtensionNegotiation.offerValue(extension_policy),
             extension_policy,
         );
         if (selected_extension.permessage_deflate and

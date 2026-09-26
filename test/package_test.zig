@@ -2266,6 +2266,10 @@ test "public modules are reachable" {
         "tls_handshake_timeout",
     ));
     try std.testing.expect(@hasDecl(netz.websocket, "ExtensionNegotiation"));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.ExtensionNegotiation,
+        "validateResponseForOfferWithPolicy",
+    ));
     try std.testing.expect(@hasDecl(netz.websocket, "compressMessage"));
     try std.testing.expect(@hasDecl(netz.websocket, "decompressMessage"));
     try std.testing.expect(@hasDecl(netz.websocket, "CompressionContext"));

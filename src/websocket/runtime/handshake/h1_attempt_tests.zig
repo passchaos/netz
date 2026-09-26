@@ -547,7 +547,7 @@ test "WebSocket HTTP1 accepted attempt skips informational and preserves coalesc
     if (shared.err) |err| return err;
 }
 
-test "WebSocket HTTP1 default client rejects unsolicited context takeover" {
+test "WebSocket HTTP1 client rejects unoffered compression window" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -607,7 +607,10 @@ test "WebSocket HTTP1 default client rejects unsolicited context takeover" {
             };
             response.appendSlice(
                 self.allocator,
-                "\r\nSec-WebSocket-Extensions: permessage-deflate\r\n\r\n",
+                "\r\nSec-WebSocket-Extensions: permessage-deflate; " ++
+                    "server_no_context_takeover; " ++
+                    "client_no_context_takeover; " ++
+                    "client_max_window_bits=15\r\n\r\n",
             ) catch |err| {
                 self.err = err;
                 return;

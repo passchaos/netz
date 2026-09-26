@@ -702,6 +702,7 @@ Current protocol coverage includes:
   that accept the same post-send mutation contract as websocket.zig,
   outbound text/close/control-frame validation plus codec-level invalid-frame write rejection,
   subprotocol token validation with strict client response selection, split-header subprotocol and extension-offer negotiation, optional permessage-deflate negotiation with
+  RFC 7692 client responses checked against the exact HTTP/1, RFC 8441, or RFC 9220 offer, including fail-closed `client_max_window_bits` authorization, its offered-value hint semantics, and the hard `server_max_window_bits` bound,
   default no-context-takeover plus explicit HTTP/1 context-takeover opt-in,
   transactional RFC 7692 sync-flush raw-DEFLATE encode/decode, retained
   independent send/receive codec scratch, actual LZ77/Huffman wire compression

@@ -2597,7 +2597,7 @@ test "WebSocket HTTP3 compression defaults to no context takeover" {
     if (shared.err) |err| return err;
 }
 
-test "WebSocket HTTP3 client rejects unsolicited context takeover" {
+test "WebSocket HTTP3 client rejects unoffered compression window" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -2666,7 +2666,10 @@ test "WebSocket HTTP3 client rejects unsolicited context takeover" {
                                     .status = 200,
                                     .headers = &.{.{
                                         .name = "sec-websocket-extensions",
-                                        .value = "permessage-deflate",
+                                        .value = "permessage-deflate; " ++
+                                            "server_no_context_takeover; " ++
+                                            "client_no_context_takeover; " ++
+                                            "client_max_window_bits=15",
                                     }},
                                     .request_method = "CONNECT",
                                     .extended_connect = true,

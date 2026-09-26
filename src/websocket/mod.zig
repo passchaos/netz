@@ -157,7 +157,10 @@ pub const ExtensionNegotiation = struct {
     pub fn parseOffer(header_value: []const u8) Error!ExtensionNegotiation {
         var offers = std.mem.splitScalar(u8, header_value, ',');
         while (offers.next()) |raw_offer| {
-            if (try parseExtensionOffer(wire.trimOws(raw_offer))) |offer| return offer;
+            if (try parseExtension(
+                wire.trimOws(raw_offer),
+                .offer,
+            )) |offer| return offer;
         }
         return .{};
     }
@@ -245,7 +248,10 @@ pub const ExtensionNegotiation = struct {
         while (responses.next()) |response| {
             const trimmed = wire.trimOws(response);
             if (trimmed.len == 0) return error.InvalidExtension;
-            const parsed = (try parseExtensionOffer(trimmed)) orelse return error.InvalidExtension;
+            const parsed = (try parseExtension(
+                trimmed,
+                .response,
+            )) orelse return error.InvalidExtension;
             if (!parsed.permessage_deflate) return error.InvalidExtension;
             if (negotiated != null) return error.InvalidExtension;
             if (!policy.allow_context_takeover and
@@ -257,6 +263,45 @@ pub const ExtensionNegotiation = struct {
             negotiated = parsed;
         }
         return negotiated orelse error.InvalidExtension;
+    }
+
+    /// Validate a server selection against the exact extension offer sent by
+    /// the client. RFC 7692 permits a server to add either no-context flag and
+    /// to choose server_max_window_bits without an offer parameter, but it
+    /// forbids an unsolicited client_max_window_bits. An offered
+    /// client_max_window_bits value is only a hint, while an offered
+    /// server_max_window_bits value is a hard upper bound.
+    pub fn validateResponseForOfferWithPolicy(
+        header_value: ?[]const u8,
+        offer_header: ?[]const u8,
+        policy: Policy,
+    ) Error!ExtensionNegotiation {
+        const response = try validateResponseWithPolicy(header_value, policy);
+        if (!response.permessage_deflate) return response;
+
+        const raw_offer = offer_header orelse return error.InvalidExtension;
+        var offers = std.mem.splitScalar(u8, raw_offer, ',');
+        while (offers.next()) |raw| {
+            const offer = (try parseExtension(
+                wire.trimOws(raw),
+                .offer,
+            )) orelse
+                continue;
+            if (response.client_max_window_bits != null and
+                offer.client_max_window_bits == null)
+            {
+                continue;
+            }
+            if (response.server_max_window_bits) |selected| {
+                if (offer.server_max_window_bits) |maximum| {
+                    if (selected > maximum) continue;
+                }
+            } else if (offer.server_max_window_bits != null) {
+                continue;
+            }
+            return response;
+        }
+        return error.InvalidExtension;
     }
 };
 
@@ -1745,7 +1790,12 @@ pub fn decompressMessageInto(
     return output_writer.buffered();
 }
 
-fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
+const ExtensionHeaderRole = enum { offer, response };
+
+fn parseExtension(
+    value: []const u8,
+    role: ExtensionHeaderRole,
+) Error!?ExtensionNegotiation {
     if (value.len == 0) return null;
     var parts = std.mem.splitScalar(u8, value, ';');
     const name = wire.trimOws(parts.next() orelse return null);
@@ -1766,11 +1816,19 @@ fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
             if (saw_server_no_context_takeover) return error.InvalidExtension;
             saw_server_no_context_takeover = true;
             out.server_no_context_takeover = true;
-        } else if (parseWindowBitsParam(param, "client_max_window_bits")) |bits| {
+        } else if (parseWindowBitsParam(
+            param,
+            "client_max_window_bits",
+            role == .offer,
+        )) |bits| {
             if (saw_client_max_window_bits) return error.InvalidExtension;
             saw_client_max_window_bits = true;
             out.client_max_window_bits = bits;
-        } else if (parseWindowBitsParam(param, "server_max_window_bits")) |bits| {
+        } else if (parseWindowBitsParam(
+            param,
+            "server_max_window_bits",
+            false,
+        )) |bits| {
             if (saw_server_max_window_bits) return error.InvalidExtension;
             saw_server_max_window_bits = true;
             out.server_max_window_bits = bits;
@@ -1783,8 +1841,14 @@ fn parseExtensionOffer(value: []const u8) Error!?ExtensionNegotiation {
     return out;
 }
 
-fn parseWindowBitsParam(param: []const u8, name: []const u8) ?u8 {
-    if (std.ascii.eqlIgnoreCase(param, name)) return 15;
+fn parseWindowBitsParam(
+    param: []const u8,
+    name: []const u8,
+    allow_implicit_value: bool,
+) ?u8 {
+    if (std.ascii.eqlIgnoreCase(param, name)) {
+        return if (allow_implicit_value) 15 else 0;
+    }
     if (param.len <= name.len or param[name.len] != '=') return null;
     if (!std.ascii.eqlIgnoreCase(param[0..name.len], name)) return null;
     return parseWindowBitsValue(param[name.len + 1 ..]);
@@ -1803,7 +1867,7 @@ fn parseWindowBitsValue(raw_value: []const u8) u8 {
         break :blk inner;
     } else raw_value;
 
-    if (value.len == 0) return 0;
+    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return 0;
     var parsed: u16 = 0;
     for (value) |byte| {
         if (!std.ascii.isDigit(byte)) return 0;
@@ -2401,6 +2465,145 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
         ExtensionNegotiation.validateResponseWithPolicy(
             "permessage-deflate",
             .{ .enable_permessage_deflate = false },
+        ),
+    );
+
+    const permissive_policy: ExtensionNegotiation.Policy = .{
+        .enable_permessage_deflate = true,
+        .allow_context_takeover = true,
+    };
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseForOfferWithPolicy(
+            "permessage-deflate; client_max_window_bits=15",
+            "permessage-deflate",
+            permissive_policy,
+        ),
+    );
+    const implicit_client_window = try ExtensionNegotiation
+        .validateResponseForOfferWithPolicy(
+        "permessage-deflate; client_max_window_bits=8",
+        "permessage-deflate; client_max_window_bits",
+        permissive_policy,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 8),
+        implicit_client_window.client_max_window_bits,
+    );
+    const maximum_implicit_client_window = try ExtensionNegotiation
+        .validateResponseForOfferWithPolicy(
+        "permessage-deflate; client_max_window_bits=15",
+        "permessage-deflate; client_max_window_bits",
+        permissive_policy,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 15),
+        maximum_implicit_client_window.client_max_window_bits,
+    );
+    const client_window_hint_is_not_a_limit = try ExtensionNegotiation
+        .validateResponseForOfferWithPolicy(
+        "permessage-deflate; client_max_window_bits=13",
+        "permessage-deflate; client_max_window_bits=12",
+        permissive_policy,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 13),
+        client_window_hint_is_not_a_limit.client_max_window_bits,
+    );
+    for ([_]u8{ 11, 12 }) |bits| {
+        var response_buffer: [64]u8 = undefined;
+        const bounded_response = try std.fmt.bufPrint(
+            &response_buffer,
+            "permessage-deflate; client_max_window_bits={d}",
+            .{bits},
+        );
+        const bounded_client_window = try ExtensionNegotiation
+            .validateResponseForOfferWithPolicy(
+            bounded_response,
+            "permessage-deflate; client_max_window_bits=12",
+            permissive_policy,
+        );
+        try std.testing.expectEqual(
+            @as(?u8, bits),
+            bounded_client_window.client_max_window_bits,
+        );
+    }
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseForOfferWithPolicy(
+            "permessage-deflate; client_max_window_bits",
+            "permessage-deflate; client_max_window_bits",
+            permissive_policy,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseForOfferWithPolicy(
+            "permessage-deflate; server_max_window_bits",
+            "permessage-deflate",
+            permissive_policy,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseForOfferWithPolicy(
+            "permessage-deflate; client_max_window_bits=08",
+            "permessage-deflate; client_max_window_bits",
+            permissive_policy,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.parseOffer(
+            "permessage-deflate; server_max_window_bits=012",
+        ),
+    );
+    const unsolicited_server_window = try ExtensionNegotiation
+        .validateResponseForOfferWithPolicy(
+        "permessage-deflate; server_max_window_bits=12",
+        "permessage-deflate",
+        permissive_policy,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 12),
+        unsolicited_server_window.server_max_window_bits,
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseForOfferWithPolicy(
+            "permessage-deflate; server_max_window_bits=13",
+            "permessage-deflate; server_max_window_bits=12",
+            permissive_policy,
+        ),
+    );
+    const bounded_server_window = try ExtensionNegotiation
+        .validateResponseForOfferWithPolicy(
+        "permessage-deflate; server_max_window_bits=12",
+        "permessage-deflate; server_max_window_bits=12",
+        permissive_policy,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 12),
+        bounded_server_window.server_max_window_bits,
+    );
+    const matching_offer = try ExtensionNegotiation
+        .validateResponseForOfferWithPolicy(
+        "permessage-deflate; client_max_window_bits=12; server_max_window_bits=11",
+        "permessage-deflate, " ++
+            "permessage-deflate; client_max_window_bits=12; server_max_window_bits=11",
+        permissive_policy,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 12),
+        matching_offer.client_max_window_bits,
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseForOfferWithPolicy(
+            "permessage-deflate; client_max_window_bits=13; server_max_window_bits=12",
+            "permessage-deflate, " ++
+                "permessage-deflate; client_max_window_bits=13; server_max_window_bits=11",
+            permissive_policy,
         ),
     );
 
