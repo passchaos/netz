@@ -26,30 +26,31 @@ support explicit
 deadline-resumable sends plus allocating, caller-buffer, and raw-frame receive
 APIs. With the default opt-out policy, all three transports negotiate both
 `*_no_context_takeover` parameters.
-`zig build fuzz-websocket-h1-context` and `fuzz-websocket-h2-context`
-additionally carry the same bounded operation sequences through real loopback
-TCP connections and HTTP/1 Upgrade or RFC 8441 Extended CONNECT with context
-takeover enabled in both directions. They mix text/binary, contiguous/sliced/
-fragmented/deadline sends, owned/caller-buffer receives, and interleaved Ping/
-Pong without allowing input to create an unbounded peer wait. These
+`zig build fuzz-websocket-h1-context`, `fuzz-websocket-h2-context`, and
+`fuzz-websocket-h3-context` additionally carry the same bounded operation
+sequences through real loopback HTTP/1 Upgrade, RFC 8441 Extended CONNECT, and
+authenticated QUIC/TLS RFC 9220 sessions with context takeover enabled in both
+directions. They mix text/binary, contiguous/sliced/fragmented/deadline sends,
+owned/caller-buffer receives, and interleaved Ping/Pong without allowing input
+to create an unbounded peer wait. These
 targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
 headers, Version Negotiation, Retry integrity, transport parameters, frame
 streams, and carried TLS handshake messages. `zig build fuzz-quic-protection`
 separately checks QUIC v1/v2 Initial, Handshake, 0-RTT, and 1-RTT packet and
 header protection: Initial uses its RFC-mandated AES-128-GCM, while the other
 packet spaces exercise AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM.
-It also covers truncation and authenticated-tamper rejection. Live context-
-takeover fuzzing through the QUIC-backed H3 adapter remains separate.
+It also covers truncation and authenticated-tamper rejection.
 `zig build fuzz-quic-connection`
 adds bounded stateful QUIC v1/v2 sequences over real loopback UDP: bidirectional
 STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all nine corpora and the complete test gate on pushes and pull
-requests, then runs the nine coverage-guided targets daily and on demand. The
-live HTTP/1 and HTTP/2 targets default to 256 daily connections while the in-memory targets
-default to 10,000 iterations; a manual `fuzz_runs` value overrides both. Because
+workflow replays all ten corpora and the complete test gate on pushes and pull
+requests, then runs the ten coverage-guided targets daily and on demand. The
+live HTTP/1 and HTTP/2 targets default to 256 daily connections, H3 defaults to
+128 authenticated sessions, and the in-memory targets default to 10,000
+iterations; a manual `fuzz_runs` value overrides all targets. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
