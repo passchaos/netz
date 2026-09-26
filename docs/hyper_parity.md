@@ -1430,7 +1430,10 @@ scheduling is additionally covered for HTTP/1 by `fuzz-http1-connection`: each
 bounded input runs through the production loopback TCP client/server and checks
 persistent reuse, complete and streaming fixed/chunked request bodies, chunked
 response trailers, HEAD body suppression, and request/response-selected close
-boundaries against an independent operation model. The dedicated
+boundaries against an independent operation model. The sibling
+`fuzz-http1-tls-connection` target carries that state model over authenticated
+TLS 1.3, checks `http/1.1` ALPN and cipher metadata, and mutates bidirectional
+traffic-key updates across persistent and rotated connections. The dedicated
 `fuzz-http2-connection` target covers real h2c connection state: ordinary
 and streaming bodies, request trailers, reversed two-stream response batches,
 PING, RST_STREAM cancellation, GOAWAY and connection rotation. The sibling

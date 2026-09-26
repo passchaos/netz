@@ -5,52 +5,93 @@ const model = @import("model.zig");
 const http1 = netz.http1;
 const runtime = http1.runtime;
 
-pub const State = struct {
-    server: *runtime.Server,
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    summary: model.Summary = .{},
-    err: ?anyerror = null,
+pub fn State(comptime Server: type, comptime tls: bool) type {
+    return struct {
+        server: *Server,
+        allocator: std.mem.Allocator,
+        input: []const u8,
+        summary: model.Summary = .{},
+        err: ?anyerror = null,
 
-    pub fn run(self: *@This()) void {
-        self.runFallible() catch |err| {
-            self.err = err;
-        };
-    }
+        pub fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
 
-    fn runFallible(self: *@This()) !void {
-        const sequence = self.input[0..@min(
-            self.input.len,
-            model.max_operations,
-        )];
-        var index: usize = 0;
-        var connections: usize = 0;
-        while (connections == 0 or index < sequence.len) {
-            var connection = try self.server.acceptWithTimeout(model.timeout);
-            var connection_open = true;
-            defer if (connection_open) connection.close();
-            connections += 1;
-            while (index < sequence.len) : (index += 1) {
-                const operation = sequence[index];
-                var request = try connection.readRequestWithTimeout(
-                    .{},
+        fn runFallible(self: *@This()) !void {
+            const sequence = self.input[0..@min(
+                self.input.len,
+                model.max_operations,
+            )];
+            var index: usize = 0;
+            var connections: usize = 0;
+            while (connections == 0 or index < sequence.len) {
+                var connection = try self.server.acceptWithTimeout(
                     model.timeout,
                 );
-                defer request.deinit(self.allocator);
-                try validateRequest(request.request, operation, index);
-                try writeResponse(&connection, request.request, operation, index);
-                self.summary.requests += 1;
-                if (model.closesConnection(operation)) {
-                    self.summary.server_closes += 1;
-                    index += 1;
-                    break;
+                var connection_open = true;
+                defer if (connection_open) connection.close();
+                if (tls) try validateTls(&connection);
+                var connection_key_updates: u64 = 0;
+                connections += 1;
+                while (index < sequence.len) : (index += 1) {
+                    const operation = sequence[index];
+                    var request = try connection.readRequestWithTimeout(
+                        .{},
+                        model.timeout,
+                    );
+                    defer request.deinit(self.allocator);
+                    try validateRequest(request.request, operation, index);
+                    try writeResponse(
+                        &connection,
+                        request.request,
+                        operation,
+                        index,
+                    );
+                    self.summary.requests += 1;
+                    if (tls and model.requestsKeyUpdate(operation)) {
+                        connection_key_updates += 1;
+                        self.summary.key_updates += 1;
+                        try validateKeyUpdates(
+                            &connection,
+                            connection_key_updates,
+                        );
+                    }
+                    if (model.closesConnection(operation)) {
+                        self.summary.server_closes += 1;
+                        index += 1;
+                        break;
+                    }
                 }
+                connection.close();
+                connection_open = false;
             }
-            connection.close();
-            connection_open = false;
         }
-    }
-};
+    };
+}
+
+fn validateTls(connection: *runtime.Connection) !void {
+    try std.testing.expectEqual(
+        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        connection.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.TranscriptHash.sha256,
+        connection.negotiatedTranscriptHash().?,
+    );
+}
+
+fn validateKeyUpdates(
+    connection: *runtime.Connection,
+    expected: u64,
+) !void {
+    const counts = connection.keyUpdateCounts() orelse
+        return error.MissingTlsState;
+    try std.testing.expectEqual(expected, counts.sent);
+    try std.testing.expectEqual(expected, counts.received);
+    try std.testing.expect(!counts.awaiting_peer_response);
+}
 
 fn validateRequest(
     request: http1.Request,

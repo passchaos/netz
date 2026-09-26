@@ -7,6 +7,17 @@ const http1 = netz.http1;
 const runtime = http1.runtime;
 
 pub fn runSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, false);
+}
+
+pub fn runTlsSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, true);
+}
+
+fn runSequenceWithTransport(
+    input: []const u8,
+    comptime tls: bool,
+) !model.Summary {
     const sequence = input[0..@min(input.len, model.max_operations)];
     if (sequence.len == 0) return .{};
     const allocator = std.testing.allocator;
@@ -16,25 +27,54 @@ pub fn runSequence(input: []const u8) !model.Summary {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var server = try runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{
-            .max_head_bytes = 4096,
-            .max_body_bytes = 4096,
-        },
+    const limits: runtime.Limits = .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    };
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
     );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const Server = if (tls) runtime.TlsServer else runtime.Server;
+    var server: Server = if (tls)
+        try runtime.TlsServer.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .limits = limits,
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .tls_handshake_timeout = model.timeout,
+                .alpn_protocols = &.{"http/1.1"},
+            },
+        )
+    else
+        try runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            limits,
+        );
     var server_open = true;
     defer if (server_open) server.deinit();
-    var server_state = server_mod.State{
+    const ServerState = server_mod.State(Server, tls);
+    var server_state = ServerState{
         .server = &server,
         .allocator = allocator,
         .input = sequence,
     };
     const server_thread = try std.Thread.spawn(
         .{},
-        server_mod.State.run,
+        ServerState.run,
         .{&server_state},
     );
     var joined = false;
@@ -47,19 +87,40 @@ pub fn runSequence(input: []const u8) !model.Summary {
     var client: ?runtime.Client = null;
     defer if (client) |*value| value.close();
     var summary = model.Summary{};
+    var connection_key_updates: u64 = 0;
     for (sequence, 0..) |operation, index| {
         if (client == null) {
-            client = try runtime.Client.connectWithTimeout(
-                allocator,
-                io,
-                server.address(),
-                .{
-                    .max_head_bytes = 4096,
-                    .max_body_bytes = 4096,
-                },
-                model.timeout,
-            );
+            client = if (tls)
+                try runtime.Client.connectVailTlsAddressWithTimeout(
+                    allocator,
+                    io,
+                    server.address(),
+                    "localhost",
+                    limits,
+                    .{
+                        .server_verifier = .{
+                            .pinned_ecdsa_p256_public_key = public_key,
+                        },
+                        .alpn_protocols = &.{"http/1.1"},
+                        .cipher_suites = &.{.aes_128_gcm_sha256},
+                        .handshake_timeout = model.timeout,
+                    },
+                    model.timeout,
+                )
+            else
+                try runtime.Client.connectWithTimeout(
+                    allocator,
+                    io,
+                    server.address(),
+                    limits,
+                    model.timeout,
+                );
+            if (tls) try validateTls(&client.?);
+            connection_key_updates = 0;
             if (index != 0) summary.reconnects += 1;
+        }
+        if (tls and model.requestsKeyUpdate(operation)) {
+            try client.?.updateTrafficKeys(true);
         }
         switch (model.kind(operation)) {
             0, 1, 4, 5, 6, 7 => try completeExchange(
@@ -82,6 +143,11 @@ pub fn runSequence(input: []const u8) !model.Summary {
             ),
         }
         summary.requests += 1;
+        if (tls and model.requestsKeyUpdate(operation)) {
+            connection_key_updates += 1;
+            summary.key_updates += 1;
+            try validateKeyUpdates(&client.?, connection_key_updates);
+        }
         if (model.closesConnection(operation)) {
             try std.testing.expect(!client.?.isReusable());
             client.?.close();
@@ -109,7 +175,34 @@ pub fn runSequence(input: []const u8) !model.Summary {
         summary.server_closes + summary.client_closes,
         server_state.summary.server_closes,
     );
+    try std.testing.expectEqual(
+        summary.key_updates,
+        server_state.summary.key_updates,
+    );
     return summary;
+}
+
+fn validateTls(client: *runtime.Client) !void {
+    try std.testing.expectEqualStrings(
+        "http/1.1",
+        client.negotiatedAlpn() orelse return error.InvalidAlpn,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        client.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.TranscriptHash.sha256,
+        client.negotiatedTranscriptHash().?,
+    );
+}
+
+fn validateKeyUpdates(client: *runtime.Client, expected: u64) !void {
+    const counts = client.keyUpdateCounts() orelse
+        return error.MissingTlsState;
+    try std.testing.expectEqual(expected, counts.sent);
+    try std.testing.expectEqual(expected, counts.received);
+    try std.testing.expect(!counts.awaiting_peer_response);
 }
 
 fn completeExchange(

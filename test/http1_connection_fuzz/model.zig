@@ -22,6 +22,10 @@ pub fn kind(operation: u8) u3 {
     return @truncate(operation);
 }
 
+pub fn requestsKeyUpdate(operation: u8) bool {
+    return (operation & 0x08) != 0;
+}
+
 pub fn method(operation: u8) http1.Method {
     return switch (kind(operation)) {
         0, 4, 5 => .GET,
@@ -65,4 +69,5 @@ pub const Summary = struct {
     head_responses: usize = 0,
     client_closes: usize = 0,
     server_closes: usize = 0,
+    key_updates: usize = 0,
 };

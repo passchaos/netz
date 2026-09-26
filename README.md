@@ -18,6 +18,9 @@ Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
 through a production loopback TCP client and server. It covers persistent
 reuse, complete and streaming fixed/chunked bodies, trailers, HEAD suppression,
 and request- or response-selected connection retirement.
+`zig build fuzz-http1-tls-connection` carries the same model over authenticated
+TLS 1.3, verifies `http/1.1` ALPN and negotiated cipher metadata, and mutates
+bidirectional traffic-key updates across persistent and rotated connections.
 `zig build fuzz-http2-connection` exercises a production h2c connection across
 ordinary and streaming request/response bodies, request trailers, reversed
 two-stream response batches, PING, RST_STREAM cancellation, GOAWAY and fresh
@@ -93,10 +96,10 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all twenty-one corpora and the complete test gate on pushes and
-pull requests, then runs the twenty-one coverage-guided targets daily and on
-demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
-the TLS HTTP/2 and HTTP/3 connection targets to 64 authenticated sessions,
+workflow replays all twenty-two corpora and the complete test gate on pushes
+and pull requests, then runs the twenty-two coverage-guided targets daily and
+on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
+the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64 authenticated sessions,
 the WebSocket H3 target to 128 authenticated sessions, ordinary live MQTT targets to 128
 real-network runs, inbound/outbound durable MQTT bridge QoS 2 to 64/32 runs,
 the WebTransport endpoint target to 32 two-session runs, and the in-memory
