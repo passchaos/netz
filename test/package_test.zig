@@ -4116,6 +4116,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(netz.mqtt, "reconnect"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Client"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect,
+        "SessionSnapshotFileError",
+    ));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ReconnectPolicy"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "Jitter"));
     try std.testing.expect(@hasDecl(netz.mqtt.reconnect, "ClientEvent"));
@@ -4690,6 +4694,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "pollWithOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "saveSessionSnapshotFile",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "saveSessionSnapshotFileAt",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "restoreSessionSnapshotFile",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.reconnect.Client,
+        "restoreSessionSnapshotFileAt",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,

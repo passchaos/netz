@@ -1,22 +1,30 @@
 //! Versioned, identity-bound persistence for one reconnecting MQTT Session.
 //!
-//! The caller owns durable file or journal replacement. This module only
-//! encodes and transactionally decodes the reconnect client's Session Store so
-//! a higher-level coordinator can atomically compose it with its own records.
+//! The in-memory codec remains composable with larger coordinator records.
+//! Standalone clients can additionally use the bounded file helpers below,
+//! which fsync a temporary inode, atomically replace the destination, and sync
+//! its parent directory before reporting success.
 
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const persistence = @import("../persistence/codec.zig");
+const durability = @import("../persistence/durability.zig");
 const session = @import("../session/mod.zig");
 
 const magic = "netz-mqtt-reconnect\x00";
 const version: u32 = 1;
+pub const max_snapshot_bytes: usize = 2 * persistence.max_blob_bytes;
 
 pub const Error = session.Error || persistence.Error || error{
     SnapshotClientMismatch,
     SnapshotProtocolMismatch,
     SnapshotSessionCountMismatch,
 };
+
+pub const FileError = Error || error{SnapshotNotFound} ||
+    std.Io.Dir.CreateFileAtomicError ||
+    std.Io.File.Writer.Error || durability.Error ||
+    std.Io.Dir.ReadFileAllocError;
 
 pub const Restored = struct {
     store: session.Store,
@@ -135,12 +143,60 @@ pub fn decode(
     return .{ .store = store, .handle = handle };
 }
 
+pub fn saveAtomic(
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    encoded: []const u8,
+) FileError!void {
+    if (encoded.len > max_snapshot_bytes) {
+        return error.SnapshotLimitExceeded;
+    }
+    var atomic = try dir.createFileAtomic(io, sub_path, .{
+        .replace = true,
+        .permissions = snapshotPermissions(),
+    });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, encoded);
+    try atomic.file.sync(io);
+    try durability.replaceSynced(&atomic, io, dir);
+}
+
+pub fn loadAlloc(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+) FileError![]u8 {
+    return dir.readFileAlloc(
+        io,
+        sub_path,
+        allocator,
+        // `limited` reports StreamTooLong when the file reaches its bound.
+        // Read one sentinel byte so an exactly maximum-sized snapshot remains
+        // legal while a larger file maps to SnapshotLimitExceeded.
+        .limited(max_snapshot_bytes + 1),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return error.SnapshotNotFound,
+        error.StreamTooLong => return error.SnapshotLimitExceeded,
+        else => |e| return e,
+    };
+}
+
 fn clampI96ToI64(value: i96) i64 {
     return @intCast(std.math.clamp(
         value,
         std.math.minInt(i64),
         std.math.maxInt(i64),
     ));
+}
+
+fn snapshotPermissions() std.Io.File.Permissions {
+    if (comptime std.Io.File.Permissions == void) return {};
+    if (comptime @hasDecl(std.Io.File.Permissions, "fromMode")) {
+        return .fromMode(0o600);
+    }
+    return .default_file;
 }
 
 test "MQTT reconnect snapshot restores both QoS2 directions" {
@@ -316,4 +372,178 @@ test "MQTT reconnect snapshot binds protocol client and checksum" {
         error.CorruptSnapshot,
         decode(allocator, encoded.items, options, .v5, "snapshot-client", .zero, .zero),
     );
+}
+
+test "MQTT reconnect snapshot file round trips durable state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options = session.Options{
+        .max_sessions = 1,
+        .max_queued_per_session = std.math.maxInt(u16),
+        .max_inflight_per_session = std.math.maxInt(u16),
+    };
+    var store = session.Store.init(allocator, options);
+    defer store.deinit();
+    const opened = try store.open(
+        "file-client",
+        false,
+        std.math.maxInt(u32),
+        .zero,
+    );
+    const staged = try store.stageImmediatePublish(
+        opened.handle,
+        "file/topic",
+        "durable",
+        .{ .qos = .at_least_once, .now = .zero },
+        8,
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encode(
+        &store,
+        opened.handle,
+        .v5,
+        "file-client",
+        &encoded,
+        allocator,
+        .zero,
+        .zero,
+    );
+    try saveAtomic(io, tmp.dir, "session.db", encoded.items);
+    const stat = try tmp.dir.statFile(io, "session.db", .{});
+    if (comptime @hasDecl(std.Io.File.Permissions, "toMode")) {
+        try std.testing.expectEqual(
+            @as(std.posix.mode_t, 0o600),
+            stat.permissions.toMode() & 0o777,
+        );
+    }
+    const loaded = try loadAlloc(
+        allocator,
+        io,
+        tmp.dir,
+        "session.db",
+    );
+    defer allocator.free(loaded);
+    try std.testing.expectEqualSlices(u8, encoded.items, loaded);
+    var restored = try decode(
+        allocator,
+        loaded,
+        options,
+        .v5,
+        "file-client",
+        .zero,
+        .zero,
+    );
+    defer restored.deinit();
+    try std.testing.expectEqual(
+        session.OutgoingQoSState.await_puback,
+        (try restored.store.outgoingQoSState(
+            restored.handle,
+            staged,
+        )).?,
+    );
+    try std.testing.expectError(
+        error.SnapshotNotFound,
+        loadAlloc(allocator, io, tmp.dir, "missing.db"),
+    );
+    var oversized = try tmp.dir.createFile(io, "oversized.db", .{});
+    defer oversized.close(io);
+    try oversized.setLength(io, max_snapshot_bytes + 1);
+    try std.testing.expectError(
+        error.SnapshotLimitExceeded,
+        loadAlloc(allocator, io, tmp.dir, "oversized.db"),
+    );
+}
+
+test "MQTT reconnect snapshot failed sync preserves installed file" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const base_io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(base_io, .{
+        .sub_path = "session.db",
+        .data = "previous-snapshot",
+    });
+
+    const Probe = struct {
+        delegate: std.Io,
+        destination: std.Io.Dir,
+        temporary: ?std.Io.File.Handle = null,
+        renames: usize = 0,
+
+        fn dirCreateFileAtomic(
+            userdata: ?*anyopaque,
+            dir: std.Io.Dir,
+            sub_path: []const u8,
+            options: std.Io.Dir.CreateFileAtomicOptions,
+        ) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            const atomic = try self.delegate.vtable.dirCreateFileAtomic(
+                self.delegate.userdata,
+                dir,
+                sub_path,
+                options,
+            );
+            if (dir.handle == self.destination.handle) {
+                self.temporary = atomic.file.handle;
+            }
+            return atomic;
+        }
+
+        fn fileSync(
+            userdata: ?*anyopaque,
+            file: std.Io.File,
+        ) std.Io.File.SyncError!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            if (self.temporary == file.handle) return error.InputOutput;
+            return self.delegate.vtable.fileSync(
+                self.delegate.userdata,
+                file,
+            );
+        }
+
+        fn dirRename(
+            userdata: ?*anyopaque,
+            old_dir: std.Io.Dir,
+            old_sub_path: []const u8,
+            new_dir: std.Io.Dir,
+            new_sub_path: []const u8,
+        ) std.Io.Dir.RenameError!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            self.renames += 1;
+            return self.delegate.vtable.dirRename(
+                self.delegate.userdata,
+                old_dir,
+                old_sub_path,
+                new_dir,
+                new_sub_path,
+            );
+        }
+    };
+
+    var probe = Probe{ .delegate = base_io, .destination = tmp.dir };
+    var vtable = base_io.vtable.*;
+    vtable.dirCreateFileAtomic = Probe.dirCreateFileAtomic;
+    vtable.fileSync = Probe.fileSync;
+    vtable.dirRename = Probe.dirRename;
+    const io: std.Io = .{ .userdata = &probe, .vtable = &vtable };
+    try std.testing.expectError(
+        error.InputOutput,
+        saveAtomic(io, tmp.dir, "session.db", "replacement"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), probe.renames);
+    const unchanged = try tmp.dir.readFileAlloc(
+        base_io,
+        "session.db",
+        allocator,
+        .limited(64),
+    );
+    defer allocator.free(unchanged);
+    try std.testing.expectEqualStrings("previous-snapshot", unchanged);
 }

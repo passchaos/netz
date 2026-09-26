@@ -1604,8 +1604,12 @@ and preserves deferred inbound QoS 2 `await_pubrel`/`release_pending` markers.
 Decode uses a temporary one-Session store and swaps only after full validation;
 online restore attempts, transient CONNECT configurations, non-empty
 destination state, foreign identities, trailing bytes, and corrupt checksums
-fail without changing the current Session. Durable file replacement remains an
-application responsibility for standalone reconnect clients. `OutboundBridge`
+fail without changing the current Session. Standalone reconnect clients now
+also expose atomic file save/load helpers with a 128 MiB read ceiling, 0600
+snapshot permissions where supported, file fsync before rename, and parent
+directory fsync after replacement. Missing, oversized, corrupt, foreign, or
+protocol-mismatched files leave the destination Session unchanged; a temporary
+file sync failure cannot replace an installed snapshot. `OutboundBridge`
 now supplies its own identity-bound commit-log coordinator to atomically
 compose both broker legs and its QoS 2 transaction; without that explicit
 coordinator the cross-broker QoS 2 path remains fail-closed.

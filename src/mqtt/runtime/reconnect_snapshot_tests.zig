@@ -962,6 +962,145 @@ test "MQTT reconnect Session snapshot restore is fail closed" {
     );
 }
 
+test "MQTT reconnect Session file API is durable and transactional" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var shutdown: std.Io.Event = .unset;
+    const properties = [_]mqtt.Property{sessionExpiryProperty(60)};
+    const unused = std.Io.net.IpAddress{ .ip4 = .loopback(1) };
+    const connect_options: runtime.ConnectOptions = .{
+        .protocol = .v5,
+        .client_id = "snapshot-file-client",
+        .clean_start = false,
+        .properties = &properties,
+    };
+
+    var source = try reconnect.Client.init(
+        allocator,
+        io,
+        unused,
+        connect_options,
+        .{},
+        &shutdown,
+    );
+    defer source.deinit();
+    const staged = try source.outgoing.stageImmediatePublish(
+        source.outgoing_handle,
+        "snapshot/file",
+        "durable",
+        .{ .qos = .at_least_once, .now = .zero },
+        8,
+    );
+    try source.saveSessionSnapshotFileAt(
+        tmp.dir,
+        "session.db",
+        .zero,
+        .zero,
+    );
+
+    var restored = try reconnect.Client.init(
+        allocator,
+        io,
+        unused,
+        connect_options,
+        .{},
+        &shutdown,
+    );
+    defer restored.deinit();
+    try restored.restoreSessionSnapshotFileAt(
+        tmp.dir,
+        "session.db",
+        .zero,
+        .zero,
+    );
+    try std.testing.expectEqual(
+        mqtt.session.OutgoingQoSState.await_puback,
+        (try restored.outgoingQoSState(staged)).?,
+    );
+    try std.testing.expectError(
+        error.SessionStateNotEmpty,
+        restored.restoreSessionSnapshotFileAt(
+            tmp.dir,
+            "missing.db",
+            .zero,
+            .zero,
+        ),
+    );
+
+    var empty = try reconnect.Client.init(
+        allocator,
+        io,
+        unused,
+        connect_options,
+        .{},
+        &shutdown,
+    );
+    defer empty.deinit();
+    try std.testing.expectError(
+        error.SnapshotNotFound,
+        empty.restoreSessionSnapshotFileAt(
+            tmp.dir,
+            "missing.db",
+            .zero,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try empty.outgoingStats()).inflight_count,
+    );
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "corrupt.db",
+        .data = "not-a-snapshot",
+    });
+    try std.testing.expectError(
+        error.CorruptSnapshot,
+        empty.restoreSessionSnapshotFileAt(
+            tmp.dir,
+            "corrupt.db",
+            .zero,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try empty.outgoingStats()).inflight_count,
+    );
+
+    var foreign = try reconnect.Client.init(
+        allocator,
+        io,
+        unused,
+        .{
+            .protocol = .v5,
+            .client_id = "snapshot-file-foreign",
+            .clean_start = false,
+            .properties = &properties,
+        },
+        .{},
+        &shutdown,
+    );
+    defer foreign.deinit();
+    try std.testing.expectError(
+        error.SnapshotClientMismatch,
+        foreign.restoreSessionSnapshotFileAt(
+            tmp.dir,
+            "session.db",
+            .zero,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try foreign.outgoingStats()).inflight_count,
+    );
+}
+
 test "MQTT reconnect Session snapshot resumes deferred inbound QoS2" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

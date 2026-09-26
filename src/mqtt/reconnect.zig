@@ -46,6 +46,8 @@ pub const SessionSnapshotError = session_snapshot.Error || error{
     SessionPersistenceDisabled,
     SessionStateNotEmpty,
 };
+pub const SessionSnapshotFileError = SessionSnapshotError ||
+    session_snapshot.FileError;
 
 const OptionsError = mqtt.Error || std.mem.Allocator.Error ||
     error{OwnedPropertyLimitExceeded};
@@ -1656,8 +1658,9 @@ pub const Client = struct {
     /// Append an identity-bound snapshot of this client's durable MQTT Session
     /// state. The client is single-owner, so an online caller can stage state,
     /// append it to a larger durable record, and only then select network work.
-    /// File replacement, fsync, and atomic composition with higher-level
-    /// coordinator state remain caller policy. Restoration stays offline-only.
+    /// This in-memory form keeps atomic composition with higher-level
+    /// coordinator state under caller control; `saveSessionSnapshotFile` owns
+    /// crash-safe standalone replacement. Restoration stays offline-only.
     pub fn writeSessionSnapshot(
         self: *Client,
         out: *std.ArrayList(u8),
@@ -1690,6 +1693,43 @@ pub const Client = struct {
         );
     }
 
+    /// Atomically persist one identity-bound reconnect Session snapshot. The
+    /// file and containing directory are synced before success is returned.
+    pub fn saveSessionSnapshotFile(
+        self: *Client,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+    ) SessionSnapshotFileError!void {
+        return self.saveSessionSnapshotFileAt(
+            dir,
+            sub_path,
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
+        );
+    }
+
+    pub fn saveSessionSnapshotFileAt(
+        self: *Client,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        monotonic_now: std.Io.Timestamp,
+        realtime_now: std.Io.Timestamp,
+    ) SessionSnapshotFileError!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try self.writeSessionSnapshotAt(
+            &encoded,
+            monotonic_now,
+            realtime_now,
+        );
+        try session_snapshot.saveAtomic(
+            self.io,
+            dir,
+            sub_path,
+            encoded.items,
+        );
+    }
+
     /// Transactionally replace an empty offline reconnect Session from a
     /// snapshot written by `writeSessionSnapshot`. Protocol and Client ID are
     /// validated by the envelope before the temporary Store is swapped in.
@@ -1713,16 +1753,7 @@ pub const Client = struct {
         monotonic_now: std.Io.Timestamp,
         realtime_now: std.Io.Timestamp,
     ) SessionSnapshotError!void {
-        if (self.connection_state != null) return error.SnapshotBusy;
-        if (!configuredPersistentSession(self.options.value)) {
-            return error.SessionPersistenceDisabled;
-        }
-        const current = try self.outgoing.stats(self.outgoing_handle);
-        if (current.subscription_count != 0 or current.queued_count != 0 or
-            current.inflight_count != 0 or current.incoming_qos2_count != 0)
-        {
-            return error.SessionStateNotEmpty;
-        }
+        try self.validateSessionSnapshotRestore();
         var restored = try session_snapshot.decode(
             self.allocator,
             bytes,
@@ -1736,6 +1767,59 @@ pub const Client = struct {
         self.outgoing.swap(&restored.store);
         self.outgoing_handle = restored.handle;
         self.outgoing_open = false;
+    }
+
+    fn validateSessionSnapshotRestore(
+        self: *Client,
+    ) SessionSnapshotError!void {
+        if (self.connection_state != null) return error.SnapshotBusy;
+        if (!configuredPersistentSession(self.options.value)) {
+            return error.SessionPersistenceDisabled;
+        }
+        const current = try self.outgoing.stats(self.outgoing_handle);
+        if (current.subscription_count != 0 or current.queued_count != 0 or
+            current.inflight_count != 0 or current.incoming_qos2_count != 0)
+        {
+            return error.SessionStateNotEmpty;
+        }
+    }
+
+    /// Bounded, transactionally decoded counterpart to
+    /// `saveSessionSnapshotFile`. The existing Session is unchanged on any
+    /// read, checksum, identity, protocol, limit, or decode failure.
+    pub fn restoreSessionSnapshotFile(
+        self: *Client,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+    ) SessionSnapshotFileError!void {
+        return self.restoreSessionSnapshotFileAt(
+            dir,
+            sub_path,
+            std.Io.Clock.awake.now(self.io),
+            std.Io.Clock.real.now(self.io),
+        );
+    }
+
+    pub fn restoreSessionSnapshotFileAt(
+        self: *Client,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        monotonic_now: std.Io.Timestamp,
+        realtime_now: std.Io.Timestamp,
+    ) SessionSnapshotFileError!void {
+        try self.validateSessionSnapshotRestore();
+        const encoded = try session_snapshot.loadAlloc(
+            self.allocator,
+            self.io,
+            dir,
+            sub_path,
+        );
+        defer self.allocator.free(encoded);
+        try self.restoreSessionSnapshotAt(
+            encoded,
+            monotonic_now,
+            realtime_now,
+        );
     }
 
     pub fn subscriptionCount(self: *const Client) usize {

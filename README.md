@@ -782,7 +782,9 @@ Current protocol coverage includes:
   queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
   out-of-order ACKs and incoming QoS 2 deduplication, atomic versioned broker
   snapshots whose file contents and, on supported POSIX targets, replacement
-  directory entry are synced, and an opt-in fsynced append journal with
+  directory entry are synced, matching identity-bound reconnect-client
+  snapshot file save/load with bounded transactional restore, and an opt-in
+  fsynced append journal with
   CRC/sequence/footer validation,
   torn-tail recovery, directory-synced atomic compaction, and protocol-visible
   durability boundaries, plus coherent allocation-free broker statistics for
