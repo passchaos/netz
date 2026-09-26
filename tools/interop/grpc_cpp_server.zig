@@ -18,6 +18,9 @@ const echo_trailing_value = "\x0a\x0b\x0a\x0b\x0a\x0b";
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
 const canonical_response_sizes = [_]usize{ 31_415, 9, 2_653, 58_979 };
 const canonical_response_sizes_u32 = [_]u32{ 31_415, 9, 2_653, 58_979 };
+const status_message = "This is a test message";
+const special_status_message =
+    "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
 
 const Scenario = enum {
     ping_pong,
@@ -29,6 +32,8 @@ const Scenario = enum {
     server_compressed_unary,
     client_compressed_streaming,
     server_compressed_streaming,
+    status_code_and_message,
+    special_status_message,
     client_streaming,
     server_streaming,
 
@@ -148,6 +153,12 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             &connection,
         ),
+        .status_code_and_message => try serveStatusCodeAndMessage(
+            &connection,
+        ),
+        .special_status_message => try serveSpecialStatusMessage(
+            &connection,
+        ),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
@@ -165,6 +176,93 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveStatusCodeAndMessage(
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    {
+        var unary = try connection.readUnary();
+        defer unary.deinit();
+        if (!std.mem.eql(u8, unary.request.path, unary_service_path)) {
+            return error.UnexpectedMethod;
+        }
+        const requested = try messages.decodeStatusRequest(
+            unary.request.message.payload,
+        );
+        try expectStatus(requested, status_message);
+        try connection.writeUnary(unary.request.stream_id, .{
+            .status = .unknown,
+            .status_message = requested.message,
+            .trailers_only = true,
+        });
+    }
+
+    var stream = try connection.acceptDuplex();
+    defer stream.deinit();
+    if (!std.mem.eql(u8, stream.path, duplex_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    var observer = StatusObserver{ .expected_message = status_message };
+    while (!observer.matches) {
+        var event = try stream.readRequestEvent(
+            &observer,
+            StatusObserver.consume,
+        );
+        defer event.deinit();
+        switch (event) {
+            .messages => {},
+            .finished => return error.UnexpectedEndOfStream,
+            .reset => return error.UnexpectedReset,
+        }
+    }
+    try stream.finish(.unknown, status_message, &.{}, &.{});
+}
+
+fn serveSpecialStatusMessage(
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var unary = try connection.readUnary();
+    defer unary.deinit();
+    if (!std.mem.eql(u8, unary.request.path, unary_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    const requested = try messages.decodeStatusRequest(
+        unary.request.message.payload,
+    );
+    try expectStatus(requested, special_status_message);
+    try connection.writeUnary(unary.request.stream_id, .{
+        .status = .unknown,
+        .status_message = requested.message,
+        .trailers_only = true,
+    });
+}
+
+const StatusObserver = struct {
+    expected_message: []const u8,
+    matches: bool = false,
+
+    fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
+        if (self.matches or message.was_compressed) {
+            return error.UnexpectedRequest;
+        }
+        try expectStatus(
+            try messages.decodeStatusRequest(message.payload),
+            self.expected_message,
+        );
+        self.matches = true;
+    }
+};
+
+fn expectStatus(
+    status: messages.EchoStatus,
+    expected_message: []const u8,
+) !void {
+    if (status.code != @intFromEnum(netz.grpc.Status.unknown) or
+        !std.mem.eql(u8, status.message, expected_message))
+    {
+        return error.UnexpectedStatus;
+    }
 }
 
 fn serveClientCompressedUnary(
@@ -638,6 +736,8 @@ fn serveScenario(
         .server_compressed_unary,
         .client_compressed_streaming,
         .server_compressed_streaming,
+        .status_code_and_message,
+        .special_status_message,
         .client_streaming,
         .server_streaming,
         => unreachable,

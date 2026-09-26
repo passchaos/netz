@@ -14,21 +14,30 @@ const std = @import("std");
 /// Apply the bound before allocation and again while decoding peer input.
 pub const max_payload_size: usize = 512 * 1024;
 pub const max_interval_us: u32 = 5 * 1000 * 1000;
+pub const max_status_message_size: usize = 4 * 1024;
 
 pub const Error = std.mem.Allocator.Error || error{
     DuplicateField,
     InvalidArgument,
     InvalidFieldNumber,
     InvalidPayloadType,
+    InvalidStatus,
+    InvalidUtf8,
     MalformedVarint,
     MessageTooLarge,
     MissingPayload,
+    MissingStatus,
     NonCanonicalVarint,
     NonZeroPayload,
     TruncatedMessage,
     UnexpectedPayloadSize,
     UnsupportedField,
     UnsupportedWireType,
+};
+
+pub const EchoStatus = struct {
+    code: u8,
+    message: []const u8,
 };
 
 pub const RequestOptions = struct {
@@ -61,6 +70,59 @@ pub const SimpleRequestOptions = struct {
     /// Presence maps to `SimpleRequest.expect_compressed` (field 8).
     expect_compressed: ?bool = null,
 };
+
+/// Encode the exact response-status-only request shared by `SimpleRequest`
+/// and `StreamingOutputCallRequest`. Both schemas assign `EchoStatus` field 7.
+pub fn encodeStatusRequestAlloc(
+    allocator: std.mem.Allocator,
+    status: EchoStatus,
+) Error![]u8 {
+    try validateEchoStatus(status);
+    const status_len = 1 + varintLen(status.code) +
+        try lengthDelimitedFieldLen(status.message.len);
+    const encoded = try allocator.alloc(
+        u8,
+        try lengthDelimitedFieldLen(status_len),
+    );
+    errdefer allocator.free(encoded);
+    var cursor: usize = 0;
+    encoded[cursor] = fieldKey(7, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, status_len);
+    encoded[cursor] = fieldKey(1, .varint);
+    cursor += 1;
+    writeVarint(encoded, &cursor, status.code);
+    encoded[cursor] = fieldKey(2, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, status.message.len);
+    @memcpy(encoded[cursor..][0..status.message.len], status.message);
+    cursor += status.message.len;
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
+}
+
+/// Decode a response-status-only interop request. The returned message borrows
+/// from `input` and is valid for the same lifetime.
+pub fn decodeStatusRequest(input: []const u8) Error!EchoStatus {
+    if (input.len > max_status_message_size + 32) return error.MessageTooLarge;
+    var reader = Reader{ .input = input };
+    var status_seen = false;
+    var result: EchoStatus = undefined;
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        if (tag.field_number != 7) return error.UnsupportedField;
+        if (tag.wire_type != .length_delimited) {
+            return error.UnsupportedWireType;
+        }
+        if (status_seen) return error.DuplicateField;
+        status_seen = true;
+        result = try decodeEchoStatus(
+            try reader.readBytes(max_status_message_size + 16),
+        );
+    }
+    if (!status_seen) return error.MissingStatus;
+    return result;
+}
 
 /// Encode the strict `SimpleRequest` subset used by unary compression and
 /// metadata interoperability cases. Wrapper booleans preserve presence even
@@ -713,6 +775,50 @@ fn decodeResponseParameters(input: []const u8) Error!ResponseParameter {
     return result;
 }
 
+fn decodeEchoStatus(input: []const u8) Error!EchoStatus {
+    var reader = Reader{ .input = input };
+    var code_seen = false;
+    var message_seen = false;
+    var result = EchoStatus{ .code = 0, .message = "" };
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        switch (tag.field_number) {
+            1 => {
+                if (tag.wire_type != .varint) {
+                    return error.UnsupportedWireType;
+                }
+                if (code_seen) return error.DuplicateField;
+                code_seen = true;
+                const code = try reader.readVarint();
+                if (code > 16) return error.InvalidStatus;
+                result.code = @intCast(code);
+            },
+            2 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (message_seen) return error.DuplicateField;
+                message_seen = true;
+                result.message = try reader.readBytes(max_status_message_size);
+            },
+            else => return error.UnsupportedField,
+        }
+    }
+    if (!code_seen or !message_seen) return error.MissingStatus;
+    try validateEchoStatus(result);
+    return result;
+}
+
+fn validateEchoStatus(status: EchoStatus) Error!void {
+    if (status.code > 16) return error.InvalidStatus;
+    if (status.message.len > max_status_message_size) {
+        return error.MessageTooLarge;
+    }
+    if (!std.unicode.utf8ValidateSlice(status.message)) {
+        return error.InvalidUtf8;
+    }
+}
+
 fn validateResponseParameter(parameter: ResponseParameter) Error!void {
     if (parameter.size > max_payload_size) return error.MessageTooLarge;
     if (parameter.interval_us > max_interval_us) return error.InvalidArgument;
@@ -1013,6 +1119,34 @@ test "encodes and decodes streaming compression controls" {
         &storage,
     );
     try std.testing.expectEqualSlices(ResponseParameter, &expected, decoded);
+}
+
+test "encodes and decodes canonical status requests" {
+    const message =
+        "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
+    const encoded = try encodeStatusRequestAlloc(
+        std.testing.allocator,
+        .{ .code = 2, .message = message },
+    );
+    defer std.testing.allocator.free(encoded);
+    const decoded = try decodeStatusRequest(encoded);
+    try std.testing.expectEqual(@as(u8, 2), decoded.code);
+    try std.testing.expectEqualStrings(message, decoded.message);
+    try std.testing.expectError(
+        error.InvalidStatus,
+        decodeStatusRequest(&.{ 0x3a, 0x04, 0x08, 0x11, 0x12, 0x00 }),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        decodeStatusRequest(&.{ 0x3a, 0x05, 0x08, 0x02, 0x12, 0x01, 0xff }),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        decodeStatusRequest(&.{
+            0x3a, 0x04, 0x08, 0x02, 0x12, 0x00,
+            0x3a, 0x04, 0x08, 0x02, 0x12, 0x00,
+        }),
+    );
 }
 
 test "encodes sleeping request without response parameters" {

@@ -4,6 +4,7 @@
 //! `03d65cc67c450ccbb58a8a45627c4da83a886ccd`'s canonical `ping_pong`,
 //! `client_compressed_unary`, `server_compressed_unary`, `custom_metadata`,
 //! `client_compressed_streaming`, `server_compressed_streaming`,
+//! `status_code_and_message`, `special_status_message`,
 //! `cancel_after_first_response`, and
 //! `timeout_on_sleeping_server` cases.  Only the bounded protobuf fixture
 //! subset lives beside this executable; netz's gRPC transport remains payload
@@ -29,6 +30,9 @@ const initial_metadata_name = "x-grpc-test-echo-initial";
 const initial_metadata_value = "test_initial_metadata_value";
 const trailing_metadata_name = "x-grpc-test-echo-trailing-bin";
 const trailing_metadata_value = [_]u8{ 0x0a, 0x0b, 0x0a, 0x0b, 0x0a, 0x0b };
+const status_message = "This is a test message";
+const special_status_message =
+    "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -99,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
     try runPingPong(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
+    try runStatusInterop(allocator, &client, message_limit);
     try runCustomMetadata(allocator, &client, message_limit);
     try runCancellationAndReuse(allocator, &client, message_limit);
     try runSleepingDeadline(allocator, &client, message_limit);
@@ -106,12 +111,83 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
             "ping_pong=4 compression=unary+streaming-gzip+identity " ++
+            "status=unary+bidi+unicode " ++
             "metadata=initial+trailing-bin " ++
             "cancel=CANCEL reuse=true " ++
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runStatusInterop(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    try runUnaryStatus(
+        allocator,
+        client,
+        message_limit,
+        status_message,
+    );
+
+    const request = try messages.encodeStatusRequestAlloc(allocator, .{
+        .code = @intFromEnum(netz.grpc.Status.unknown),
+        .message = status_message,
+    });
+    defer allocator.free(request);
+    var stream = try client.startDuplex(.{
+        .path = service_path,
+        .authority = authority,
+        .max_message_size = message_limit,
+    });
+    defer stream.deinit();
+    var observer = Observer{
+        .expected_sizes = &.{},
+        .expected_terminal_message = status_message,
+    };
+    try writeMessageFully(allocator, &stream, request, &observer);
+    try finishRequestFully(allocator, &stream, &observer);
+    try readThroughTerminal(allocator, &stream, &observer);
+    if (observer.message_count != 0 or
+        observer.terminal_status != .unknown or
+        !observer.terminal_message_matches)
+    {
+        return error.InvalidStatusResponse;
+    }
+
+    try runUnaryStatus(
+        allocator,
+        client,
+        message_limit,
+        special_status_message,
+    );
+}
+
+fn runUnaryStatus(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+    expected_message: []const u8,
+) !void {
+    const request = try messages.encodeStatusRequestAlloc(allocator, .{
+        .code = @intFromEnum(netz.grpc.Status.unknown),
+        .message = expected_message,
+    });
+    defer allocator.free(request);
+    var response = try client.unary(.{
+        .path = unary_service_path,
+        .authority = authority,
+        .message = request,
+        .max_message_size = message_limit,
+    });
+    defer response.deinit();
+    if (response.status != .unknown or response.message != null or
+        !std.mem.eql(u8, response.status_message, expected_message))
+    {
+        return error.InvalidStatusResponse;
+    }
 }
 
 fn runStreamingCompression(
@@ -476,6 +552,8 @@ const Observer = struct {
     initial_metadata_echo: bool = false,
     trailing_metadata_echo: bool = false,
     terminal_status: ?netz.grpc.Status = null,
+    expected_terminal_message: ?[]const u8 = null,
+    terminal_message_matches: bool = false,
 
     fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
         if (self.message_count >= self.expected_sizes.len) {
@@ -585,6 +663,12 @@ fn readEvent(
                 return error.DuplicateTerminalResponse;
             }
             observer.terminal_status = response.status;
+            if (observer.expected_terminal_message) |expected| {
+                if (!std.mem.eql(u8, response.status_message, expected)) {
+                    return error.InvalidStatusResponse;
+                }
+                observer.terminal_message_matches = true;
+            }
             if (observer.expect_metadata_echo) {
                 const trailers = response.trailers orelse
                     return error.MissingTrailingMetadata;

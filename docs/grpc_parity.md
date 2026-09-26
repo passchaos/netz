@@ -226,8 +226,8 @@ external pass until the pinned tool or a prebuilt server is supplied.
 On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
 8.7.0 and GCC. The netz client completed the full forward harness, including
-the canonical client/server compressed-streaming cases, while the official
-C++ client completed eleven scenarios per transport. The upstream
+the canonical compressed-streaming and status-message cases, while the
+official C++ client completed thirteen scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
@@ -253,6 +253,7 @@ progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
 `empty_stream`, `client_compressed_unary`, `server_compressed_unary`,
 `client_compressed_streaming`, `server_compressed_streaming`,
+`status_code_and_message`, `special_status_message`,
 `client_streaming`, `server_streaming`,
 `cancel_after_first_response`, `timeout_on_sleeping_server`, and
 `custom_metadata` over both transports. Client streaming checks all four
@@ -277,6 +278,10 @@ inverse direction on one persistent channel: netz sends and receives the same
 unary and streaming matrices, checks every message compressed bit, validates
 the negotiated `grpc-encoding: gzip`, and validates exact decompressed protobuf
 payloads. Both directions run over h2c and certificate-verified TLS.
+The ordinary status case requests `UNKNOWN` with an exact ASCII message over
+both unary and bidirectional RPCs. The special status case proves
+`grpc-message` percent encoding and decoding preserves CR/LF, tabs, BMP ☺,
+and non-BMP 😈 text byte-for-byte through the independent C++ peer.
 
 The reflection gate passed again after the zio migration on 2026-09-15 against
 the same pinned upstream revision and its Linux Posix EventEngine. Its ready,
@@ -363,8 +368,9 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    custom-metadata echo, and the canonical client/server compressed unary and
    streaming cases against netz over both transports. The forward gate
    independently covers the same gzip/identity unary and per-message streaming
-   matrices against the C++ server. Broader upstream status and authentication
-   cases remain future work.
+   matrices against the C++ server, plus the canonical ordinary and Unicode
+   status-message cases. Broader upstream authentication cases remain future
+   work.
 3. Add broader conformance/interop runners. Reflection accepts standard
    descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.

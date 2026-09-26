@@ -398,7 +398,9 @@ Current protocol coverage includes:
   process gates run the netz endpoints on zio-backed `std.Io` and identify the
   pinned Linux peer as `grpc-cpp-posix-event-engine`; they cover upstream's
   canonical compressed-unary and compressed-streaming probes plus gzip/identity
-  request and response messages in both endpoint directions. The official reflection
+  request and response messages in both endpoint directions, plus exact unary
+  and bidirectional status/message propagation including Unicode and control
+  whitespace. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
