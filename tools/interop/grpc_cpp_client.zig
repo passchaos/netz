@@ -20,6 +20,10 @@ const client_streaming_service_path =
     "/grpc.testing.TestService/StreamingInputCall";
 const server_streaming_service_path =
     "/grpc.testing.TestService/StreamingOutputCall";
+const unimplemented_method_path =
+    "/grpc.testing.TestService/UnimplementedCall";
+const unimplemented_service_path =
+    "/grpc.testing.UnimplementedService/UnimplementedCall";
 const authority = "localhost";
 const response_timeout = std.Io.Duration.fromSeconds(10);
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
@@ -104,6 +108,7 @@ pub fn main(init: std.process.Init) !void {
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
     try runStatusInterop(allocator, &client, message_limit);
+    try runUnimplementedRoutes(&client, message_limit);
     try runCustomMetadata(allocator, &client, message_limit);
     try runCancellationAndReuse(allocator, &client, message_limit);
     try runSleepingDeadline(allocator, &client, message_limit);
@@ -112,12 +117,34 @@ pub fn main(init: std.process.Init) !void {
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
             "ping_pong=4 compression=unary+streaming-gzip+identity " ++
             "status=unary+bidi+unicode " ++
+            "unimplemented=method+service " ++
             "metadata=initial+trailing-bin " ++
             "cancel=CANCEL reuse=true " ++
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runUnimplementedRoutes(
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    for ([_][]const u8{
+        unimplemented_method_path,
+        unimplemented_service_path,
+    }) |path| {
+        var response = try client.unary(.{
+            .path = path,
+            .authority = authority,
+            .message = &.{},
+            .max_message_size = message_limit,
+        });
+        defer response.deinit();
+        if (response.status != .unimplemented or response.message != null) {
+            return error.InvalidUnimplementedResponse;
+        }
+    }
 }
 
 fn runStatusInterop(

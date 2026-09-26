@@ -196,6 +196,8 @@ for transport in h2c tls; do
     server_compressed_streaming \
     status_code_and_message \
     special_status_message \
+    unimplemented_method \
+    unimplemented_service \
     client_streaming \
     server_streaming
   do
@@ -203,4 +205,4 @@ for transport in h2c tls; do
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode client_streaming=true server_streaming=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

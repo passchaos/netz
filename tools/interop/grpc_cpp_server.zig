@@ -10,6 +10,10 @@ const client_streaming_service_path =
     "/grpc.testing.TestService/StreamingInputCall";
 const server_streaming_service_path =
     "/grpc.testing.TestService/StreamingOutputCall";
+const unimplemented_method_path =
+    "/grpc.testing.TestService/UnimplementedCall";
+const unimplemented_service_path =
+    "/grpc.testing.UnimplementedService/UnimplementedCall";
 const message_limit = messages.max_payload_size + 64;
 const echo_initial_key = "x-grpc-test-echo-initial";
 const echo_initial_value = "test_initial_metadata_value";
@@ -34,6 +38,8 @@ const Scenario = enum {
     server_compressed_streaming,
     status_code_and_message,
     special_status_message,
+    unimplemented_method,
+    unimplemented_service,
     client_streaming,
     server_streaming,
 
@@ -159,6 +165,14 @@ pub fn main(init: std.process.Init) !void {
         .special_status_message => try serveSpecialStatusMessage(
             &connection,
         ),
+        .unimplemented_method => try serveUnimplementedRoute(
+            &connection,
+            unimplemented_method_path,
+        ),
+        .unimplemented_service => try serveUnimplementedRoute(
+            &connection,
+            unimplemented_service_path,
+        ),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
@@ -176,6 +190,26 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveUnimplementedRoute(
+    connection: *netz.grpc.runtime.ServerConnection,
+    expected_path: []const u8,
+) !void {
+    var unary = try connection.readUnary();
+    defer unary.deinit();
+    if (!std.mem.eql(u8, unary.request.path, expected_path)) {
+        return error.UnexpectedMethod;
+    }
+    if (unary.request.message.payload.len != 0 or
+        unary.request.was_compressed)
+    {
+        return error.UnexpectedRequest;
+    }
+    try connection.writeUnary(unary.request.stream_id, .{
+        .status = .unimplemented,
+        .trailers_only = true,
+    });
 }
 
 fn serveStatusCodeAndMessage(
@@ -738,6 +772,8 @@ fn serveScenario(
         .server_compressed_streaming,
         .status_code_and_message,
         .special_status_message,
+        .unimplemented_method,
+        .unimplemented_service,
         .client_streaming,
         .server_streaming,
         => unreachable,

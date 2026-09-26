@@ -227,7 +227,7 @@ On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
 8.7.0 and GCC. The netz client completed the full forward harness, including
 the canonical compressed-streaming and status-message cases, while the
-official C++ client completed thirteen scenarios per transport. The upstream
+official C++ client completed fifteen scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
@@ -254,6 +254,7 @@ The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
 `empty_stream`, `client_compressed_unary`, `server_compressed_unary`,
 `client_compressed_streaming`, `server_compressed_streaming`,
 `status_code_and_message`, `special_status_message`,
+`unimplemented_method`, `unimplemented_service`,
 `client_streaming`, `server_streaming`,
 `cancel_after_first_response`, `timeout_on_sleeping_server`, and
 `custom_metadata` over both transports. Client streaming checks all four
@@ -282,6 +283,11 @@ The ordinary status case requests `UNKNOWN` with an exact ASCII message over
 both unary and bidirectional RPCs. The special status case proves
 `grpc-message` percent encoding and decoding preserves CR/LF, tabs, BMP ☺,
 and non-BMP 😈 text byte-for-byte through the independent C++ peer.
+The routing cases distinguish the registered test service's deliberately
+unimplemented method from an entirely unregistered service and require a
+trailers-only `UNIMPLEMENTED` result for each. The forward harness performs
+both calls consecutively on its persistent channel, proving the errors retire
+only their RPC streams.
 
 The reflection gate passed again after the zio migration on 2026-09-15 against
 the same pinned upstream revision and its Linux Posix EventEngine. Its ready,
