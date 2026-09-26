@@ -19,6 +19,10 @@ pub fn kind(operation: u8) u3 {
     return @truncate(operation);
 }
 
+pub fn requestsKeyUpdate(operation: u8) bool {
+    return (operation & 0x08) != 0 and kind(operation) < 6;
+}
+
 pub fn pathBuffer(
     buffer: []u8,
     operation: u8,
@@ -43,4 +47,5 @@ pub const Summary = struct {
     cancellations: usize = 0,
     goaways: usize = 0,
     reconnects: usize = 0,
+    key_updates: usize = 0,
 };

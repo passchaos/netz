@@ -5,77 +5,119 @@ const model = @import("model.zig");
 const http2 = netz.http2;
 const runtime = http2.runtime;
 
-pub const State = struct {
-    server: *runtime.Server,
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    summary: model.Summary = .{},
-    err: ?anyerror = null,
+pub fn State(comptime Server: type, comptime tls: bool) type {
+    return struct {
+        server: *Server,
+        allocator: std.mem.Allocator,
+        input: []const u8,
+        summary: model.Summary = .{},
+        err: ?anyerror = null,
 
-    pub fn run(self: *@This()) void {
-        self.runFallible() catch |err| {
-            self.err = err;
-        };
-    }
-
-    fn runFallible(self: *@This()) !void {
-        const sequence = self.input[0..@min(
-            self.input.len,
-            model.max_operations,
-        )];
-        var index: usize = 0;
-        while (index < sequence.len) {
-            var last_stream_id: u31 = 0;
-            var connection = try self.server.acceptWithTimeout(model.timeout);
-            var connection_open = true;
-            defer if (connection_open) connection.close();
-            while (index < sequence.len) : (index += 1) {
-                const operation = sequence[index];
-                switch (model.kind(operation)) {
-                    0, 1, 2 => last_stream_id = try completeRequest(
-                        &connection,
-                        operation,
-                        index,
-                    ),
-                    3 => last_stream_id = try streamResponse(
-                        &connection,
-                        operation,
-                        index,
-                    ),
-                    4 => last_stream_id = try responseBatch(
-                        &connection,
-                        operation,
-                        index,
-                    ),
-                    5 => {
-                        const expected = pingPayload(operation, index);
-                        try std.testing.expectEqual(
-                            expected,
-                            try connection.readPingWithTimeout(model.timeout),
-                        );
-                    },
-                    6 => last_stream_id = try expectCancellation(
-                        &connection,
-                        operation,
-                        index,
-                    ),
-                    7 => {
-                        try connection.sendGoAway(
-                            last_stream_id,
-                            .no_error,
-                            "fuzz-rotate",
-                        );
-                        self.summary.goaways += 1;
-                        index += 1;
-                        break;
-                    },
-                }
-            }
-            connection.close();
-            connection_open = false;
+        pub fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
         }
-    }
-};
+
+        fn runFallible(self: *@This()) !void {
+            const sequence = self.input[0..@min(
+                self.input.len,
+                model.max_operations,
+            )];
+            var index: usize = 0;
+            while (index < sequence.len) {
+                var last_stream_id: u31 = 0;
+                var connection = try self.server.acceptWithTimeout(
+                    model.timeout,
+                );
+                var connection_open = true;
+                defer if (connection_open) connection.close();
+                if (tls) try validateTls(&connection);
+                var connection_key_updates: u64 = 0;
+                while (index < sequence.len) : (index += 1) {
+                    const operation = sequence[index];
+                    switch (model.kind(operation)) {
+                        0, 1, 2 => last_stream_id = try completeRequest(
+                            &connection,
+                            operation,
+                            index,
+                        ),
+                        3 => last_stream_id = try streamResponse(
+                            &connection,
+                            operation,
+                            index,
+                        ),
+                        4 => last_stream_id = try responseBatch(
+                            &connection,
+                            operation,
+                            index,
+                        ),
+                        5 => {
+                            const expected = pingPayload(operation, index);
+                            try std.testing.expectEqual(
+                                expected,
+                                try connection.readPingWithTimeout(
+                                    model.timeout,
+                                ),
+                            );
+                        },
+                        6 => last_stream_id = try expectCancellation(
+                            &connection,
+                            operation,
+                            index,
+                        ),
+                        7 => {
+                            try connection.sendGoAway(
+                                last_stream_id,
+                                .no_error,
+                                "fuzz-rotate",
+                            );
+                            self.summary.goaways += 1;
+                            index += 1;
+                            break;
+                        },
+                    }
+                    if (tls and model.requestsKeyUpdate(operation)) {
+                        connection_key_updates += 1;
+                        self.summary.key_updates += 1;
+                        try validateKeyUpdates(
+                            &connection,
+                            connection_key_updates,
+                        );
+                    }
+                }
+                connection.close();
+                connection_open = false;
+            }
+        }
+    };
+}
+
+fn validateTls(connection: *runtime.Connection) !void {
+    try std.testing.expectEqualStrings(
+        "h2",
+        connection.negotiatedAlpn() orelse return error.InvalidAlpn,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        connection.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.TranscriptHash.sha256,
+        connection.negotiatedTranscriptHash().?,
+    );
+}
+
+fn validateKeyUpdates(
+    connection: *runtime.Connection,
+    expected: u64,
+) !void {
+    const counts = connection.keyUpdateCounts() orelse
+        return error.MissingTlsState;
+    try std.testing.expectEqual(expected, counts.sent);
+    try std.testing.expectEqual(expected, counts.received);
+    try std.testing.expect(!counts.awaiting_peer_response);
+}
 
 fn completeRequest(
     connection: *runtime.Connection,

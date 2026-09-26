@@ -1433,8 +1433,10 @@ response trailers, HEAD body suppression, and request/response-selected close
 boundaries against an independent operation model. The dedicated
 `fuzz-http2-connection` target covers real h2c connection state: ordinary
 and streaming bodies, request trailers, reversed two-stream response batches,
-PING, RST_STREAM cancellation, GOAWAY and connection rotation. TLS-wrapped
-HTTP/2 connection-state fuzzing remains outside these fuzz surfaces. The
+PING, RST_STREAM cancellation, GOAWAY and connection rotation. The sibling
+`fuzz-http2-tls-connection` target carries the same state model over
+authenticated TLS 1.3, checks mandatory `h2` ALPN and cipher metadata, and
+mutates bidirectional traffic-key updates between HTTP/2 operations. The
 dedicated `fuzz-http3-connection` target covers authenticated QUIC/TLS HTTP/3
 connection state: complete and streaming bodies, request and response trailers,
 reversed multiplexed responses, cancellation, HEAD body suppression, and
