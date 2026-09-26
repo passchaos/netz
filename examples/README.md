@@ -144,9 +144,13 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
 `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
-bad values, and listener options before the first listener are errors. This
-bounded example interprets each listener's `max_connections` as its finite
-accept count. Global `max_packet_size` defaults to Mosquitto's 2,000,000-byte
+bad values, and listener options before the first listener are errors. In
+production config mode, each listener's `max_connections` is its simultaneous
+admitted-client limit and the broker keeps accepting after clients disconnect.
+The repository's process gate sets `NETZ_MQTT_CONFIG_FINITE_TEST=1` to use the
+sum of those values solely as a deterministic test-exit budget; applications
+must not use that test-only switch. Global `max_packet_size` defaults to
+Mosquitto's 2,000,000-byte
 full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
@@ -188,7 +192,7 @@ disconnects; `-1` maps to the bounded 2,147,483,647-client implementation
 ceiling, while zero and other negative values are rejected. Because the
 portable `PendingSource` boundary returns after transport setup and CONNECT
 parsing, the shared broker slot is claimed immediately after that boundary;
-per-listener accept concurrency continues to bound pre-CONNECT work.
+per-listener accept worker counts continue to bound pre-CONNECT work.
 Global
 `max_inflight_messages` defaults to 20 and bounds each client's incoming and
 outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive

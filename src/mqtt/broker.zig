@@ -839,6 +839,9 @@ pub const Listener = struct {
     /// Additional listener-local CONNECT authorization. Callback state is
     /// borrowed and must remain alive throughout `serveListeners`.
     authorization: ListenerAuthorization = .{},
+    /// Optional simultaneous admitted-client limit for this listener. The
+    /// finite `connection_count` remains the number of accept attempts.
+    max_connections: ?usize = null,
     /// Finite accept count for deterministic process/test teardown.
     connection_count: usize,
 };
@@ -861,6 +864,10 @@ pub const ListenerEndpoint = struct {
     /// Additional listener-local CONNECT authorization. Callback state is
     /// borrowed and must remain alive throughout `serveListenersUntil`.
     authorization: ListenerAuthorization = .{},
+    /// Optional simultaneous admitted-client limit for this listener. Use an
+    /// `accept_concurrency` greater than this value to actively close excess
+    /// peers instead of leaving them queued in the transport backlog.
+    max_connections: ?usize = null,
     accept_concurrency: usize = 1,
 };
 
@@ -2344,6 +2351,9 @@ pub const Broker = struct {
             {
                 return error.InvalidProperty;
             }
+            if (listener.max_connections == 0) {
+                return error.InvalidProperty;
+            }
             connection_count = std.math.add(
                 usize,
                 connection_count,
@@ -2383,15 +2393,27 @@ pub const Broker = struct {
         );
         defer self.allocator.free(errors);
         @memset(errors, null);
+        const capacities = try self.allocator.alloc(
+            ListenerCapacity,
+            listeners.len,
+        );
+        defer self.allocator.free(capacities);
+        for (listeners, capacities) |listener, *capacity| {
+            capacity.* = .{
+                .limit = listener.max_connections orelse
+                    listener.connection_count,
+            };
+        }
 
         var next_result: usize = 0;
-        for (listeners) |listener| {
+        for (listeners, capacities) |listener, *capacity| {
             for (0..listener.connection_count) |_| {
                 const result = &errors[next_result];
                 next_result += 1;
                 const accept_task = ListenerAcceptTask{
                     .broker = self,
                     .listener = self.listenerWithTraffic(listener),
+                    .capacity = capacity,
                     .result = result,
                 };
                 group.async(
@@ -2450,6 +2472,20 @@ pub const Broker = struct {
             if (listener.accept_concurrency == 0) {
                 return error.InvalidProperty;
             }
+            if (listener.max_connections == 0) {
+                return error.InvalidProperty;
+            }
+        }
+        const capacities = try self.allocator.alloc(
+            ListenerCapacity,
+            listeners.len,
+        );
+        defer self.allocator.free(capacities);
+        for (listeners, capacities) |listener, *capacity| {
+            capacity.* = .{
+                .limit = listener.max_connections orelse
+                    listener.accept_concurrency,
+            };
         }
         var group: std.Io.Group = .init;
         var supervisor = ListenerSupervisorState{
@@ -2467,7 +2503,7 @@ pub const Broker = struct {
             group.cancel(self.io);
         };
 
-        for (listeners, 0..) |listener, listener_index| {
+        for (listeners, capacities, 0..) |listener, *capacity, listener_index| {
             for (0..listener.accept_concurrency) |_| {
                 try group.concurrent(
                     self.io,
@@ -2477,6 +2513,7 @@ pub const Broker = struct {
                         .listener = self.listenerEndpointWithTraffic(
                             listener,
                         ),
+                        .capacity = capacity,
                         .listener_index = listener_index,
                     }},
                 );
@@ -5976,8 +6013,12 @@ const ClientTask = struct {
     subscriber_id: router_mod.SubscriberId,
     connect: runtime.OwnedConnect,
     result: *?anyerror,
+    listener_capacity: ?*ListenerCapacity = null,
 
     fn run(task: ClientTask) std.Io.Cancelable!void {
+        defer if (task.listener_capacity) |capacity| {
+            capacity.release(task.broker.io);
+        };
         var connect = task.connect;
         defer connect.deinit(task.broker.allocator);
         const slot = &task.broker.slots[task.slot_index];
@@ -6366,9 +6407,31 @@ const ClientTask = struct {
     }
 };
 
+const ListenerCapacity = struct {
+    limit: usize,
+    active: usize = 0,
+    mutex: std.Io.Mutex = .init,
+
+    fn claim(self: *ListenerCapacity, io: std.Io) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (self.active >= self.limit) return false;
+        self.active += 1;
+        return true;
+    }
+
+    fn release(self: *ListenerCapacity, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(self.active != 0);
+        self.active -= 1;
+    }
+};
+
 const ListenerAcceptTask = struct {
     broker: *Broker,
     listener: Listener,
+    capacity: *ListenerCapacity,
     result: *?anyerror,
 
     fn run(task: ListenerAcceptTask) std.Io.Cancelable!void {
@@ -6377,6 +6440,14 @@ const ListenerAcceptTask = struct {
         ) catch |err| {
             task.result.* = err;
             return;
+        };
+        if (!task.capacity.claim(task.broker.io)) {
+            pending.deinit(task.broker.allocator);
+            return;
+        }
+        var capacity_claimed = true;
+        defer if (capacity_claimed) {
+            task.capacity.release(task.broker.io);
         };
         const slot_index = task.broker.claimSlot() catch |err| {
             pending.deinit(task.broker.allocator);
@@ -6391,7 +6462,7 @@ const ListenerAcceptTask = struct {
         defer if (slot_claimed) {
             task.broker.releaseClaimedSlot(slot_index);
         };
-        const client_task = task.broker.preparePending(
+        var client_task = task.broker.preparePending(
             slot_index,
             &pending,
             task.listener.namespace,
@@ -6411,6 +6482,8 @@ const ListenerAcceptTask = struct {
             return;
         };
         slot_claimed = false;
+        client_task.listener_capacity = task.capacity;
+        capacity_claimed = false;
         ClientTask.run(client_task) catch |err| {
             task.result.* = err;
         };
@@ -6465,6 +6538,7 @@ const ListenerSupervisorState = struct {
 const ListenerSupervisorAcceptTask = struct {
     supervisor: *ListenerSupervisorState,
     listener: ListenerEndpoint,
+    capacity: *ListenerCapacity,
     listener_index: usize,
 
     fn run(task: ListenerSupervisorAcceptTask) std.Io.Cancelable!void {
@@ -6494,6 +6568,14 @@ const ListenerSupervisorAcceptTask = struct {
                 pending.deinit(task.supervisor.broker.allocator);
                 return;
             }
+            if (!task.capacity.claim(task.supervisor.broker.io)) {
+                pending.deinit(task.supervisor.broker.allocator);
+                continue;
+            }
+            var capacity_claimed = true;
+            defer if (capacity_claimed) {
+                task.capacity.release(task.supervisor.broker.io);
+            };
             const slot_index = task.supervisor.broker.claimSlot() catch |err| {
                 pending.deinit(task.supervisor.broker.allocator);
                 if (err == error.BrokerFull) continue;
@@ -6510,7 +6592,7 @@ const ListenerSupervisorAcceptTask = struct {
                 task.supervisor.broker.releaseClaimedSlot(slot_index);
             };
             var connection_error: ?anyerror = null;
-            const client_task = task.supervisor.broker.preparePending(
+            var client_task = task.supervisor.broker.preparePending(
                 slot_index,
                 &pending,
                 task.listener.namespace,
@@ -6534,6 +6616,8 @@ const ListenerSupervisorAcceptTask = struct {
                 continue;
             };
             slot_claimed = false;
+            client_task.listener_capacity = task.capacity;
+            capacity_claimed = false;
             ClientTask.run(client_task) catch |err| {
                 connection_error = err;
             };
@@ -6667,6 +6751,22 @@ test "broker rejects invalid listener Client Identifier prefixes" {
             .auto_client_id_prefix = "bad\x00prefix",
             .connection_count = 0,
         }}),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.serveListeners(&.{.{
+            .source = undefined,
+            .max_connections = 0,
+            .connection_count = 0,
+        }}),
+    );
+    var shutdown: std.Io.Event = .unset;
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.serveListenersUntil(&.{.{
+            .source = undefined,
+            .max_connections = 0,
+        }}, .{ .shutdown = &shutdown }),
     );
 }
 

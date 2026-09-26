@@ -9,6 +9,13 @@ const source_acl = @import("support/mqtt_source_acl.zig");
 
 const mqtt = netz.mqtt;
 
+pub const RunOptions = struct {
+    /// Deterministic process-test lifecycle. Production config mode is a
+    /// long-running supervisor and does not reinterpret listener limits as a
+    /// cumulative accept count.
+    finite_test: bool = false,
+};
+
 const ConfiguredServer = union(enum) {
     mqtt: mqtt.runtime.Server,
     mqtt_tls: mqtt.tls_runtime.Server,
@@ -70,6 +77,7 @@ pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     config_path: []const u8,
+    run_options: RunOptions,
 ) !void {
     var config = try mqtt.broker_config.load(
         allocator,
@@ -318,6 +326,11 @@ pub fn run(
         config.listeners.len,
     );
     defer allocator.free(listeners);
+    const endpoints = try allocator.alloc(
+        mqtt.broker.ListenerEndpoint,
+        config.listeners.len,
+    );
+    defer allocator.free(endpoints);
     const authorizations = try allocator.alloc(
         mqtt.password_file.Authorization,
         config.listeners.len,
@@ -439,15 +452,38 @@ pub fn run(
                 .use_subject_as_username = configured.use_subject_as_username,
                 .retained_source_id = configured.address.getPort(),
             },
+            .max_connections = configured.max_connections,
             .connection_count = configured.max_connections,
+        };
+        const accept_concurrency = std.math.add(
+            usize,
+            @min(configured.max_connections, active_connection_limit),
+            1,
+        ) catch return error.IntegerOverflow;
+        endpoints[index] = .{
+            .source = listeners[index].source,
+            .namespace = listeners[index].namespace,
+            .auto_client_id_prefix = listeners[index].auto_client_id_prefix,
+            .accept = listeners[index].accept,
+            .authorization = listeners[index].authorization,
+            .max_connections = configured.max_connections,
+            .accept_concurrency = accept_concurrency,
         };
     }
 
-    std.debug.print(
-        "netz MQTT 3.1.1/5 broker configured {d} listeners for {d} " ++
-            "clients server_io=zio-std-io\n",
-        .{ listeners.len, connection_count },
-    );
+    if (run_options.finite_test) {
+        std.debug.print(
+            "netz MQTT 3.1.1/5 broker configured {d} listeners for {d} " ++
+                "clients server_io=zio-std-io\n",
+            .{ listeners.len, connection_count },
+        );
+    } else {
+        std.debug.print(
+            "netz MQTT 3.1.1/5 broker configured {d} listeners " ++
+                "global_max_connections={d} server_io=zio-std-io\n",
+            .{ listeners.len, active_connection_limit },
+        );
+    }
     for (servers, config.listeners) |server, configured| {
         std.debug.print(
             "  {s} {f} mount_point={s} max_connections={d}\n",
@@ -463,16 +499,24 @@ pub fn run(
         );
     }
 
+    var shutdown: std.Io.Event = .unset;
+    const service: Service = if (run_options.finite_test)
+        .{ .finite = listeners }
+    else
+        .{ .continuous = .{
+            .listeners = endpoints,
+            .shutdown = &shutdown,
+        } };
     if (config.persistence and !config.autosave_on_changes) {
         try serveWithPeriodicAutosave(
             &broker,
-            listeners,
+            service,
             io,
             persistence_path.?,
             config.autosave_interval,
         );
     } else {
-        try broker.serveListeners(listeners);
+        try serveConfigured(&broker, service);
     }
     if (persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
@@ -481,7 +525,7 @@ pub fn run(
 
 fn serveWithPeriodicAutosave(
     broker: *mqtt.broker.Broker,
-    listeners: []const mqtt.broker.Listener,
+    service: Service,
     io: std.Io,
     persistence_path: []const u8,
     interval_seconds: u32,
@@ -493,7 +537,7 @@ fn serveWithPeriodicAutosave(
     var result_buffer: [2]Result = undefined;
     var select: std.Io.Select(Result) = .init(io, &result_buffer);
     defer select.cancelDiscard();
-    try select.concurrent(.serve, serveResult, .{ broker, listeners });
+    try select.concurrent(.serve, serveResult, .{ broker, service });
     try select.concurrent(
         .timer,
         waitInterval,
@@ -531,11 +575,32 @@ fn serveWithPeriodicAutosave(
     }
 }
 
+const Service = union(enum) {
+    finite: []const mqtt.broker.Listener,
+    continuous: struct {
+        listeners: []const mqtt.broker.ListenerEndpoint,
+        shutdown: *std.Io.Event,
+    },
+};
+
+fn serveConfigured(
+    broker: *mqtt.broker.Broker,
+    service: Service,
+) anyerror!void {
+    switch (service) {
+        .finite => |listeners| try broker.serveListeners(listeners),
+        .continuous => |continuous| try broker.serveListenersUntil(
+            continuous.listeners,
+            .{ .shutdown = continuous.shutdown },
+        ),
+    }
+}
+
 fn serveResult(
     broker: *mqtt.broker.Broker,
-    listeners: []const mqtt.broker.Listener,
+    service: Service,
 ) ?anyerror {
-    broker.serveListeners(listeners) catch |err| return err;
+    serveConfigured(broker, service) catch |err| return err;
     return null;
 }
 

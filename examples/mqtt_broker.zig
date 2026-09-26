@@ -66,7 +66,14 @@ pub fn main(init: std.process.Init) !void {
     defer backend.deinit();
     const io = backend.io();
     if (config_path) |path| {
-        return broker_config_runner.run(allocator, io, path);
+        return broker_config_runner.run(allocator, io, path, .{
+            .finite_test = if (init.environ_map.get(
+                "NETZ_MQTT_CONFIG_FINITE_TEST",
+            )) |value|
+                std.mem.eql(u8, value, "1")
+            else
+                false,
+        });
     }
     const config = try parseArgs(init);
 

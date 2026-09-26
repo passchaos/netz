@@ -773,6 +773,8 @@ Current protocol coverage includes:
   finite deterministic batches plus a graceful-shutdown production supervisor
   that continuously replaces disconnected clients, and
   listener-specific MQTT 3.1.1/5 admission with version-correct refusal,
+  independent listener-local and broker-global simultaneous connection caps
+  that actively close excess peers and reuse capacity after disconnect,
   Mosquitto-compatible mount-point namespaces with inbound PUBLISH/Will and
   ordinary/shared-filter mapping plus fail-closed live/durable outbound topic
   projection,

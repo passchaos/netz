@@ -5292,8 +5292,16 @@ test "public modules are reachable" {
         "authorization",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker.Listener,
+        "max_connections",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker.ListenerEndpoint,
         "authorization",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.ListenerEndpoint,
+        "max_connections",
     ));
     try std.testing.expectEqual(
         @as(usize, 1024),

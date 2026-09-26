@@ -2147,7 +2147,8 @@ zero, negative, and overflow handling. Its real MQTT 3.1.1/5 process cases
 show Session Present on an immediate reconnect and no Session Present after
 the configured one-second offline cap elapses.
 The same gate source-locks Mosquitto's
-`01-connect-global-max-connections.py` and separates its live-connection rule
+`01-connect-global-max-connections.py` and `01-connect-max-connections.py`,
+and separates the live-connection rules
 from `global_max_clients`: two listeners share one admitted-client slot, an
 excess MQTT 5 peer is closed without a CONNACK, and the second listener can
 reuse the slot after the first client disconnects. The strict parser accepts a
@@ -2155,7 +2156,13 @@ positive bound or Mosquitto's `-1` unlimited spelling and rejects zero, other
 negative values, overflow, missing values, and duplicate directives. Netz
 claims this slot after the transport-specific `PendingSource` has completed
 CONNECT parsing; listener worker counts independently bound connections still
-in TCP, TLS, WebSocket, or CONNECT setup.
+in TCP, TLS, WebSocket, or CONNECT setup. The production config runner maps
+listener `max_connections` to a separate per-listener admitted-client counter,
+keeps one additional accept worker available to close excess peers promptly,
+and continues accepting after capacity is released. A fourth process-level
+connection proves production service does not stop after the former finite
+accept budget. The repository gate's finite test mode uses the same limits
+while retaining a separate deterministic accept budget.
 The Clean Start/offline QoS 1 case ports Mosquitto's
 `05-clean-session-qos1.py`: a persistent subscriber disconnects after
 subscribing, receives the exact queued QoS 1 PUBLISH with Session Present on

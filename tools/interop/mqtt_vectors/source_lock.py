@@ -25,6 +25,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "17988c421847b7ded574192c8f7f30e5d5b01b4ee86eb5052eca5997e73852db",
     "broker/01-connect-global-max-connections.py":
         "c24875b36288f418f484107415da902d96708cd58e24de1fdf5dedabff15daff",
+    "broker/01-connect-max-connections.py":
+        "e45bdbc27c2966c22ae1add1d98da4256ca5f55cfa8c4601f2a2bcd28569e01a",
     "broker/12-prop-assigned-client-identifier.py":
         "8c65d0fd5cc74901f2ebe37c7ee9433db7225219c2908276335c358ac587e5fc",
     "broker/13-websocket-bad-origin.py":

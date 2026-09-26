@@ -1659,6 +1659,79 @@ test "finite listeners share global admitted connection capacity" {
     try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
 }
 
+test "finite listener rejects beyond its own live connection limit" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 2,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const listener = mqtt.broker.Listener{
+        .source = server.pendingSource(),
+        .max_connections = 1,
+        .connection_count = 3,
+    };
+    var serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &.{listener},
+    };
+    const thread = try std.Thread.spawn(.{}, ListenerServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var held = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "listener-capacity-held" },
+    );
+    defer held.close();
+    try held.ping();
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        runtime.Client.connect(
+            allocator,
+            io,
+            server.address(),
+            .{ .protocol = .v5, .client_id = "listener-capacity-refused" },
+        ),
+    );
+    try held.ping();
+    try held.disconnect(0);
+    try waitForPeerClose(&held);
+
+    var replacement = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "listener-capacity-replacement" },
+    );
+    defer replacement.close();
+    try replacement.ping();
+    try replacement.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+}
+
 test "listener supervisor rejects over-capacity peer and reuses slot" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -1669,7 +1742,7 @@ test "listener supervisor rejects over-capacity peer and reuses slot" {
 
     var broker = try Broker.init(allocator, io, .{
         .limits = .{
-            .max_connections = 1,
+            .max_connections = 2,
             .max_queued_deliveries_per_connection = 1,
             .runtime = .{ .max_packet_size = 4096 },
         },
@@ -1701,6 +1774,7 @@ test "listener supervisor rejects over-capacity peer and reuses slot" {
         .broker = &broker,
         .endpoint = .{
             .source = server.pendingSource(),
+            .max_connections = 1,
             .accept_concurrency = 2,
         },
     };

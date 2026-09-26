@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import os
 from pathlib import Path
 import socket
 import ssl
@@ -19,6 +20,7 @@ from mqtt_broker_config_queue import run_queued_limits_case
 from mqtt_broker_config_session import (
     run_global_max_clients_case,
     run_global_max_connections_case,
+    run_listener_max_connections_case,
     run_persistent_client_expiration_case,
 )
 from mqtt_broker_config_sys import run_system_interval_case
@@ -27,6 +29,7 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 
 
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
+FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 
 
 def parse_args() -> argparse.Namespace:
@@ -3780,6 +3783,7 @@ def run_optional_client_certificate_case(
 
 def main() -> None:
     args = parse_args()
+    os.environ[FINITE_TEST_ENV] = "1"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
@@ -3799,6 +3803,7 @@ def main() -> None:
         run_persistent_client_expiration_case(args.broker, directory)
         run_global_max_clients_case(args.broker, directory)
         run_global_max_connections_case(args.broker, directory)
+        run_listener_max_connections_case(args.broker, directory)
         run_system_interval_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
@@ -3819,7 +3824,8 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
-        "global client-session and live-connection capacity, persistent-client and "
+        "global client-session plus global/listener live-connection capacity, "
+        "persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID and outgoing QoS "
