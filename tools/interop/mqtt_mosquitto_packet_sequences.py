@@ -4,10 +4,11 @@
 The upstream broker harness mixes raw packet conformance with Mosquitto CLI,
 configuration, plugin, and log assertions. This adapter deliberately handles
 only its portable packet files and preserves their group/test inheritance,
-payload DSL, and standard MQTT helper-publisher actions. Add a file to
-SEQUENCE_FILES only when every action is portable without weakening or
-rewriting individual expectations. Subsets lock the whole source file and name
-every exclusion with a documented reason so fixture drift fails closed.
+payload DSL, and standard MQTT helper-publisher actions. Standards-correcting
+replays lock the complete original action sequence before substituting it. Add
+a file to SEQUENCE_FILES only when every action is portable without weakening
+individual expectations. Subsets lock the whole source file and name every
+exclusion with a documented reason so fixture drift fails closed.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 from pathlib import Path
 import socket
 import sys
+from typing import NamedTuple
 
 from mqtt_mosquitto_vectors import (
     NetzBroker,
@@ -50,6 +52,8 @@ SEQUENCE_FILES = {
         "bf6a7b5f6c03faf31f2e825ba6853943b7b9cc6fa4bf07706fb54ecd9703e73f",
     "PUBCOMP.json":
         "097a9d2b5e3690295dedde21665a82a97baf0e5f8a0258a6deed35c9f848943f",
+    "PUBLISH.json":
+        "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
     "PUBREL.json":
         "5edf48213e6a9c85254b6255618fa5c67b47bfe59bf84b3b09307b8691cea225",
     "SUBACK.json":
@@ -66,8 +70,6 @@ SEQUENCE_SUBSET_FILES = {
         "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
     "CONNACK.json":
         "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
-    "PUBLISH.json":
-        "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
 }
 
 # Each exclusion is an audited divergence from the selected upstream fixture,
@@ -77,11 +79,6 @@ EXCLUSION_REASONS = {
     "unsupported_mqtt_3_1": (
         "the scenario uses obsolete MQTT protocol level 3, outside netz's "
         "declared MQTT 3.1.1 and MQTT 5 scope"
-    ),
-    "mosquitto_qos2_reuse_limit": (
-        "Mosquitto disconnects after its second pre-PUBREL non-DUP reuse; "
-        "MQTT 5 section 4.3.3 requires PUBREC for every same-identifier "
-        "PUBLISH until PUBREL, without replacing the first message"
     ),
 }
 SEQUENCE_EXCLUSIONS = {
@@ -104,11 +101,77 @@ SEQUENCE_EXCLUSIONS = {
         ("v3.1.1 CONNACK", "issue 2163 v3"):
             "unsupported_mqtt_3_1",
     },
+}
+
+# Mosquitto's two "QoS 2 Dup flow*3" cases impose its implementation's
+# finite tolerance for repeated non-DUP PUBLISH packets. MQTT 3.1.1/5 instead
+# require the receiver to repeat PUBREC until PUBREL. These full-sequence
+# replays preserve all three source PUBLISH packets, assert each PUBREC, finish
+# the transaction, and leave the connection live. The complete source action
+# list and inherited terminal policy are checked before substitution.
+SEQUENCE_REPLAY_REASONS = {
+    "mqtt_qos2_repeat_pubrec": (
+        "MQTT 3.1.1/5 require PUBREC for every same-identifier PUBLISH "
+        "received before PUBREL, without replacing the first transaction"
+    ),
+}
+
+
+class SequenceReplay(NamedTuple):
+    source_actions: tuple[tuple[str, str], ...]
+    actions: tuple[tuple[str, str], ...]
+    source_expect_disconnect: bool
+    expect_disconnect: bool
+    reason: str
+
+
+SEQUENCE_REPLAYS = {
     "PUBLISH.json": {
-        ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"):
-            "mosquitto_qos2_reuse_limit",
-        ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"):
-            "mosquitto_qos2_reuse_limit",
+        ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3", 0): SequenceReplay(
+            source_actions=(
+                ("send", "34 r16 s5 'topic' m1234 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r16 s5 'topic' m1234 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r16 s5 'topic' m1234 'payload'"),
+            ),
+            actions=(
+                ("send", "34 r16 s5 'topic' m1234 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r16 s5 'topic' m1234 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r16 s5 'topic' m1234 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "62 r2 m1234"),
+                ("recv", "70 r2 m1234"),
+            ),
+            source_expect_disconnect=True,
+            expect_disconnect=False,
+            reason="mqtt_qos2_repeat_pubrec",
+        ),
+        ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3", 0): SequenceReplay(
+            source_actions=(
+                ("send", "34 r17 s5 'topic' m1234 v0 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r17 s5 'topic' m1234 v0 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r17 s5 'topic' m1234 v0 'payload'"),
+                ("recv", "E0 r1 82"),
+            ),
+            actions=(
+                ("send", "34 r17 s5 'topic' m1234 v0 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r17 s5 'topic' m1234 v0 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "34 r17 s5 'topic' m1234 v0 'payload'"),
+                ("recv", "50 r2 m1234"),
+                ("send", "62 r2 m1234"),
+                ("recv", "70 r2 m1234"),
+            ),
+            source_expect_disconnect=True,
+            expect_disconnect=False,
+            reason="mqtt_qos2_repeat_pubrec",
+        ),
     },
 }
 
@@ -486,17 +549,15 @@ EXPECTATION_OVERRIDES["DISCONNECT.json"].update({
         for header in ("E1", "E2", "E4", "E8")
     },
 })
-EXPECTED_COMPLETE_SEQUENCE_COUNT = 1212
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 1372
 EXPECTED_SUBSET_SEQUENCE_COUNTS = {
     "CONNECT.json": 299,
     "CONNACK.json": 145,
-    "PUBLISH.json": 158,
 }
 EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
-EXPECTED_SEQUENCE_COUNT = (
-    EXPECTED_COMPLETE_SEQUENCE_COUNT + EXPECTED_SUBSET_SEQUENCE_COUNT
-)
+EXPECTED_SEQUENCE_COUNT = 1816
 EXPECTED_EXPECTATION_OVERRIDE_COUNT = 259
+EXPECTED_SEQUENCE_REPLAY_COUNT = 2
 CONNECT_REFUSAL_DIAGNOSTICS = {
     ("CONNECT.json", group, test): bytes.fromhex("20 03 00 81 00")
     for group, test in (
@@ -584,15 +645,21 @@ def load_sequences(
     expectation_overrides: dict[
         str, dict[tuple[str, str, int], tuple[str, str, str]]
     ] | None = None,
+    sequence_replays: dict[
+        str, dict[tuple[str, str, int], SequenceReplay]
+    ] | None = None,
 ) -> list[dict]:
     if selected_files is None:
         selected_files = SEQUENCE_FILES | SEQUENCE_SUBSET_FILES
         excluded_tests = SEQUENCE_EXCLUSIONS
         expectation_overrides = EXPECTATION_OVERRIDES
+        sequence_replays = SEQUENCE_REPLAYS
     elif excluded_tests is None:
         excluded_tests = {}
     if expectation_overrides is None:
         expectation_overrides = {}
+    if sequence_replays is None:
+        sequence_replays = {}
     unknown_exclusion_files = set(excluded_tests) - set(selected_files)
     if unknown_exclusion_files:
         raise ValueError(
@@ -605,6 +672,12 @@ def load_sequences(
             f"expectation overrides name unselected files: "
             f"{sorted(unknown_override_files)}"
         )
+    unknown_replay_files = set(sequence_replays) - set(selected_files)
+    if unknown_replay_files:
+        raise ValueError(
+            f"sequence replays name unselected files: "
+            f"{sorted(unknown_replay_files)}"
+        )
     sequences: list[dict] = []
     for filename, expected_hash in selected_files.items():
         path = data_root / filename
@@ -613,8 +686,10 @@ def load_sequences(
         groups = json.loads(source)
         file_exclusions = excluded_tests.get(filename, {})
         file_overrides = expectation_overrides.get(filename, {})
+        file_replays = sequence_replays.get(filename, {})
         found_exclusions: set[tuple[str, str]] = set()
-        found_overrides: set[tuple[str, str, int]] = set()
+        found_overrides: set[tuple] = set()
+        found_replays: set[tuple[str, str, int]] = set()
         for group in groups:
             if group.get("disable", False):
                 continue
@@ -649,6 +724,48 @@ def load_sequences(
                     raise ValueError(
                         f"{filename} {test['name']} is not a portable raw sequence"
                     )
+                replay_identity = (group["group"], test["name"], occurrence)
+                replay = file_replays.get(replay_identity)
+                source_expect_disconnect = test.get(
+                    "expect_disconnect", group_disconnect
+                )
+                if replay is not None:
+                    reason = replay.reason
+                    if reason not in SEQUENCE_REPLAY_REASONS:
+                        raise ValueError(
+                            f"{filename} {replay_identity} has unknown "
+                            f"sequence replay reason: {reason}"
+                        )
+                    source_actions = tuple(
+                        (action["type"], action["payload"])
+                        for action in actions
+                    )
+                    if source_actions != replay.source_actions:
+                        raise ValueError(
+                            f"{filename} sequence replay source drift for "
+                            f"{replay_identity}: expected "
+                            f"{replay.source_actions!r}, found "
+                            f"{source_actions!r}"
+                        )
+                    if source_expect_disconnect != replay.source_expect_disconnect:
+                        raise ValueError(
+                            f"{filename} sequence replay terminal-policy "
+                            f"drift for {replay_identity}"
+                        )
+                    actions = [
+                        {"type": kind, "payload": payload}
+                        for kind, payload in replay.actions
+                    ]
+                    replay_action_types = {
+                        action["type"] for action in actions
+                    }
+                    if not replay_action_types <= {"send", "recv"}:
+                        raise ValueError(
+                            f"{filename} {replay_identity} has invalid "
+                            f"sequence replay action type"
+                        )
+                    source_expect_disconnect = replay.expect_disconnect
+                    found_replays.add(replay_identity)
                 for action_index, action in enumerate(actions):
                     exact_override_identity = (
                         group["group"], test["name"], occurrence,
@@ -689,9 +806,7 @@ def load_sequences(
                     "name": f"{group['group']} {test['name']}",
                     "protocol": test.get("ver", group_protocol),
                     "connect": test.get("connect", group_connect),
-                    "expect_disconnect": test.get(
-                        "expect_disconnect", group_disconnect
-                    ),
+                    "expect_disconnect": source_expect_disconnect,
                     "actions": actions,
                 })
         expected_exclusions = set(file_exclusions)
@@ -706,6 +821,12 @@ def load_sequences(
             raise ValueError(
                 f"{filename} expectation overrides not found in source: "
                 f"{missing}"
+            )
+        expected_replays = set(file_replays)
+        if found_replays != expected_replays:
+            missing = sorted(expected_replays - found_replays)
+            raise ValueError(
+                f"{filename} sequence replays not found in source: {missing}"
             )
     return sequences
 
@@ -873,6 +994,10 @@ def main() -> None:
         raise AssertionError(
             "expectation overrides must name selected files"
         )
+    if not set(SEQUENCE_REPLAYS) <= selected_files:
+        raise AssertionError(
+            "sequence replays must name selected files"
+        )
     override_count = sum(
         len(overrides)
         for overrides in EXPECTATION_OVERRIDES.values()
@@ -881,6 +1006,14 @@ def main() -> None:
         raise AssertionError(
             f"expected {EXPECTED_EXPECTATION_OVERRIDE_COUNT} audited "
             f"expectation overrides, found {override_count}"
+        )
+    replay_count = sum(
+        len(replays) for replays in SEQUENCE_REPLAYS.values()
+    )
+    if replay_count != EXPECTED_SEQUENCE_REPLAY_COUNT:
+        raise AssertionError(
+            f"expected {EXPECTED_SEQUENCE_REPLAY_COUNT} audited sequence "
+            f"replays, found {replay_count}"
         )
     if (len(CONNECT_REFUSAL_DIAGNOSTICS) !=
             EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT):
@@ -902,10 +1035,16 @@ def main() -> None:
         for filename in SEQUENCE_FILES
         if filename in EXPECTATION_OVERRIDES
     }
+    complete_replays = {
+        filename: SEQUENCE_REPLAYS[filename]
+        for filename in SEQUENCE_FILES
+        if filename in SEQUENCE_REPLAYS
+    }
     complete_sequences = load_sequences(
         data_root,
         SEQUENCE_FILES,
         expectation_overrides=complete_overrides,
+        sequence_replays=complete_replays,
     )
     if len(complete_sequences) != EXPECTED_COMPLETE_SEQUENCE_COUNT:
         raise AssertionError(
@@ -985,7 +1124,8 @@ def main() -> None:
         f"{filenames}; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited "
         f"subsets {subset_summary}; "
         f"{EXPECTED_EXPECTATION_OVERRIDE_COUNT} exact audited expectation "
-        f"overrides; {EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT} exact "
+        f"overrides; {EXPECTED_SEQUENCE_REPLAY_COUNT} exact audited "
+        f"standards replays; {EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT} exact "
         f"optional CONNECT refusal diagnostics)"
     )
 

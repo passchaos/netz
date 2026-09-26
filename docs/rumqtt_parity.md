@@ -2316,15 +2316,23 @@ source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `AUTH.json`, `DISCONNECT.json`, `FLOW.json`, `FORBIDDEN.json`, `OTHER.json`,
 `PINGREQ.json`, `PINGRESP.json`,
 `PUBACK.json`, `PUBREC.json`, `PUBREL.json`, `PUBCOMP.json`, `REGRESSION.json`,
-`SUBACK.json`, `SUBSCRIBE.json`, `UNSUBACK.json`, and `UNSUBSCRIBE.json` files:
-1,212 upstream scenarios across MQTT 3.1.1 and MQTT 5.
+`SUBACK.json`, `SUBSCRIBE.json`, `UNSUBACK.json`, `UNSUBSCRIBE.json`, and
+`PUBLISH.json` files: 1,372 upstream scenarios across MQTT 3.1.1 and MQTT 5.
 It additionally runs 145 of 146 scenarios in the complete, hash-locked
-`CONNACK.json`, 299 of 307 in `CONNECT.json`, and 158 of 160 in
-`PUBLISH.json`, for 1,814 source-derived sequences total. The eleven
-exclusions are exact `(group, test)` identities rather than pattern skips: two
-exercise Mosquitto's finite non-DUP QoS 2 reuse tolerance instead of MQTT 5
-section 4.3.3's repeat-PUBREC rule, and nine use obsolete MQTT protocol level 3
-outside netz's declared 3.1.1/5 scope.
+`CONNACK.json` and 299 of 307 in `CONNECT.json`, for 1,816 source-derived
+sequences total. The nine exclusions are exact `(group, test)` identities
+rather than pattern skips; all use obsolete MQTT protocol level 3 outside
+netz's declared 3.1.1/5 scope.
+
+`PUBLISH.json` is now complete at 160/160. Its two `QoS 2 Dup flow*3`
+scenarios encode Mosquitto's private finite tolerance for repeated non-DUP
+PUBLISH packets, which conflicts with MQTT 3.1.1/5 receiver retransmission
+semantics. The adapter therefore uses two source-locked standards replays: it
+verifies each entire original action list and inherited close expectation,
+preserves all three source PUBLISH packets, requires PUBREC after each one,
+then sends PUBREL, requires PUBCOMP, and proves the connection remains live.
+Any group, test, occurrence, byte sequence, or terminal-policy drift fails the
+gate rather than silently weakening this correction.
 The entire upstream file hashes, exclusion identities, reason vocabulary, and
 per-file included counts are independently asserted, so upstream fixture
 additions or renamed exclusions fail closed.
@@ -2462,17 +2470,13 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
   --mosquitto-test-root=/nav_env/Work/mosquitto/test
 ```
 
-The manifest pins SHA-256 hashes for all sixteen complete JSON inputs, the
-audited `CONNECT.json`, `CONNACK.json`, and `PUBLISH.json` subset sources,
+The manifest pins SHA-256 hashes for all seventeen complete JSON inputs and the
+audited `CONNECT.json` and `CONNACK.json` subset sources,
 and the imported `mqtt_packets.py` generator, so a changed
 upstream fixture cannot silently reuse the recorded scenario count.
 The adapter intentionally does not claim complete-file coverage for
-`CONNECT.json`, `CONNACK.json`, or `PUBLISH.json` yet. `PUBLISH.json`
-additionally contains the explicitly enumerated QoS 2 reuse and reason-code
-differences described above; all other scenarios in that hash-locked file are
-executed. `CONNECT.json` and
-`CONNACK.json` also contain MQTT 3.1 protocol-level cases, outside netz's
-declared MQTT 3.1.1/5 scope.
+`CONNECT.json` or `CONNACK.json`; both contain MQTT 3.1 protocol-level cases,
+outside netz's declared MQTT 3.1.1/5 scope.
 The CONNECT subset also permits twelve exact MQTT 5 Malformed Packet
 diagnostics where Mosquitto's fixture only requires EOF, including the case
 whose group label says v3.1.1 but whose wire-level protocol byte is `05`.
@@ -2527,10 +2531,10 @@ proxy evidence for the entire suite.
    validated broker-process RSS records; a current 64-connection run measured
    netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
    the independent-peer memory gap.
-3. Expand the source-hash-locked gate beyond its current 1,814 upstream packet
+3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining reload/general-CRL/persistence semantics.
    The 225
-   curated scenarios, sixteen complete portable JSON files, audited 299/307
-   `CONNECT.json`, 145/146 `CONNACK.json`, and 158/160 `PUBLISH.json`
-   subsets still do not cover the full protocol/conformance suite.
+   curated scenarios, seventeen complete portable JSON files, audited 299/307
+   `CONNECT.json`, and 145/146 `CONNACK.json` subsets still do not cover the
+   full protocol/conformance suite.

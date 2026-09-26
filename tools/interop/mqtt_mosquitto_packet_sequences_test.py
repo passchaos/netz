@@ -128,6 +128,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 "PUBCOMP.json",
                 "PUBREC.json",
                 "PUBREL.json",
+                "PUBLISH.json",
                 "REGRESSION.json",
                 "SUBACK.json",
                 "SUBSCRIBE.json",
@@ -154,26 +155,24 @@ class SequenceLoadingTests(unittest.TestCase):
                     "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
                 "CONNACK.json":
                     "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
-                "PUBLISH.json":
-                    "a3b6a5d5b2cd44b70550ce17a03ff5607cc76e4f165ae1f1f6deb68eb7013f86",
             },
         )
         self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS),
             set(sequences.SEQUENCE_SUBSET_FILES),
         )
-        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 1212)
+        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 1372)
         self.assertEqual(
             sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
             {
                 "CONNECT.json": 299,
                 "CONNACK.json": 145,
-                "PUBLISH.json": 158,
             },
         )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 602)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1814)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 444)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1816)
         self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 259)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_REPLAY_COUNT, 2)
         self.assertEqual(
             sequences.EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT, 12,
         )
@@ -232,13 +231,6 @@ class SequenceLoadingTests(unittest.TestCase):
                 "unsupported_mqtt_3_1"},
         )
         self.assertEqual(
-            set(sequences.SEQUENCE_EXCLUSIONS["PUBLISH.json"]),
-            {
-                ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3"),
-                ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3"),
-            },
-        )
-        self.assertEqual(
             {
                 reason: sum(
                     value == reason
@@ -249,9 +241,31 @@ class SequenceLoadingTests(unittest.TestCase):
             },
             {
                 "unsupported_mqtt_3_1": 9,
-                "mosquitto_qos2_reuse_limit": 2,
             },
         )
+        self.assertEqual(
+            set(sequences.SEQUENCE_REPLAYS),
+            {"PUBLISH.json"},
+        )
+        self.assertEqual(
+            set(sequences.SEQUENCE_REPLAYS["PUBLISH.json"]),
+            {
+                ("v3.1.1 PUBLISH", "34 QoS 2 Dup flow*3", 0),
+                ("v5.0   PUBLISH", "34 QoS 2 Dup flow*3", 0),
+            },
+        )
+        for replay in sequences.SEQUENCE_REPLAYS["PUBLISH.json"].values():
+            self.assertEqual(replay.reason, "mqtt_qos2_repeat_pubrec")
+            self.assertTrue(replay.source_expect_disconnect)
+            self.assertFalse(replay.expect_disconnect)
+            self.assertEqual(
+                [kind for kind, _ in replay.actions].count("recv"),
+                4,
+            )
+            self.assertEqual(replay.actions[-2:], (
+                ("send", "62 r2 m1234"),
+                ("recv", "70 r2 m1234"),
+            ))
         expected_override_counts = {
             "AUTH.json": 5,
             "CONNECT.json": 87,
@@ -683,6 +697,117 @@ class SequenceLoadingTests(unittest.TestCase):
                         ("portable", "reason", 0): (
                             "E0 r1 82", "E0 r1 81", "undocumented",
                         ),
+                    }},
+                )
+
+    def test_applies_source_locked_sequence_replay(self) -> None:
+        groups = [{
+            "group": "portable",
+            "expect_disconnect": True,
+            "tests": [{
+                "name": "replayed",
+                "msgs": [
+                    {"type": "send", "payload": "30 r0"},
+                    {"type": "recv", "payload": "E0 r1 82"},
+                ],
+            }],
+        }]
+        replay = sequences.SequenceReplay(
+            source_actions=(
+                ("send", "30 r0"),
+                ("recv", "E0 r1 82"),
+            ),
+            actions=(
+                ("send", "30 r0"),
+                ("recv", "40 r2 m1"),
+            ),
+            source_expect_disconnect=True,
+            expect_disconnect=False,
+            reason="mqtt_qos2_repeat_pubrec",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            loaded = sequences.load_sequences(
+                root,
+                selected,
+                sequence_replays={"TEST.json": {
+                    ("portable", "replayed", 0): replay,
+                }},
+            )
+
+        self.assertEqual(loaded[0]["actions"], [
+            {"type": "send", "payload": "30 r0"},
+            {"type": "recv", "payload": "40 r2 m1"},
+        ])
+        self.assertFalse(loaded[0]["expect_disconnect"])
+
+    def test_rejects_sequence_replay_source_or_terminal_drift(self) -> None:
+        groups = [{
+            "group": "portable",
+            "expect_disconnect": True,
+            "tests": [{
+                "name": "replayed",
+                "msgs": [{"type": "send", "payload": "30 r0"}],
+            }],
+        }]
+        base_replay = sequences.SequenceReplay(
+            source_actions=(("send", "30 r0"),),
+            actions=(("send", "30 r0"),),
+            source_expect_disconnect=True,
+            expect_disconnect=False,
+            reason="mqtt_qos2_repeat_pubrec",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            drifted_actions = base_replay._replace(
+                source_actions=(("send", "31 r0"),)
+            )
+            with self.assertRaisesRegex(ValueError, "replay source drift"):
+                sequences.load_sequences(
+                    root, selected, sequence_replays={"TEST.json": {
+                        ("portable", "replayed", 0): drifted_actions,
+                    }},
+                )
+            drifted_terminal = base_replay._replace(
+                source_expect_disconnect=False
+            )
+            with self.assertRaisesRegex(
+                ValueError, "replay terminal-policy drift"
+            ):
+                sequences.load_sequences(
+                    root, selected, sequence_replays={"TEST.json": {
+                        ("portable", "replayed", 0): drifted_terminal,
+                    }},
+                )
+
+    def test_rejects_missing_or_unknown_sequence_replay(self) -> None:
+        groups = [{
+            "group": "portable",
+            "tests": [{"name": "present", "msgs": []}],
+        }]
+        replay = sequences.SequenceReplay(
+            source_actions=(),
+            actions=(),
+            source_expect_disconnect=True,
+            expect_disconnect=False,
+            reason="mqtt_qos2_repeat_pubrec",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = self.write_source(root, groups)
+            with self.assertRaisesRegex(ValueError, "replays not found"):
+                sequences.load_sequences(
+                    root, selected, sequence_replays={"TEST.json": {
+                        ("portable", "missing", 0): replay,
+                    }},
+                )
+            unknown = replay._replace(reason="undocumented")
+            with self.assertRaisesRegex(ValueError, "unknown sequence replay"):
+                sequences.load_sequences(
+                    root, selected, sequence_replays={"TEST.json": {
+                        ("portable", "present", 0): unknown,
                     }},
                 )
 
