@@ -1581,8 +1581,15 @@ replay. `fuzz-mqtt-outbound-bridge` covers the non-coordinated cross-broker
 path with independent real source and target TCP peers: QoS 0/1 mapping, target
 delivery before source PUBACK, retained propagation, target retransmission
 under preserved/fresh Sessions, source Session transitions, subscription
-replay, DUP normalization, and connection-scoped property isolation. Durable
-outbound QoS 2 coordinator recovery remains outside these fuzz surfaces.
+replay, DUP normalization, and connection-scoped property isolation.
+`fuzz-mqtt-outbound-bridge-qos2` completes this bounded bridge matrix with two
+production brokers, a durable coordinator, live publisher/subscriber and
+restartable OutboundBridge. It verifies exactly-once delivery across
+pre-target-wire and target-PUBREL journal restoration, independent
+source/target reconnects, retained replacement/deletion, and connection-scoped
+property isolation. Cross-process crash injection below the filesystem syscall
+boundary remains the responsibility of the commit-log and atomic-file fault
+tests rather than the socket fuzzers.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,

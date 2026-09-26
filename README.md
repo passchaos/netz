@@ -37,6 +37,11 @@ between independent real TCP peers. Its model checks topic and property
 mapping, source acknowledgement after target delivery, retained propagation,
 target resend under preserved/fresh Sessions, source Session transitions and
 ordered subscription replay.
+`zig build fuzz-mqtt-outbound-bridge-qos2` composes two production brokers,
+the durable coordinator, publisher, subscriber and restartable OutboundBridge.
+It verifies end-to-end exactly-once delivery, pre-wire and PUBREL-phase journal
+restore, independent source/target reconnects, retained replacement/deletion
+and connection-scoped property isolation.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -69,13 +74,13 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all fifteen corpora and the complete test gate on pushes and
-pull requests, then runs the fifteen coverage-guided targets daily and on
+workflow replays all sixteen corpora and the complete test gate on pushes and
+pull requests, then runs the sixteen coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
 H3 to 128 authenticated sessions, ordinary live MQTT targets to 128
-real-network runs, durable MQTT bridge QoS 2 to 64 runs, and the in-memory
-targets to 10,000 iterations. A manual `fuzz_runs` value overrides all targets.
-Because
+real-network runs, inbound/outbound durable MQTT bridge QoS 2 to 64/32 runs,
+and the in-memory targets to 10,000 iterations. A manual `fuzz_runs` value
+overrides all targets. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
