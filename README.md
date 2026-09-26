@@ -764,6 +764,7 @@ Current protocol coverage includes:
   WSS application handshakes, with trusted source, destination, transport and
   v2 TLV metadata,
   heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS listener sources sharing one broker core, with
+  listener-configured HAProxy PROXY v1/v2 parsing before transport handshakes,
   finite deterministic batches plus a graceful-shutdown production supervisor
   that continuously replaces disconnected clients, and
   listener-specific MQTT 3.1.1/5 admission with version-correct refusal,

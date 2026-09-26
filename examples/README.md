@@ -99,6 +99,7 @@ autosave_on_changes false
 
 listener 1883 127.0.0.1
 accept_protocol_versions 4,5
+enable_proxy_protocol 1
 allow_anonymous false
 max_qos 1
 max_keepalive 60
@@ -127,6 +128,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
 `accept_protocol_versions`,
 `websockets_origin`,
+`enable_proxy_protocol`,
 `max_qos`, `max_keepalive`, `max_topic_alias`,
 `max_topic_alias_broker`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
@@ -155,7 +157,12 @@ and unknown versions fail configuration because netz does not implement MQTT
 `websockets_origin` builds an exact, case-sensitive Origin allowlist for its
 WebSocket or WSS listener; once configured, a missing or unmatched Origin is
 rejected during HTTP Upgrade. Using it on a raw MQTT listener fails
-configuration. Global `websockets_headers_size` defaults to 4096 bytes and
+configuration. Listener-local `enable_proxy_protocol` accepts only `1` or
+`2` and consumes the required HAProxy header before MQTT, TLS, or WebSocket
+handshakes. Version 2 cannot be combined with local TLS termination or
+certificate-derived usernames; proxy-asserted TLS identity requires the
+lower-level `proxy_v2_require_tls` and certificate flags. Global
+`websockets_headers_size` defaults to 4096 bytes and
 accepts 1..65,535, bounding the complete HTTP Upgrade head for every WS/WSS
 listener before MQTT parsing. The legacy `packet_buffer_size` alias is not
 accepted because netz's raw MQTT framing uses an independent exact packet

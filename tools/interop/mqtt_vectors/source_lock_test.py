@@ -120,6 +120,14 @@ class SourceLockTests(unittest.TestCase):
                     "95b2079245e724956128e1a62d6fa46b9972ddc9166b97d51ae3d3a131d1ed6d",
                 "broker/16-config-parse-errors-without-tls.py":
                     "e554db32fe8a7ee87dd54d6959913365202b4a32c893fbdeaa32ee2f7b273ae7",
+                "broker/21-proxy-v1-success.py":
+                    "07c5c8f9b94dc49239190b680e1c3f858ed987734d5c879a88531590e1583d53",
+                "broker/21-proxy-v2-websockets.py":
+                    "de1ea836095867cec17fe21afbbcd29c7b9d9f05bf734d995914227119764c3f",
+                "broker/21-proxy-bad-version.py":
+                    "6a9410ad8e09f74466d794356623b0ba204f8d2f715d02251d57948bf074d711",
+                "broker/21-proxy-v2-bad-config.py":
+                    "aa6042e987bbbd86f802152b2297b5e402d7abf6db1add69d22c6b9c67cdeb3b",
                 "broker/persist_client_will_core.py":
                     "0085074a986f587ac681dd73e318950a144fa2dadde22bb44c6e68aa97cc36a1",
                 "broker/persist_module_helper.py":

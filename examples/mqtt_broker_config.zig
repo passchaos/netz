@@ -327,6 +327,7 @@ pub fn run(
                         .limits = .{
                             .max_packet_size = config.max_packet_size,
                             .tcp_nodelay = config.set_tcp_nodelay,
+                            .proxy_protocol = configured.proxy_protocol,
                         },
                         .tcp_nodelay = config.set_tcp_nodelay,
                     },
@@ -344,6 +345,7 @@ pub fn run(
                             .limits = .{
                                 .max_packet_size = config.max_packet_size,
                                 .tcp_nodelay = config.set_tcp_nodelay,
+                                .proxy_protocol = configured.proxy_protocol,
                             },
                             .tcp_nodelay = config.set_tcp_nodelay,
                         },
@@ -358,6 +360,7 @@ pub fn run(
                 .{
                     .max_packet_size = config.max_packet_size,
                     .tcp_nodelay = config.set_tcp_nodelay,
+                    .proxy_protocol = configured.proxy_protocol,
                 },
             ) },
             .websockets => .{
@@ -369,6 +372,7 @@ pub fn run(
                         .limits = .{
                             .max_packet_size = config.max_packet_size,
                             .tcp_nodelay = config.set_tcp_nodelay,
+                            .proxy_protocol = configured.proxy_protocol,
                         },
                         .allowed_origins = configured.websocket_origins.items,
                         .max_head_bytes = config.websocket_headers_size,

@@ -50,6 +50,7 @@ pub const Listener = struct {
     max_topic_alias_broker: u16 = default_max_topic_aliases,
     accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
     websocket_origins: std.ArrayList([]u8) = .empty,
+    proxy_protocol: ?mqtt.proxy_protocol.Version = null,
     use_username_as_client_id: bool = false,
     max_connections: usize = default_max_connections,
 
@@ -214,6 +215,7 @@ const ListenerSeen = struct {
     max_topic_alias: bool = false,
     max_topic_alias_broker: bool = false,
     accept_protocol_versions: bool = false,
+    enable_proxy_protocol: bool = false,
     use_username_as_client_id: bool = false,
     max_connections: bool = false,
 };
@@ -585,6 +587,20 @@ fn parseSources(
                 } else if (std.mem.eql(
                     u8,
                     directive,
+                    "enable_proxy_protocol",
+                )) {
+                    try markOnce(&seen.enable_proxy_protocol);
+                    listener.proxy_protocol = switch (try parseOneInteger(
+                        u2,
+                        &words,
+                    )) {
+                        1 => .v1,
+                        2 => .v2,
+                        else => return error.InvalidInteger,
+                    };
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
                     "use_username_as_clientid",
                 )) {
                     try markOnce(&seen.use_username_as_client_id);
@@ -626,6 +642,13 @@ fn parseSources(
         }
         if (listener.websocket_origins.items.len != 0 and
             listener.protocol != .websockets)
+        {
+            return error.InvalidDirective;
+        }
+        if (listener.proxy_protocol == .v2 and
+            (listener.usesTls() or
+                listener.use_identity_as_username or
+                listener.use_subject_as_username))
         {
             return error.InvalidDirective;
         }
@@ -697,6 +720,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "max_topic_alias_broker") or
         std.mem.eql(u8, value, "accept_protocol_versions") or
         std.mem.eql(u8, value, "websockets_origin") or
+        std.mem.eql(u8, value, "enable_proxy_protocol") or
         std.mem.eql(u8, value, "use_username_as_clientid") or
         std.mem.eql(u8, value, "max_connections");
 }
@@ -851,6 +875,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\autosave_on_changes true
         \\listener 1883 127.0.0.1
         \\allow_anonymous true
+        \\enable_proxy_protocol 1
         \\max_qos 1
         \\max_keepalive 30
         \\max_topic_alias 7
@@ -909,6 +934,10 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqual(@as(usize, 2), config.listeners.len);
     try std.testing.expect(config.listeners[0].protocol == .mqtt);
     try std.testing.expect(config.listeners[0].allow_anonymous);
+    try std.testing.expectEqual(
+        mqtt.proxy_protocol.Version.v1,
+        config.listeners[0].proxy_protocol.?,
+    );
     try std.testing.expect(config.listeners[0].password_file.len == 0);
     try std.testing.expect(config.listeners[0].acl_file.len == 0);
     try std.testing.expect(config.listeners[0].maximum_qos.? == .at_least_once);
@@ -1943,6 +1972,10 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     );
     try std.testing.expect(config.listeners[0].accepted_protocol_versions.v3_1_1);
     try std.testing.expect(config.listeners[0].accepted_protocol_versions.v5);
+    try std.testing.expectEqual(
+        @as(?mqtt.proxy_protocol.Version, null),
+        config.listeners[0].proxy_protocol,
+    );
 
     var minimum = try parse(
         std.testing.allocator,
@@ -2353,6 +2386,65 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
             \\listener 1883
             \\accept_protocol_versions 4
             \\accept_protocol_versions 5
+            \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config validates listener PROXY protocol versions" {
+    const allocator = std.testing.allocator;
+    var config = try parse(allocator,
+        \\listener 1883
+        \\enable_proxy_protocol 1
+        \\allow_anonymous true
+        \\listener 8080
+        \\protocol websockets
+        \\enable_proxy_protocol 2
+        \\allow_anonymous true
+    );
+    defer config.deinit(allocator);
+    try std.testing.expectEqual(
+        mqtt.proxy_protocol.Version.v1,
+        config.listeners[0].proxy_protocol.?,
+    );
+    try std.testing.expectEqual(
+        mqtt.proxy_protocol.Version.v2,
+        config.listeners[1].proxy_protocol.?,
+    );
+
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "enable_proxy_protocol 1\nlistener 1883\n"),
+    );
+    for ([_][]const u8{ "0", "3", "-1" }) |value| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "listener 1883\nenable_proxy_protocol {s}\n" ++
+                "allow_anonymous true\n",
+            .{value},
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\enable_proxy_protocol 1
+            \\enable_proxy_protocol 2
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 8883
+            \\enable_proxy_protocol 2
+            \\certfile server.pem
+            \\keyfile server.key
             \\allow_anonymous true
         ),
     );
