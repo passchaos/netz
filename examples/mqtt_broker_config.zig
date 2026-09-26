@@ -4,10 +4,69 @@
 //! example from also owning heterogeneous transport lifetime bookkeeping.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const netz = @import("netz");
 const source_acl = @import("support/mqtt_source_acl.zig");
 
 const mqtt = netz.mqtt;
+
+var checkpoint_requested: u8 = 0;
+
+const CheckpointSignal = if (builtin.os.tag == .linux) struct {
+    previous: std.posix.Sigaction,
+
+    fn install() @This() {
+        @atomicStore(u8, &checkpoint_requested, 0, .release);
+        const action: std.posix.Sigaction = .{
+            .handler = .{ .handler = handle },
+            .mask = std.posix.sigemptyset(),
+            .flags = std.posix.SA.RESTART,
+        };
+        var previous: std.posix.Sigaction = undefined;
+        std.posix.sigaction(.USR1, &action, &previous);
+        return .{ .previous = previous };
+    }
+
+    fn deinit(self: *@This()) void {
+        std.posix.sigaction(.USR1, &self.previous, null);
+        @atomicStore(u8, &checkpoint_requested, 0, .release);
+    }
+
+    fn take() bool {
+        return @atomicRmw(
+            u8,
+            &checkpoint_requested,
+            .Xchg,
+            0,
+            .acq_rel,
+        ) != 0;
+    }
+
+    fn request() void {
+        @atomicStore(u8, &checkpoint_requested, 1, .release);
+    }
+
+    fn handle(_: std.posix.SIG) callconv(.c) void {
+        // Keep the asynchronous signal path lock-free and allocation-free.
+        // The std.Io supervisor consumes the flag and performs the snapshot.
+        request();
+    }
+} else struct {
+    fn install() @This() {
+        return .{};
+    }
+
+    fn deinit(_: *@This()) void {}
+
+    fn take() bool {
+        return false;
+    }
+
+    fn request() void {}
+};
+
+const checkpoint_signal_poll_interval: std.Io.Clock.Duration =
+    .{ .raw = .fromMilliseconds(100), .clock = .awake };
 
 pub const RunOptions = struct {
     /// Deterministic process-test lifecycle. Production config mode is a
@@ -210,6 +269,11 @@ pub fn run(
             if (err != error.SnapshotNotFound) return err;
         };
     }
+    var checkpoint_signal = if (config.persistence)
+        CheckpointSignal.install()
+    else
+        null;
+    defer if (checkpoint_signal) |*signal| signal.deinit();
 
     const identities = try allocator.alloc(
         ?netz.tls.server_identity_file.Identity,
@@ -508,15 +572,17 @@ pub fn run(
             .listeners = endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence and !config.autosave_on_changes and
-        config.autosave_interval != 0)
-    {
-        try serveWithPeriodicAutosave(
+    if (config.persistence) {
+        try serveWithPersistenceCheckpoints(
             &broker,
             service,
             io,
             persistence_path.?,
-            config.autosave_interval,
+            if (!config.autosave_on_changes and
+                config.autosave_interval != 0)
+                config.autosave_interval
+            else
+                null,
         );
     } else {
         try serveConfigured(&broker, service);
@@ -526,29 +592,39 @@ pub fn run(
     }
 }
 
-fn serveWithPeriodicAutosave(
+fn serveWithPersistenceCheckpoints(
     broker: *mqtt.broker.Broker,
     service: Service,
     io: std.Io,
     persistence_path: []const u8,
-    interval_seconds: u32,
+    interval_seconds: ?u32,
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
-        timer: std.Io.Cancelable!void,
+        periodic_timer: std.Io.Cancelable!void,
+        signal_poll: std.Io.Cancelable!void,
     };
-    var result_buffer: [2]Result = undefined;
+    var result_buffer: [3]Result = undefined;
     var select: std.Io.Select(Result) = .init(io, &result_buffer);
     defer select.cancelDiscard();
     try select.concurrent(.serve, serveResult, .{ broker, service });
-    try select.concurrent(
-        .timer,
-        waitInterval,
-        .{ io, std.Io.Clock.Duration{
-            .raw = .fromSeconds(interval_seconds),
-            .clock = .awake,
-        } },
-    );
+    if (interval_seconds) |seconds| {
+        try select.concurrent(
+            .periodic_timer,
+            waitInterval,
+            .{ io, std.Io.Clock.Duration{
+                .raw = .fromSeconds(seconds),
+                .clock = .awake,
+            } },
+        );
+    }
+    if (comptime builtin.os.tag == .linux) {
+        try select.concurrent(
+            .signal_poll,
+            waitInterval,
+            .{ io, checkpoint_signal_poll_interval },
+        );
+    }
     while (true) {
         switch (try select.await()) {
             .serve => |maybe_error| {
@@ -556,7 +632,7 @@ fn serveWithPeriodicAutosave(
                 if (maybe_error) |err| return err;
                 return;
             },
-            .timer => |result| {
+            .periodic_timer => |result| {
                 try result;
                 broker.saveLiveSnapshot(
                     std.Io.Dir.cwd(),
@@ -565,13 +641,42 @@ fn serveWithPeriodicAutosave(
                     error.SnapshotBusy => {},
                     else => return err,
                 };
+                const seconds = interval_seconds orelse unreachable;
                 try select.concurrent(
-                    .timer,
+                    .periodic_timer,
                     waitInterval,
                     .{ io, std.Io.Clock.Duration{
-                        .raw = .fromSeconds(interval_seconds),
+                        .raw = .fromSeconds(seconds),
                         .clock = .awake,
                     } },
+                );
+            },
+            .signal_poll => |result| {
+                try result;
+                if (CheckpointSignal.take()) {
+                    broker.saveLiveSnapshot(
+                        std.Io.Dir.cwd(),
+                        persistence_path,
+                    ) catch |err| switch (err) {
+                        error.SnapshotBusy => CheckpointSignal.request(),
+                        else => return err,
+                    };
+                    if (!CheckpointSignal.take()) {
+                        std.debug.print(
+                            "netz MQTT persistence checkpoint completed: " ++
+                                "source=SIGUSR1 server_io=zio-std-io\n",
+                            .{},
+                        );
+                    } else {
+                        // A request delivered during the completed snapshot
+                        // still needs its own subsequent checkpoint.
+                        CheckpointSignal.request();
+                    }
+                }
+                try select.concurrent(
+                    .signal_poll,
+                    waitInterval,
+                    .{ io, checkpoint_signal_poll_interval },
                 );
             },
         }

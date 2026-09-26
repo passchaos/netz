@@ -7,10 +7,13 @@ import argparse
 import base64
 import os
 from pathlib import Path
+import select
+import signal
 import socket
 import ssl
 import subprocess
 import tempfile
+import time
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
 from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
@@ -1960,6 +1963,11 @@ def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
                 raise RuntimeError(
                     f"disabled {mode} autosave {pass_name} failed: {ready}"
                 )
+            listener = process.stdout.readline().strip()
+            if not listener.startswith("mqtt "):
+                raise RuntimeError(
+                    f"disabled {mode} autosave listener missing: {listener}"
+                )
             return process
 
         initial = start("initial broker")
@@ -1979,18 +1987,41 @@ def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
                 raise AssertionError(
                     f"disabled {mode} autosave wrote before shutdown"
                 )
-            publisher.sendall(bytes.fromhex("e000"))
+            os.kill(initial.pid, signal.SIGUSR1)
+            deadline = time.monotonic() + 5
+            checkpoint_complete = False
+            while time.monotonic() < deadline:
+                remaining = max(0.0, deadline - time.monotonic())
+                readable, _, _ = select.select(
+                    [initial.stdout], [], [], remaining
+                )
+                if not readable:
+                    break
+                line = initial.stdout.readline().strip()
+                if (
+                    "persistence checkpoint completed: source=SIGUSR1"
+                    in line
+                ):
+                    checkpoint_complete = True
+                    break
+                if initial.poll() is not None:
+                    break
+            if not checkpoint_complete:
+                raise AssertionError(
+                    f"disabled {mode} autosave ignored SIGUSR1: "
+                    + initial.stdout.read()
+                )
+            if not snapshot.is_file() or snapshot.stat().st_size == 0:
+                raise AssertionError(
+                    f"disabled {mode} SIGUSR1 checkpoint was empty"
+                )
+            initial.kill()
+            initial.wait(timeout=5)
         finally:
             publisher.close()
-        if initial.wait(timeout=5) != 0:
-            raise RuntimeError(
-                f"disabled {mode} autosave initial broker failed: "
-                + initial.stdout.read()
-            )
-        if not snapshot.is_file() or snapshot.stat().st_size == 0:
-            raise AssertionError(
-                f"disabled {mode} autosave omitted shutdown snapshot"
-            )
+            if initial.poll() is None:
+                initial.kill()
+                initial.wait()
 
         restored = start("restored broker")
         subscriber = socket.create_connection(("127.0.0.1", port), timeout=5)
@@ -4023,7 +4054,7 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "disabled-autosave shutdown persistence, and snapshot restore "
+        "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )
 

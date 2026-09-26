@@ -324,7 +324,10 @@ before listeners are bound.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime
-autosave while preserving startup restore and the final shutdown snapshot.
+autosave while preserving startup restore and the final shutdown snapshot. On
+Linux, `SIGUSR1` requests an immediate live checkpoint through an
+allocation-free signal flag consumed by the normal `std.Io` supervisor; it
+never performs allocator, locking, or filesystem work in the signal handler.
 Run the end-to-end gate with
 `zig build interop-mqtt-broker-config -Doptimize=ReleaseFast`.
 
