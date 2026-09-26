@@ -27,6 +27,7 @@ const canonical_response_sizes = [_]usize{ 31_415, 9, 2_653, 58_979 };
 const canonical_response_sizes_u32 = [_]u32{ 31_415, 9, 2_653, 58_979 };
 const slow_consumer_messages: usize = 2_000;
 const slow_consumer_response_size: u32 = 1_030;
+const rpc_soak_iterations: usize = 100;
 const status_message = "This is a test message";
 const special_status_message =
     "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
@@ -50,6 +51,7 @@ const Scenario = enum {
     large_unary,
     half_duplex,
     slow_consumer,
+    rpc_soak,
     client_streaming,
     server_streaming,
 
@@ -187,6 +189,7 @@ pub fn main(init: std.process.Init) !void {
         .large_unary => try serveLargeUnary(allocator, &connection),
         .half_duplex => try serveHalfDuplex(allocator, &connection),
         .slow_consumer => try serveSlowConsumer(allocator, &connection),
+        .rpc_soak => try serveRpcSoak(allocator, &connection),
         .cancel_after_begin => try serveCancelAfterBegin(&connection),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
@@ -205,6 +208,15 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveRpcSoak(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    for (0..rpc_soak_iterations) |_| {
+        try serveLargeUnary(allocator, connection);
+    }
 }
 
 fn serveSlowConsumer(
@@ -968,6 +980,7 @@ fn serveScenario(
         .cancel_after_begin => unreachable,
         .half_duplex => unreachable,
         .slow_consumer => unreachable,
+        .rpc_soak => unreachable,
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
         .custom_metadata,

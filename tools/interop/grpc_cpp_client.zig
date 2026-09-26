@@ -36,6 +36,7 @@ const metadata_response_size = 314_159;
 const slow_consumer_messages: usize = 2_000;
 const slow_consumer_response_size: usize = 1_030;
 const slow_consumer_delay = std.Io.Duration.fromMilliseconds(20);
+const rpc_soak_iterations: usize = 100;
 const initial_metadata_name = "x-grpc-test-echo-initial";
 const initial_metadata_value = "test_initial_metadata_value";
 const trailing_metadata_name = "x-grpc-test-echo-trailing-bin";
@@ -115,6 +116,7 @@ pub fn main(init: std.process.Init) !void {
     try runSlowConsumer(allocator, io, &client, message_limit);
     try runCancelAfterBegin(&client, message_limit);
     try runUnaryBasics(allocator, &client, message_limit);
+    try runRpcSoak(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
     try runStatusInterop(allocator, &client, message_limit);
@@ -129,6 +131,7 @@ pub fn main(init: std.process.Init) !void {
             "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
+            "rpc_soak=100x271828/314159 " ++
             "status=unary+bidi+unicode " ++
             "unimplemented=method+service " ++
             "metadata=initial+trailing-bin " ++
@@ -137,6 +140,36 @@ pub fn main(init: std.process.Init) !void {
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runRpcSoak(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+        .response_size = metadata_response_size,
+        .request_body_size = metadata_request_size,
+    });
+    defer allocator.free(request);
+    for (0..rpc_soak_iterations) |_| {
+        var response = try client.unary(.{
+            .path = unary_service_path,
+            .authority = authority,
+            .message = request,
+            .max_message_size = message_limit,
+        });
+        defer response.deinit();
+        if (response.status != .ok or response.message == null or
+            response.was_compressed)
+        {
+            return error.InvalidSoakResponse;
+        }
+        try messages.validateStreamingOutputCallResponse(
+            response.message.?.payload,
+            metadata_response_size,
+        );
+    }
 }
 
 const SlowConsumer = struct {
