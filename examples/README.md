@@ -128,7 +128,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
 `accept_protocol_versions`,
 `websockets_origin`,
-`enable_proxy_protocol`,
+`enable_proxy_protocol`, `proxy_protocol_v2_require_tls`,
 `max_qos`, `max_keepalive`, `max_topic_alias`,
 `max_topic_alias_broker`,
 `allow_zero_length_clientid`, `use_username_as_clientid`, `max_connections`, `max_packet_size`,
@@ -159,9 +159,16 @@ WebSocket or WSS listener; once configured, a missing or unmatched Origin is
 rejected during HTTP Upgrade. Using it on a raw MQTT listener fails
 configuration. Listener-local `enable_proxy_protocol` accepts only `1` or
 `2` and consumes the required HAProxy header before MQTT, TLS, or WebSocket
-handshakes. Version 2 cannot be combined with local TLS termination or
-certificate-derived usernames; proxy-asserted TLS identity requires the
-lower-level `proxy_v2_require_tls` and certificate flags. Global
+handshakes. On a cleartext version 2 listener,
+`proxy_protocol_v2_require_tls true` requires the SSL TLV's TLS assertion;
+`require_certificate true` additionally requires its successful verification
+status and connection/session certificate bit. Adding
+`use_identity_as_username true` uses the validated, non-empty MQTT UTF-8 SSL
+TLV commonName for authentication and ACLs. Version 2 remains incompatible
+with local `certfile`/`keyfile` termination and
+`use_subject_as_username`. These listener options trust the proxy's
+assertions, so the port must not be reachable except through that trusted
+proxy. Global
 `websockets_headers_size` defaults to 4096 bytes and
 accepts 1..65,535, bounding the complete HTTP Upgrade head for every WS/WSS
 listener before MQTT parsing. The legacy `packet_buffer_size` alias is not

@@ -53,6 +53,19 @@ const ConfiguredServer = union(enum) {
     }
 };
 
+fn listenerLimits(
+    config: mqtt.broker_config.Config,
+    listener: mqtt.broker_config.Listener,
+) mqtt.runtime.Limits {
+    return .{
+        .max_packet_size = config.max_packet_size,
+        .tcp_nodelay = config.set_tcp_nodelay,
+        .proxy_protocol = listener.proxy_protocol,
+        .proxy_v2_require_tls = listener.proxy_protocol_v2_require_tls,
+        .proxy_v2_require_client_certificate = listener.proxy_protocol == .v2 and listener.require_certificate,
+    };
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -324,11 +337,7 @@ pub fn run(
                     .{
                         .identity = identity.serverIdentity(),
                         .client_auth = client_auth_policies[index],
-                        .limits = .{
-                            .max_packet_size = config.max_packet_size,
-                            .tcp_nodelay = config.set_tcp_nodelay,
-                            .proxy_protocol = configured.proxy_protocol,
-                        },
+                        .limits = listenerLimits(config, configured),
                         .tcp_nodelay = config.set_tcp_nodelay,
                     },
                 ) },
@@ -342,11 +351,7 @@ pub fn run(
                             .client_auth = client_auth_policies[index],
                             .allowed_origins = configured.websocket_origins.items,
                             .max_head_bytes = config.websocket_headers_size,
-                            .limits = .{
-                                .max_packet_size = config.max_packet_size,
-                                .tcp_nodelay = config.set_tcp_nodelay,
-                                .proxy_protocol = configured.proxy_protocol,
-                            },
+                            .limits = listenerLimits(config, configured),
                             .tcp_nodelay = config.set_tcp_nodelay,
                         },
                     ),
@@ -357,11 +362,7 @@ pub fn run(
                 allocator,
                 io,
                 configured.address,
-                .{
-                    .max_packet_size = config.max_packet_size,
-                    .tcp_nodelay = config.set_tcp_nodelay,
-                    .proxy_protocol = configured.proxy_protocol,
-                },
+                listenerLimits(config, configured),
             ) },
             .websockets => .{
                 .websockets = try mqtt.websocket_runtime.Server.listen(
@@ -369,11 +370,7 @@ pub fn run(
                     io,
                     configured.address,
                     .{
-                        .limits = .{
-                            .max_packet_size = config.max_packet_size,
-                            .tcp_nodelay = config.set_tcp_nodelay,
-                            .proxy_protocol = configured.proxy_protocol,
-                        },
+                        .limits = listenerLimits(config, configured),
                         .allowed_origins = configured.websocket_origins.items,
                         .max_head_bytes = config.websocket_headers_size,
                     },

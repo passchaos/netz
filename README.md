@@ -765,6 +765,8 @@ Current protocol coverage includes:
   v2 TLV metadata,
   heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS listener sources sharing one broker core, with
   listener-configured HAProxy PROXY v1/v2 parsing before transport handshakes,
+  including required v2 TLS/client-certificate assertions and validated
+  proxy-certificate CN username mapping on trusted cleartext listeners,
   finite deterministic batches plus a graceful-shutdown production supervisor
   that continuously replaces disconnected clients, and
   listener-specific MQTT 3.1.1/5 admission with version-correct refusal,

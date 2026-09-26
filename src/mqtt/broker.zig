@@ -225,9 +225,11 @@ pub const ListenerAuthorization = struct {
     /// takeover, ACL and delivery state then consistently use the username.
     /// A missing username is refused as Not Authorized.
     use_username_as_client_id: bool = false,
-    /// Use the verified leaf certificate's Subject commonName as the MQTT
-    /// username before every authorization callback. Wire username/password
-    /// are ignored; a missing or invalid certificate identity is refused.
+    /// Use the verified leaf certificate's Subject commonName, or the CN from
+    /// a trusted PROXY v2 SSL assertion for a verified client certificate, as
+    /// the MQTT username before every authorization callback. Wire
+    /// username/password are ignored; a missing or invalid identity is
+    /// refused.
     use_identity_as_username: bool = false,
     /// Use the verified leaf certificate's complete OpenSSL-compatible RFC
     /// 2253 Subject as the MQTT username. The CN-only policy takes precedence
@@ -2718,28 +2720,47 @@ pub const Broker = struct {
         if (listener_authorization.use_identity_as_username or
             listener_authorization.use_subject_as_username)
         {
-            const chain = pending.connection.peerCertificates() orelse {
-                try self.refuseUnauthorizedConnect(pending, &pending_owned);
-                return null;
+            var owned_certificate_username: ?[]u8 = null;
+            defer if (owned_certificate_username) |username| {
+                self.allocator.free(username);
             };
-            if (chain.len == 0) {
-                try self.refuseUnauthorizedConnect(pending, &pending_owned);
-                return null;
-            }
-            const certificate_username = (if (listener_authorization.use_identity_as_username) vail.x509.identity.commonNameAlloc(
-                self.allocator,
-                chain[0],
-            ) else vail.x509.identity.subjectNameAlloc(
-                self.allocator,
-                chain[0],
-            )) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {
+            const certificate_username: []const u8 = identity: {
+                if (pending.connection.peerCertificates()) |chain| {
+                    if (chain.len == 0) {
+                        try self.refuseUnauthorizedConnect(
+                            pending,
+                            &pending_owned,
+                        );
+                        return null;
+                    }
+                    owned_certificate_username = (if (listener_authorization.use_identity_as_username) vail.x509.identity.commonNameAlloc(
+                        self.allocator,
+                        chain[0],
+                    ) else vail.x509.identity.subjectNameAlloc(
+                        self.allocator,
+                        chain[0],
+                    )) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => {
+                            try self.refuseUnauthorizedConnect(
+                                pending,
+                                &pending_owned,
+                            );
+                            return null;
+                        },
+                    };
+                    break :identity owned_certificate_username.?;
+                }
+                if (listener_authorization.use_identity_as_username) {
+                    if (pending.connection.authenticatedProxyCommonName()) |common_name| {
+                        break :identity common_name;
+                    }
+                }
+                {
                     try self.refuseUnauthorizedConnect(pending, &pending_owned);
                     return null;
-                },
+                }
             };
-            defer self.allocator.free(certificate_username);
             pending.connect.replaceUsername(
                 self.allocator,
                 certificate_username,

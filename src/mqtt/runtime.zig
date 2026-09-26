@@ -2563,6 +2563,26 @@ pub const Connection = struct {
         return if (self.proxy_metadata) |*metadata| metadata else null;
     }
 
+    /// Return a PROXY v2 SSL commonName only when this connection's listener
+    /// explicitly required a verified client certificate assertion. This
+    /// prevents callers from accidentally promoting an optional TLV string to
+    /// authenticated identity.
+    pub fn authenticatedProxyCommonName(
+        self: *const Connection,
+    ) ?[]const u8 {
+        if (!self.limits.proxy_v2_require_client_certificate) return null;
+        const metadata = self.proxyMetadata() orelse return null;
+        if (metadata.version != .v2 or metadata.command != .proxy) return null;
+        const tls = metadata.tls orelse return null;
+        if (!tls.client_ssl or !tls.verified or
+            (!tls.client_certificate_connection and
+                !tls.client_certificate_session))
+        {
+            return null;
+        }
+        return tls.common_name;
+    }
+
     /// Transfer owned trusted-proxy metadata into this connection. This may be
     /// called at most once, after the preface is consumed and before the
     /// connection escapes its transport adapter.
@@ -6176,6 +6196,15 @@ test "MQTT TCP PROXY v2 requires verified TLS metadata when configured" {
                 !std.mem.eql(u8, tls.common_name.?, "device-42"))
             {
                 shared.err = error.InvalidProxyMetadata;
+                return;
+            }
+            const common_name = accepted.connection
+                .authenticatedProxyCommonName() orelse {
+                shared.err = error.MissingAuthenticatedProxyIdentity;
+                return;
+            };
+            if (!std.mem.eql(u8, common_name, "device-42")) {
+                shared.err = error.InvalidProxyIdentity;
                 return;
             }
             var disconnect = accepted.connection.readDisconnect() catch |err| {

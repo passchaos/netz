@@ -5215,6 +5215,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
+        "proxy_protocol_v2_require_tls",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "authenticatedProxyCommonName",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
         "auto_id_prefix",
     ));
     try std.testing.expect(@hasField(

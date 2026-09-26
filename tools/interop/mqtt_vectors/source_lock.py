@@ -97,6 +97,18 @@ MOSQUITTO_SOURCE_SHA256 = {
         "6a9410ad8e09f74466d794356623b0ba204f8d2f715d02251d57948bf074d711",
     "broker/21-proxy-v2-bad-config.py":
         "aa6042e987bbbd86f802152b2297b5e402d7abf6db1add69d22c6b9c67cdeb3b",
+    "broker/21-proxy-v2-ssl-require-tls-success.py":
+        "10f7f84d4b719c0c38ff2041884279b6197d4a8b581324668b6f7d1ca359c401",
+    "broker/21-proxy-v2-ssl-require-tls-failure.py":
+        "fbee4ea39be96f75248bb4ca8d88dc679bf49ce2be9601963ee8c5bfb4a5ce2f",
+    "broker/21-proxy-v2-ssl-require-cert-success.py":
+        "2d6438339085498af2ecd5127c9537e93461f0afd3030e99e64c04e6cef8aad5",
+    "broker/21-proxy-v2-ssl-require-cert-failure.py":
+        "d282170a458da501a6fe1169244c945dd78cbd01704b95feb8cd2eea38e82e31",
+    "broker/21-proxy-v2-ssl-common-name-success.py":
+        "63278ecce32d25aeede20f771aef62308343fbf01752301e57d6d099a9e69e39",
+    "broker/21-proxy-v2-ssl-common-name-failure.py":
+        "226effad299a6d7a6f9a4935730ab59be459320680b1dcb56b17525405aa8e52",
     "broker/persist_client_will_core.py":
         "0085074a986f587ac681dd73e318950a144fa2dadde22bb44c6e68aa97cc36a1",
     "broker/persist_module_helper.py":

@@ -51,6 +51,7 @@ pub const Listener = struct {
     accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
     websocket_origins: std.ArrayList([]u8) = .empty,
     proxy_protocol: ?mqtt.proxy_protocol.Version = null,
+    proxy_protocol_v2_require_tls: bool = false,
     use_username_as_client_id: bool = false,
     max_connections: usize = default_max_connections,
 
@@ -216,6 +217,7 @@ const ListenerSeen = struct {
     max_topic_alias_broker: bool = false,
     accept_protocol_versions: bool = false,
     enable_proxy_protocol: bool = false,
+    proxy_protocol_v2_require_tls: bool = false,
     use_username_as_client_id: bool = false,
     max_connections: bool = false,
 };
@@ -601,6 +603,14 @@ fn parseSources(
                 } else if (std.mem.eql(
                     u8,
                     directive,
+                    "proxy_protocol_v2_require_tls",
+                )) {
+                    try markOnce(&seen.proxy_protocol_v2_require_tls);
+                    listener.proxy_protocol_v2_require_tls =
+                        try parseOneBool(&words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
                     "use_username_as_clientid",
                 )) {
                     try markOnce(&seen.use_username_as_client_id);
@@ -623,14 +633,15 @@ fn parseSources(
     {
         return error.PersistenceRequired;
     }
-    for (listeners.items) |listener| {
+    for (listeners.items, listener_seen.items) |listener, seen| {
         const has_client_ca = listener.cafile.len != 0 or
             listener.capath.len != 0;
         if ((listener.certfile.len == 0) != (listener.keyfile.len == 0)) {
             return error.TlsIdentityIncomplete;
         }
+        const proxy_v2 = listener.proxy_protocol == .v2;
         if (listener.require_certificate and
-            (!has_client_ca or !listener.usesTls()))
+            !proxy_v2 and (!has_client_ca or !listener.usesTls()))
         {
             return error.ClientCertificateConfigurationIncomplete;
         }
@@ -645,11 +656,12 @@ fn parseSources(
         {
             return error.InvalidDirective;
         }
-        if (listener.proxy_protocol == .v2 and
-            (listener.usesTls() or
-                listener.use_identity_as_username or
-                listener.use_subject_as_username))
+        if (proxy_v2 and
+            (listener.usesTls() or listener.use_subject_as_username))
         {
+            return error.InvalidDirective;
+        }
+        if (seen.proxy_protocol_v2_require_tls and !proxy_v2) {
             return error.InvalidDirective;
         }
         if (listener.crlfile.len != 0 and !has_client_ca) {
@@ -721,6 +733,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "accept_protocol_versions") or
         std.mem.eql(u8, value, "websockets_origin") or
         std.mem.eql(u8, value, "enable_proxy_protocol") or
+        std.mem.eql(u8, value, "proxy_protocol_v2_require_tls") or
         std.mem.eql(u8, value, "use_username_as_clientid") or
         std.mem.eql(u8, value, "max_connections");
 }
@@ -2448,6 +2461,61 @@ test "MQTT broker config validates listener PROXY protocol versions" {
             \\allow_anonymous true
         ),
     );
+
+    var proxy_tls = try parse(allocator,
+        \\listener 1883
+        \\enable_proxy_protocol 2
+        \\proxy_protocol_v2_require_tls true
+        \\require_certificate true
+        \\use_identity_as_username true
+        \\allow_anonymous false
+    );
+    defer proxy_tls.deinit(allocator);
+    try std.testing.expect(
+        proxy_tls.listeners[0].proxy_protocol_v2_require_tls,
+    );
+    try std.testing.expect(proxy_tls.listeners[0].require_certificate);
+    try std.testing.expect(proxy_tls.listeners[0].use_identity_as_username);
+
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(
+            allocator,
+            "proxy_protocol_v2_require_tls true\nlistener 1883\n",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\enable_proxy_protocol 2
+            \\proxy_protocol_v2_require_tls true
+            \\proxy_protocol_v2_require_tls false
+            \\allow_anonymous true
+        ),
+    );
+    for ([_][]const u8{
+        \\listener 1883
+        \\proxy_protocol_v2_require_tls true
+        \\allow_anonymous true
+        ,
+        \\listener 1883
+        \\enable_proxy_protocol 1
+        \\proxy_protocol_v2_require_tls true
+        \\allow_anonymous true
+        ,
+        \\listener 1883
+        \\enable_proxy_protocol 2
+        \\require_certificate true
+        \\use_subject_as_username true
+        \\allow_anonymous false
+        ,
+    }) |source| {
+        try std.testing.expectError(
+            error.InvalidDirective,
+            parse(allocator, source),
+        );
+    }
 }
 
 test "MQTT broker config accumulates WebSocket Origin allowlists" {
