@@ -196,7 +196,8 @@ pub fn run(
             .max_queued_payload_bytes_per_session = config.max_queued_bytes,
         },
         .persistent_change_autosave = if (config.persistence and
-            config.autosave_on_changes) .{
+            config.autosave_on_changes and
+            config.autosave_interval != 0) .{
             .dir = std.Io.Dir.cwd(),
             .sub_path = persistence_path.?,
             .max_changes = config.autosave_interval,
@@ -507,7 +508,9 @@ pub fn run(
             .listeners = endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence and !config.autosave_on_changes) {
+    if (config.persistence and !config.autosave_on_changes and
+        config.autosave_interval != 0)
+    {
         try serveWithPeriodicAutosave(
             &broker,
             service,

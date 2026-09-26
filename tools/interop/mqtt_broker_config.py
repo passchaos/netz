@@ -1928,6 +1928,101 @@ def run_persistence_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
+    for autosave_on_changes in (False, True):
+        mode = "changes" if autosave_on_changes else "time"
+        port = free_port()
+        snapshot = directory / f"disabled-autosave-{mode}.db"
+        config = directory / f"disabled-autosave-{mode}.conf"
+        topic = f"persistence/disabled-autosave/{mode}"
+        payload = f"saved-on-exit-{mode}".encode()
+        config.write_text(
+            "persistence true\n"
+            f"persistence_location {directory}\n"
+            f"persistence_file {snapshot.name}\n"
+            "autosave_interval 0\n"
+            f"autosave_on_changes {str(autosave_on_changes).lower()}\n"
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 1\n"
+        )
+
+        def start(pass_name: str) -> subprocess.Popen[str]:
+            process = subprocess.Popen(
+                [str(broker), f"--config={config}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            assert process.stdout is not None
+            ready = process.stdout.readline().strip()
+            if "configured 1 listeners for 1 clients" not in ready:
+                raise RuntimeError(
+                    f"disabled {mode} autosave {pass_name} failed: {ready}"
+                )
+            return process
+
+        initial = start("initial broker")
+        publisher = socket.create_connection(("127.0.0.1", port), timeout=5)
+        publisher.settimeout(5)
+        try:
+            publisher.sendall(connect_packet(f"disabled-autosave-{mode}"))
+            if connack_reason(read_mqtt_packet(publisher)) != 0:
+                raise AssertionError(
+                    f"disabled {mode} autosave CONNECT failed"
+                )
+            publisher.sendall(
+                publish_packet(topic, payload, retain=True)
+            )
+            mqtt_ping(publisher)
+            if snapshot.exists():
+                raise AssertionError(
+                    f"disabled {mode} autosave wrote before shutdown"
+                )
+            publisher.sendall(bytes.fromhex("e000"))
+        finally:
+            publisher.close()
+        if initial.wait(timeout=5) != 0:
+            raise RuntimeError(
+                f"disabled {mode} autosave initial broker failed: "
+                + initial.stdout.read()
+            )
+        if not snapshot.is_file() or snapshot.stat().st_size == 0:
+            raise AssertionError(
+                f"disabled {mode} autosave omitted shutdown snapshot"
+            )
+
+        restored = start("restored broker")
+        subscriber = socket.create_connection(("127.0.0.1", port), timeout=5)
+        subscriber.settimeout(5)
+        try:
+            subscriber.sendall(
+                connect_packet(f"disabled-autosave-restored-{mode}")
+            )
+            if connack_reason(read_mqtt_packet(subscriber)) != 0:
+                raise AssertionError(
+                    f"disabled {mode} autosave restore CONNECT failed"
+                )
+            subscriber.sendall(subscribe_packet(1, topic))
+            if read_mqtt_packet(subscriber) != bytes.fromhex("900400010000"):
+                raise AssertionError(
+                    f"disabled {mode} autosave restore SUBACK mismatch"
+                )
+            expected = publish_packet(topic, payload, retain=True)
+            if read_mqtt_packet(subscriber) != expected:
+                raise AssertionError(
+                    f"disabled {mode} autosave did not restore retained state"
+                )
+            subscriber.sendall(bytes.fromhex("e000"))
+        finally:
+            subscriber.close()
+        if restored.wait(timeout=5) != 0:
+            raise RuntimeError(
+                f"disabled {mode} autosave restored broker failed: "
+                + restored.stdout.read()
+            )
+
+
 def run_retain_source_case(broker: Path, directory: Path) -> None:
     for proto_ver in (5, 4):
         for per_listener in (False, True):
@@ -3899,6 +3994,7 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
+        run_disabled_autosave_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
         run_modern_tls_identity_case(args.broker, directory)
@@ -3926,7 +4022,8 @@ def main() -> None:
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
-        "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, and snapshot restore "
+        "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
+        "disabled-autosave shutdown persistence, and snapshot restore "
         + RUNTIME
     )
 

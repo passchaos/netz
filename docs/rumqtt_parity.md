@@ -418,7 +418,12 @@ routing. Scheduled-Will tests cover downtime deadline reduction, canonical
 publisher restoration, reconnect cancellation, driver publication after an
 actual broker restart and retained-Will storage. This snapshot surface still
 has narrower persistence-plugin integration than Mosquitto, but supports both
-elapsed-time and persistent-change-count live autosave. Tests also cover
+elapsed-time and persistent-change-count live autosave. An
+`autosave_interval` of zero disables either runtime trigger, matching
+Mosquitto, without disabling startup restore or the final shutdown snapshot.
+The process gate verifies this for both `autosave_on_changes` modes by proving
+no snapshot exists after a retained-PUBLISH/PING barrier, then restarting from
+the shutdown snapshot and reading the exact retained message. Tests also cover
 inbound QoS 2 body ownership, downtime expiry, Clean Start cleanup, real broker
 restart, Session Present, post-restart PUBREL routing and duplicate PUBREL
 idempotence.

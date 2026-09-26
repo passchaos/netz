@@ -505,7 +505,7 @@ fn parseSources(
                 }
             } else if (std.mem.eql(u8, directive, "autosave_interval")) {
                 try markOnce(&global_seen.autosave_interval);
-                config.autosave_interval = try parseOnePositive(u32, &words);
+                config.autosave_interval = try parseOneInteger(u32, &words);
             } else if (std.mem.eql(u8, directive, "autosave_on_changes")) {
                 try markOnce(&global_seen.autosave_on_changes);
                 config.autosave_on_changes = try parseOneBool(&words);
@@ -1870,6 +1870,26 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\autosave_interval 5
         ),
     );
+    try std.testing.expectError(
+        error.PersistenceRequired,
+        parse(allocator,
+            \\listener 1883
+            \\autosave_interval 0
+        ),
+    );
+    var disabled_autosave = try parse(allocator,
+        \\persistence true
+        \\autosave_interval 0
+        \\autosave_on_changes true
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer disabled_autosave.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        disabled_autosave.autosave_interval,
+    );
+    try std.testing.expect(disabled_autosave.autosave_on_changes);
     try std.testing.expectError(
         error.DuplicateListener,
         parse(allocator,
