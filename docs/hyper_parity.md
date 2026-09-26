@@ -1426,8 +1426,12 @@ bounded HTTP/1 incremental and pipelined message sequences, HTTP/2 flow-window
 and HPACK dynamic-table transitions, and HTTP/3 split control frames and QPACK
 table transitions. It found and now guards an HPACK compaction bug in which
 duplicate-name lookup keys could outlive their backing entry. Live socket
-scheduling, TLS, encrypted QUIC packets, and complete HTTP/2/3 connection state
-remain outside these fuzz surfaces.
+scheduling is additionally covered for HTTP/1 by `fuzz-http1-connection`: each
+bounded input runs through the production loopback TCP client/server and checks
+persistent reuse, complete and streaming fixed/chunked request bodies, chunked
+response trailers, HEAD body suppression, and request/response-selected close
+boundaries against an independent operation model. TLS and complete HTTP/2/3
+connection-state fuzzing remain outside these fuzz surfaces.
 
 The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may
