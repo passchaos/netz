@@ -2421,6 +2421,8 @@ fn acceptInternal(
         options.handshake_recovery.deadline,
     );
     if (options.retry) |policy| {
+        var versioned_policy = policy;
+        versioned_policy.version = options.version;
         const odcid = try endpoint.allocator.dupe(
             u8,
             client_initial.packet.destination_connection_id,
@@ -2441,7 +2443,7 @@ fn acceptInternal(
         const prepared = retry.prepareInto(
             &retry_storage,
             endpoint.io,
-            policy,
+            versioned_policy,
             rscid,
             odcid,
             client_initial.packet.source_connection_id,

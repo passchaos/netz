@@ -61,9 +61,12 @@ key-generation bounds are checked after every operation. The companion
 `fuzz-quic-path` target drives authenticated packets across real UDP sockets on
 three loopback IPs and multiple source ports. It covers superseded and invalid
 PATH_RESPONSE, validation, timeout/retry/fallback, NAT rebinding, and
-bidirectional stream traffic after path changes. These targets still do not
-fuzz TLS handshake failure sequences, long-running connection limits, or
-concurrent event-loop ownership.
+bidirectional stream traffic after path changes. `fuzz-quic-handshake` covers
+the integrated QUIC/TLS layer across v1/v2, AES-128/SHA-256 and
+AES-256/SHA-384, X25519/P-256/P-384, first-flight loss and corruption on either
+side, Retry, bounded timeout, and post-handshake 1-RTT traffic. Long-running
+connection limits and concurrent event-loop ownership remain outside these
+bounded fuzz models.
 The first extended run exposed an RFC 9001 Section 6.2 state conflation: netz
 rejected a valid peer update after it had sent the required new-phase ACK merely
 because that ACK packet had not itself been acknowledged. Receive-update

@@ -9,6 +9,7 @@ const std = @import("std");
 const quic = @import("../mod.zig");
 
 pub const Policy = struct {
+    version: quic.Version = .version_1,
     secret: quic.address_validation_token.Secret,
     peer_address: []const u8,
     issued_ns: i64,
@@ -171,6 +172,7 @@ pub fn prepareInto(
     defer std.crypto.secureZero(u8, &nonce);
     return .{
         .datagram = try quic.retry_flow.issueInto(storage, .{
+            .version = policy.version,
             .original_destination_connection_id = original_destination_connection_id,
             .client_source_connection_id = client_source_connection_id,
             .retry_source_connection_id = source_connection_id,
@@ -259,6 +261,39 @@ test "integrated Retry policy defaults to the server connection ID" {
         server_scid,
         verified.packet.source_connection_id,
     );
+}
+
+test "integrated Retry policy preserves the negotiated QUIC version" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var storage: [quic.retry_flow.max_datagram_len]u8 = undefined;
+    const prepared = try prepareInto(
+        &storage,
+        threaded.io(),
+        .{
+            .version = .version_2,
+            .secret = [_]u8{0x41} **
+                quic.address_validation_token.secret_len,
+            .peer_address = "client-path",
+            .issued_ns = 1_000,
+            .lifetime_ns = 5_000,
+            .nonce = [_]u8{0x42} **
+                quic.address_validation_token.nonce_len,
+        },
+        "server",
+        "original",
+        "client",
+    );
+    const packet = try quic.parseRetryPacket(prepared.datagram);
+    try std.testing.expectEqual(
+        quic.Version.version_2.wireValue(),
+        packet.version,
+    );
+    try std.testing.expect(try quic.verifyRetryIntegrityTag(
+        std.testing.allocator,
+        "original",
+        prepared.datagram,
+    ));
 }
 
 test "client Initial response filter requires CRYPTO offset zero in v1 and v2" {
