@@ -80,9 +80,13 @@ APIs. With the default opt-out policy, all three transports negotiate both
 `fuzz-websocket-h3-context` additionally carry the same bounded operation
 sequences through real loopback HTTP/1 Upgrade, RFC 8441 Extended CONNECT, and
 authenticated QUIC/TLS RFC 9220 sessions with context takeover enabled in both
-directions. They mix text/binary, contiguous/sliced/fragmented/deadline sends,
-owned/caller-buffer receives, and interleaved Ping/Pong without allowing input
-to create an unbounded peer wait. These
+directions. The companion `fuzz-websocket-h1-tls-context` and
+`fuzz-websocket-h2-tls-context` targets authenticate WSS and RFC 8441 TLS
+peers, require `http/1.1` or `h2` ALPN, fix AES-128-GCM/SHA-256, and exercise a
+bidirectional TLS 1.3 KeyUpdate before the modeled traffic. They mix
+text/binary, contiguous/sliced/fragmented/deadline sends, owned/caller-buffer
+receives, and interleaved Ping/Pong without allowing input to create an
+unbounded peer wait. These
 targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
 headers, Version Negotiation, Retry integrity, transport parameters, frame
 streams, and carried TLS handshake messages. `zig build fuzz-quic-protection`
@@ -103,12 +107,13 @@ v1/v2, AES-128/SHA-256 or AES-256/SHA-384, and X25519/P-256/P-384 while
 recovering from dropped or authentication-failed client/server flights and
 validating Retry, bounded timeout, and post-handshake 1-RTT traffic. Long-running
 connection limits and concurrent event-loop ownership remain outside these
-bounded fuzz models. The pinned GitHub Actions workflow replays all twenty-four
+bounded fuzz models. The pinned GitHub Actions workflow replays all twenty-six
 corpora and the complete test gate on pushes and pull requests, then runs the
-twenty-four coverage-guided targets
+twenty-six coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
-authenticated sessions, the WebSocket H3 target to 128 authenticated sessions,
+authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
+sessions, the WebSocket H3 target to 128 authenticated sessions,
 ordinary live MQTT targets to 128 real-network runs, inbound/outbound durable
 MQTT bridge QoS 2 to 64/32 runs, the WebTransport endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target

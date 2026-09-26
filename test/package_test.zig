@@ -1915,6 +1915,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Connection,
+        "negotiatedAlpn",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.Connection,
         "negotiatedTranscriptHash",
     ));
     try std.testing.expect(@hasDecl(
@@ -2217,6 +2221,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.PendingUpgrade,
         "negotiatedCipherSuite",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.PendingUpgrade,
+        "negotiatedAlpn",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.TlsServer,

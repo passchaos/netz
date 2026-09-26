@@ -871,7 +871,10 @@ that the second message consumes prior-message history and fails after reset.
 `fuzz-websocket-h1-context`, `fuzz-websocket-h2-context`, and
 `fuzz-websocket-h3-context` now drive the same bounded operation sequences
 through real loopback HTTP/1 Upgrade, RFC 8441 Extended CONNECT, and
-authenticated QUIC/TLS RFC 9220 sessions. Both directions retain context while
+authenticated QUIC/TLS RFC 9220 sessions. The H1/H2 companion TLS targets
+add certificate-pinned WSS and RFC 8441 sessions, mandatory `http/1.1`/`h2`
+ALPN, fixed AES-128-GCM/SHA-256 negotiation, and bidirectional TLS 1.3
+KeyUpdate accounting. Both directions retain context while
 the input selects text/binary, contiguous/sliced/fragmented/deadline sends,
 owned/caller-buffer receives, and interleaved Ping/Pong. The H2 path
 additionally traverses SETTINGS negotiation, DATA framing, and stream/

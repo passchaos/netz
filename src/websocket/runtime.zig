@@ -1038,6 +1038,7 @@ pub const TlsServer = struct {
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
                 .client_auth = options.client_auth,
+                .alpn_protocols = options.alpn_protocols,
             },
             .tcp_nodelay = options.tcp_nodelay,
         };
@@ -1306,6 +1307,9 @@ pub const TlsListenOptions = struct {
     /// deadline starts independently after TLS succeeds.
     tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    /// Optional ALPN selection for WSS. Configured servers require one of
+    /// these protocols, matching the vail-backed client policy.
+    alpn_protocols: []const []const u8 = &.{},
     tcp_nodelay: bool = true,
 };
 
@@ -1749,6 +1753,14 @@ pub const PendingUpgrade = struct {
             else => return null,
         };
         return connection.negotiatedTranscriptHash();
+    }
+
+    pub fn negotiatedAlpn(self: *const PendingUpgrade) ?[]const u8 {
+        const connection = switch (self.transport) {
+            .tls_server => |value| value,
+            else => return null,
+        };
+        return connection.negotiatedAlpn();
     }
 
     pub fn accept(self: *PendingUpgrade) Error!Connection {
@@ -3720,6 +3732,17 @@ pub const Connection = struct {
         }
         if (self.tls_vail_conn) |connection| {
             return connection.negotiatedCipherSuite();
+        }
+        return null;
+    }
+
+    /// Return the negotiated WSS ALPN value for vail-backed transports.
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        if (self.tls_server_conn) |connection| {
+            return connection.negotiatedAlpn();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.negotiatedAlpn();
         }
         return null;
     }

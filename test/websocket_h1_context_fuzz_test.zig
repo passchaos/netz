@@ -1,10 +1,8 @@
 //! Bounded context-takeover fuzzing over real HTTP/1 WebSocket connections.
 
 const std = @import("std");
-const netz = @import("netz");
 const support = @import("websocket_live_context_support.zig");
-
-const runtime = netz.websocket.runtime;
+const harness = @import("websocket_h1_context_fuzz/harness.zig");
 
 test "structured live HTTP1 context-takeover sequences cover runtime APIs" {
     try support.requireApiMatrix(try runSequence(
@@ -54,75 +52,5 @@ fn fuzzContextTakeover(_: void, smith: *std.testing.Smith) !void {
 }
 
 fn runSequence(bytes: []const u8) !support.Summary {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const io = threaded.io();
-    var server = try runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{
-            .max_head_bytes = 4096,
-            .max_frame_bytes = 2048,
-            .max_message_bytes = support.max_message_bytes,
-        },
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *runtime.Server,
-        bytes: []const u8,
-        err: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            self.runFallible() catch |err| {
-                self.err = err;
-            };
-        }
-
-        fn runFallible(self: *@This()) !void {
-            var connection = try self.server.accept(.{
-                .enable_permessage_deflate = true,
-                .allow_context_takeover = true,
-                .compression_threshold = 0,
-            });
-            defer connection.close();
-            try support.runServer(
-                self.server.http.allocator,
-                &connection,
-                self.bytes,
-            );
-        }
-    };
-
-    var shared = Shared{ .server = &server, .bytes = bytes };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
-
-    var client = try runtime.Client.connect(
-        allocator,
-        io,
-        server.address(),
-        .{
-            .host = "127.0.0.1",
-            .target = "/fuzz-context-takeover",
-            .enable_permessage_deflate = true,
-            .allow_context_takeover = true,
-            .compression_threshold = 0,
-            .limits = .{
-                .max_head_bytes = 4096,
-                .max_frame_bytes = 2048,
-                .max_message_bytes = support.max_message_bytes,
-            },
-        },
-    );
-    defer client.close();
-    const summary = try support.runClient(allocator, &client, bytes);
-
-    thread.join();
-    joined = true;
-    if (shared.err) |err| return err;
-    return summary;
+    return harness.runSequence(bytes);
 }

@@ -1,11 +1,8 @@
 //! Bounded context-takeover fuzzing over real RFC 8441 WebSocket streams.
 
 const std = @import("std");
-const netz = @import("netz");
 const support = @import("websocket_live_context_support.zig");
-
-const http2 = netz.http2.runtime;
-const websocket = netz.websocket.runtime;
+const harness = @import("websocket_h2_context_fuzz/harness.zig");
 
 test "structured live HTTP2 context-takeover sequences cover runtime APIs" {
     try support.requireApiMatrix(try runSequence(
@@ -55,93 +52,5 @@ fn fuzzContextTakeover(_: void, smith: *std.testing.Smith) !void {
 }
 
 fn runSequence(bytes: []const u8) !support.Summary {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{
-        .async_limit = .unlimited,
-    });
-    defer threaded.deinit();
-    const io = threaded.io();
-    const h2_limits: http2.Limits = .{
-        .max_frame_payload = 4096,
-        .max_body_bytes = 16 * 1024,
-        .initial_window_size = 16 * 1024,
-        .initial_connection_window_size = 65_535,
-        .enable_connect_protocol = true,
-    };
-    var server = try http2.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        h2_limits,
-    );
-    defer server.deinit();
-
-    const Shared = struct {
-        server: *http2.Server,
-        bytes: []const u8,
-        err: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            self.runFallible() catch |err| {
-                self.err = err;
-            };
-        }
-
-        fn runFallible(self: *@This()) !void {
-            var h2 = try self.server.accept();
-            defer h2.close();
-            var connection = try websocket.H2Server.accept(
-                self.server.allocator,
-                &h2,
-                .{
-                    .enable_permessage_deflate = true,
-                    .allow_context_takeover = true,
-                    .compression_threshold = 0,
-                    .limits = .{
-                        .max_head_bytes = 4096,
-                        .max_frame_bytes = 2048,
-                        .max_message_bytes = support.max_message_bytes,
-                    },
-                },
-            );
-            defer connection.close();
-            try support.runServer(
-                self.server.allocator,
-                &connection,
-                self.bytes,
-            );
-        }
-    };
-
-    var shared = Shared{ .server = &server, .bytes = bytes };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
-
-    var h2_client = try http2.Client.connect(
-        allocator,
-        io,
-        server.address(),
-        h2_limits,
-    );
-    defer h2_client.close();
-    var client = try websocket.H2Client.open(allocator, &h2_client, .{
-        .authority = "localhost",
-        .path = "/fuzz-context-takeover",
-        .enable_permessage_deflate = true,
-        .allow_context_takeover = true,
-        .compression_threshold = 0,
-        .limits = .{
-            .max_head_bytes = 4096,
-            .max_frame_bytes = 2048,
-            .max_message_bytes = support.max_message_bytes,
-        },
-    });
-    defer client.close();
-    const summary = try support.runClient(allocator, &client, bytes);
-
-    thread.join();
-    joined = true;
-    if (shared.err) |err| return err;
-    return summary;
+    return harness.runSequence(bytes);
 }
