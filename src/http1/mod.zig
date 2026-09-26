@@ -226,6 +226,10 @@ pub const RequestHead = struct {
             headersKeepAlive(self.version, self.headers);
     }
 
+    pub fn acceptsTrailers(self: RequestHead) bool {
+        return requestAcceptsTrailers(self.version, self.headers);
+    }
+
     /// Total bytes for a pipelined message when its body boundary is known from
     /// the head. Chunked bodies require parsing chunks and return null.
     pub fn messageLength(self: RequestHead) Error!?usize {
@@ -330,6 +334,10 @@ pub const Request = struct {
             headersKeepAlive(self.version, self.headers);
     }
 
+    pub fn acceptsTrailers(self: Request) bool {
+        return requestAcceptsTrailers(self.version, self.headers);
+    }
+
     pub fn upgradeProtocol(self: Request) ?[]const u8 {
         if (!wire.anyHeaderContainsToken(
             self.headers,
@@ -358,6 +366,22 @@ pub fn headersKeepAlive(
         "keep-alive",
     )) return true;
     return version == .http_1_1;
+}
+
+/// Whether a request explicitly permits response trailer fields.
+///
+/// Netz enforces RFC 9110 section 6.5.1's recommendation that an HTTP/1.1
+/// server not emit trailer fields unless the request's TE field advertises
+/// trailers. Repeated TE fields are treated as one logical list.
+pub fn requestAcceptsTrailers(
+    version: Version,
+    headers: []const Header,
+) bool {
+    return version == .http_1_1 and wire.anyHeaderContainsToken(
+        headers,
+        "te",
+        "trailers",
+    );
 }
 
 fn hasHeaderNamed(headers: []const Header, name: []const u8) bool {
@@ -2192,6 +2216,19 @@ test "HTTP/1 repeated Connection fields all affect message semantics" {
         "websocket",
         switching.upgradeProtocol().?,
     );
+}
+
+test "HTTP/1 request trailer capability combines repeated TE fields" {
+    const headers = [_]Header{
+        .{ .name = "TE", .value = "gzip" },
+        .{ .name = "te", .value = "deflate, Trailers" },
+    };
+    try std.testing.expect(requestAcceptsTrailers(.http_1_1, &headers));
+    try std.testing.expect(!requestAcceptsTrailers(.http_1_0, &headers));
+    try std.testing.expect(!requestAcceptsTrailers(.http_1_1, &.{.{
+        .name = "TE",
+        .value = "gzip, trailers;q=1",
+    }}));
 }
 
 test "HTTP/1 parser preserves exact header-name spelling across borrowed and owned heads" {

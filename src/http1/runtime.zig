@@ -6666,6 +6666,9 @@ fn adjustResponseForServeLoop(
     graceful_shutdown: bool,
 ) Error!ServeLoopResponse {
     var out = response;
+    // The request is authoritative. A handler cannot opt itself into sending
+    // trailers when the peer did not advertise support for receiving them.
+    out.request_accepts_trailers = request.acceptsTrailers();
     const request_keep_alive = request.keepAlive();
     const response_wants_keep_alive = responseOptionsKeepAlive(response);
     var adjusted = ServeLoopResponse{ .response = out };
@@ -6715,6 +6718,49 @@ fn adjustResponseForServeLoop(
 
     adjusted.response = out;
     return adjusted;
+}
+
+test "HTTP/1 serve response derives trailer capability from request" {
+    const allocator = std.testing.allocator;
+    var accepted_headers = [_]http1.Header{
+        .{ .name = "Host", .value = "example.test" },
+        .{ .name = "TE", .value = "gzip" },
+        .{ .name = "te", .value = "Trailers" },
+    };
+    var accepted = try adjustResponseForServeLoop(
+        allocator,
+        .{
+            .method = .GET,
+            .target = "/",
+            .version = .http_1_1,
+            .headers = &accepted_headers,
+            .body = &.{},
+            .consumed = 0,
+        },
+        .{},
+        false,
+    );
+    defer accepted.deinit(allocator);
+    try std.testing.expect(accepted.response.request_accepts_trailers);
+
+    var refused_headers = [_]http1.Header{
+        .{ .name = "Host", .value = "example.test" },
+    };
+    var refused = try adjustResponseForServeLoop(
+        allocator,
+        .{
+            .method = .GET,
+            .target = "/",
+            .version = .http_1_1,
+            .headers = &refused_headers,
+            .body = &.{},
+            .consumed = 0,
+        },
+        .{ .request_accepts_trailers = true },
+        false,
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.response.request_accepts_trailers);
 }
 
 fn addConnectionHeaderForServeLoop(allocator: std.mem.Allocator, response: ResponseOptions, value: []const u8) Error!ServeLoopResponse {
@@ -11086,6 +11132,7 @@ test "HTTP/1 runtime writes response trailers with chunked framing" {
                 .status = 200,
                 .headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
                 .body = "download",
+                .request_accepts_trailers = request.request.acceptsTrailers(),
                 .trailers = &.{
                     .{ .name = "Digest", .value = "sha-256=response" },
                     .{ .name = "digest", .value = "sha-256=second" },

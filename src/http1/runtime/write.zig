@@ -33,6 +33,9 @@ pub const ResponseOptions = struct {
     headers: []const http1.Header = &.{},
     body: []const u8 = &.{},
     trailers: []const http1.Header = &.{},
+    /// True only when the associated HTTP/1.1 request contained a
+    /// TE: trailers token. Response trailer fields are rejected otherwise.
+    request_accepts_trailers: bool = false,
     header_name_casing: HeaderNameCasing = .preserve,
     /// Optional method of the request this response answers. HEAD and
     /// successful CONNECT have method-specific body framing rules that cannot
@@ -64,6 +67,10 @@ pub const StreamingResponseOptions = struct {
     /// ordinary HTTP/1.1 response.
     body_length: ?usize = null,
     trailer_names: []const []const u8 = &.{},
+    /// True only when the associated HTTP/1.1 request contained a
+    /// TE: trailers token. Announced response trailers are rejected
+    /// otherwise.
+    request_accepts_trailers: bool = false,
     header_name_casing: HeaderNameCasing = .preserve,
     request_method: ?http1.Method = null,
 };
@@ -315,6 +322,9 @@ fn prepareStreamingResponseWithDefaultDate(
     );
     const trailers_requested = hasHeader(options.headers, "trailer") or
         options.trailer_names.len != 0;
+    if (trailers_requested and !options.request_accepts_trailers) {
+        return error.InvalidTrailer;
+    }
     if (trailers_requested and !explicit_chunked) {
         return error.InvalidTrailer;
     }
@@ -467,9 +477,30 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
         error.InvalidTrailer,
         prepareStreamingResponse(
             allocator,
-            .{ .trailer_names = &.{"Upgrade"} },
+            .{
+                .trailer_names = &.{"Upgrade"},
+                .request_accepts_trailers = true,
+            },
             &scratch,
         ),
+    );
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareStreamingResponse(
+            allocator,
+            .{ .trailer_names = &.{"Digest"} },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareResponse(allocator, .{
+            .body = "ok",
+            .trailers = &.{.{
+                .name = "Digest",
+                .value = "sha-256=demo",
+            }},
+        }, &scratch),
     );
     const response = try prepareStreamingResponse(
         allocator,
@@ -478,6 +509,7 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
                 .name = "Trailer",
                 .value = "Digest",
             }},
+            .request_accepts_trailers = true,
         },
         &scratch,
     );
@@ -575,6 +607,7 @@ test "HTTP/1 title-case policy applies to merged chunked trailers" {
             .{ .name = "x-checkSUM", .value = "one" },
             .{ .name = "X-CHECKsum", .value = "two" },
         },
+        .request_accepts_trailers = true,
         .header_name_casing = .title_case,
     }, &scratch);
     try std.testing.expect(std.mem.indexOf(
@@ -594,6 +627,7 @@ test "HTTP/1 title-case policy applies to merged chunked trailers" {
             .value = "chunked",
         }},
         .trailer_names = &.{"x-checksum"},
+        .request_accepts_trailers = true,
         .header_name_casing = .title_case,
     }, &scratch);
     try std.testing.expect(std.mem.indexOf(
@@ -902,6 +936,12 @@ fn prepareResponseFraming(
         options.body,
         options.trailers,
     );
+    if ((options.trailers.len != 0 or
+        hasHeader(options.headers, "trailer")) and
+        !options.request_accepts_trailers)
+    {
+        return error.InvalidTrailer;
+    }
     const use_chunked = try chunkedWriteFraming(
         options.version,
         options.headers,

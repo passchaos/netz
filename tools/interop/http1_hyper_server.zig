@@ -75,6 +75,7 @@ pub fn main(init: std.process.Init) !void {
         }},
         .trailer_names = &.{"X-Netz-Trailer"},
         .request_method = request.request.method,
+        .request_accepts_trailers = request.request.acceptsTrailers(),
     });
     defer response.deinit();
     try response.writeChunks(&.{ "netz-", "response" });
@@ -239,20 +240,46 @@ pub fn main(init: std.process.Init) !void {
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 
-    var invalid_trailer_connection = if (tls_enabled)
+    {
+        var invalid_trailer_connection = if (tls_enabled)
+            try tls_server.accept()
+        else
+            try clear_server.accept();
+        defer invalid_trailer_connection.close();
+        if (invalid_trailer_connection.readRequest(.{})) |invalid_request| {
+            var unexpected = invalid_request;
+            unexpected.deinit(allocator);
+            return error.ExpectedInvalidTrailer;
+        } else |err| {
+            if (err != error.InvalidTrailer) return err;
+        }
+        std.debug.print(
+            "netz HTTP/1 server rejected Hyper connection-control trailer: transport={s} field=connection error=InvalidTrailer\n",
+            .{if (tls_enabled) "tls" else "cleartext"},
+        );
+    }
+
+    var unnegotiated_trailer_connection = if (tls_enabled)
         try tls_server.accept()
     else
         try clear_server.accept();
-    defer invalid_trailer_connection.close();
-    if (invalid_trailer_connection.readRequest(.{})) |invalid_request| {
-        var unexpected = invalid_request;
-        unexpected.deinit(allocator);
-        return error.ExpectedInvalidTrailer;
-    } else |err| {
-        if (err != error.InvalidTrailer) return err;
+    defer unnegotiated_trailer_connection.close();
+    var unnegotiated_request = try unnegotiated_trailer_connection
+        .readRequest(.{});
+    defer unnegotiated_request.deinit(allocator);
+    if (unnegotiated_request.request.acceptsTrailers()) {
+        return error.UnexpectedTrailerCapability;
     }
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        unnegotiated_trailer_connection.startResponse(.{
+            .trailer_names = &.{"X-Netz-Trailer"},
+            .request_method = unnegotiated_request.request.method,
+            .request_accepts_trailers = unnegotiated_request.request.acceptsTrailers(),
+        }),
+    );
     std.debug.print(
-        "netz HTTP/1 server rejected Hyper connection-control trailer: transport={s} field=connection error=InvalidTrailer\n",
+        "netz HTTP/1 server rejected unnegotiated response trailers: transport={s} request_te=false bytes_written=0 error=InvalidTrailer\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 }

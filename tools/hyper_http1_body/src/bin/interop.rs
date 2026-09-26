@@ -815,6 +815,46 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         .await
         .expect("join Hyper invalid-trailer connection");
     println!("Hyper HTTP/1 client observed netz reject connection-control trailer: field=connection response=false");
+
+    let stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect netz unnegotiated-response-trailer server");
+    stream
+        .set_nodelay(true)
+        .expect("unnegotiated-response-trailer TCP_NODELAY");
+    let io = match ca_path.as_ref() {
+        Some(ca) => MaybeTls::Client(
+            TlsConnector::from(tls_client_config(ca))
+                .connect(
+                    rustls::pki_types::ServerName::try_from("localhost")
+                        .expect("valid server name"),
+                    stream,
+                )
+                .await
+                .expect("connect unnegotiated-response-trailer HTTPS"),
+        ),
+        None => MaybeTls::Clear(stream),
+    };
+    let (mut unnegotiated_sender, unnegotiated_connection) = client_http1::Builder::new()
+        .handshake(TokioIo::new(io))
+        .await
+        .expect("Hyper unnegotiated-response-trailer handshake");
+    let unnegotiated_driver = tokio::spawn(unnegotiated_connection);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/unnegotiated-response-trailer?from=hyper")
+        .header("host", "localhost")
+        .body(empty_body())
+        .expect("unnegotiated-response-trailer request");
+    assert!(
+        unnegotiated_sender.send_request(request).await.is_err(),
+        "netz must not emit response trailers without TE: trailers",
+    );
+    drop(unnegotiated_sender);
+    let _ = unnegotiated_driver
+        .await
+        .expect("join Hyper unnegotiated-response-trailer connection");
+    println!("Hyper HTTP/1 client observed netz reject unnegotiated response trailers: request_te=false response=false");
 }
 
 fn empty_body() -> Body {

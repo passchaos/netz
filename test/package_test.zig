@@ -920,6 +920,15 @@ test "public modules are reachable" {
         "waitForContinueWithInformational",
     ));
     try std.testing.expect(@hasDecl(netz.http1, "ResponseContext"));
+    try std.testing.expect(@hasDecl(netz.http1, "requestAcceptsTrailers"));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.ResponseOptions,
+        "request_accepts_trailers",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.StreamingResponseOptions,
+        "request_accepts_trailers",
+    ));
     try std.testing.expect(@hasDecl(netz.http1, "parseResponseForRequest"));
     try std.testing.expect(@hasDecl(netz.http1, "RequestHead"));
     try std.testing.expect(@hasDecl(netz.http1, "ResponseHead"));

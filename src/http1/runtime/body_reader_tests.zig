@@ -1010,6 +1010,7 @@ test "HTTP/1 streaming response reads chunked trailers and writer handoff" {
             var response = try connection.startResponse(.{
                 .request_method = request.request.method,
                 .trailer_names = &.{"Digest"},
+                .request_accepts_trailers = request.request.acceptsTrailers(),
             });
             defer response.deinit();
             try response.write("streamed ");
@@ -1035,6 +1036,7 @@ test "HTTP/1 streaming response reads chunked trailers and writer handoff" {
         .method = .POST,
         .target = "/upload",
         .host = "localhost",
+        .headers = &.{.{ .name = "TE", .value = "trailers" }},
         .body_length = 6,
     });
     defer writer.deinit();

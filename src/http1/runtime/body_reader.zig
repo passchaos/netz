@@ -83,6 +83,13 @@ pub fn Reader(comptime RuntimeError: type) type {
                     self.headers,
                 );
             }
+
+            pub fn acceptsTrailers(self: Request) bool {
+                return http1.requestAcceptsTrailers(
+                    self.version,
+                    self.headers,
+                );
+            }
         };
 
         pub const Response = struct {
@@ -149,6 +156,13 @@ pub fn Reader(comptime RuntimeError: type) type {
 
             pub fn keepAlive(self: RequestHead) bool {
                 return !self.must_close and http1.headersKeepAlive(
+                    self.version,
+                    self.headers,
+                );
+            }
+
+            pub fn acceptsTrailers(self: RequestHead) bool {
+                return http1.requestAcceptsTrailers(
                     self.version,
                     self.headers,
                 );

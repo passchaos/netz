@@ -170,6 +170,14 @@ benchmark response:
   automatic `100 Continue`; pooled leases therefore discard failed sockets.
   Deterministic tests expose four-byte socket-visible prefixes before failure,
   while invalid Content-Length preflight remains retryable without any write;
+- HTTP/1.1 response trailer fields require the associated request's exact
+  `TE: trailers` token. Owned and streaming request values expose
+  `acceptsTrailers()`; low-level response options carry that explicit
+  capability, while the high-level serve loop derives it automatically and
+  cannot be overridden by the handler. Unnegotiated trailer responses fail
+  before their head is written. This is stricter than Hyper's silent trailer
+  suppression and prevents an application from believing integrity metadata
+  reached a client when it was discarded;
 - `Connection.readRequestBatchInto` parses request heads and fixed or chunked
   bodies into caller storage, borrows one receive buffer and consumes its
   prefix once per batch. It validates the complete batch before mutation, then

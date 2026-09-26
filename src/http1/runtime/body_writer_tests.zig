@@ -315,6 +315,7 @@ test "HTTP/1 chunked response writer streams announced trailers" {
             var writer = try connection.startResponse(.{
                 .request_method = request.request.method,
                 .trailer_names = &.{"Digest"},
+                .request_accepts_trailers = request.request.acceptsTrailers(),
             });
             defer writer.deinit();
             try writer.write("");
@@ -340,6 +341,7 @@ test "HTTP/1 chunked response writer streams announced trailers" {
     var response = try client.request(.{
         .target = "/streamed-response",
         .host = "localhost",
+        .headers = &.{.{ .name = "TE", .value = "trailers" }},
     });
     defer response.deinit(allocator);
     try std.testing.expectEqual(http1.BodyFraming.chunked, response.response.body_framing);
