@@ -28,6 +28,10 @@ inbound bridge, a local production broker and two local clients. It checks
 QoS 0/1 mapping and acknowledgement ordering, retained replacement/deletion,
 fresh/resumed upstream Sessions, subscription replay, DUP normalization and
 connection-scoped property isolation.
+`zig build fuzz-mqtt-bridge-qos2` exercises the durable inbound bridge
+transaction across PUBREC/PUBREL/PUBCOMP, transport reconnect, complete Bridge
+recreation, fresh-Session epoch replacement, local exactly-once fanout and
+retained replay through a crash-safe commit log.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -60,12 +64,13 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all thirteen corpora and the complete test gate on pushes and
-pull requests, then runs the thirteen coverage-guided targets daily and on
+workflow replays all fourteen corpora and the complete test gate on pushes and
+pull requests, then runs the fourteen coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
-H3 to 128 authenticated sessions, each live MQTT target to 128 real-network
-runs, and the in-memory targets to 10,000 iterations. A manual `fuzz_runs`
-value overrides all targets. Because
+H3 to 128 authenticated sessions, ordinary live MQTT targets to 128
+real-network runs, durable MQTT bridge QoS 2 to 64 runs, and the in-memory
+targets to 10,000 iterations. A manual `fuzz_runs` value overrides all targets.
+Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret

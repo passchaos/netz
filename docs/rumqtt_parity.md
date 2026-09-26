@@ -1571,7 +1571,13 @@ probe. Its model checks QoS 0/1 topic mapping, acknowledgement ordering,
 retained replacement/deletion, fresh/resumed upstream Sessions, ordered bridge
 subscription replay, DUP normalization, User Property preservation, and the
 non-transfer of upstream Topic Alias/Subscription Identifier state. Durable
-QoS 2 and outbound bridge cross-broker state remain outside these fuzz surfaces.
+QoS 2 has its own `fuzz-mqtt-bridge-qos2` target: every real upstream
+transaction is durably staged before PUBREC, remains invisible locally before
+PUBREL, then either completes exactly once, resumes after transport loss, is
+restored by a newly constructed Bridge, or is discarded when CONNACK reports a
+fresh Session and advances the bridge epoch. The same model checks downstream
+QoS 2 completion, DUP normalization, property isolation, and final retained
+replay. Outbound bridge cross-broker state remains outside these fuzz surfaces.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,

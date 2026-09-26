@@ -1,0 +1,425 @@
+const std = @import("std");
+const netz = @import("netz");
+const model = @import("model.zig");
+const peer = @import("peer.zig");
+
+const mqtt = netz.mqtt;
+const bridge_mod = mqtt.bridge;
+const Broker = mqtt.broker.Broker;
+const runtime = mqtt.runtime;
+
+const BrokerRunner = struct {
+    broker: *Broker,
+    shutdown: std.Io.Event = .unset,
+    err: ?anyerror = null,
+
+    fn run(self: *@This()) void {
+        self.broker.serveListenersUntil(&.{.{
+            .source = self.broker.server.?.pendingSource(),
+            .accept_concurrency = 2,
+        }}, .{
+            .shutdown = &self.shutdown,
+        }) catch |err| {
+            self.err = err;
+        };
+    }
+
+    fn stop(self: *@This(), io: std.Io, thread: std.Thread) !void {
+        self.shutdown.set(io);
+        thread.join();
+        if (self.err) |err| return err;
+    }
+};
+
+pub fn runSequence(input: []const u8) !model.Summary {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var local = try Broker.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = model.max_operations,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer local.deinit();
+    try local.createCommitLog(tmp.dir, "bridge-qos2.log", .{});
+    var local_runner = BrokerRunner{ .broker = &local };
+    const local_thread = try std.Thread.spawn(
+        .{},
+        BrokerRunner.run,
+        .{&local_runner},
+    );
+    var local_joined = false;
+    defer if (!local_joined) {
+        local_runner.shutdown.set(io);
+        local_thread.join();
+    };
+
+    var subscriber = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        local.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "fuzz-qos2-subscriber",
+            .topic_alias_maximum = 0,
+        },
+        model.packet_timeout,
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(&.{.{
+        .topic_filter = "mirror/#",
+        .qos = .exactly_once,
+        .retain_as_published = true,
+    }}, .{});
+    defer suback.deinit(allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{0x02},
+        suback.suback.reason_codes,
+    );
+
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    var remote_open = true;
+    defer if (remote_open) remote.deinit();
+    const sequence = input[0..@min(input.len, model.max_operations)];
+    var peer_state = peer.State{
+        .server = &remote,
+        .input = sequence,
+    };
+    const peer_thread = try std.Thread.spawn(.{}, peer.State.run, .{&peer_state});
+    var peer_joined = false;
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge: ?bridge_mod.Bridge = initBridge(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        &shutdown,
+    ) catch |err| {
+        remote.deinit();
+        remote_open = false;
+        peer_thread.join();
+        return err;
+    };
+    defer if (bridge) |*value| value.deinit();
+    defer if (!peer_joined) {
+        remote.deinit();
+        remote_open = false;
+        peer_thread.join();
+    };
+    const initial = try bridge.?.connect();
+    try std.testing.expect(!initial.session_present);
+
+    var state = model.State{};
+    var summary = model.Summary{};
+    for (sequence, 0..) |operation, index| {
+        const kind = operation & 0x03;
+        try std.testing.expect(try bridge.?.step(.{
+            .timeout = model.packet_timeout,
+        }));
+        try std.testing.expectEqual(
+            summary.released,
+            local.stats().publish_messages_received,
+        );
+        try expectTransactionCount(
+            allocator,
+            &local,
+            bridge.?.session_epoch,
+            1,
+        );
+        try drainSubscriber(&subscriber, null);
+
+        switch (kind) {
+            0 => {
+                try std.testing.expect(try bridge.?.step(.{
+                    .timeout = model.packet_timeout,
+                }));
+                summary.ordinary += 1;
+            },
+            1 => {
+                try std.testing.expect(try bridge.?.step(.{
+                    .timeout = model.packet_timeout,
+                }));
+                try std.testing.expect(try bridge.?.step(.{
+                    .timeout = model.packet_timeout,
+                }));
+                summary.transport_resumes += 1;
+            },
+            2 => {
+                bridge.?.deinit();
+                bridge = null;
+                bridge = try initBridge(
+                    allocator,
+                    io,
+                    &local,
+                    remote.address(),
+                    &shutdown,
+                );
+                const resumed = try bridge.?.connect();
+                try std.testing.expect(resumed.session_present);
+                try std.testing.expect(try bridge.?.step(.{
+                    .timeout = model.packet_timeout,
+                }));
+                summary.process_resumes += 1;
+            },
+            3 => {
+                try std.testing.expect(try bridge.?.step(.{
+                    .timeout = model.packet_timeout,
+                }));
+                summary.fresh_session_discards += 1;
+                try expectTransactionCount(
+                    allocator,
+                    &local,
+                    bridge.?.session_epoch,
+                    0,
+                );
+                continue;
+            },
+            else => unreachable,
+        }
+
+        state.release(operation, index);
+        summary.released += 1;
+        summary.duplicate_inputs += @intFromBool(operation & 0x10 != 0);
+        summary.retained_writes += @intFromBool(operation & 0x08 != 0);
+        try drainSubscriber(
+            &subscriber,
+            .{
+                .operation = operation,
+                .index = index,
+                .retained = operation & 0x08 != 0,
+            },
+        );
+        try std.testing.expectEqual(
+            summary.released,
+            local.stats().publish_messages_received,
+        );
+        try expectTransactionCount(
+            allocator,
+            &local,
+            bridge.?.session_epoch,
+            0,
+        );
+    }
+
+    try bridge.?.disconnect(0);
+    peer_thread.join();
+    peer_joined = true;
+    if (peer_state.err) |err| return err;
+    summary.subscription_replays = peer_state.summary.subscription_replays;
+
+    try verifyRetainedState(allocator, io, local, state, &summary);
+    try subscriber.disconnect(0);
+    try local_runner.stop(io, local_thread);
+    local_joined = true;
+    return summary;
+}
+
+fn expectTransactionCount(
+    allocator: std.mem.Allocator,
+    local: *Broker,
+    session_epoch: u64,
+    expected: usize,
+) !void {
+    const transactions = try local.bridgeQoS2SessionTransactionsAlloc(
+        allocator,
+        model.bridge_id,
+        session_epoch,
+    );
+    defer allocator.free(transactions);
+    try std.testing.expectEqual(expected, transactions.len);
+    if (expected == 1) {
+        try std.testing.expect(transactions[0].phase == .pending);
+    }
+}
+
+fn initBridge(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    local: *Broker,
+    remote_address: std.Io.net.IpAddress,
+    shutdown: *std.Io.Event,
+) !bridge_mod.Bridge {
+    const properties = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    return bridge_mod.Bridge.initMany(
+        allocator,
+        io,
+        local,
+        remote_address,
+        .{
+            .connect = .{
+                .protocol = .v5,
+                .client_id = "fuzz-qos2-bridge",
+                .clean_start = false,
+                .connect_timeout = model.packet_timeout,
+                .properties = &properties,
+            },
+            .reconnect_policy = .{
+                .initial_delay = .fromMilliseconds(1),
+                .max_delay = .fromMilliseconds(1),
+                .max_attempts = 1,
+            },
+            .rules = &.{
+                .{
+                    .filter = model.remote_topics[0],
+                    .qos = .exactly_once,
+                    .local_prefix = "mirror/",
+                },
+                .{
+                    .filter = model.remote_topics[1],
+                    .qos = .exactly_once,
+                    .local_prefix = "mirror/",
+                },
+            },
+            .bridge_id = model.bridge_id,
+        },
+        shutdown,
+    );
+}
+
+const Expected = struct {
+    operation: u8,
+    index: usize,
+    retained: bool,
+};
+
+fn drainSubscriber(
+    connection: *runtime.Connection,
+    expected: ?Expected,
+) !void {
+    try connection.writePingReq();
+    var saw_publish = false;
+    var pending_id: ?u16 = null;
+    while (true) {
+        var event = try connection.readClientPacketEventWithTimeout(
+            model.packet_timeout,
+        );
+        defer event.deinit(std.testing.allocator);
+        switch (event) {
+            .publish => |delivery| {
+                if (saw_publish or pending_id != null) {
+                    return error.UnexpectedBridgeDelivery;
+                }
+                try validateDelivery(
+                    delivery.publish,
+                    expected orelse return error.UnexpectedBridgeDelivery,
+                );
+                pending_id = delivery.publish.packet_id.?;
+                try connection.writePubRec(pending_id.?, 0);
+            },
+            .pubrel => |release| {
+                try std.testing.expectEqual(pending_id.?, release.ack.packet_id);
+                try connection.writePubComp(release.ack.packet_id, 0);
+                pending_id = null;
+                saw_publish = true;
+            },
+            .pingresp => {
+                if (pending_id != null) {
+                    // The first request was already queued when PUBREC made
+                    // PUBREL eligible. A second response is the ordering
+                    // barrier for the completed two-phase exchange.
+                    try connection.writePingReq();
+                    continue;
+                }
+                try std.testing.expectEqual(expected != null, saw_publish);
+                return;
+            },
+            else => return error.UnexpectedClientPacket,
+        }
+    }
+}
+
+fn validateDelivery(publish: mqtt.Publish, expected: Expected) !void {
+    const topic_index: usize = (expected.operation >> 2) & 0x01;
+    const payload = model.Payload.init(expected.operation, expected.index);
+    try std.testing.expectEqualStrings(
+        model.local_topics[topic_index],
+        publish.topic,
+    );
+    try std.testing.expectEqualSlices(u8, &payload.bytes, publish.payload);
+    try std.testing.expectEqual(mqtt.QoS.exactly_once, publish.qos);
+    try std.testing.expectEqual(expected.retained, publish.retain);
+    try std.testing.expect(!publish.dup);
+    var user_property_count: usize = 0;
+    for (publish.properties) |property| switch (property) {
+        .utf8_pair => |value| if (value.id == .user_property) {
+            try std.testing.expectEqualStrings("origin", value.key);
+            try std.testing.expectEqualStrings("remote-qos2", value.value);
+            user_property_count += 1;
+        },
+        .varint => |value| if (value.id == .subscription_identifier) {
+            return error.RemoteSubscriptionIdentifierLeaked;
+        },
+        .two_byte => |value| if (value.id == .topic_alias) {
+            return error.RemoteTopicAliasLeaked;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 1), user_property_count);
+}
+
+fn verifyRetainedState(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    local: Broker,
+    state: model.State,
+    summary: *model.Summary,
+) !void {
+    var probe = try runtime.Client.connectWithTimeout(
+        allocator,
+        io,
+        local.address(),
+        .{
+            .protocol = .v5,
+            .client_id = "fuzz-qos2-retained-probe",
+            .topic_alias_maximum = 0,
+        },
+        model.packet_timeout,
+    );
+    defer probe.close();
+    for (model.local_topics, 0..) |topic, topic_index| {
+        var suback = try probe.subscribe(&.{.{
+            .topic_filter = topic,
+            .qos = .exactly_once,
+            .retain_as_published = true,
+        }}, .{});
+        defer suback.deinit(allocator);
+        if (state.retained[topic_index]) |retained| {
+            try drainSubscriber(
+                &probe,
+                .{
+                    .operation = retained.payload.bytes[0],
+                    .index = retained.payload.bytes[1],
+                    .retained = true,
+                },
+            );
+            summary.retained_probe_deliveries += 1;
+        } else {
+            try drainSubscriber(&probe, null);
+        }
+    }
+    try probe.disconnect(0);
+}
