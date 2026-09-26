@@ -27,6 +27,8 @@ const Scenario = enum {
     custom_metadata,
     client_compressed_unary,
     server_compressed_unary,
+    client_compressed_streaming,
+    server_compressed_streaming,
     client_streaming,
     server_streaming,
 
@@ -137,6 +139,15 @@ pub fn main(init: std.process.Init) !void {
             allocator,
             &connection,
         ),
+        .client_compressed_streaming => try serveClientCompressedStreaming(
+            allocator,
+            io,
+            &connection,
+        ),
+        .server_compressed_streaming => try serveServerCompressedStreaming(
+            allocator,
+            &connection,
+        ),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
@@ -238,22 +249,111 @@ fn writeUnaryPayload(
 const InputStreamAccumulator = struct {
     count: usize = 0,
     total: usize = 0,
+    expected_sizes: []const usize = &canonical_request_sizes,
+    expected_compression: ?[]const bool = null,
+    compression_matches: bool = true,
 
     fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
-        if (self.count == canonical_request_sizes.len or
-            try messages.decodeStreamingInputCallRequest(message.payload) !=
-                canonical_request_sizes[self.count])
-        {
+        if (self.count == self.expected_sizes.len) {
+            return error.UnexpectedRequest;
+        }
+        const request = try messages.decodeStreamingInputCallRequest(
+            message.payload,
+        );
+        if (request.request_body_size != self.expected_sizes[self.count]) {
+            return error.UnexpectedRequest;
+        }
+        if (self.expected_compression) |expected| {
+            if (request.expect_compressed != expected[self.count] or
+                message.was_compressed != expected[self.count])
+            {
+                self.compression_matches = false;
+            }
+        } else if (request.expect_compressed != null) {
             return error.UnexpectedRequest;
         }
         self.total = std.math.add(
             usize,
             self.total,
-            canonical_request_sizes[self.count],
+            request.request_body_size,
         ) catch return error.MessageTooLarge;
         self.count += 1;
     }
 };
+
+fn serveClientCompressedStreaming(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    const probe_sizes = [_]usize{27_182};
+    const probe_compression = [_]bool{true};
+    {
+        var probe = InputStreamAccumulator{
+            .expected_sizes = &probe_sizes,
+            .expected_compression = &probe_compression,
+        };
+        var probe_stream = try connection.acceptDuplex();
+        defer probe_stream.deinit();
+        if (!std.mem.eql(
+            u8,
+            probe_stream.path,
+            client_streaming_service_path,
+        )) return error.UnexpectedMethod;
+        while (probe.count == 0) {
+            var event = try probe_stream.readRequestEvent(
+                &probe,
+                InputStreamAccumulator.consume,
+            );
+            defer event.deinit();
+            switch (event) {
+                .messages => {},
+                .finished => return error.UnexpectedEndOfStream,
+                .reset => return error.UnexpectedReset,
+            }
+        }
+        if (probe.count != probe_sizes.len or probe.compression_matches) {
+            return error.UnexpectedCompressionProbe;
+        }
+        try probe_stream.finish(
+            .invalid_argument,
+            "Compressed request expectation not met.",
+            &.{},
+            &.{},
+        );
+        const cleanup_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        });
+        _ = try probe_stream.drainRequestAfterResponseWithDeadline(
+            cleanup_deadline,
+        );
+    }
+
+    const expected_sizes = [_]usize{ 27_182, 45_904 };
+    const expected_compression = [_]bool{ true, false };
+    var accumulator = InputStreamAccumulator{
+        .expected_sizes = &expected_sizes,
+        .expected_compression = &expected_compression,
+    };
+    var request = try connection.readStreaming(
+        &accumulator,
+        InputStreamAccumulator.consume,
+    );
+    defer request.deinit();
+    if (!std.mem.eql(u8, request.path, client_streaming_service_path) or
+        accumulator.count != expected_sizes.len or
+        !accumulator.compression_matches)
+    {
+        return error.UnexpectedCompression;
+    }
+    try writeStreamingInputResponse(
+        allocator,
+        connection,
+        &request,
+        accumulator.total,
+    );
+}
 
 fn serveClientStreaming(
     allocator: std.mem.Allocator,
@@ -271,9 +371,23 @@ fn serveClientStreaming(
     {
         return error.UnexpectedRequest;
     }
+    try writeStreamingInputResponse(
+        allocator,
+        connection,
+        &request,
+        accumulator.total,
+    );
+}
+
+fn writeStreamingInputResponse(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+    request: *const netz.grpc.StreamingRequest,
+    aggregate: usize,
+) !void {
     const response = try messages.encodeStreamingInputCallResponseAlloc(
         allocator,
-        accumulator.total,
+        aggregate,
     );
     defer allocator.free(response);
     var writer = try connection.startStreamingResponse(
@@ -297,13 +411,20 @@ fn serveServerStreaming(
     if (!std.mem.eql(u8, request.request.path, server_streaming_service_path)) {
         return error.UnexpectedMethod;
     }
-    var sizes_storage: [16]u32 = undefined;
-    const sizes = try messages.decodeStreamingOutputCallResponseSizes(
+    var parameter_storage: [16]messages.ResponseParameter = undefined;
+    const parameters = try messages.decodeStreamingOutputCallResponseParameters(
         request.request.message.payload,
-        &sizes_storage,
+        &parameter_storage,
     );
-    if (!std.mem.eql(u32, sizes, &canonical_response_sizes_u32)) {
+    if (parameters.len != canonical_response_sizes_u32.len) {
         return error.UnexpectedRequest;
+    }
+    for (parameters, canonical_response_sizes_u32) |parameter, size| {
+        if (parameter.size != size or parameter.interval_us != 0 or
+            parameter.compressed != null)
+        {
+            return error.UnexpectedRequest;
+        }
     }
     var writer = try connection.startStreamingResponse(
         request.request.stream_id,
@@ -313,13 +434,62 @@ fn serveServerStreaming(
         },
     );
     defer writer.deinit();
-    for (sizes) |size| {
+    for (parameters) |parameter| {
         const response = try messages.encodeStreamingOutputCallResponseAlloc(
             allocator,
-            size,
+            parameter.size,
         );
         defer allocator.free(response);
         try writer.writeMessage(response);
+    }
+    try writer.finishOk();
+}
+
+fn serveServerCompressedStreaming(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var request = try connection.readUnary();
+    defer request.deinit();
+    if (!std.mem.eql(u8, request.request.path, server_streaming_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    var storage: [2]messages.ResponseParameter = undefined;
+    const parameters = try messages.decodeStreamingOutputCallResponseParameters(
+        request.request.message.payload,
+        &storage,
+    );
+    const expected = [_]messages.ResponseParameter{
+        .{ .size = 31_415, .compressed = true },
+        .{ .size = 92_653, .compressed = false },
+    };
+    if (parameters.len != expected.len) return error.UnexpectedRequest;
+    for (parameters, expected) |actual, wanted| {
+        if (actual.size != wanted.size or
+            actual.interval_us != wanted.interval_us or
+            actual.compressed != wanted.compressed)
+        {
+            return error.UnexpectedRequest;
+        }
+    }
+    var writer = try connection.startStreamingResponse(
+        request.request.stream_id,
+        .{
+            .compression = .gzip,
+            .request_accepted_encodings = request.request.accepted_encodings,
+            .max_message_size = message_limit,
+        },
+    );
+    defer writer.deinit();
+    for (parameters) |parameter| {
+        const response = try messages.encodeStreamingOutputCallResponseAlloc(
+            allocator,
+            parameter.size,
+        );
+        defer allocator.free(response);
+        try writer.writeMessageWithOptions(response, .{
+            .disable_compression = !parameter.compressed.?,
+        });
     }
     try writer.finishOk();
 }
@@ -466,6 +636,8 @@ fn serveScenario(
         .custom_metadata,
         .client_compressed_unary,
         .server_compressed_unary,
+        .client_compressed_streaming,
+        .server_compressed_streaming,
         .client_streaming,
         .server_streaming,
         => unreachable,

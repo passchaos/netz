@@ -68,17 +68,30 @@ pub const ClientWriter = struct {
         self: *ClientWriter,
         payload: []const u8,
     ) Error!void {
+        return self.writeMessageWithOptions(payload, .{});
+    }
+
+    pub fn writeMessageWithOptions(
+        self: *ClientWriter,
+        payload: []const u8,
+        options: codec.MessageOptions,
+    ) Error!void {
         if (self.deadline) |deadline| {
-            self.encoder.writeMessageWithDeadline(
+            self.encoder.writeMessageWithOptionsAndDeadline(
                 &self.transport,
                 payload,
+                options,
                 deadline,
             ) catch |err| {
                 if (err == error.Timeout) self.cancelAfterDeadline();
                 return err;
             };
         } else {
-            try self.encoder.writeMessage(&self.transport, payload);
+            try self.encoder.writeMessageWithOptions(
+                &self.transport,
+                payload,
+                options,
+            );
         }
     }
 
@@ -95,7 +108,22 @@ pub const ClientWriter = struct {
         context: anytype,
         comptime consume: anytype,
     ) !?Response {
-        self.writeMessage(payload) catch |err| switch (err) {
+        return self.writeMessageWithOptionsOrReadResponse(
+            payload,
+            .{},
+            context,
+            consume,
+        );
+    }
+
+    pub fn writeMessageWithOptionsOrReadResponse(
+        self: *ClientWriter,
+        payload: []const u8,
+        options: codec.MessageOptions,
+        context: anytype,
+        comptime consume: anytype,
+    ) !?Response {
+        self.writeMessageWithOptions(payload, options) catch |err| switch (err) {
             error.ResponseAvailable => {
                 return try self.readResponse(context, consume);
             },
@@ -461,7 +489,19 @@ pub const ServerWriter = struct {
         self: *ServerWriter,
         payload: []const u8,
     ) Error!void {
-        try self.encoder.writeMessage(&self.transport, payload);
+        return self.writeMessageWithOptions(payload, .{});
+    }
+
+    pub fn writeMessageWithOptions(
+        self: *ServerWriter,
+        payload: []const u8,
+        options: codec.MessageOptions,
+    ) Error!void {
+        try self.encoder.writeMessageWithOptions(
+            &self.transport,
+            payload,
+            options,
+        );
     }
 
     pub fn finish(

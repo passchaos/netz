@@ -3,6 +3,7 @@
 //! The scenarios mirror gRPC Core commit
 //! `03d65cc67c450ccbb58a8a45627c4da83a886ccd`'s canonical `ping_pong`,
 //! `client_compressed_unary`, `server_compressed_unary`, `custom_metadata`,
+//! `client_compressed_streaming`, `server_compressed_streaming`,
 //! `cancel_after_first_response`, and
 //! `timeout_on_sleeping_server` cases.  Only the bounded protobuf fixture
 //! subset lives beside this executable; netz's gRPC transport remains payload
@@ -14,6 +15,10 @@ const messages = @import("grpc_cpp_messages.zig");
 
 const service_path = "/grpc.testing.TestService/FullDuplexCall";
 const unary_service_path = "/grpc.testing.TestService/UnaryCall";
+const client_streaming_service_path =
+    "/grpc.testing.TestService/StreamingInputCall";
+const server_streaming_service_path =
+    "/grpc.testing.TestService/StreamingOutputCall";
 const authority = "localhost";
 const response_timeout = std.Io.Duration.fromSeconds(10);
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
@@ -93,19 +98,145 @@ pub fn main(init: std.process.Init) !void {
 
     try runPingPong(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
+    try runStreamingCompression(allocator, &client, message_limit);
     try runCustomMetadata(allocator, &client, message_limit);
     try runCancellationAndReuse(allocator, &client, message_limit);
     try runSleepingDeadline(allocator, &client, message_limit);
 
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
-            "ping_pong=4 compression=request+response-gzip+identity " ++
+            "ping_pong=4 compression=unary+streaming-gzip+identity " ++
             "metadata=initial+trailing-bin " ++
             "cancel=CANCEL reuse=true " ++
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runStreamingCompression(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    try runClientStreamingCompression(allocator, client, message_limit);
+    try runServerStreamingCompression(allocator, client, message_limit);
+}
+
+const AggregateObserver = struct {
+    count: usize = 0,
+    aggregate: usize = 0,
+
+    fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
+        if (self.count != 0 or message.was_compressed) {
+            return error.InvalidCompressionResponse;
+        }
+        self.aggregate = try messages.decodeStreamingInputCallResponse(
+            message.payload,
+        );
+        self.count += 1;
+    }
+};
+
+fn runClientStreamingCompression(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    {
+        var probe = try client.startStreaming(.{
+            .path = client_streaming_service_path,
+            .authority = authority,
+            .max_message_size = message_limit,
+        });
+        defer probe.deinit();
+        const request = try messages.encodeStreamingInputCallRequestAlloc(
+            allocator,
+            .{ .request_body_size = 27_182, .expect_compressed = true },
+        );
+        defer allocator.free(request);
+        try probe.writeMessage(request);
+        var observer = AggregateObserver{};
+        var response = try probe.finishAndRead(
+            &observer,
+            AggregateObserver.consume,
+        );
+        defer response.deinit();
+        if (response.status != .invalid_argument or observer.count != 0) {
+            return error.InvalidCompressionProbe;
+        }
+    }
+
+    var stream = try client.startStreaming(.{
+        .path = client_streaming_service_path,
+        .authority = authority,
+        .compression = .gzip,
+        .max_message_size = message_limit,
+    });
+    defer stream.deinit();
+    const sizes = [_]usize{ 27_182, 45_904 };
+    for (sizes, [_]bool{ true, false }) |size, compress| {
+        const request = try messages.encodeStreamingInputCallRequestAlloc(
+            allocator,
+            .{ .request_body_size = size, .expect_compressed = compress },
+        );
+        defer allocator.free(request);
+        try stream.writeMessageWithOptions(request, .{
+            .disable_compression = !compress,
+        });
+    }
+    var observer = AggregateObserver{};
+    var response = try stream.finishAndRead(
+        &observer,
+        AggregateObserver.consume,
+    );
+    defer response.deinit();
+    if (response.status != .ok or observer.count != 1 or
+        observer.aggregate != 27_182 + 45_904)
+    {
+        return error.InvalidCompressionResponse;
+    }
+}
+
+fn runServerStreamingCompression(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    const expected_sizes = [_]usize{ 31_415, 92_653 };
+    const expected_compression = [_]bool{ true, false };
+    const parameters = [_]messages.ResponseParameter{
+        .{ .size = 31_415, .compressed = true },
+        .{ .size = 92_653, .compressed = false },
+    };
+    const request = try messages.encodeStreamingOutputCallParametersAlloc(
+        allocator,
+        &parameters,
+    );
+    defer allocator.free(request);
+    var stream = try client.startStreaming(.{
+        .path = server_streaming_service_path,
+        .authority = authority,
+        .accepted_encodings = .{ .gzip = true },
+        .max_message_size = message_limit,
+    });
+    defer stream.deinit();
+    try stream.writeMessage(request);
+    var observer = Observer{
+        .expected_sizes = &expected_sizes,
+        .expected_compression = &expected_compression,
+    };
+    var response = try stream.finishAndRead(&observer, Observer.consume);
+    defer response.deinit();
+    if (response.status != .ok or observer.message_count != parameters.len or
+        !std.mem.eql(
+            u8,
+            response.encoding orelse return error.InvalidCompressionResponse,
+            "gzip",
+        ))
+    {
+        return error.InvalidCompressionResponse;
+    }
 }
 
 fn runUnaryCompression(
@@ -339,6 +470,7 @@ const ObservedEvent = enum { metadata, messages, terminal };
 
 const Observer = struct {
     expected_sizes: []const usize,
+    expected_compression: ?[]const bool = null,
     message_count: usize = 0,
     expect_metadata_echo: bool = false,
     initial_metadata_echo: bool = false,
@@ -353,6 +485,11 @@ const Observer = struct {
             message.payload,
             self.expected_sizes[self.message_count],
         );
+        if (self.expected_compression) |expected| {
+            if (message.was_compressed != expected[self.message_count]) {
+                return error.InvalidCompressionResponse;
+            }
+        }
         self.message_count += 1;
     }
 };

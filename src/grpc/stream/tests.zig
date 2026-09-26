@@ -329,6 +329,37 @@ test "gRPC stream encoder uses independent compression contexts" {
     try std.testing.expect(try iterator.next() == null);
 }
 
+test "gRPC stream encoder supports per-message compression opt-out" {
+    const allocator = std.testing.allocator;
+    const payload = "per-message-compression-opt-out-" ** 64;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const encoder = codec.Encoder{
+        .allocator = allocator,
+        .algorithm = .gzip,
+        .compression_level = 1,
+        .max_message_size = payload.len,
+    };
+    try encoder.appendMessage(&encoded, payload);
+    try encoder.appendMessageWithOptions(
+        &encoded,
+        payload,
+        .{ .disable_compression = true },
+    );
+    try encoder.appendMessage(&encoded, payload);
+
+    var iterator = wire.MessageIterator.init(encoded.items, payload.len);
+    const first = (try iterator.next()).?;
+    const identity = (try iterator.next()).?;
+    const third = (try iterator.next()).?;
+    try std.testing.expect(first.compressed);
+    try std.testing.expect(!identity.compressed);
+    try std.testing.expectEqualStrings(payload, identity.payload);
+    try std.testing.expect(third.compressed);
+    try std.testing.expectEqualSlices(u8, first.payload, third.payload);
+    try std.testing.expect(try iterator.next() == null);
+}
+
 test "gRPC request and response message streams cross HTTP2 DATA frames" {
     const allocator = std.testing.allocator;
     const large_request = "request-compressible-" ** 128;
@@ -509,6 +540,8 @@ test "gRPC request and response message streams cross HTTP2 DATA frames" {
 
 test "gRPC duplex interleaves a response before request FIN" {
     const allocator = std.testing.allocator;
+    const first_request = "first-request-compressed-" ** 16;
+    const second_request = "second-request-identity-" ** 16;
     const fragmented_response = "fragmented-response-" ** 8;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -537,8 +570,15 @@ test "gRPC duplex interleaves a response before request FIN" {
         }
 
         fn consume(self: *@This(), message: codec.DecodedMessage) !void {
-            const expected = if (self.requests == 0) "one" else "two";
+            const expected = if (self.requests == 0)
+                first_request
+            else
+                second_request;
             try std.testing.expectEqualStrings(expected, message.payload);
+            try std.testing.expectEqual(
+                self.requests == 0,
+                message.was_compressed,
+            );
             self.requests += 1;
         }
 
@@ -554,11 +594,19 @@ test "gRPC duplex interleaves a response before request FIN" {
             try std.testing.expectEqualStrings("demo.Echo", stream.service);
             try std.testing.expectEqualStrings("Bidi", stream.method);
 
-            var first = try stream.readRequestEvent(self, consume);
-            defer first.deinit();
-            try std.testing.expectEqual(@as(usize, 1), first.messages.count);
-            try std.testing.expect(!first.messages.end_stream);
+            while (self.requests == 0) {
+                var first = try stream.readRequestEvent(self, consume);
+                defer first.deinit();
+                switch (first) {
+                    .messages => |progress| {
+                        try std.testing.expect(progress.count <= 1);
+                        try std.testing.expect(!progress.end_stream);
+                    },
+                    .finished, .reset => return error.UnexpectedEndOfStream,
+                }
+            }
             try stream.startResponse(.{
+                .compression = .gzip,
                 .request_accepted_encodings = stream.accepted_encodings,
                 .initial_metadata = &.{.{
                     .name = "x-duplex",
@@ -570,10 +618,19 @@ test "gRPC duplex interleaves a response before request FIN" {
                 try stream.writeMessage(fragmented_response),
             );
 
-            var second = try stream.readRequestEvent(self, consume);
-            defer second.deinit();
-            try std.testing.expectEqual(@as(usize, 1), second.messages.count);
-            try std.testing.expect(second.messages.end_stream);
+            var request_ended = false;
+            while (self.requests == 1) {
+                var second = try stream.readRequestEvent(self, consume);
+                defer second.deinit();
+                switch (second) {
+                    .messages => |progress| {
+                        try std.testing.expect(progress.count <= 1);
+                        request_ended = progress.end_stream;
+                    },
+                    .finished, .reset => return error.UnexpectedEndOfStream,
+                }
+            }
+            try std.testing.expect(request_ended);
 
             var finished = try stream.readRequestEvent(self, consume);
             defer finished.deinit();
@@ -583,7 +640,10 @@ test "gRPC duplex interleaves a response before request FIN" {
             );
             try std.testing.expectEqual(
                 duplex.WriteResult.complete,
-                try stream.writeMessage("ack-two"),
+                try stream.writeMessageWithOptions(
+                    "ack-two",
+                    .{ .disable_compression = true },
+                ),
             );
             try stream.finishOk();
         }
@@ -598,6 +658,10 @@ test "gRPC duplex interleaves a response before request FIN" {
             else
                 "ack-two";
             try std.testing.expectEqualStrings(expected, message.payload);
+            try std.testing.expectEqual(
+                self.count == 0,
+                message.was_compressed,
+            );
             self.count += 1;
         }
     };
@@ -619,12 +683,14 @@ test "gRPC duplex interleaves a response before request FIN" {
         .{
             .path = "/demo.Echo/Bidi",
             .authority = "localhost",
+            .compression = .gzip,
+            .accepted_encodings = .{ .gzip = true },
         },
     );
     defer stream.deinit();
     try std.testing.expectEqual(
         duplex.WriteResult.complete,
-        try stream.writeMessage("one"),
+        try stream.writeMessage(first_request),
     );
 
     var collector: Collector = .{};
@@ -653,7 +719,10 @@ test "gRPC duplex interleaves a response before request FIN" {
 
     try std.testing.expectEqual(
         duplex.WriteResult.complete,
-        try stream.writeFinalMessage("two"),
+        try stream.writeFinalMessageWithOptions(
+            second_request,
+            .{ .disable_compression = true },
+        ),
     );
     var second_reply = try stream.readResponseEvent(
         &collector,
@@ -1445,8 +1514,9 @@ test "gRPC streaming upload returns early cancelled status while flow blocked" {
         {},
         Consumer.consume,
     )) == null);
-    var early = (try client.writeMessageOrReadResponse(
+    var early = (try client.writeMessageWithOptionsOrReadResponse(
         "second",
+        .{ .disable_compression = true },
         {},
         Consumer.consume,
     )).?;

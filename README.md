@@ -379,6 +379,8 @@ Current protocol coverage includes:
   a package-local focused DEFLATE backend, bounded decompression, typed
   `grpc-accept-encoding` negotiation, asymmetric request/response algorithms,
   and gRPC Core-compatible fallback when compression does not shrink a message,
+  stream-level encoding with per-message compression opt-out on sequential and
+  duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server
   helpers with opaque protobuf payloads, initial/trailing metadata,
   final HEADERS-before-DATA callbacks, arbitrary prefix/payload split
@@ -395,8 +397,8 @@ Current protocol coverage includes:
   only a lazy integration dependency. The bidirectional h2c/TLS gRPC C++
   process gates run the netz endpoints on zio-backed `std.Io` and identify the
   pinned Linux peer as `grpc-cpp-posix-event-engine`; they cover upstream's
-  canonical compressed-unary request probe plus gzip/identity request and
-  response cases in both endpoint directions. The official reflection
+  canonical compressed-unary and compressed-streaming probes plus gzip/identity
+  request and response messages in both endpoint directions. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

@@ -187,10 +187,23 @@ pub const ClientDuplex = struct {
         self: *ClientDuplex,
         payload: []const u8,
     ) Error!WriteResult {
+        return self.writeMessageWithOptions(payload, .{});
+    }
+
+    pub fn writeMessageWithOptions(
+        self: *ClientDuplex,
+        payload: []const u8,
+        options: codec.MessageOptions,
+    ) Error!WriteResult {
         try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         self.pending_message = .{
-            .bytes = try encodeMessageAlloc(self.allocator, self.encoder, payload),
+            .bytes = try encodeMessageAlloc(
+                self.allocator,
+                self.encoder,
+                payload,
+                options,
+            ),
         };
         return self.resumeMessage();
     }
@@ -202,10 +215,23 @@ pub const ClientDuplex = struct {
         self: *ClientDuplex,
         payload: []const u8,
     ) Error!WriteResult {
+        return self.writeFinalMessageWithOptions(payload, .{});
+    }
+
+    pub fn writeFinalMessageWithOptions(
+        self: *ClientDuplex,
+        payload: []const u8,
+        options: codec.MessageOptions,
+    ) Error!WriteResult {
         try self.ensureWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         self.pending_message = .{
-            .bytes = try encodeMessageAlloc(self.allocator, self.encoder, payload),
+            .bytes = try encodeMessageAlloc(
+                self.allocator,
+                self.encoder,
+                payload,
+                options,
+            ),
             .end_stream = true,
         };
         return self.resumeMessage();
@@ -965,12 +991,25 @@ pub const ServerDuplex = struct {
         self: *ServerDuplex,
         payload: []const u8,
     ) Error!WriteResult {
+        return self.writeMessageWithOptions(payload, .{});
+    }
+
+    pub fn writeMessageWithOptions(
+        self: *ServerDuplex,
+        payload: []const u8,
+        options: codec.MessageOptions,
+    ) Error!WriteResult {
         try self.ensureResponseWritable();
         if (self.pending_message != null) return error.InvalidStreamState;
         const encoder = self.response_encoder orelse
             return error.InvalidStreamState;
         self.pending_message = .{
-            .bytes = try encodeMessageAlloc(self.allocator, encoder, payload),
+            .bytes = try encodeMessageAlloc(
+                self.allocator,
+                encoder,
+                payload,
+                options,
+            ),
         };
         return self.resumeMessage();
     }
@@ -1256,10 +1295,11 @@ fn encodeMessageAlloc(
     allocator: std.mem.Allocator,
     encoder: codec.Encoder,
     payload: []const u8,
+    options: codec.MessageOptions,
 ) Error![]u8 {
     var encoded: std.ArrayList(u8) = .empty;
     errdefer encoded.deinit(allocator);
-    try encoder.appendMessage(&encoded, payload);
+    try encoder.appendMessageWithOptions(&encoded, payload, options);
     return encoded.toOwnedSlice(allocator);
 }
 

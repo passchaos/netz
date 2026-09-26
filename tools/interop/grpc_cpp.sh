@@ -133,7 +133,7 @@ fi
 
 timeout 30s "$client" "$port" >"$work/client.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=h2c ping_pong=4 compression=request+response-gzip+identity metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
+  'netz gRPC client interoperated with grpc-cpp: transport=h2c ping_pong=4 compression=unary+streaming-gzip+identity metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client.log"
 cat "$work/client.log"
 
@@ -193,6 +193,6 @@ fi
 timeout 30s "$client" "$port" "$ca_file" \
   >"$work/client-tls.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=tls ping_pong=4 compression=request+response-gzip+identity metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
+  'netz gRPC client interoperated with grpc-cpp: transport=tls ping_pong=4 compression=unary+streaming-gzip+identity metadata=initial+trailing-bin cancel=CANCEL reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client-tls.log"
 cat "$work/client-tls.log"

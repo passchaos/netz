@@ -31,6 +31,8 @@ existing HTTP/2 runtime:
   `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
 - per-message gzip and RFC 1950 zlib-wrapped `deflate` compression using the
   package-local focused DEFLATE backend, with no cross-message codec state,
+- per-message compression opt-out on sequential and duplex client/server
+  writers while retaining the stream's negotiated `grpc-encoding`,
 - strict single-stream decompression with checksum/trailer validation,
   decompressed-size limits, raw-deflate and trailing-data rejection,
 - gRPC Core-compatible compression fallback when an encoded message is not
@@ -221,10 +223,11 @@ matches upstream's checked-in `.bazelversion`. The harness is reproducible even
 when a host lacks that exact Bazel release, but such a host cannot establish an
 external pass until the pinned tool or a prebuilt server is supplied.
 
-On 2026-09-15, after the zio migration, both complete h2c/TLS directions
+On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
-8.7.0 and GCC. The netz client completed all four forward scenarios, while the
-official C++ client completed seven scenarios per transport. The upstream
+8.7.0 and GCC. The netz client completed the full forward harness, including
+the canonical client/server compressed-streaming cases, while the official
+C++ client completed eleven scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
@@ -249,6 +252,7 @@ responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
 `empty_stream`, `client_compressed_unary`, `server_compressed_unary`,
+`client_compressed_streaming`, `server_compressed_streaming`,
 `client_streaming`, `server_streaming`,
 `cancel_after_first_response`, `timeout_on_sleeping_server`, and
 `custom_metadata` over both transports. Client streaming checks all four
@@ -262,16 +266,17 @@ condition. For the upstream test's hard-coded 1 ms deadline, the harness also
 records the legitimate race where the client reaches local
 `DEADLINE_EXCEEDED` before the cleartext or TLS server accept finishes and no
 server RPC exists.
-The two compression cases use gRPC Core's own test-only call inspector: the
-client-compressed case first sends the canonical deliberately false probe and
-requires netz to return `INVALID_ARGUMENT`, then verifies gzip and identity
-requests independently; the server-compressed case requires gzip and identity
-responses independently. The forward gate exercises the inverse direction on
-one persistent channel: netz sends gzip and identity unary requests that the
-C++ server inspects, advertises only gzip for the response check, verifies the
-message compressed bit and `grpc-encoding: gzip`, and validates the exact
-314159-byte decompressed protobuf payload. Both directions run over h2c and
-certificate-verified TLS.
+The four compression cases use gRPC Core's own test-only call inspector. The
+client-compressed unary and streaming cases first send the canonical false
+probe and require netz to return `INVALID_ARGUMENT`, then verify compressed
+and identity messages. Streaming uses one gzip RPC whose second request opts
+out per message. The server-compressed cases require gzip and identity
+responses independently; streaming uses one response stream whose first
+message is compressed and second is identity. The forward gate exercises the
+inverse direction on one persistent channel: netz sends and receives the same
+unary and streaming matrices, checks every message compressed bit, validates
+the negotiated `grpc-encoding: gzip`, and validates exact decompressed protobuf
+payloads. Both directions run over h2c and certificate-verified TLS.
 
 The reflection gate passed again after the zio migration on 2026-09-15 against
 the same pinned upstream revision and its Linux Posix EventEngine. Its ready,
@@ -355,10 +360,10 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    deadline propagation over h2c and certificate-verified TLS. The reverse gate
    covers upstream-client ping-pong, client/server streaming, empty-stream
    completion, cancellation, deadline behavior, unary/bidirectional
-   custom-metadata echo, and the canonical client/server compressed-unary
-   cases against netz over both transports. The forward gate independently
-   covers the same gzip/identity request and response matrix against the C++
-   server. Broader upstream streaming-compression, status, and authentication
+   custom-metadata echo, and the canonical client/server compressed unary and
+   streaming cases against netz over both transports. The forward gate
+   independently covers the same gzip/identity unary and per-message streaming
+   matrices against the C++ server. Broader upstream status and authentication
    cases remain future work.
 3. Add broader conformance/interop runners. Reflection accepts standard
    descriptor sets directly and

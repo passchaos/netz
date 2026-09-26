@@ -20,6 +20,13 @@ pub const DecodedMessage = struct {
     was_compressed: bool,
 };
 
+/// Controls encoding for one message without changing the stream's declared
+/// `grpc-encoding`. A disabled message uses the identity representation and a
+/// clear compressed flag; later messages continue using the stream default.
+pub const MessageOptions = struct {
+    disable_compression: bool = false,
+};
+
 pub const Decoder = struct {
     allocator: std.mem.Allocator,
     max_message_size: usize,
@@ -212,12 +219,21 @@ pub const Encoder = struct {
         writer: anytype,
         payload: []const u8,
     ) !void {
+        return self.writeMessageWithOptions(writer, payload, .{});
+    }
+
+    pub fn writeMessageWithOptions(
+        self: Encoder,
+        writer: anytype,
+        payload: []const u8,
+        options: MessageOptions,
+    ) !void {
         if (payload.len > self.max_message_size) {
             return error.GrpcMessageTooLarge;
         }
         var encoded = try compression.compressAlloc(
             self.allocator,
-            self.algorithm,
+            self.messageAlgorithm(options),
             payload,
             self.compression_level,
         );
@@ -246,12 +262,27 @@ pub const Encoder = struct {
         payload: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) !void {
+        return self.writeMessageWithOptionsAndDeadline(
+            writer,
+            payload,
+            .{},
+            deadline,
+        );
+    }
+
+    pub fn writeMessageWithOptionsAndDeadline(
+        self: Encoder,
+        writer: anytype,
+        payload: []const u8,
+        options: MessageOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) !void {
         if (payload.len > self.max_message_size) {
             return error.GrpcMessageTooLarge;
         }
         var encoded = try compression.compressAlloc(
             self.allocator,
-            self.algorithm,
+            self.messageAlgorithm(options),
             payload,
             self.compression_level,
         );
@@ -281,12 +312,21 @@ pub const Encoder = struct {
         out: *std.ArrayList(u8),
         payload: []const u8,
     ) !void {
+        return self.appendMessageWithOptions(out, payload, .{});
+    }
+
+    pub fn appendMessageWithOptions(
+        self: Encoder,
+        out: *std.ArrayList(u8),
+        payload: []const u8,
+        options: MessageOptions,
+    ) !void {
         if (payload.len > self.max_message_size) {
             return error.GrpcMessageTooLarge;
         }
         var encoded = try compression.compressAlloc(
             self.allocator,
-            self.algorithm,
+            self.messageAlgorithm(options),
             payload,
             self.compression_level,
         );
@@ -297,5 +337,12 @@ pub const Encoder = struct {
             encoded.bytes,
             encoded.compressed,
         );
+    }
+
+    fn messageAlgorithm(
+        self: Encoder,
+        options: MessageOptions,
+    ) compression.Algorithm {
+        return if (options.disable_compression) .identity else self.algorithm;
     }
 };

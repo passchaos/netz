@@ -6,6 +6,7 @@ pub const duplex = @import("duplex.zig");
 
 pub const Error = runtime.Error;
 pub const DecodedMessage = codec.DecodedMessage;
+pub const MessageOptions = codec.MessageOptions;
 pub const Decoder = codec.Decoder;
 pub const Encoder = codec.Encoder;
 pub const RequestOptions = runtime.RequestOptions;

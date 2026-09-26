@@ -36,8 +36,21 @@ pub const RequestOptions = struct {
     response_size: ?u32,
     /// `ResponseParameters.interval_us` (field 2); zero is omitted.
     interval_us: u32 = 0,
+    /// Presence maps to `ResponseParameters.compressed` (field 3).
+    response_compressed: ?bool = null,
     /// Number of zero bytes in `Payload.body` (payload field 2).
     request_body_size: usize,
+};
+
+pub const ResponseParameter = struct {
+    size: u32 = 0,
+    interval_us: u32 = 0,
+    compressed: ?bool = null,
+};
+
+pub const StreamingInputRequest = struct {
+    request_body_size: usize,
+    expect_compressed: ?bool = null,
 };
 
 pub const SimpleRequestOptions = struct {
@@ -188,13 +201,56 @@ pub fn encodeSimpleResponseAlloc(
     return encodeStreamingOutputCallResponseAlloc(allocator, body_size);
 }
 
-/// Decode one canonical `StreamingInputCallRequest` and return the zero-filled
-/// payload body size.
-pub fn decodeStreamingInputCallRequest(input: []const u8) Error!usize {
-    if (input.len > max_payload_size + 16) return error.MessageTooLarge;
+/// Encode the bounded `StreamingInputCallRequest` compression fixture.
+pub fn encodeStreamingInputCallRequestAlloc(
+    allocator: std.mem.Allocator,
+    options: StreamingInputRequest,
+) Error![]u8 {
+    if (options.request_body_size > max_payload_size) {
+        return error.MessageTooLarge;
+    }
+    const payload_len = if (options.request_body_size == 0)
+        0
+    else
+        try lengthDelimitedFieldLen(options.request_body_size);
+    const encoded_len = std.math.add(
+        usize,
+        try lengthDelimitedFieldLen(payload_len),
+        boolWrapperFieldLen(options.expect_compressed),
+    ) catch return error.MessageTooLarge;
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+    var cursor: usize = 0;
+    encoded[cursor] = fieldKey(1, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, payload_len);
+    if (options.request_body_size != 0) {
+        encoded[cursor] = fieldKey(2, .length_delimited);
+        cursor += 1;
+        writeVarint(encoded, &cursor, options.request_body_size);
+        @memset(encoded[cursor..][0..options.request_body_size], 0);
+        cursor += options.request_body_size;
+    }
+    writeBoolWrapperField(
+        encoded,
+        &cursor,
+        2,
+        options.expect_compressed,
+    );
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
+}
+
+/// Decode one canonical `StreamingInputCallRequest`, preserving the nullable
+/// compression expectation separately from the protobuf payload size.
+pub fn decodeStreamingInputCallRequest(
+    input: []const u8,
+) Error!StreamingInputRequest {
+    if (input.len > max_payload_size + 32) return error.MessageTooLarge;
     var reader = Reader{ .input = input };
     var payload_seen = false;
-    var body_size: usize = 0;
+    var expect_compressed_seen = false;
+    var result = StreamingInputRequest{ .request_body_size = 0 };
     while (!reader.finished()) {
         const tag = try reader.readTag();
         switch (tag.field_number) {
@@ -204,15 +260,25 @@ pub fn decodeStreamingInputCallRequest(input: []const u8) Error!usize {
                 }
                 if (payload_seen) return error.DuplicateField;
                 payload_seen = true;
-                body_size = try decodeZeroPayload(
+                result.request_body_size = try decodeZeroPayload(
                     try reader.readBytes(max_payload_size + 16),
+                );
+            },
+            2 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (expect_compressed_seen) return error.DuplicateField;
+                expect_compressed_seen = true;
+                result.expect_compressed = try decodeBoolValue(
+                    try reader.readBytes(2),
                 );
             },
             else => return error.UnsupportedField,
         }
     }
     if (!payload_seen) return error.MissingPayload;
-    return body_size;
+    return result;
 }
 
 pub fn encodeStreamingInputCallResponseAlloc(
@@ -234,12 +300,31 @@ pub fn encodeStreamingInputCallResponseAlloc(
     return encoded;
 }
 
-/// Decode the repeated response sizes from the canonical server-streaming
-/// request into caller-owned bounded storage.
-pub fn decodeStreamingOutputCallResponseSizes(
+pub fn decodeStreamingInputCallResponse(input: []const u8) Error!usize {
+    if (input.len > 16) return error.MessageTooLarge;
+    var reader = Reader{ .input = input };
+    var aggregate_seen = false;
+    var aggregate: usize = 0;
+    while (!reader.finished()) {
+        const tag = try reader.readTag();
+        if (tag.field_number != 1) return error.UnsupportedField;
+        if (tag.wire_type != .varint) return error.UnsupportedWireType;
+        if (aggregate_seen) return error.DuplicateField;
+        aggregate_seen = true;
+        const value = try reader.readVarint();
+        if (value > std.math.maxInt(i32)) return error.InvalidArgument;
+        aggregate = @intCast(value);
+    }
+    if (!aggregate_seen) return error.MissingPayload;
+    return aggregate;
+}
+
+/// Decode repeated response parameters from a server-streaming request into
+/// caller-owned bounded storage.
+pub fn decodeStreamingOutputCallResponseParameters(
     input: []const u8,
-    out: []u32,
-) Error![]const u32 {
+    out: []ResponseParameter,
+) Error![]const ResponseParameter {
     if (input.len > max_payload_size + 64) return error.MessageTooLarge;
     var reader = Reader{ .input = input };
     var response_type_seen = false;
@@ -265,10 +350,7 @@ pub fn decodeStreamingOutputCallResponseSizes(
                 const parameters = try decodeResponseParameters(
                     try reader.readBytes(32),
                 );
-                if (parameters.interval_us != 0) {
-                    return error.InvalidArgument;
-                }
-                out[count] = parameters.size;
+                out[count] = parameters;
                 count += 1;
             },
             else => return error.UnsupportedField,
@@ -318,6 +400,7 @@ pub fn decodeStreamingOutputCallRequest(input: []const u8) Error!RequestOptions 
                 const decoded = try decodeResponseParameters(parameters);
                 result.response_size = decoded.size;
                 result.interval_us = decoded.interval_us;
+                result.response_compressed = decoded.compressed;
             },
             3 => {
                 if (tag.wire_type != .length_delimited) {
@@ -381,13 +464,20 @@ pub fn encodeStreamingOutputCallRequestAlloc(
     if (options.interval_us > max_interval_us) return error.InvalidArgument;
     if (options.response_size) |size| {
         if (size > max_payload_size) return error.MessageTooLarge;
-    } else if (options.interval_us != 0) {
+    } else if (options.interval_us != 0 or
+        options.response_compressed != null)
+    {
         return error.InvalidArgument;
     }
 
-    const parameters_len = if (options.response_size) |size|
-        (if (size == 0) 0 else 1 + varintLen(size)) +
-            (if (options.interval_us == 0) 0 else 1 + varintLen(options.interval_us))
+    const parameter = ResponseParameter{
+        .size = options.response_size orelse 0,
+        .interval_us = options.interval_us,
+        .compressed = options.response_compressed,
+    };
+    if (options.response_size != null) try validateResponseParameter(parameter);
+    const parameters_len = if (options.response_size != null)
+        responseParameterLen(parameter)
     else
         0;
     const parameters_field_len = if (options.response_size != null)
@@ -410,23 +500,12 @@ pub fn encodeStreamingOutputCallRequestAlloc(
     errdefer allocator.free(encoded);
     var cursor: usize = 0;
 
-    if (options.response_size) |size| {
+    if (options.response_size != null) {
         // StreamingOutputCallRequest.response_parameters = field 2.
         encoded[cursor] = fieldKey(2, .length_delimited);
         cursor += 1;
         writeVarint(encoded, &cursor, parameters_len);
-        if (size != 0) {
-            // ResponseParameters.size = field 1.
-            encoded[cursor] = fieldKey(1, .varint);
-            cursor += 1;
-            writeVarint(encoded, &cursor, size);
-        }
-        if (options.interval_us != 0) {
-            // ResponseParameters.interval_us = field 2.
-            encoded[cursor] = fieldKey(2, .varint);
-            cursor += 1;
-            writeVarint(encoded, &cursor, options.interval_us);
-        }
+        writeResponseParameter(encoded, &cursor, parameter);
     }
 
     // StreamingOutputCallRequest.payload = field 3.
@@ -440,6 +519,37 @@ pub fn encodeStreamingOutputCallRequestAlloc(
         writeVarint(encoded, &cursor, options.request_body_size);
         @memset(encoded[cursor..][0..options.request_body_size], 0);
         cursor += options.request_body_size;
+    }
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
+}
+
+/// Encode a server-streaming request containing only the supplied response
+/// parameters. This matches the canonical compressed-streaming case, whose
+/// request has no input payload.
+pub fn encodeStreamingOutputCallParametersAlloc(
+    allocator: std.mem.Allocator,
+    parameters: []const ResponseParameter,
+) Error![]u8 {
+    if (parameters.len == 0) return error.MissingPayload;
+    var encoded_len: usize = 0;
+    for (parameters) |parameter| {
+        try validateResponseParameter(parameter);
+        encoded_len = std.math.add(
+            usize,
+            encoded_len,
+            try lengthDelimitedFieldLen(responseParameterLen(parameter)),
+        ) catch return error.MessageTooLarge;
+    }
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+    var cursor: usize = 0;
+    for (parameters) |parameter| {
+        const parameter_len = responseParameterLen(parameter);
+        encoded[cursor] = fieldKey(2, .length_delimited);
+        cursor += 1;
+        writeVarint(encoded, &cursor, parameter_len);
+        writeResponseParameter(encoded, &cursor, parameter);
     }
     std.debug.assert(cursor == encoded.len);
     return encoded;
@@ -555,16 +665,12 @@ const Reader = struct {
     }
 };
 
-const DecodedResponseParameters = struct {
-    size: u32 = 0,
-    interval_us: u32 = 0,
-};
-
-fn decodeResponseParameters(input: []const u8) Error!DecodedResponseParameters {
+fn decodeResponseParameters(input: []const u8) Error!ResponseParameter {
     var reader = Reader{ .input = input };
     var size_seen = false;
     var interval_seen = false;
-    var result = DecodedResponseParameters{};
+    var compressed_seen = false;
+    var result = ResponseParameter{};
     while (!reader.finished()) {
         const tag = try reader.readTag();
         switch (tag.field_number) {
@@ -591,10 +697,49 @@ fn decodeResponseParameters(input: []const u8) Error!DecodedResponseParameters {
                 }
                 result.interval_us = @intCast(interval);
             },
+            3 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (compressed_seen) return error.DuplicateField;
+                compressed_seen = true;
+                result.compressed = try decodeBoolValue(
+                    try reader.readBytes(2),
+                );
+            },
             else => return error.UnsupportedField,
         }
     }
     return result;
+}
+
+fn validateResponseParameter(parameter: ResponseParameter) Error!void {
+    if (parameter.size > max_payload_size) return error.MessageTooLarge;
+    if (parameter.interval_us > max_interval_us) return error.InvalidArgument;
+}
+
+fn responseParameterLen(parameter: ResponseParameter) usize {
+    return (if (parameter.size == 0) 0 else 1 + varintLen(parameter.size)) +
+        (if (parameter.interval_us == 0) 0 else 1 + varintLen(parameter.interval_us)) +
+        boolWrapperFieldLen(parameter.compressed);
+}
+
+fn writeResponseParameter(
+    output: []u8,
+    cursor: *usize,
+    parameter: ResponseParameter,
+) void {
+    if (parameter.size != 0) {
+        output[cursor.*] = fieldKey(1, .varint);
+        cursor.* += 1;
+        writeVarint(output, cursor, parameter.size);
+    }
+    if (parameter.interval_us != 0) {
+        output[cursor.*] = fieldKey(2, .varint);
+        cursor.* += 1;
+        writeVarint(output, cursor, parameter.interval_us);
+    }
+    writeBoolWrapperField(output, cursor, 3, parameter.compressed);
 }
 
 fn decodeZeroPayload(input: []const u8) Error!usize {
@@ -801,12 +946,29 @@ test "encodes and decodes unary compression controls" {
 }
 
 test "decodes client and server streaming fixture messages" {
+    const input_request = try decodeStreamingInputCallRequest(
+        &.{ 0x0a, 0x05, 0x12, 0x03, 0, 0, 0 },
+    );
     try std.testing.expectEqual(
         @as(usize, 3),
-        try decodeStreamingInputCallRequest(
-            &.{ 0x0a, 0x05, 0x12, 0x03, 0, 0, 0 },
-        ),
+        input_request.request_body_size,
     );
+    try std.testing.expectEqual(@as(?bool, null), input_request.expect_compressed);
+
+    const compressed_input = try encodeStreamingInputCallRequestAlloc(
+        std.testing.allocator,
+        .{ .request_body_size = 3, .expect_compressed = false },
+    );
+    defer std.testing.allocator.free(compressed_input);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x0a, 0x05, 0x12, 0x03, 0, 0, 0, 0x12, 0x00 },
+        compressed_input,
+    );
+    const decoded_input = try decodeStreamingInputCallRequest(compressed_input);
+    try std.testing.expectEqual(@as(usize, 3), decoded_input.request_body_size);
+    try std.testing.expectEqual(@as(?bool, false), decoded_input.expect_compressed);
+
     const aggregate = try encodeStreamingInputCallResponseAlloc(
         std.testing.allocator,
         74_922,
@@ -817,16 +979,40 @@ test "decodes client and server streaming fixture messages" {
         &.{ 0x08, 0xaa, 0xc9, 0x04 },
         aggregate,
     );
+    try std.testing.expectEqual(
+        @as(usize, 74_922),
+        try decodeStreamingInputCallResponse(aggregate),
+    );
 
-    var sizes_storage: [4]u32 = undefined;
-    const sizes = try decodeStreamingOutputCallResponseSizes(
+    var parameters_storage: [4]ResponseParameter = undefined;
+    const parameters = try decodeStreamingOutputCallResponseParameters(
         &.{
             0x12, 0x04, 0x08, 0xb7, 0xf5, 0x01,
             0x12, 0x02, 0x08, 0x09,
         },
-        &sizes_storage,
+        &parameters_storage,
     );
-    try std.testing.expectEqualSlices(u32, &.{ 31_415, 9 }, sizes);
+    try std.testing.expectEqual(@as(usize, 2), parameters.len);
+    try std.testing.expectEqual(@as(u32, 31_415), parameters[0].size);
+    try std.testing.expectEqual(@as(u32, 9), parameters[1].size);
+}
+
+test "encodes and decodes streaming compression controls" {
+    const expected = [_]ResponseParameter{
+        .{ .size = 31_415, .compressed = true },
+        .{ .size = 92_653, .compressed = false },
+    };
+    const encoded = try encodeStreamingOutputCallParametersAlloc(
+        std.testing.allocator,
+        &expected,
+    );
+    defer std.testing.allocator.free(encoded);
+    var storage: [2]ResponseParameter = undefined;
+    const decoded = try decodeStreamingOutputCallResponseParameters(
+        encoded,
+        &storage,
+    );
+    try std.testing.expectEqualSlices(ResponseParameter, &expected, decoded);
 }
 
 test "encodes sleeping request without response parameters" {
@@ -900,7 +1086,7 @@ test "request decoding rejects malformed and unsupported fields" {
     );
     try std.testing.expectError(
         error.UnsupportedField,
-        decodeStreamingOutputCallRequest(&.{ 0x12, 0x02, 0x18, 0x00, 0x1a, 0x00 }),
+        decodeStreamingOutputCallRequest(&.{ 0x12, 0x02, 0x28, 0x00, 0x1a, 0x00 }),
     );
     try std.testing.expectError(
         error.InvalidPayloadType,

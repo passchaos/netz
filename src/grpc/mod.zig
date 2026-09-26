@@ -46,6 +46,7 @@ pub const formatCompressionAcceptEncodingInto =
 pub const compressMessageAlloc = compression.compressAlloc;
 pub const decompressMessageAlloc = compression.decompressAlloc;
 pub const StreamingMessage = stream.DecodedMessage;
+pub const StreamingMessageOptions = stream.MessageOptions;
 pub const MessageStreamDecoder = stream.Decoder;
 pub const MessageStreamEncoder = stream.Encoder;
 pub const StreamingRequestOptions = stream.RequestOptions;
