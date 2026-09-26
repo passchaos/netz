@@ -7,7 +7,7 @@ expected_grpc_commit=03d65cc67c450ccbb58a8a45627c4da83a886ccd
 bazel_bin=${BAZEL:-}
 server=${GRPC_CPP_INTEROP_SERVER:-}
 build_timeout=${GRPC_CPP_BUILD_TIMEOUT:-20m}
-case_timeout=${GRPC_CPP_CASE_TIMEOUT:-90s}
+case_timeout=${GRPC_CPP_CASE_TIMEOUT:-120s}
 work=$(mktemp -d)
 server_pid=
 
@@ -134,7 +134,7 @@ fi
 
 timeout "$case_timeout" "$client" "$port" >"$work/client.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=h2c ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
+  'netz gRPC client interoperated with grpc-cpp: transport=h2c ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client.log"
 cat "$work/client.log"
 
@@ -194,6 +194,6 @@ fi
 timeout "$case_timeout" "$client" "$port" "$ca_file" \
   >"$work/client-tls.log" 2>&1
 grep -Fq \
-  'netz gRPC client interoperated with grpc-cpp: transport=tls ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
+  'netz gRPC client interoperated with grpc-cpp: transport=tls ping_pong=4 half_duplex=4 slow_consumer=2000x1030@20ms compression=unary+streaming-gzip+identity unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 status=unary+bidi+unicode unimplemented=method+service metadata=initial+trailing-bin cancel=begin+after-response reuse=true deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL client_io=zio-std-io server_io=grpc-cpp-posix-event-engine' \
   "$work/client-tls.log"
 cat "$work/client-tls.log"

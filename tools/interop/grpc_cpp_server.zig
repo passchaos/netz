@@ -28,6 +28,7 @@ const canonical_response_sizes_u32 = [_]u32{ 31_415, 9, 2_653, 58_979 };
 const slow_consumer_messages: usize = 2_000;
 const slow_consumer_response_size: u32 = 1_030;
 const rpc_soak_iterations: usize = 100;
+const channel_soak_iterations: usize = 100;
 const status_message = "This is a test message";
 const special_status_message =
     "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
@@ -52,6 +53,7 @@ const Scenario = enum {
     half_duplex,
     slow_consumer,
     rpc_soak,
+    channel_soak,
     client_streaming,
     server_streaming,
 
@@ -124,6 +126,20 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ port, @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+    if (scenario == .channel_soak) {
+        try serveChannelSoak(
+            allocator,
+            tls_enabled,
+            &clear_server,
+            &tls_server,
+        );
+        std.debug.print(
+            "netz grpc server completed: scenario={s} transport={s} " ++
+                "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
+            .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
+        );
+        return;
+    }
 
     var connection = if (tls_enabled)
         tls_server.accept() catch |err| {
@@ -208,6 +224,49 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveChannelSoak(
+    allocator: std.mem.Allocator,
+    tls_enabled: bool,
+    clear_server: *netz.grpc.runtime.Server,
+    tls_server: *netz.grpc.runtime.TlsServer,
+) !void {
+    var completed: usize = 0;
+    while (completed < channel_soak_iterations) {
+        var connection = if (tls_enabled)
+            tls_server.accept() catch |err| switch (err) {
+                // ResetChannel may abandon a speculative TCP connection
+                // before TLS completes. It never carried an RPC and must not
+                // consume one of the 100 successful soak iterations.
+                error.UnexpectedEof, error.SocketUnconnected => continue,
+                else => return err,
+            }
+        else
+            try clear_server.accept();
+        defer connection.deinit();
+        if (tls_enabled and
+            !std.mem.eql(u8, connection.negotiatedAlpn() orelse "", "h2"))
+        {
+            return error.InvalidAlpn;
+        }
+        try serveLargeUnary(allocator, &connection);
+        // Channel soak destroys the client channel immediately after the RPC.
+        // Complete a two-phase HTTP/2 shutdown so response delivery cannot
+        // race a raw TCP close while the next independent channel connects.
+        connection.connection.gracefulShutdownWithTimeout(
+            .fromSeconds(5),
+        ) catch |err| switch (err) {
+            // ResetChannel may close immediately after receiving the complete
+            // RPC. That peer EOF is the desired per-iteration teardown.
+            error.ConnectionClosed,
+            error.SocketUnconnected,
+            error.UnexpectedEof,
+            => {},
+            else => return err,
+        };
+        completed += 1;
+    }
 }
 
 fn serveRpcSoak(
@@ -981,6 +1040,7 @@ fn serveScenario(
         .half_duplex => unreachable,
         .slow_consumer => unreachable,
         .rpc_soak => unreachable,
+        .channel_soak => unreachable,
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
         .custom_metadata,

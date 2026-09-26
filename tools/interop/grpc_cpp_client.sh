@@ -10,6 +10,7 @@ build_timeout=${GRPC_CPP_BUILD_TIMEOUT:-20m}
 case_timeout=${GRPC_CPP_CASE_TIMEOUT:-30s}
 slow_consumer_timeout=${GRPC_CPP_SLOW_CONSUMER_TIMEOUT:-90s}
 rpc_soak_timeout=${GRPC_CPP_RPC_SOAK_TIMEOUT:-90s}
+channel_soak_timeout=${GRPC_CPP_CHANNEL_SOAK_TIMEOUT:-120s}
 work=$(mktemp -d)
 server_pid=
 
@@ -121,7 +122,7 @@ PY
     --server_port="$port"
     --test_case="$scenario"
   )
-  if [[ "$scenario" == rpc_soak ]]; then
+  if [[ "$scenario" == rpc_soak || "$scenario" == channel_soak ]]; then
     client_args+=(
       --soak_iterations=100
       --soak_max_failures=0
@@ -165,6 +166,8 @@ PY
     timeout_value=$slow_consumer_timeout
   elif [[ "$scenario" == rpc_soak ]]; then
     timeout_value=$rpc_soak_timeout
+  elif [[ "$scenario" == channel_soak ]]; then
+    timeout_value=$channel_soak_timeout
   fi
   GRPC_DEFAULT_SSL_ROOTS_FILE_PATH="$work/netz-ca.pem" \
     timeout "$timeout_value" "$client" "${client_args[@]}" \
@@ -210,6 +213,7 @@ for transport in h2c tls; do
     half_duplex \
     slow_consumer \
     rpc_soak \
+    channel_soak \
     empty_stream \
     cancel_after_begin \
     cancel_after_first_response \
@@ -230,4 +234,4 @@ for transport in h2c tls; do
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large rpc_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

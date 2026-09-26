@@ -37,6 +37,7 @@ const slow_consumer_messages: usize = 2_000;
 const slow_consumer_response_size: usize = 1_030;
 const slow_consumer_delay = std.Io.Duration.fromMilliseconds(20);
 const rpc_soak_iterations: usize = 100;
+const channel_soak_iterations: usize = 100;
 const initial_metadata_name = "x-grpc-test-echo-initial";
 const initial_metadata_value = "test_initial_metadata_value";
 const trailing_metadata_name = "x-grpc-test-echo-trailing-bin";
@@ -82,29 +83,17 @@ pub fn main(init: std.process.Init) !void {
             args[2],
         );
     }
-    var client = if (tls_enabled)
-        try netz.grpc.runtime.Client.connectTlsAddress(
-            allocator,
-            io,
-            .{ .ip4 = .loopback(port) },
-            "foo.test.google.fr",
-            authority,
-            .{
-                .limits = limits,
-                .tls = .{ .ca_bundle = .{
-                    .bundle = &ca_bundle,
-                    .lock = &ca_lock,
-                } },
-            },
-        )
-    else
-        try netz.grpc.runtime.Client.connect(
-            allocator,
-            io,
-            .{ .ip4 = .loopback(port) },
-            limits,
-        );
-    defer client.deinit();
+    var client = try connectClient(
+        allocator,
+        io,
+        port,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
+        limits,
+    );
+    var client_live = true;
+    defer if (client_live) client.deinit();
     if (tls_enabled and
         !std.mem.eql(u8, client.negotiatedAlpn() orelse "", "h2"))
     {
@@ -124,6 +113,19 @@ pub fn main(init: std.process.Init) !void {
     try runCustomMetadata(allocator, &client, message_limit);
     try runCancellationAndReuse(allocator, &client, message_limit);
     try runSleepingDeadline(allocator, &client, message_limit);
+    client.deinit();
+    client_live = false;
+
+    try runChannelSoak(
+        allocator,
+        io,
+        port,
+        tls_enabled,
+        &ca_bundle,
+        &ca_lock,
+        limits,
+        message_limit,
+    );
 
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
@@ -132,6 +134,7 @@ pub fn main(init: std.process.Init) !void {
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
             "rpc_soak=100x271828/314159 " ++
+            "channel_soak=100x271828/314159 " ++
             "status=unary+bidi+unicode " ++
             "unimplemented=method+service " ++
             "metadata=initial+trailing-bin " ++
@@ -140,6 +143,89 @@ pub fn main(init: std.process.Init) !void {
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn connectClient(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+    tls_enabled: bool,
+    ca_bundle: *std.crypto.Certificate.Bundle,
+    ca_lock: *std.Io.RwLock,
+    limits: netz.http2.runtime.Limits,
+) !netz.grpc.runtime.Client {
+    return if (tls_enabled)
+        try netz.grpc.runtime.Client.connectTlsAddress(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            "foo.test.google.fr",
+            authority,
+            .{
+                .limits = limits,
+                .tls = .{ .ca_bundle = .{
+                    .bundle = ca_bundle,
+                    .lock = ca_lock,
+                } },
+            },
+        )
+    else
+        try netz.grpc.runtime.Client.connect(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(port) },
+            limits,
+        );
+}
+
+fn runChannelSoak(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+    tls_enabled: bool,
+    ca_bundle: *std.crypto.Certificate.Bundle,
+    ca_lock: *std.Io.RwLock,
+    limits: netz.http2.runtime.Limits,
+    message_limit: usize,
+) !void {
+    const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+        .response_size = metadata_response_size,
+        .request_body_size = metadata_request_size,
+    });
+    defer allocator.free(request);
+    for (0..channel_soak_iterations) |_| {
+        var client = try connectClient(
+            allocator,
+            io,
+            port,
+            tls_enabled,
+            ca_bundle,
+            ca_lock,
+            limits,
+        );
+        defer client.deinit();
+        if (tls_enabled and
+            !std.mem.eql(u8, client.negotiatedAlpn() orelse "", "h2"))
+        {
+            return error.InvalidAlpn;
+        }
+        var response = try client.unary(.{
+            .path = unary_service_path,
+            .authority = authority,
+            .message = request,
+            .max_message_size = message_limit,
+        });
+        defer response.deinit();
+        if (response.status != .ok or response.message == null or
+            response.was_compressed)
+        {
+            return error.InvalidSoakResponse;
+        }
+        try messages.validateStreamingOutputCallResponse(
+            response.message.?.payload,
+            metadata_response_size,
+        );
+    }
 }
 
 fn runRpcSoak(
