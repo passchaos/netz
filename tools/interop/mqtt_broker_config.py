@@ -2448,15 +2448,18 @@ def create_ca(
             "-out",
             key,
         )
+    elif algorithm == "ed25519":
+        run_openssl("genpkey", "-algorithm", "ED25519", "-out", key)
     else:
         raise AssertionError(f"unsupported CA algorithm {algorithm}")
+    digest_arguments = () if algorithm == "ed25519" else ("-sha256",)
     run_openssl(
         "req",
         "-new",
         "-x509",
         "-key",
         key,
-        "-sha256",
+        *digest_arguments,
         "-days",
         "1",
         "-subj",
@@ -2481,6 +2484,7 @@ def create_signed_certificate(
     extended_key_usage: str,
     subject_alt_name: str | None = None,
     key_algorithm: str = "ec",
+    ca_key_algorithm: str = "ec",
     subject: str | None = None,
 ) -> tuple[Path, Path]:
     key = directory / f"{name}.key"
@@ -2509,6 +2513,8 @@ def create_signed_certificate(
             "-out",
             key,
         )
+    elif key_algorithm == "ed25519":
+        run_openssl("genpkey", "-algorithm", "ED25519", "-out", key)
     else:
         raise AssertionError(f"unsupported key algorithm {key_algorithm}")
     certificate_subject = subject or (
@@ -2531,7 +2537,7 @@ def create_signed_certificate(
         serial,
         "-days",
         "1",
-        "-sha256",
+        *(() if ca_key_algorithm == "ed25519" else ("-sha256",)),
         "-extfile",
         extensions,
         "-out",
@@ -2546,6 +2552,7 @@ def create_crl(
     ca_certificate: Path,
     ca_key: Path,
     revoked_certificate: Path,
+    ca_key_algorithm: str = "ec",
 ) -> Path:
     ca_directory = directory / f"{name}-database"
     ca_directory.mkdir()
@@ -2565,7 +2572,7 @@ def create_crl(
         f"private_key = {ca_key}\n"
         "serial = $dir/serial\n"
         "crlnumber = $dir/crlnumber\n"
-        "default_md = sha256\n"
+        f"default_md = {'default' if ca_key_algorithm == 'ed25519' else 'sha256'}\n"
         "default_crl_days = 1\n"
         "policy = policy_any\n"
         "[ policy_any ]\n"
@@ -3347,53 +3354,64 @@ def run_capath_listener_case(broker: Path, directory: Path) -> None:
             )
 
 
-def run_rsa_crl_listener_case(broker: Path, directory: Path) -> None:
+def run_signed_crl_listener_case(
+    broker: Path,
+    directory: Path,
+    algorithm: str,
+) -> None:
+    if algorithm not in ("rsa", "ed25519"):
+        raise AssertionError(f"unsupported CRL fixture algorithm {algorithm}")
     server_ca = directory / "server-ca.crt"
     server_certificate = directory / "mtls-server.crt"
     server_key = directory / "mtls-server.key"
-    rsa_ca, rsa_ca_key = create_ca(
+    label = "RSA" if algorithm == "rsa" else "Ed25519"
+    fixture_name = algorithm.replace("_", "-")
+    client_ca, client_ca_key = create_ca(
         directory,
-        "rsa-client-ca",
-        "RSA Client Root",
-        "rsa",
+        f"{fixture_name}-client-ca",
+        f"{label} Client Root",
+        algorithm,
     )
-    rsa_client, rsa_client_key = create_signed_certificate(
+    client, client_key = create_signed_certificate(
         directory,
-        "rsa-client",
-        "rsa-client",
-        rsa_ca,
-        rsa_ca_key,
+        f"{fixture_name}-client",
+        f"{fixture_name}-client",
+        client_ca,
+        client_ca_key,
         401,
         "clientAuth",
-        key_algorithm="rsa",
+        key_algorithm=algorithm,
+        ca_key_algorithm=algorithm,
     )
-    rsa_revoked, rsa_revoked_key = create_signed_certificate(
+    revoked, revoked_key = create_signed_certificate(
         directory,
-        "rsa-revoked-client",
-        "rsa-revoked-client",
-        rsa_ca,
-        rsa_ca_key,
+        f"{fixture_name}-revoked-client",
+        f"{fixture_name}-revoked-client",
+        client_ca,
+        client_ca_key,
         402,
         "clientAuth",
-        key_algorithm="rsa",
+        key_algorithm=algorithm,
+        ca_key_algorithm=algorithm,
     )
-    rsa_crl = create_crl(
+    crl = create_crl(
         directory,
-        "rsa-client-revocations",
-        rsa_ca,
-        rsa_ca_key,
-        rsa_revoked,
+        f"{fixture_name}-client-revocations",
+        client_ca,
+        client_ca_key,
+        revoked,
+        ca_key_algorithm=algorithm,
     )
 
     port = free_port()
-    config = directory / "rsa-crl.conf"
+    config = directory / f"{fixture_name}-crl.conf"
     write_mtls_config(
         config,
         port,
         server_certificate,
         server_key,
-        rsa_ca,
-        crlfile=rsa_crl,
+        client_ca,
+        crlfile=crl,
     )
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
@@ -3404,27 +3422,29 @@ def run_rsa_crl_listener_case(broker: Path, directory: Path) -> None:
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
     if "configured 1 listeners for 1 clients" not in ready:
-        raise RuntimeError(f"RSA CRL broker failed to start: {ready}")
+        raise RuntimeError(f"{label} CRL broker failed to start: {ready}")
     assert_openssl_mqtt_success(
         openssl_mqtt_client(
             port,
             server_ca,
-            rsa_client,
-            rsa_client_key,
+            client,
+            client_key,
         )
     )
     if process.wait(timeout=5) != 0:
-        raise RuntimeError("RSA CRL good-client broker exited with an error")
+        raise RuntimeError(
+            f"{label} CRL good-client broker exited with an error"
+        )
 
     rejected_port = free_port()
-    rejected_config = directory / "rsa-crl-revoked.conf"
+    rejected_config = directory / f"{fixture_name}-crl-revoked.conf"
     write_mtls_config(
         rejected_config,
         rejected_port,
         server_certificate,
         server_key,
-        rsa_ca,
-        crlfile=rsa_crl,
+        client_ca,
+        crlfile=crl,
     )
     run_mtls_rejection_case(
         broker,
@@ -3432,9 +3452,54 @@ def run_rsa_crl_listener_case(broker: Path, directory: Path) -> None:
         rejected_port,
         server_ca,
         "CertificateUntrusted",
-        rsa_revoked,
-        rsa_revoked_key,
+        revoked,
+        revoked_key,
     )
+
+    if algorithm != "ed25519":
+        return
+    tampered_crl = directory / "ed25519-tampered.crl"
+    tamper_pem_crl(crl, tampered_crl)
+    cleartext_port = free_port()
+    invalid_crl_port = free_port()
+    while invalid_crl_port == cleartext_port:
+        invalid_crl_port = free_port()
+    invalid_config = directory / "ed25519-crl-invalid.conf"
+    invalid_config.write_text(
+        f"listener {cleartext_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {invalid_crl_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        f"crlfile {tampered_crl}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    invalid_result = subprocess.run(
+        [str(broker), f"--config={invalid_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if (
+        invalid_result.returncode == 0
+        or "InvalidCrl" not in invalid_result.stdout
+    ):
+        raise AssertionError(
+            "tampered Ed25519 CRL did not fail before listen: "
+            + invalid_result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
+            raise AssertionError(
+                "an earlier listener was bound before Ed25519 CRL validation"
+            )
 
 
 def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
@@ -3818,7 +3883,8 @@ def main() -> None:
         run_capath_listener_case(args.broker, directory)
         run_mtls_subject_username_case(args.broker, directory)
         run_optional_client_certificate_case(args.broker, directory)
-        run_rsa_crl_listener_case(args.broker, directory)
+        run_signed_crl_listener_case(args.broker, directory, "rsa")
+        run_signed_crl_listener_case(args.broker, directory, "ed25519")
         run_unsupported_tls_key_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
@@ -3835,7 +3901,7 @@ def main() -> None:
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
-        "P-256/RSA signed CRL revocation, strict TLS "
+        "P-256/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, and snapshot restore "
         + RUNTIME
     )
