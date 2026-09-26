@@ -407,8 +407,9 @@ Current protocol coverage includes:
   that emits four ordered responses only after request END_STREAM. The canonical
   slow-consumer case drives 2000 responses through HTTP/2 flow control while
   the application reads one every 20 ms; a 100-iteration large-unary RPC soak
-  additionally verifies persistent-channel stream retirement, and a matching
-  channel soak recreates TCP/TLS/ALPN/certificate state for every RPC. The official reflection
+  additionally verifies persistent-channel stream retirement. A matching
+  100-iteration channel soak recreates TCP/TLS/ALPN/certificate state for every
+  large unary RPC. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

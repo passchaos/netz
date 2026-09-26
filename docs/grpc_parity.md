@@ -227,7 +227,7 @@ On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
 8.7.0 and GCC. The netz client completed the full forward harness, including
 the canonical compressed-streaming and status-message cases, while the
-official C++ client completed twenty-two scenarios per transport. The upstream
+official C++ client completed twenty-three scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
@@ -310,12 +310,12 @@ with the canonical 271828-byte request and 314159-byte response. The official
 C++ side allows zero failures, enforces a 5-second per-iteration latency bound
 and a 60-second overall bound; the netz side validates every decompressed
 payload before advancing.
-The matching channel soak performs 100 iterations with the same payloads and
-latency/failure bounds while reconstructing the channel every time. It covers
-TCP and HTTP/2 handshake initialization on h2c plus TLS 1.3, certificate
-verification, and `h2` ALPN on TLS. The multi-accept netz fixture completes a
-bounded graceful HTTP/2 shutdown after each RPC and tolerates only peer-close
-outcomes after the full response or speculative TLS EOFs before any RPC.
+The matching channel soak uses the same 100 iterations and payload bounds but
+reconstructs the channel for every RPC. It exercises TCP and HTTP/2 setup on
+h2c plus TLS 1.3, certificate verification, and `h2` ALPN on TLS. The netz
+fixture counts only connections that complete the large unary RPC, tolerates
+speculative TLS connections abandoned before any request, and completes a
+bounded graceful HTTP/2 shutdown before releasing each successful connection.
 The cancellation matrix now includes cancellation immediately after request
 metadata, with no request message, and cancellation after the first duplex
 response. The netz server requires an actual peer `RST_STREAM(CANCEL)` in both
