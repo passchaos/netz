@@ -18,6 +18,10 @@ Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
 through a production loopback TCP client and server. It covers persistent
 reuse, complete and streaming fixed/chunked bodies, trailers, HEAD suppression,
 and request- or response-selected connection retirement.
+`zig build fuzz-http2-connection` exercises a production h2c connection across
+ordinary and streaming request/response bodies, request trailers, reversed
+two-stream response batches, PING, RST_STREAM cancellation, GOAWAY and fresh
+connection rotation.
 `zig build fuzz-mqtt-live-broker` starts the production broker and three real
 loopback TCP clients for each bounded input. It checks exact-topic
 SUBSCRIBE/UNSUBSCRIBE ordering, live QoS 0 fanout, retained write, replacement,
@@ -78,8 +82,8 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all seventeen corpora and the complete test gate on pushes and
-pull requests, then runs the seventeen coverage-guided targets daily and on
+workflow replays all eighteen corpora and the complete test gate on pushes and
+pull requests, then runs the eighteen coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
 H3 to 128 authenticated sessions, ordinary live MQTT targets to 128
 real-network runs, inbound/outbound durable MQTT bridge QoS 2 to 64/32 runs,

@@ -1430,8 +1430,11 @@ scheduling is additionally covered for HTTP/1 by `fuzz-http1-connection`: each
 bounded input runs through the production loopback TCP client/server and checks
 persistent reuse, complete and streaming fixed/chunked request bodies, chunked
 response trailers, HEAD body suppression, and request/response-selected close
-boundaries against an independent operation model. TLS and complete HTTP/2/3
-connection-state fuzzing remain outside these fuzz surfaces.
+boundaries against an independent operation model. The dedicated
+`fuzz-http2-connection` target covers real h2c connection state: ordinary
+and streaming bodies, request trailers, reversed two-stream response batches,
+PING, RST_STREAM cancellation, GOAWAY and connection rotation. TLS and complete
+HTTP/3 connection-state fuzzing remain outside these fuzz surfaces.
 
 The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may
