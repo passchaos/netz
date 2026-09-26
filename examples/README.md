@@ -79,6 +79,7 @@ one shared Broker core. For example:
 
 ```text
 queue_qos0_messages true
+global_max_clients 16384
 auto_id_prefix auto-
 max_inflight_messages 20
 max_inflight_bytes 0
@@ -139,7 +140,8 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `persistent_client_expiration`,
 `retain_expiry_interval`,
 `sys_interval`, `websockets_headers_size`, `set_tcp_nodelay`,
-`password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
+`global_max_clients`, `password_file`, `acl_file`, `persistence`,
+`persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
 bounded example interprets each listener's `max_connections` as its finite
@@ -173,7 +175,12 @@ proxy. Global
 accepts 1..65,535, bounding the complete HTTP Upgrade head for every WS/WSS
 listener before MQTT parsing. The legacy `packet_buffer_size` alias is not
 accepted because netz's raw MQTT framing uses an independent exact packet
-limit. Global
+limit. Global `global_max_clients` defaults to 16,384 and bounds active
+plus unexpired offline Sessions across all listeners. A new MQTT 5 client over
+the limit receives Server Busy; MQTT 3.1.1 is closed because it has no matching
+CONNACK code. The Mosquitto `-1` form maps to the implementation's bounded
+2,147,483,647-session ceiling; zero and other negative values are rejected.
+Global
 `max_inflight_messages` defaults to 20 and bounds each client's incoming and
 outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive
 Maximum; MQTT 3.1.1 enforces the same limit without a property. A peer that

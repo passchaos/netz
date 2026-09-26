@@ -791,6 +791,8 @@ Current protocol coverage includes:
   with anonymous/user scopes, exact per-listener WebSocket Origin allowlists,
   a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and
   per-listener zero-length Client ID admission,
+  a global cap spanning active and unexpired offline MQTT Sessions with
+  protocol-correct capacity refusal,
   deny precedence and `%u`/`%c` patterns, global
   full-packet and Application Message payload limits, global retained-message
   availability with MQTT 5 capability advertisement and version-correct

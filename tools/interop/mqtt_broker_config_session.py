@@ -13,7 +13,11 @@ from mqtt_commit_log_support import connect_packet, free_port, read_packet
 
 
 @contextmanager
-def _configured_broker(broker: Path, config: Path) -> Iterator[None]:
+def _configured_broker(
+    broker: Path,
+    config: Path,
+    connection_count: int = 6,
+) -> Iterator[None]:
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,
@@ -23,14 +27,15 @@ def _configured_broker(broker: Path, config: Path) -> Iterator[None]:
     assert process.stdout is not None
     try:
         ready = process.stdout.readline().strip()
-        if "configured 1 listeners for 6 clients" not in ready:
+        expected = f"configured 1 listeners for {connection_count} clients"
+        if expected not in ready:
             raise RuntimeError(
-                f"persistent-expiration broker failed to start: {ready}"
+                f"session-policy broker failed to start: {ready}"
             )
         yield
         if process.wait(timeout=5) != 0:
             raise RuntimeError(
-                "persistent-expiration broker failed: "
+                "session-policy broker failed: "
                 + process.stdout.read()
             )
     finally:
@@ -114,3 +119,68 @@ def run_persistent_client_expiration_case(
             time.sleep(1.2)
             expired = _connect(port, client_id, protocol, False)
             _disconnect(expired, protocol)
+
+
+def run_global_max_clients_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    """Keep connected and offline Sessions inside one global capacity."""
+    port = free_port()
+    config = directory / "global-max-clients.conf"
+    config.write_text(
+        "global_max_clients 1\n"
+        "persistent_client_expiration 1s\n"
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 5\n"
+    )
+    with _configured_broker(broker, config, connection_count=5):
+        first = _connect(port, "global-limit-held", 5, False)
+
+        refused_v5 = socket.create_connection(("127.0.0.1", port), timeout=5)
+        refused_v5.settimeout(5)
+        refused_v5.sendall(connect_packet(
+            "global-limit-v5",
+            clean_start=True,
+            protocol=5,
+        ))
+        packet_type, body = read_packet(refused_v5)
+        if packet_type != 0x20 or body != b"\x00\x89\x00":
+            raise AssertionError(
+                "global client limit did not return MQTT 5 Server Busy: "
+                f"{packet_type:02x}{body.hex()}"
+            )
+        refused_v5.close()
+
+        _disconnect(first, 5)
+
+        resumed = _connect(port, "global-limit-held", 5, True)
+        _disconnect(resumed, 5)
+
+        refused_v311 = socket.create_connection(
+            ("127.0.0.1", port), timeout=5,
+        )
+        refused_v311.settimeout(5)
+        refused_v311.sendall(connect_packet(
+            "global-limit-v311",
+            clean_start=True,
+            protocol=4,
+        ))
+        try:
+            unexpected = refused_v311.recv(1)
+        except ConnectionResetError:
+            unexpected = b""
+        finally:
+            refused_v311.close()
+        if unexpected:
+            raise AssertionError(
+                "global client limit sent an invalid MQTT 3.1.1 response: "
+                + unexpected.hex()
+            )
+
+        # The first disconnected Session continues to consume capacity until
+        # the configured expiry cap releases it through the deadline driver.
+        time.sleep(1.2)
+        replacement = _connect(port, "global-limit-released", 5, False)
+        _disconnect(replacement, 5)

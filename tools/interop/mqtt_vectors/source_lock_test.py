@@ -52,6 +52,8 @@ class SourceLockTests(unittest.TestCase):
                     "6fa62519cbb04bcad3e79244773d0354dfbab206b4b18f4234a96faf2ef3db11",
                 "broker/01-connect-zero-length-id.py":
                     "3e69a4a94622dbe6e3814d5a2457605a5f8b6b9a6affe8505be81bf64c8338cd",
+                "broker/01-connect-global-max-clients.py":
+                    "17988c421847b7ded574192c8f7f30e5d5b01b4ee86eb5052eca5997e73852db",
                 "broker/12-prop-assigned-client-identifier.py":
                     "8c65d0fd5cc74901f2ebe37c7ee9433db7225219c2908276335c358ac587e5fc",
                 "broker/13-websocket-bad-origin.py":

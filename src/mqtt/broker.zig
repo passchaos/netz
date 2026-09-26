@@ -2865,6 +2865,16 @@ pub const Broker = struct {
             self.finishPartialPersistentChange(
                 registration_progress.rollback_changed,
             );
+            if (err == error.SessionLimitExceeded) {
+                if (pending.connect.connect.protocol == .v5) {
+                    var refused = try pending.finish(.{
+                        .reason_code = 0x89,
+                    });
+                    pending_owned = false;
+                    refused.deinit(self.allocator);
+                }
+                return null;
+            }
             return err;
         };
         const subscriber_id = registration.subscriber_id;
@@ -3057,7 +3067,10 @@ pub const Broker = struct {
             self.sessionExpiryForConnect(effective_connect),
             now,
         ) catch |err| {
-            slot.active = false;
+            // The caller owns the claimed slot until preparePending returns.
+            // Preserve that reservation while a protocol-level capacity
+            // refusal is written so another accept worker cannot claim it.
+            if (err != error.SessionLimitExceeded) slot.active = false;
             return err;
         };
         if (previous_route_id) |route_id| {

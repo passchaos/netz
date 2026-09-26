@@ -14,6 +14,7 @@ const net = std.Io.net;
 
 pub const max_config_bytes: usize = 1024 * 1024;
 pub const default_max_connections: usize = 16;
+pub const default_global_max_clients: usize = 16_384;
 pub const default_max_packet_size: usize = 2_000_000;
 pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
@@ -77,6 +78,7 @@ pub const Listener = struct {
 
 pub const Config = struct {
     listeners: []Listener,
+    global_max_clients: usize = default_global_max_clients,
     per_listener_settings: bool = false,
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
@@ -224,6 +226,7 @@ const ListenerSeen = struct {
 
 const GlobalSeen = struct {
     per_listener_settings: bool = false,
+    global_max_clients: bool = false,
     queue_qos0_messages: bool = false,
     upgrade_outgoing_qos: bool = false,
     password_file: bool = false,
@@ -327,7 +330,10 @@ fn parseSources(
                 continue;
             }
 
-            if (std.mem.eql(u8, directive, "per_listener_settings")) {
+            if (std.mem.eql(u8, directive, "global_max_clients")) {
+                try markOnce(&global_seen.global_max_clients);
+                config.global_max_clients = try parseGlobalMaxClients(&words);
+            } else if (std.mem.eql(u8, directive, "per_listener_settings")) {
                 try markOnce(&global_seen.per_listener_settings);
                 const enabled = try parseOneBool(&words);
                 if (enabled and security_settings_seen) {
@@ -804,6 +810,25 @@ fn parseOnePositive(
     return value;
 }
 
+fn parseGlobalMaxClients(words: anytype) error{
+    InvalidDirective,
+    InvalidInteger,
+}!usize {
+    const value = try parseOne(words);
+    if (std.mem.eql(u8, value, "-1")) return std.math.maxInt(u31);
+    return @intCast(try parsePositiveText(u31, value));
+}
+
+fn parsePositiveText(
+    comptime T: type,
+    value: []const u8,
+) error{InvalidInteger}!T {
+    const parsed = std.fmt.parseInt(T, value, 10) catch
+        return error.InvalidInteger;
+    if (parsed == 0) return error.InvalidInteger;
+    return parsed;
+}
+
 fn parseAcceptedProtocolVersions(
     words: anytype,
 ) error{ InvalidDirective, InvalidInteger }!mqtt.AcceptedProtocolVersions {
@@ -862,6 +887,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     const allocator = std.testing.allocator;
     var config = try parse(allocator,
         \\# strict supported subset
+        \\global_max_clients 128
         \\queue_qos0_messages true
         \\upgrade_outgoing_qos true
         \\max_packet_size 2000000
@@ -912,6 +938,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\max_connections 2
     );
     defer config.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 128), config.global_max_clients);
     try std.testing.expect(config.queue_qos0_messages);
     try std.testing.expect(config.upgrade_outgoing_qos);
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
@@ -1012,6 +1039,51 @@ test "MQTT broker config parses owned multi-listener policy" {
     const path = try config.persistencePath(allocator);
     defer allocator.free(path);
     try std.testing.expectEqualStrings("state/broker.db", path);
+}
+
+test "MQTT broker config validates global client session limit" {
+    const allocator = std.testing.allocator;
+
+    var unlimited = try parse(allocator,
+        \\global_max_clients -1
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer unlimited.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, std.math.maxInt(u31)),
+        unlimited.global_max_clients,
+    );
+
+    for ([_][]const u8{ "0", "-2", "2147483648", "invalid" }) |value| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "global_max_clients {s}\nlistener 1883\nallow_anonymous true\n",
+            .{value},
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\global_max_clients
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\global_max_clients 1
+            \\global_max_clients 2
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
 }
 
 test "MQTT broker config owns per-listener security files" {

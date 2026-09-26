@@ -180,6 +180,7 @@ pub fn run(
             .fromSeconds(config.sys_interval_seconds),
         .access_control = source_access_control,
         .session = .{
+            .max_sessions = config.global_max_clients,
             .max_inflight_per_session = max_inflight_messages,
             .max_inflight_payload_bytes_per_session = config.max_inflight_bytes,
             .max_queued_per_session = config.effectiveMaxQueuedMessages(),
