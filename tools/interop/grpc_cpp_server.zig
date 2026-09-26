@@ -30,6 +30,7 @@ const special_status_message =
 const Scenario = enum {
     ping_pong,
     empty_stream,
+    cancel_after_begin,
     cancel_after_first_response,
     timeout_on_sleeping_server,
     custom_metadata,
@@ -178,6 +179,7 @@ pub fn main(init: std.process.Init) !void {
         ),
         .empty_unary => try serveEmptyUnary(&connection),
         .large_unary => try serveLargeUnary(allocator, &connection),
+        .cancel_after_begin => try serveCancelAfterBegin(&connection),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
@@ -195,6 +197,34 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveCancelAfterBegin(
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var stream = try connection.acceptDuplexWithTimeout(.fromSeconds(5));
+    defer stream.deinit();
+    if (!std.mem.eql(u8, stream.path, client_streaming_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    var event = try stream.readRequestEventWithTimeout(
+        .fromSeconds(5),
+        {},
+        struct {
+            fn consume(_: void, _: netz.grpc.StreamingMessage) !void {
+                return error.UnexpectedRequest;
+            }
+        }.consume,
+    );
+    defer event.deinit();
+    switch (event) {
+        .reset => |reset| {
+            if (reset.error_code != .cancel or stream.message_count != 0) {
+                return error.UnexpectedReset;
+            }
+        },
+        .messages, .finished => return error.UnexpectedRequest,
+    }
 }
 
 fn serveEmptyUnary(
@@ -808,6 +838,7 @@ fn serveScenario(
     switch (scenario) {
         .ping_pong => try servePingPong(io, stream, &queue, deadline),
         .empty_stream => try serveEmpty(stream, &queue, deadline),
+        .cancel_after_begin => unreachable,
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
         .custom_metadata,

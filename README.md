@@ -402,7 +402,8 @@ Current protocol coverage includes:
   and bidirectional status/message propagation including Unicode and control
   whitespace, and trailers-only `UNIMPLEMENTED` results for both unknown
   methods and unknown services. They also cover canonical empty and 271828-byte
-  request/314159-byte response unary calls. The official reflection
+  request/314159-byte response unary calls, plus cancellation immediately
+  after request metadata and after the first response. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

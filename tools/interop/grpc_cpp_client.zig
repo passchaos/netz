@@ -106,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try runPingPong(allocator, &client, message_limit);
+    try runCancelAfterBegin(&client, message_limit);
     try runUnaryBasics(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
@@ -122,11 +123,24 @@ pub fn main(init: std.process.Init) !void {
             "status=unary+bidi+unicode " ++
             "unimplemented=method+service " ++
             "metadata=initial+trailing-bin " ++
-            "cancel=CANCEL reuse=true " ++
+            "cancel=begin+after-response reuse=true " ++
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runCancelAfterBegin(
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    var stream = try client.startStreaming(.{
+        .path = client_streaming_service_path,
+        .authority = authority,
+        .max_message_size = message_limit,
+    });
+    try stream.cancel();
+    stream.deinit();
 }
 
 fn runUnaryBasics(

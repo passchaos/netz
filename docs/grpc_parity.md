@@ -227,7 +227,7 @@ On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
 8.7.0 and GCC. The netz client completed the full forward harness, including
 the canonical compressed-streaming and status-message cases, while the
-official C++ client completed seventeen scenarios per transport. The upstream
+official C++ client completed eighteen scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
@@ -251,7 +251,8 @@ process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
-`empty_unary`, `large_unary`, `empty_stream`, `client_compressed_unary`,
+`empty_unary`, `large_unary`, `empty_stream`, `cancel_after_begin`,
+`client_compressed_unary`,
 `server_compressed_unary`,
 `client_compressed_streaming`, `server_compressed_streaming`,
 `status_code_and_message`, `special_status_message`,
@@ -292,6 +293,10 @@ only their RPC streams.
 The basic unary cases additionally require the canonical empty protobuf round
 trip and identity-framed 271828-byte request/314159-byte response payloads in
 both independent implementation directions.
+The cancellation matrix now includes cancellation immediately after request
+metadata, with no request message, and cancellation after the first duplex
+response. The netz server requires an actual peer `RST_STREAM(CANCEL)` in both
+cases; the netz client then reuses its channel for subsequent RPCs.
 
 The reflection gate passed again after the zio migration on 2026-09-15 against
 the same pinned upstream revision and its Linux Posix EventEngine. Its ready,
