@@ -32,6 +32,11 @@ connection-scoped property isolation.
 transaction across PUBREC/PUBREL/PUBCOMP, transport reconnect, complete Bridge
 recreation, fresh-Session epoch replacement, local exactly-once fanout and
 retained replay through a crash-safe commit log.
+`zig build fuzz-mqtt-outbound-bridge` drives the two-client outbound Bridge
+between independent real TCP peers. Its model checks topic and property
+mapping, source acknowledgement after target delivery, retained propagation,
+target resend under preserved/fresh Sessions, source Session transitions and
+ordered subscription replay.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -64,8 +69,8 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all fourteen corpora and the complete test gate on pushes and
-pull requests, then runs the fourteen coverage-guided targets daily and on
+workflow replays all fifteen corpora and the complete test gate on pushes and
+pull requests, then runs the fifteen coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
 H3 to 128 authenticated sessions, ordinary live MQTT targets to 128
 real-network runs, durable MQTT bridge QoS 2 to 64 runs, and the in-memory

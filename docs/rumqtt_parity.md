@@ -1577,7 +1577,12 @@ PUBREL, then either completes exactly once, resumes after transport loss, is
 restored by a newly constructed Bridge, or is discarded when CONNACK reports a
 fresh Session and advances the bridge epoch. The same model checks downstream
 QoS 2 completion, DUP normalization, property isolation, and final retained
-replay. Outbound bridge cross-broker state remains outside these fuzz surfaces.
+replay. `fuzz-mqtt-outbound-bridge` covers the non-coordinated cross-broker
+path with independent real source and target TCP peers: QoS 0/1 mapping, target
+delivery before source PUBACK, retained propagation, target retransmission
+under preserved/fresh Sessions, source Session transitions, subscription
+replay, DUP normalization, and connection-scoped property isolation. Durable
+outbound QoS 2 coordinator recovery remains outside these fuzz surfaces.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
