@@ -868,8 +868,13 @@ machines, retained and explicitly reset histories, fragmented and repeated
 messages, output-limit rollback, hostile compressed sequences, and every
 negotiated window. A Python zlib continuous-stream vector independently proves
 that the second message consumes prior-message history and fails after reset.
-Live transport context-takeover negotiation and I/O remain outside these fuzz
-surfaces. HTTP/1 loopback tests cover its opt-in
+`fuzz-websocket-h1-context` now drives bounded operation sequences through a
+real loopback TCP connection and HTTP Upgrade. Both directions retain context
+while the input selects text/binary, contiguous/sliced/fragmented/deadline
+sends, owned/caller-buffer receives, and interleaved Ping/Pong. Its lockstep
+model fixes message cardinality and applies a five-second bound to every read,
+so fuzz input cannot manufacture a peer wait. Live H2/H3 context-takeover I/O
+remain outside the fuzz surfaces. HTTP/1 loopback tests also cover its opt-in
 takeover handshake, bidirectional history, compression fallback, API mixing,
 and partial-write resume; RFC 8441 and RFC 9220 endpoint tests cover the same
 state across their flow-controlled transports. The public compressor now has

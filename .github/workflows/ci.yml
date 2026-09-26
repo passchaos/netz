@@ -49,7 +49,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
-          ref: 291573cd9ab4beee72a6aaebf1f723cf8e8484f2
+          ref: fc856b91d944bd390dfedc600b8c88ba4b994e6a
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vail
           persist-credentials: false
@@ -79,7 +79,7 @@ jobs:
         run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
 
       - name: Replay bounded fuzz corpora
-        run: zig build fuzz-parsers fuzz-stateful fuzz-websocket-compression fuzz-websocket-context fuzz-quic-wire fuzz-quic-protection fuzz-quic-connection
+        run: zig build fuzz-parsers fuzz-stateful fuzz-websocket-compression fuzz-websocket-context fuzz-websocket-h1-context fuzz-quic-wire fuzz-quic-protection fuzz-quic-connection
 
       - name: Run the complete test gate serially
         run: zig build test -j1 --summary all
@@ -91,7 +91,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz-parsers, fuzz-stateful, fuzz-websocket-compression, fuzz-websocket-context, fuzz-quic-wire, fuzz-quic-protection, fuzz-quic-connection]
+        include:
+          - target: fuzz-parsers
+            default_runs: 10000
+          - target: fuzz-stateful
+            default_runs: 10000
+          - target: fuzz-websocket-compression
+            default_runs: 10000
+          - target: fuzz-websocket-context
+            default_runs: 10000
+          - target: fuzz-websocket-h1-context
+            default_runs: 256
+          - target: fuzz-quic-wire
+            default_runs: 10000
+          - target: fuzz-quic-protection
+            default_runs: 10000
+          - target: fuzz-quic-connection
+            default_runs: 10000
     defaults:
       run:
         working-directory: netz
@@ -115,7 +131,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
-          ref: 291573cd9ab4beee72a6aaebf1f723cf8e8484f2
+          ref: fc856b91d944bd390dfedc600b8c88ba4b994e6a
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vail
           persist-credentials: false
@@ -145,7 +161,7 @@ jobs:
 
       - name: Run bounded coverage-guided fuzzing
         env:
-          FUZZ_RUNS: ${{ inputs.fuzz_runs || '10000' }}
+          FUZZ_RUNS: ${{ inputs.fuzz_runs || matrix.default_runs }}
           FUZZ_TARGET: ${{ matrix.target }}
         run: |
           case "$FUZZ_RUNS" in

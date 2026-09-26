@@ -25,23 +25,30 @@ support explicit
 `allow_context_takeover` opt-in across ordinary, sliced, fragmented, and
 deadline-resumable sends plus allocating, caller-buffer, and raw-frame receive
 APIs. With the default opt-out policy, all three transports negotiate both
-`*_no_context_takeover` parameters. These
+`*_no_context_takeover` parameters.
+`zig build fuzz-websocket-h1-context` additionally carries bounded operation
+sequences through a real loopback TCP connection and HTTP Upgrade with context
+takeover enabled in both directions. It mixes text/binary, contiguous/sliced/
+fragmented/deadline sends, owned/caller-buffer receives, and interleaved Ping/
+Pong without allowing input to create an unbounded peer wait. These
 targets are joined by `zig build fuzz-quic-wire`, which covers QUIC long
 headers, Version Negotiation, Retry integrity, transport parameters, frame
 streams, and carried TLS handshake messages. `zig build fuzz-quic-protection`
 separately checks QUIC v1/v2 Initial, Handshake, 0-RTT, and 1-RTT packet and
 header protection: Initial uses its RFC-mandated AES-128-GCM, while the other
 packet spaces exercise AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM.
-It also covers truncation and authenticated-tamper rejection. These targets do
-not yet fuzz WebSocket context takeover through live H1/H2/H3 transports.
+It also covers truncation and authenticated-tamper rejection. Live context-
+takeover fuzzing through the flow-controlled H2/H3 adapters remains separate.
 `zig build fuzz-quic-connection`
 adds bounded stateful QUIC v1/v2 sequences over real loopback UDP: bidirectional
 STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all seven corpora and the complete test gate on pushes and pull
-requests, then runs the seven coverage-guided targets daily and on demand. Because
+workflow replays all eight corpora and the complete test gate on pushes and pull
+requests, then runs the eight coverage-guided targets daily and on demand. The
+live HTTP/1 target defaults to 256 daily connections while the in-memory targets
+default to 10,000 iterations; a manual `fuzz_runs` value overrides both. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
