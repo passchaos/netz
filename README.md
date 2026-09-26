@@ -22,6 +22,10 @@ and request- or response-selected connection retirement.
 ordinary and streaming request/response bodies, request trailers, reversed
 two-stream response batches, PING, RST_STREAM cancellation, GOAWAY and fresh
 connection rotation.
+`zig build fuzz-http3-connection` drives authenticated QUIC/TLS HTTP/3 client
+and server sessions through complete and streaming requests, request and
+response trailers, reversed multiplexed responses, cancellation, HEAD body
+suppression, and terminal two-phase GOAWAY.
 `zig build fuzz-mqtt-live-broker` starts the production broker and three real
 loopback TCP clients for each bounded input. It checks exact-topic
 SUBSCRIBE/UNSUBSCRIBE ordering, live QoS 0 fanout, retained write, replacement,
@@ -82,10 +86,11 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all eighteen corpora and the complete test gate on pushes and
-pull requests, then runs the eighteen coverage-guided targets daily and on
+workflow replays all nineteen corpora and the complete test gate on pushes and
+pull requests, then runs the nineteen coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
-H3 to 128 authenticated sessions, ordinary live MQTT targets to 128
+the HTTP/3 connection target to 64 authenticated sessions, the WebSocket H3
+target to 128 authenticated sessions, ordinary live MQTT targets to 128
 real-network runs, inbound/outbound durable MQTT bridge QoS 2 to 64/32 runs,
 and the in-memory targets to 10,000 iterations. A manual `fuzz_runs` value
 overrides all targets. Because

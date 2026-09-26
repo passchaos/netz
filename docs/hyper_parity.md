@@ -1433,8 +1433,12 @@ response trailers, HEAD body suppression, and request/response-selected close
 boundaries against an independent operation model. The dedicated
 `fuzz-http2-connection` target covers real h2c connection state: ordinary
 and streaming bodies, request trailers, reversed two-stream response batches,
-PING, RST_STREAM cancellation, GOAWAY and connection rotation. TLS and complete
-HTTP/3 connection-state fuzzing remain outside these fuzz surfaces.
+PING, RST_STREAM cancellation, GOAWAY and connection rotation. TLS-wrapped
+HTTP/2 connection-state fuzzing remains outside these fuzz surfaces. The
+dedicated `fuzz-http3-connection` target covers authenticated QUIC/TLS HTTP/3
+connection state: complete and streaming bodies, request and response trailers,
+reversed multiplexed responses, cancellation, HEAD body suppression, and
+terminal two-phase GOAWAY.
 
 The persistent server now treats peer EOF at an empty request
 boundary as orderly retirement instead of a connection failure. A client may

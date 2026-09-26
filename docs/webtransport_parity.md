@@ -851,9 +851,12 @@ bidirectional/unidirectional association-header parsing with deterministic and
 coverage-guided mutation. The companion `fuzz-stateful` target drives session
 establish/drain/close transitions, datagram accounting, bounded local/peer
 stream registration, FIN/reset/stop/priority transitions, HTTP/3 control-stream
-fragmentation, and QPACK table mutation. Encrypted QUIC packet processing, live
-H3 scheduling and multi-session routing remain outside these fuzz surfaces and
-retain their focused protocol/fault gates.
+fragmentation, and QPACK table mutation. Authenticated QUIC/TLS HTTP/3
+connection scheduling is additionally covered by `fuzz-http3-connection`,
+including streaming and multiplexed requests, trailers, cancellation, HEAD
+body suppression, and two-phase GOAWAY. Multi-session routing through a shared
+endpoint remains outside these fuzz surfaces and retains its focused
+protocol/fault gates.
 
 1. The endpoint also exposes a synchronous `serveUntil` callback loop with
    bounded receive polling and external shutdown. Add independent per-session
