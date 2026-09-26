@@ -87,6 +87,7 @@ max_queued_bytes 0
 persistent_client_expiration 2m
 retain_expiry_interval 60
 sys_interval 10
+websockets_headers_size 4096
 set_tcp_nodelay false
 password_file users.pw
 acl_file access.acl
@@ -135,7 +136,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `check_retain_source`, `queue_qos0_messages`,
 `persistent_client_expiration`,
 `retain_expiry_interval`,
-`sys_interval`, `set_tcp_nodelay`,
+`sys_interval`, `websockets_headers_size`, `set_tcp_nodelay`,
 `password_file`, `acl_file`, `persistence`, `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
@@ -154,7 +155,11 @@ and unknown versions fail configuration because netz does not implement MQTT
 `websockets_origin` builds an exact, case-sensitive Origin allowlist for its
 WebSocket or WSS listener; once configured, a missing or unmatched Origin is
 rejected during HTTP Upgrade. Using it on a raw MQTT listener fails
-configuration. Global
+configuration. Global `websockets_headers_size` defaults to 4096 bytes and
+accepts 1..65,535, bounding the complete HTTP Upgrade head for every WS/WSS
+listener before MQTT parsing. The legacy `packet_buffer_size` alias is not
+accepted because netz's raw MQTT framing uses an independent exact packet
+limit. Global
 `max_inflight_messages` defaults to 20 and bounds each client's incoming and
 outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive
 Maximum; MQTT 3.1.1 enforces the same limit without a property. A peer that

@@ -143,3 +143,49 @@ def run_websocket_origins_case(broker: Path, directory: Path) -> None:
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=2)
+
+    bounded_port = free_port()
+    bounded_config = directory / "websocket-headers-size.conf"
+    bounded_config.write_text(
+        "websockets_headers_size 256\n"
+        f"listener {bounded_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={bounded_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        ready = process.stdout.readline().strip()
+        if "configured 1 listeners for 1 clients" not in ready:
+            raise RuntimeError(f"header-limit broker failed to start: {ready}")
+        with socket.create_connection(
+            ("127.0.0.1", bounded_port),
+            timeout=5,
+        ) as sock:
+            sock.settimeout(5)
+            oversized = _request(bounded_port, None).replace(
+                b"\r\n\r\n",
+                b"X-Padding: " + b"x" * 512 + b"\r\n\r\n",
+            )
+            sock.sendall(oversized)
+            try:
+                if sock.recv(1):
+                    raise AssertionError("oversized Upgrade unexpectedly accepted")
+            except ConnectionResetError:
+                pass
+        return_code = process.wait(timeout=5)
+        output = process.stdout.read()
+        if return_code == 0 or "HeadersTooLarge" not in output:
+            raise AssertionError(
+                "WebSocket header limit was not enforced: " + output
+            )
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2)

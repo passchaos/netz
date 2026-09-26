@@ -3810,7 +3810,8 @@ def main() -> None:
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
-        "listener protocol/Topic Alias/Origin policy, persistent-client and "
+        "listener protocol/Topic Alias/Origin and WebSocket header limits, "
+        "persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID and outgoing QoS "

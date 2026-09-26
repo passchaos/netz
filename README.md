@@ -785,8 +785,9 @@ Current protocol coverage includes:
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   global or `per_listener_settings`-isolated Mosquitto password/ACL files
-  and exact per-listener WebSocket Origin allowlists,
-  with anonymous/user scopes, per-listener zero-length Client ID admission,
+  with anonymous/user scopes, exact per-listener WebSocket Origin allowlists,
+  a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and
+  per-listener zero-length Client ID admission,
   deny precedence and `%u`/`%c` patterns, global
   full-packet and Application Message payload limits, global retained-message
   availability with MQTT 5 capability advertisement and version-correct

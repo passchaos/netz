@@ -340,6 +340,7 @@ pub fn run(
                             .identity = identity.serverIdentity(),
                             .client_auth = client_auth_policies[index],
                             .allowed_origins = configured.websocket_origins.items,
+                            .max_head_bytes = config.websocket_headers_size,
                             .limits = .{
                                 .max_packet_size = config.max_packet_size,
                                 .tcp_nodelay = config.set_tcp_nodelay,
@@ -370,6 +371,7 @@ pub fn run(
                             .tcp_nodelay = config.set_tcp_nodelay,
                         },
                         .allowed_origins = configured.websocket_origins.items,
+                        .max_head_bytes = config.websocket_headers_size,
                     },
                 ),
             },

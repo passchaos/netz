@@ -5179,6 +5179,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
+        "websocket_headers_size",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
         "set_tcp_nodelay",
     ));
     try std.testing.expect(@hasField(

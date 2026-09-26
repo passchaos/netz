@@ -18,6 +18,7 @@ pub const default_max_packet_size: usize = 2_000_000;
 pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
 pub const default_max_topic_aliases: u16 = 10;
+pub const default_websocket_headers_size: u16 = 4096;
 pub const default_sys_interval_seconds: u16 = 10;
 pub const maximum_retain_expiry_interval_minutes: u32 = 10_000_000;
 pub const default_auto_id_prefix = "auto-";
@@ -92,6 +93,7 @@ pub const Config = struct {
     persistent_client_expiration_seconds: ?u32 = null,
     retain_expiry_interval_seconds: u32 = 0,
     sys_interval_seconds: u16 = default_sys_interval_seconds,
+    websocket_headers_size: u16 = default_websocket_headers_size,
     set_tcp_nodelay: bool = false,
     persistence: bool = false,
     persistence_location: []u8 = &.{},
@@ -235,6 +237,7 @@ const GlobalSeen = struct {
     persistent_client_expiration: bool = false,
     retain_expiry_interval: bool = false,
     sys_interval: bool = false,
+    websocket_header_limit: bool = false,
     set_tcp_nodelay: bool = false,
     persistence: bool = false,
     persistence_location: bool = false,
@@ -438,6 +441,14 @@ fn parseSources(
                 try markOnce(&global_seen.sys_interval);
                 config.sys_interval_seconds =
                     try parseOneInteger(u16, &words);
+            } else if (std.mem.eql(
+                u8,
+                directive,
+                "websockets_headers_size",
+            )) {
+                try markOnce(&global_seen.websocket_header_limit);
+                config.websocket_headers_size =
+                    try parseOnePositive(u16, &words);
             } else if (std.mem.eql(u8, directive, "set_tcp_nodelay")) {
                 try markOnce(&global_seen.set_tcp_nodelay);
                 config.set_tcp_nodelay = try parseOneBool(&words);
@@ -829,6 +840,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\persistent_client_expiration 2h
         \\retain_expiry_interval 37
         \\sys_interval 17
+        \\websockets_headers_size 8192
         \\set_tcp_nodelay true
         \\password_file users.pw
         \\acl_file access.acl
@@ -885,6 +897,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         config.retain_expiry_interval_seconds,
     );
     try std.testing.expectEqual(@as(u16, 17), config.sys_interval_seconds);
+    try std.testing.expectEqual(@as(u16, 8192), config.websocket_headers_size);
     try std.testing.expect(config.set_tcp_nodelay);
     try std.testing.expect(!config.per_listener_settings);
     try std.testing.expectEqualStrings("users.pw", config.password_file);
@@ -1914,6 +1927,10 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         default_sys_interval_seconds,
         config.sys_interval_seconds,
     );
+    try std.testing.expectEqual(
+        default_websocket_headers_size,
+        config.websocket_headers_size,
+    );
     try std.testing.expect(!config.set_tcp_nodelay);
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
     try std.testing.expectEqual(
@@ -2089,6 +2106,52 @@ test "MQTT broker config validates retained expiry scan interval" {
             \\retain_expiry_interval 1
             \\retain_expiry_interval 2
             \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config validates WebSocket header size" {
+    var minimum = try parse(std.testing.allocator,
+        \\websockets_headers_size 1
+        \\listener 8080
+        \\protocol websockets
+        \\allow_anonymous true
+    );
+    defer minimum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u16, 1), minimum.websocket_headers_size);
+
+    var maximum = try parse(std.testing.allocator,
+        \\listener 8080
+        \\protocol websockets
+        \\allow_anonymous true
+        \\websockets_headers_size 65535
+    );
+    defer maximum.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        maximum.websocket_headers_size,
+    );
+    for ([_][]const u8{ "-1", "0", "65536" }) |value| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "websockets_headers_size {s}\nlistener 8080\n" ++
+                "protocol websockets\nallow_anonymous true\n",
+            .{value},
+        );
+        defer std.testing.allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(std.testing.allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(std.testing.allocator,
+            \\websockets_headers_size 4096
+            \\websockets_headers_size 8192
+            \\listener 8080
+            \\protocol websockets
             \\allow_anonymous true
         ),
     );
