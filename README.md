@@ -384,7 +384,9 @@ Current protocol coverage includes:
   gRPC RPC shapes; protobuf remains an application-layer choice and pbz is
   only a lazy integration dependency. The bidirectional h2c/TLS gRPC C++
   process gates run the netz endpoints on zio-backed `std.Io` and identify the
-  pinned Linux peer as `grpc-cpp-posix-event-engine`; the official reflection
+  pinned Linux peer as `grpc-cpp-posix-event-engine`; they cover upstream's
+  canonical compressed-unary request probe plus gzip/identity request and
+  response cases in both endpoint directions. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

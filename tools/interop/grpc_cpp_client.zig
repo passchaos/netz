@@ -2,7 +2,8 @@
 //!
 //! The scenarios mirror gRPC Core commit
 //! `03d65cc67c450ccbb58a8a45627c4da83a886ccd`'s canonical `ping_pong`,
-//! `custom_metadata`, `cancel_after_first_response`, and
+//! `client_compressed_unary`, `server_compressed_unary`, `custom_metadata`,
+//! `cancel_after_first_response`, and
 //! `timeout_on_sleeping_server` cases.  Only the bounded protobuf fixture
 //! subset lives beside this executable; netz's gRPC transport remains payload
 //! agnostic.
@@ -12,6 +13,7 @@ const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
 
 const service_path = "/grpc.testing.TestService/FullDuplexCall";
+const unary_service_path = "/grpc.testing.TestService/UnaryCall";
 const authority = "localhost";
 const response_timeout = std.Io.Duration.fromSeconds(10);
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
@@ -90,18 +92,86 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try runPingPong(allocator, &client, message_limit);
+    try runUnaryCompression(allocator, &client, message_limit);
     try runCustomMetadata(allocator, &client, message_limit);
     try runCancellationAndReuse(allocator, &client, message_limit);
     try runSleepingDeadline(allocator, &client, message_limit);
 
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
-            "ping_pong=4 metadata=initial+trailing-bin " ++
+            "ping_pong=4 compression=request+response-gzip+identity " ++
+            "metadata=initial+trailing-bin " ++
             "cancel=CANCEL reuse=true " ++
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runUnaryCompression(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    for ([_]bool{ true, false }) |compress| {
+        const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+            .response_size = metadata_response_size,
+            .request_body_size = metadata_request_size,
+            .expect_compressed = compress,
+        });
+        defer allocator.free(request);
+        var response = try client.unary(.{
+            .path = unary_service_path,
+            .authority = authority,
+            .message = request,
+            .compression = if (compress) .gzip else .identity,
+            .accepted_encodings = .{ .gzip = true },
+            .max_message_size = message_limit,
+        });
+        defer response.deinit();
+        try validateUnaryCompressionResponse(response, false);
+    }
+
+    for ([_]bool{ true, false }) |compress| {
+        const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+            .response_size = metadata_response_size,
+            .request_body_size = metadata_request_size,
+            .response_compressed = compress,
+        });
+        defer allocator.free(request);
+        var response = try client.unary(.{
+            .path = unary_service_path,
+            .authority = authority,
+            .message = request,
+            .accepted_encodings = .{ .gzip = true },
+            .max_message_size = message_limit,
+        });
+        defer response.deinit();
+        try validateUnaryCompressionResponse(response, compress);
+    }
+}
+
+fn validateUnaryCompressionResponse(
+    response: netz.grpc.UnaryResponse,
+    compressed: bool,
+) !void {
+    if (response.status != .ok or response.message == null) {
+        return error.InvalidCompressionResponse;
+    }
+    try messages.validateStreamingOutputCallResponse(
+        response.message.?.payload,
+        metadata_response_size,
+    );
+    if (response.was_compressed != compressed) {
+        return error.InvalidCompressionResponse;
+    }
+    if (compressed and !std.mem.eql(
+        u8,
+        response.encoding orelse return error.InvalidCompressionResponse,
+        "gzip",
+    )) {
+        return error.InvalidCompressionResponse;
+    }
 }
 
 fn runPingPong(

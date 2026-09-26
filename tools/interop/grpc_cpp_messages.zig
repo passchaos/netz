@@ -43,7 +43,67 @@ pub const RequestOptions = struct {
 pub const SimpleRequestOptions = struct {
     response_size: u32,
     request_body_size: usize,
+    /// Presence maps to `SimpleRequest.response_compressed` (field 6).
+    response_compressed: ?bool = null,
+    /// Presence maps to `SimpleRequest.expect_compressed` (field 8).
+    expect_compressed: ?bool = null,
 };
+
+/// Encode the strict `SimpleRequest` subset used by unary compression and
+/// metadata interoperability cases. Wrapper booleans preserve presence even
+/// when their contained proto3 value is false.
+pub fn encodeSimpleRequestAlloc(
+    allocator: std.mem.Allocator,
+    options: SimpleRequestOptions,
+) Error![]u8 {
+    if (options.response_size > max_payload_size or
+        options.request_body_size > max_payload_size)
+    {
+        return error.MessageTooLarge;
+    }
+    const payload_len = if (options.request_body_size == 0)
+        0
+    else
+        try lengthDelimitedFieldLen(options.request_body_size);
+    const encoded_len = std.math.add(
+        usize,
+        1 + varintLen(options.response_size) +
+            try lengthDelimitedFieldLen(payload_len),
+        boolWrapperFieldLen(options.response_compressed) +
+            boolWrapperFieldLen(options.expect_compressed),
+    ) catch return error.MessageTooLarge;
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+    var cursor: usize = 0;
+
+    encoded[cursor] = fieldKey(2, .varint);
+    cursor += 1;
+    writeVarint(encoded, &cursor, options.response_size);
+    encoded[cursor] = fieldKey(3, .length_delimited);
+    cursor += 1;
+    writeVarint(encoded, &cursor, payload_len);
+    if (options.request_body_size != 0) {
+        encoded[cursor] = fieldKey(2, .length_delimited);
+        cursor += 1;
+        writeVarint(encoded, &cursor, options.request_body_size);
+        @memset(encoded[cursor..][0..options.request_body_size], 0);
+        cursor += options.request_body_size;
+    }
+    writeBoolWrapperField(
+        encoded,
+        &cursor,
+        6,
+        options.response_compressed,
+    );
+    writeBoolWrapperField(
+        encoded,
+        &cursor,
+        8,
+        options.expect_compressed,
+    );
+    std.debug.assert(cursor == encoded.len);
+    return encoded;
+}
 
 /// Decode the exact `SimpleRequest` subset emitted by the canonical unary
 /// custom-metadata case.
@@ -54,6 +114,8 @@ pub fn decodeSimpleRequest(input: []const u8) Error!SimpleRequestOptions {
     var response_type_seen = false;
     var response_size_seen = false;
     var payload_seen = false;
+    var response_compressed_seen = false;
+    var expect_compressed_seen = false;
     var result = SimpleRequestOptions{
         .response_size = 0,
         .request_body_size = 0,
@@ -89,6 +151,26 @@ pub fn decodeSimpleRequest(input: []const u8) Error!SimpleRequestOptions {
                 payload_seen = true;
                 const payload = try reader.readBytes(max_payload_size + 16);
                 result.request_body_size = try decodeZeroPayload(payload);
+            },
+            6 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (response_compressed_seen) return error.DuplicateField;
+                response_compressed_seen = true;
+                result.response_compressed = try decodeBoolValue(
+                    try reader.readBytes(2),
+                );
+            },
+            8 => {
+                if (tag.wire_type != .length_delimited) {
+                    return error.UnsupportedWireType;
+                }
+                if (expect_compressed_seen) return error.DuplicateField;
+                expect_compressed_seen = true;
+                result.expect_compressed = try decodeBoolValue(
+                    try reader.readBytes(2),
+                );
             },
             else => return error.UnsupportedField,
         }
@@ -557,6 +639,40 @@ fn validatePayload(input: []const u8, expected_body_size: usize) Error!void {
     if (body_size != expected_body_size) return error.UnexpectedPayloadSize;
 }
 
+fn decodeBoolValue(input: []const u8) Error!bool {
+    if (input.len == 0) return false;
+    var reader = Reader{ .input = input };
+    const tag = try reader.readTag();
+    if (tag.field_number != 1 or tag.wire_type != .varint) {
+        return error.UnsupportedField;
+    }
+    const raw = try reader.readVarint();
+    if (!reader.finished() or raw > 1) return error.InvalidArgument;
+    return raw == 1;
+}
+
+fn boolWrapperFieldLen(value: ?bool) usize {
+    return if (value) |enabled| if (enabled) 4 else 2 else 0;
+}
+
+fn writeBoolWrapperField(
+    output: []u8,
+    cursor: *usize,
+    field_number: u5,
+    value: ?bool,
+) void {
+    const enabled = value orelse return;
+    output[cursor.*] = fieldKey(field_number, .length_delimited);
+    cursor.* += 1;
+    output[cursor.*] = if (enabled) 2 else 0;
+    cursor.* += 1;
+    if (enabled) {
+        output[cursor.*] = fieldKey(1, .varint);
+        output[cursor.* + 1] = 1;
+        cursor.* += 2;
+    }
+}
+
 fn lengthDelimitedFieldLen(payload_len: usize) Error!usize {
     return std.math.add(
         usize,
@@ -631,6 +747,59 @@ test "decodes canonical unary custom metadata request" {
     );
 }
 
+test "encodes and decodes unary compression controls" {
+    const encoded = try encodeSimpleRequestAlloc(
+        std.testing.allocator,
+        .{
+            .response_size = 5,
+            .request_body_size = 3,
+            .response_compressed = true,
+            .expect_compressed = false,
+        },
+    );
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{
+            0x10, 0x05,
+            0x1a, 0x05,
+            0x12, 0x03,
+            0,    0,
+            0,    0x32,
+            0x02, 0x08,
+            0x01, 0x42,
+            0x00,
+        },
+        encoded,
+    );
+    const decoded = try decodeSimpleRequest(encoded);
+    try std.testing.expectEqual(@as(u32, 5), decoded.response_size);
+    try std.testing.expectEqual(@as(usize, 3), decoded.request_body_size);
+    try std.testing.expectEqual(@as(?bool, true), decoded.response_compressed);
+    try std.testing.expectEqual(@as(?bool, false), decoded.expect_compressed);
+    try std.testing.expectError(
+        error.InvalidArgument,
+        decodeSimpleRequest(&.{
+            0x10, 0x05, 0x1a, 0x00,
+            0x42, 0x02, 0x08, 0x02,
+        }),
+    );
+    try std.testing.expectError(
+        error.DuplicateField,
+        decodeSimpleRequest(&.{
+            0x10, 0x05, 0x1a, 0x00,
+            0x32, 0x00, 0x32, 0x00,
+        }),
+    );
+    try std.testing.expectError(
+        error.UnsupportedField,
+        decodeSimpleRequest(&.{
+            0x10, 0x05, 0x1a, 0x00,
+            0x32, 0x02, 0x10, 0x01,
+        }),
+    );
+}
+
 test "decodes client and server streaming fixture messages" {
     try std.testing.expectEqual(
         @as(usize, 3),
@@ -652,7 +821,7 @@ test "decodes client and server streaming fixture messages" {
     var sizes_storage: [4]u32 = undefined;
     const sizes = try decodeStreamingOutputCallResponseSizes(
         &.{
-            0x12, 0x03, 0x08, 0xb7, 0xf5, 0x01,
+            0x12, 0x04, 0x08, 0xb7, 0xf5, 0x01,
             0x12, 0x02, 0x08, 0x09,
         },
         &sizes_storage,

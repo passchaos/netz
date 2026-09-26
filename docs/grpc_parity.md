@@ -248,7 +248,8 @@ process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
-`empty_stream`, `client_streaming`, `server_streaming`,
+`empty_stream`, `client_compressed_unary`, `server_compressed_unary`,
+`client_streaming`, `server_streaming`,
 `cancel_after_first_response`, `timeout_on_sleeping_server`, and
 `custom_metadata` over both transports. Client streaming checks all four
 canonical request payload sizes and the exact aggregate response; server
@@ -261,6 +262,16 @@ condition. For the upstream test's hard-coded 1 ms deadline, the harness also
 records the legitimate race where the client reaches local
 `DEADLINE_EXCEEDED` before the cleartext or TLS server accept finishes and no
 server RPC exists.
+The two compression cases use gRPC Core's own test-only call inspector: the
+client-compressed case first sends the canonical deliberately false probe and
+requires netz to return `INVALID_ARGUMENT`, then verifies gzip and identity
+requests independently; the server-compressed case requires gzip and identity
+responses independently. The forward gate exercises the inverse direction on
+one persistent channel: netz sends gzip and identity unary requests that the
+C++ server inspects, advertises only gzip for the response check, verifies the
+message compressed bit and `grpc-encoding: gzip`, and validates the exact
+314159-byte decompressed protobuf payload. Both directions run over h2c and
+certificate-verified TLS.
 
 The reflection gate passed again after the zio migration on 2026-09-15 against
 the same pinned upstream revision and its Linux Posix EventEngine. Its ready,
@@ -295,8 +306,10 @@ The netz client exercises upstream's canonical `FullDuplexCall` contract:
   a typed `DEADLINE_EXCEEDED` terminal result.
 
 `tools/interop/grpc_cpp_messages.zig` encodes and validates only the bounded
-subset of `grpc.testing.StreamingOutputCallRequest`/`Response` needed by these
-cases. It pins its field-number assumptions to the audited source revision and
+subset of `grpc.testing.SimpleRequest`/`Response` and
+`StreamingOutputCallRequest`/`Response` needed by these cases, including
+presence-preserving protobuf `BoolValue` compression controls. It pins its
+field-number assumptions to the audited source revision and
 strictly rejects malformed, non-canonical, oversized, or unexpected protobuf
 input; it is a fixture codec, not a replacement for generated `pbz` bindings.
 
@@ -341,9 +354,12 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    server checks of full duplex, metadata, cancellation/channel reuse, and
    deadline propagation over h2c and certificate-verified TLS. The reverse gate
    covers upstream-client ping-pong, client/server streaming, empty-stream
-   completion, cancellation, deadline behavior, and unary/bidirectional
-   custom-metadata echo against netz over both transports. Broader upstream
-   compression, status, and authentication cases remain future work.
+   completion, cancellation, deadline behavior, unary/bidirectional
+   custom-metadata echo, and the canonical client/server compressed-unary
+   cases against netz over both transports. The forward gate independently
+   covers the same gzip/identity request and response matrix against the C++
+   server. Broader upstream streaming-compression, status, and authentication
+   cases remain future work.
 3. Add broader conformance/interop runners. Reflection accepts standard
    descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.

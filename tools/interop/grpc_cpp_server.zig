@@ -25,6 +25,8 @@ const Scenario = enum {
     cancel_after_first_response,
     timeout_on_sleeping_server,
     custom_metadata,
+    client_compressed_unary,
+    server_compressed_unary,
     client_streaming,
     server_streaming,
 
@@ -127,6 +129,14 @@ pub fn main(init: std.process.Init) !void {
     }
     switch (scenario) {
         .custom_metadata => try serveCustomMetadata(allocator, &connection),
+        .client_compressed_unary => try serveClientCompressedUnary(
+            allocator,
+            &connection,
+        ),
+        .server_compressed_unary => try serveServerCompressedUnary(
+            allocator,
+            &connection,
+        ),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
@@ -144,6 +154,85 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveClientCompressedUnary(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    for ([_]bool{ true, true, false }, 0..) |expected, index| {
+        var unary = try connection.readUnary();
+        defer unary.deinit();
+        if (!std.mem.eql(u8, unary.request.path, unary_service_path)) {
+            return error.UnexpectedMethod;
+        }
+        const request = try messages.decodeSimpleRequest(
+            unary.request.message.payload,
+        );
+        if (request.expect_compressed != expected) {
+            return error.UnexpectedRequest;
+        }
+        const matches = unary.request.was_compressed == expected;
+        if (index == 0) {
+            if (matches) return error.UnexpectedCompressionProbe;
+            try connection.writeUnary(unary.request.stream_id, .{
+                .status = .invalid_argument,
+                .status_message = "Compressed request expectation not met.",
+                .trailers_only = true,
+            });
+            continue;
+        }
+        if (!matches) return error.UnexpectedCompression;
+        try writeUnaryPayload(allocator, connection, &unary, false);
+    }
+}
+
+fn serveServerCompressedUnary(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    for ([_]bool{ true, false }) |compressed| {
+        var unary = try connection.readUnary();
+        defer unary.deinit();
+        if (!std.mem.eql(u8, unary.request.path, unary_service_path)) {
+            return error.UnexpectedMethod;
+        }
+        const request = try messages.decodeSimpleRequest(
+            unary.request.message.payload,
+        );
+        if (request.response_compressed != compressed or
+            unary.request.was_compressed)
+        {
+            return error.UnexpectedCompression;
+        }
+        try writeUnaryPayload(allocator, connection, &unary, compressed);
+    }
+}
+
+fn writeUnaryPayload(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+    unary: *const netz.grpc.runtime.OwnedUnaryRequest,
+    compressed: bool,
+) !void {
+    const request = try messages.decodeSimpleRequest(
+        unary.request.message.payload,
+    );
+    if (request.response_size != 314_159 or
+        request.request_body_size != 271_828)
+    {
+        return error.UnexpectedRequest;
+    }
+    const response = try messages.encodeSimpleResponseAlloc(
+        allocator,
+        request.response_size,
+    );
+    defer allocator.free(response);
+    try connection.writeUnary(unary.request.stream_id, .{
+        .message = response,
+        .compression = if (compressed) .gzip else .identity,
+        .request_accepted_encodings = unary.request.accepted_encodings,
+    });
 }
 
 const InputStreamAccumulator = struct {
@@ -374,7 +463,12 @@ fn serveScenario(
         .empty_stream => try serveEmpty(stream, &queue, deadline),
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
-        .custom_metadata, .client_streaming, .server_streaming => unreachable,
+        .custom_metadata,
+        .client_compressed_unary,
+        .server_compressed_unary,
+        .client_streaming,
+        .server_streaming,
+        => unreachable,
     }
 }
 

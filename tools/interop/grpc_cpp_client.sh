@@ -190,6 +190,8 @@ for transport in h2c tls; do
     cancel_after_first_response \
     timeout_on_sleeping_server \
     custom_metadata \
+    client_compressed_unary \
+    server_compressed_unary \
     client_streaming \
     server_streaming
   do
@@ -197,4 +199,4 @@ for transport in h2c tls; do
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true client_streaming=true server_streaming=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls ping_pong=true empty_stream=true compression=client+server-gzip+identity client_streaming=true server_streaming=true cancel=CANCEL deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
