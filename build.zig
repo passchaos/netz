@@ -177,6 +177,27 @@ pub fn build(b: *std.Build) void {
     fuzz_websocket_h1_context_step.dependOn(
         &run_websocket_h1_context_fuzz_tests.step,
     );
+    const websocket_h2_context_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/websocket_h2_context_fuzz_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_websocket_h2_context_fuzz_tests = b.addRunArtifact(
+        websocket_h2_context_fuzz_tests,
+    );
+    const fuzz_websocket_h2_context_step = b.step(
+        "fuzz-websocket-h2-context",
+        "Fuzz WebSocket context takeover over live HTTP/2 connections",
+    );
+    fuzz_websocket_h2_context_step.dependOn(
+        &run_websocket_h2_context_fuzz_tests.step,
+    );
     const quic_wire_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/quic_wire_fuzz_test.zig"),
@@ -477,6 +498,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_websocket_compression_fuzz_tests.step);
     test_step.dependOn(&run_websocket_context_fuzz_tests.step);
     test_step.dependOn(&run_websocket_h1_context_fuzz_tests.step);
+    test_step.dependOn(&run_websocket_h2_context_fuzz_tests.step);
     test_step.dependOn(&run_quic_wire_fuzz_tests.step);
     test_step.dependOn(&run_quic_protection_fuzz_tests.step);
     test_step.dependOn(&run_quic_connection_fuzz_tests.step);
