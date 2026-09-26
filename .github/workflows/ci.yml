@@ -79,7 +79,7 @@ jobs:
         run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
 
       - name: Replay bounded fuzz corpora
-        run: zig build fuzz-parsers fuzz-stateful fuzz-websocket-compression fuzz-websocket-context fuzz-websocket-h1-context fuzz-websocket-h2-context fuzz-websocket-h3-context fuzz-quic-wire fuzz-quic-protection fuzz-quic-connection
+        run: zig build fuzz-parsers fuzz-stateful fuzz-mqtt-live-broker fuzz-websocket-compression fuzz-websocket-context fuzz-websocket-h1-context fuzz-websocket-h2-context fuzz-websocket-h3-context fuzz-quic-wire fuzz-quic-protection fuzz-quic-connection
 
       - name: Run the complete test gate serially
         run: zig build test -j1 --summary all
@@ -96,6 +96,8 @@ jobs:
             default_runs: 10000
           - target: fuzz-stateful
             default_runs: 10000
+          - target: fuzz-mqtt-live-broker
+            default_runs: 128
           - target: fuzz-websocket-compression
             default_runs: 10000
           - target: fuzz-websocket-context

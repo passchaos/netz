@@ -114,6 +114,27 @@ pub fn build(b: *std.Build) void {
         "Fuzz bounded HTTP/WebSocket/WebTransport/MQTT state sequences",
     );
     fuzz_stateful_step.dependOn(&run_stateful_fuzz_tests.step);
+    const mqtt_live_broker_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/mqtt_live_broker_fuzz_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_mqtt_live_broker_fuzz_tests = b.addRunArtifact(
+        mqtt_live_broker_fuzz_tests,
+    );
+    const fuzz_mqtt_live_broker_step = b.step(
+        "fuzz-mqtt-live-broker",
+        "Fuzz live MQTT broker ordering and retained routing",
+    );
+    fuzz_mqtt_live_broker_step.dependOn(
+        &run_mqtt_live_broker_fuzz_tests.step,
+    );
     const websocket_compression_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -523,6 +544,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_package_tests.step);
     test_step.dependOn(&run_parser_fuzz_tests.step);
     test_step.dependOn(&run_stateful_fuzz_tests.step);
+    test_step.dependOn(&run_mqtt_live_broker_fuzz_tests.step);
     test_step.dependOn(&run_websocket_compression_fuzz_tests.step);
     test_step.dependOn(&run_websocket_context_fuzz_tests.step);
     test_step.dependOn(&run_websocket_h1_context_fuzz_tests.step);

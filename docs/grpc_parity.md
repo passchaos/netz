@@ -227,7 +227,7 @@ On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
 8.7.0 and GCC. The netz client completed the full forward harness, including
 the canonical compressed-streaming and status-message cases, while the
-official C++ client completed twenty-three scenarios per transport. The upstream
+official C++ client completed twenty-two scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has

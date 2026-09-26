@@ -1554,8 +1554,14 @@ random mutations with leak checks; Zig's `--fuzz` mode adds coverage guidance.
 The companion `fuzz-stateful` target interleaves bounded Session open/takeover,
 disconnect/expiry, subscription, queued and immediate publication, outgoing
 QoS 1/2 acknowledgement, incoming QoS 2, and snapshot round-trip operations.
-Live broker connection ordering, reconnect timing, retained-message routing,
-bridge state and multi-client packet I/O remain outside these fuzz surfaces.
+The separate `fuzz-mqtt-live-broker` target starts the production TCP broker,
+one publisher and two subscribers for each bounded input. An independent model
+checks ordered exact-topic SUBSCRIBE/UNSUBSCRIBE, live QoS 0 publication,
+retained write/replacement/deletion and Retain Handling 0 replay. Explicit
+PINGREQ/PINGRESP barriers prove each expected queue is complete without timing
+sleeps, including a final empty barrier that rejects delayed extra delivery.
+Reconnect timing, bridge state and their multi-client packet I/O remain outside
+these fuzz surfaces.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,

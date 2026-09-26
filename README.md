@@ -14,6 +14,11 @@ fuzz-stateful` drives bounded operation sequences through HTTP/1 pipelines,
 HTTP/2 flow control and HPACK, HTTP/3 control streams and QPACK, WebSocket
 fragmented-message assembly, WebTransport session/stream lifecycles, and MQTT
 Session/QoS persistence; add `--fuzz=N` for coverage-guided sequence discovery.
+`zig build fuzz-mqtt-live-broker` starts the production broker and three real
+loopback TCP clients for each bounded input. It checks exact-topic
+SUBSCRIBE/UNSUBSCRIBE ordering, live QoS 0 fanout, retained write, replacement,
+deletion and Retain Handling 0 replay against an independent delivery model,
+using PINGREQ/PINGRESP as deterministic no-sleep barriers.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -46,11 +51,12 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all ten corpora and the complete test gate on pushes and pull
-requests, then runs the ten coverage-guided targets daily and on demand. The
-live HTTP/1 and HTTP/2 targets default to 256 daily connections, H3 defaults to
-128 authenticated sessions, and the in-memory targets default to 10,000
-iterations; a manual `fuzz_runs` value overrides all targets. Because
+workflow replays all eleven corpora and the complete test gate on pushes and
+pull requests, then runs the eleven coverage-guided targets daily and on
+demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
+H3 to 128 authenticated sessions, live MQTT to 128 three-client broker runs,
+and the in-memory targets to 10,000 iterations. A manual `fuzz_runs` value
+overrides all targets. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
