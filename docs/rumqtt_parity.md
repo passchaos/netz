@@ -1565,7 +1565,13 @@ a scripted real TCP peer across one bounded operation history. It checks QoS 1
 and QoS 2 success, lost-PUBACK/PUBREC PUBLISH replay with a stable Packet
 Identifier and DUP, lost-PUBCOMP PUBREL-only replay, fresh-Session transaction
 discard, preserved-Session resume, and ordered accepted-subscription replay.
-Bridge state and its multi-client packet I/O remain outside these fuzz surfaces.
+`fuzz-mqtt-bridge` then composes a scripted upstream TCP peer, production
+inbound Bridge, local production broker, live subscriber and retained-state
+probe. Its model checks QoS 0/1 topic mapping, acknowledgement ordering,
+retained replacement/deletion, fresh/resumed upstream Sessions, ordered bridge
+subscription replay, DUP normalization, User Property preservation, and the
+non-transfer of upstream Topic Alias/Subscription Identifier state. Durable
+QoS 2 and outbound bridge cross-broker state remain outside these fuzz surfaces.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,

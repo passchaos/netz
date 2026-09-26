@@ -23,6 +23,11 @@ using PINGREQ/PINGRESP as deterministic no-sleep barriers.
 scripted real TCP peer. It verifies QoS 1/2 completion, lost-ACK PUBLISH replay
 with stable Packet Identifier and DUP, PUBREL-only recovery, fresh-Session
 transaction loss, and ordered accepted-subscription replay.
+`zig build fuzz-mqtt-bridge` adds a real upstream TCP peer, the production
+inbound bridge, a local production broker and two local clients. It checks
+QoS 0/1 mapping and acknowledgement ordering, retained replacement/deletion,
+fresh/resumed upstream Sessions, subscription replay, DUP normalization and
+connection-scoped property isolation.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -55,8 +60,8 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all twelve corpora and the complete test gate on pushes and
-pull requests, then runs the twelve coverage-guided targets daily and on
+workflow replays all thirteen corpora and the complete test gate on pushes and
+pull requests, then runs the thirteen coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
 H3 to 128 authenticated sessions, each live MQTT target to 128 real-network
 runs, and the in-memory targets to 10,000 iterations. A manual `fuzz_runs`
