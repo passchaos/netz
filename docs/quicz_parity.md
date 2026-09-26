@@ -57,9 +57,13 @@ duplication, corruption, explicit ACKs, PTO retransmission, bidirectional
 STREAM/FIN/PING traffic, RESET_STREAM terminal delivery, application reads, and
 key updates for QUIC v1/v2 and all supported traffic ciphers. Prefix-exact
 application data, packet-number bounds, stream-count bounds, and directional
-key-generation bounds are checked after every operation. This still does not
-fuzz TLS handshakes, path migration,
-long-running connection limits, or concurrent event-loop ownership.
+key-generation bounds are checked after every operation. The companion
+`fuzz-quic-path` target drives authenticated packets across real UDP sockets on
+three loopback IPs and multiple source ports. It covers superseded and invalid
+PATH_RESPONSE, validation, timeout/retry/fallback, NAT rebinding, and
+bidirectional stream traffic after path changes. These targets still do not
+fuzz TLS handshake failure sequences, long-running connection limits, or
+concurrent event-loop ownership.
 The first extended run exposed an RFC 9001 Section 6.2 state conflation: netz
 rejected a valid peer update after it had sent the required new-phase ACK merely
 because that ACK packet had not itself been acknowledged. Receive-update
