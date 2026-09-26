@@ -18,6 +18,7 @@ from mqtt_broker_config_proxy import run_proxy_protocol_case
 from mqtt_broker_config_queue import run_queued_limits_case
 from mqtt_broker_config_session import (
     run_global_max_clients_case,
+    run_global_max_connections_case,
     run_persistent_client_expiration_case,
 )
 from mqtt_broker_config_sys import run_system_interval_case
@@ -3797,6 +3798,7 @@ def main() -> None:
         run_topic_alias_policy_case(args.broker, directory)
         run_persistent_client_expiration_case(args.broker, directory)
         run_global_max_clients_case(args.broker, directory)
+        run_global_max_connections_case(args.broker, directory)
         run_system_interval_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
@@ -3817,7 +3819,7 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
-        "global client-session capacity, persistent-client and "
+        "global client-session and live-connection capacity, persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID and outgoing QoS "

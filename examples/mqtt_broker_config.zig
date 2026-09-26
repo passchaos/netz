@@ -80,6 +80,7 @@ pub fn run(
     defer config.deinit(allocator);
 
     const connection_count = try config.totalMaxConnections();
+    const active_connection_limit = try config.activeConnectionLimit();
     const persistence_path = if (config.persistence)
         try config.persistencePath(allocator)
     else
@@ -160,7 +161,7 @@ pub fn run(
     };
     var broker = try mqtt.broker.Broker.init(allocator, io, .{
         .limits = .{
-            .max_connections = connection_count,
+            .max_connections = active_connection_limit,
             .max_payload_size = config.message_size_limit,
             .runtime = .{ .max_packet_size = config.max_packet_size },
         },

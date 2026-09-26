@@ -5162,9 +5162,21 @@ test "public modules are reachable" {
         netz.mqtt.broker_config.Config,
         "global_max_clients",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
+        "global_max_connections",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker_config,
         "default_global_max_clients",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker_config,
+        "default_global_max_connections",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker_config.Config,
+        "activeConnectionLimit",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,

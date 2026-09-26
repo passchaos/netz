@@ -17,6 +17,7 @@ def _configured_broker(
     broker: Path,
     config: Path,
     connection_count: int = 6,
+    listener_count: int = 1,
 ) -> Iterator[None]:
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
@@ -27,7 +28,10 @@ def _configured_broker(
     assert process.stdout is not None
     try:
         ready = process.stdout.readline().strip()
-        expected = f"configured 1 listeners for {connection_count} clients"
+        expected = (
+            f"configured {listener_count} listeners for "
+            f"{connection_count} clients"
+        )
         if expected not in ready:
             raise RuntimeError(
                 f"session-policy broker failed to start: {ready}"
@@ -183,4 +187,66 @@ def run_global_max_clients_case(
         # the configured expiry cap releases it through the deadline driver.
         time.sleep(1.2)
         replacement = _connect(port, "global-limit-released", 5, False)
+        _disconnect(replacement, 5)
+
+
+def run_global_max_connections_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    """Bound simultaneous admitted clients across independent listeners."""
+    first_port = free_port()
+    second_port = free_port()
+    while second_port == first_port:
+        second_port = free_port()
+    config = directory / "global-max-connections.conf"
+    config.write_text(
+        "global_max_connections 1\n"
+        f"listener {first_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {second_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+    )
+    with _configured_broker(
+        broker,
+        config,
+        connection_count=3,
+        listener_count=2,
+    ):
+        held = _connect(first_port, "global-connection-held", 5, False)
+
+        refused = socket.create_connection(
+            ("127.0.0.1", second_port), timeout=5,
+        )
+        refused.settimeout(5)
+        try:
+            refused.sendall(connect_packet(
+                "global-connection-refused",
+                clean_start=True,
+                protocol=5,
+            ))
+            try:
+                unexpected = refused.recv(1)
+            except ConnectionResetError:
+                unexpected = b""
+            if unexpected:
+                raise AssertionError(
+                    "global connection limit sent CONNACK bytes: "
+                    + unexpected.hex()
+                )
+        finally:
+            refused.close()
+
+        _disconnect(held, 5)
+
+        # Capacity is live-connection scoped, not Session scoped. Once the
+        # first transport closes, another listener can consume the shared slot.
+        replacement = _connect(
+            second_port,
+            "global-connection-released",
+            5,
+            False,
+        )
         _disconnect(replacement, 5)

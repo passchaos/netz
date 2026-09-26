@@ -80,6 +80,7 @@ one shared Broker core. For example:
 ```text
 queue_qos0_messages true
 global_max_clients 16384
+global_max_connections -1
 auto_id_prefix auto-
 max_inflight_messages 20
 max_inflight_bytes 0
@@ -140,7 +141,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `persistent_client_expiration`,
 `retain_expiry_interval`,
 `sys_interval`, `websockets_headers_size`, `set_tcp_nodelay`,
-`global_max_clients`, `password_file`, `acl_file`, `persistence`,
+`global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
 `persistence_location`, `persistence_file`,
 `autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. This
@@ -180,6 +181,14 @@ plus unexpired offline Sessions across all listeners. A new MQTT 5 client over
 the limit receives Server Busy; MQTT 3.1.1 is closed because it has no matching
 CONNACK code. The Mosquitto `-1` form maps to the implementation's bounded
 2,147,483,647-session ceiling; zero and other negative values are rejected.
+`global_max_connections` independently bounds simultaneously admitted clients
+across all listeners and defaults to `-1` (unlimited). Excess peers are closed
+without a CONNACK and capacity is reusable as soon as an established client
+disconnects; `-1` maps to the bounded 2,147,483,647-client implementation
+ceiling, while zero and other negative values are rejected. Because the
+portable `PendingSource` boundary returns after transport setup and CONNECT
+parsing, the shared broker slot is claimed immediately after that boundary;
+per-listener accept concurrency continues to bound pre-CONNECT work.
 Global
 `max_inflight_messages` defaults to 20 and bounds each client's incoming and
 outgoing QoS 1/2 transactions. MQTT 5 advertises the incoming limit as Receive

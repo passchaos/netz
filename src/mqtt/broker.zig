@@ -846,9 +846,9 @@ pub const Listener = struct {
 /// One endpoint in a long-running heterogeneous listener service.
 ///
 /// Multiple workers permit TLS and HTTP Upgrade handshakes and established
-/// connections to overlap. Their aggregate concurrency must fit the Broker's
-/// `max_connections`; each worker accepts another client after its prior one
-/// disconnects or is refused.
+/// connections to overlap. The Broker's `max_connections` independently caps
+/// admitted clients across all workers; an excess peer is closed and its
+/// worker accepts another client after the next disconnect or refusal.
 pub const ListenerEndpoint = struct {
     source: runtime.PendingSource,
     namespace: listener_namespace.Namespace = .{},
@@ -2324,7 +2324,8 @@ pub const Broker = struct {
     /// Serve finite accept counts from heterogeneous listeners over one broker
     /// state core. One accept task is scheduled per finite connection, so
     /// listeners and their established clients make progress concurrently;
-    /// connection slots are allocated atomically by the shared state mutex.
+    /// connection slots are allocated atomically by the shared state mutex and
+    /// excess peers are closed without terminating the finite service.
     pub fn serveListeners(
         self: *Broker,
         listeners: []const Listener,
@@ -2349,7 +2350,6 @@ pub const Broker = struct {
                 listener.connection_count,
             ) catch return error.BrokerFull;
         }
-        if (connection_count > self.slots.len) return error.BrokerFull;
         var group: std.Io.Group = .init;
         self.deadline_driver.start();
         // Unlike `Io.async`, `concurrent` guarantees the deadline driver is
@@ -2434,7 +2434,6 @@ pub const Broker = struct {
         if (options.accept_error_backoff.nanoseconds < 0) {
             return error.InvalidProperty;
         }
-        var worker_count: usize = 0;
         for (listeners) |listener| {
             _ = try listener_namespace.Namespace.init(
                 listener.namespace.prefix,
@@ -2451,14 +2450,7 @@ pub const Broker = struct {
             if (listener.accept_concurrency == 0) {
                 return error.InvalidProperty;
             }
-            worker_count = std.math.add(
-                usize,
-                worker_count,
-                listener.accept_concurrency,
-            ) catch return error.BrokerFull;
         }
-        if (worker_count > self.slots.len) return error.BrokerFull;
-
         var group: std.Io.Group = .init;
         var supervisor = ListenerSupervisorState{
             .broker = self,
@@ -6388,6 +6380,10 @@ const ListenerAcceptTask = struct {
         };
         const slot_index = task.broker.claimSlot() catch |err| {
             pending.deinit(task.broker.allocator);
+            // Capacity rejection is local to this newly accepted peer. Other
+            // finite listener tasks may still complete after a live client
+            // releases its slot.
+            if (err == error.BrokerFull) return;
             task.result.* = err;
             return;
         };
@@ -6500,6 +6496,7 @@ const ListenerSupervisorAcceptTask = struct {
             }
             const slot_index = task.supervisor.broker.claimSlot() catch |err| {
                 pending.deinit(task.supervisor.broker.allocator);
+                if (err == error.BrokerFull) continue;
                 task.supervisor.report(
                     task.listener_index,
                     .connection,

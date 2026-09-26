@@ -15,6 +15,7 @@ const net = std.Io.net;
 pub const max_config_bytes: usize = 1024 * 1024;
 pub const default_max_connections: usize = 16;
 pub const default_global_max_clients: usize = 16_384;
+pub const default_global_max_connections: usize = std.math.maxInt(u31);
 pub const default_max_packet_size: usize = 2_000_000;
 pub const default_max_inflight_messages: u16 = 20;
 pub const default_max_queued_messages: usize = 1_000;
@@ -79,6 +80,7 @@ pub const Listener = struct {
 pub const Config = struct {
     listeners: []Listener,
     global_max_clients: usize = default_global_max_clients,
+    global_max_connections: usize = default_global_max_connections,
     per_listener_settings: bool = false,
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
@@ -127,6 +129,17 @@ pub const Config = struct {
                 return error.IntegerOverflow;
         }
         return total;
+    }
+
+    /// Bound simultaneously admitted clients without changing each
+    /// listener's finite accept budget.
+    pub fn activeConnectionLimit(
+        self: Config,
+    ) error{IntegerOverflow}!usize {
+        return @min(
+            try self.totalMaxConnections(),
+            self.global_max_connections,
+        );
     }
 
     /// Convert Mosquitto's zero-as-unlimited configuration value into the
@@ -227,6 +240,7 @@ const ListenerSeen = struct {
 const GlobalSeen = struct {
     per_listener_settings: bool = false,
     global_max_clients: bool = false,
+    global_max_connections: bool = false,
     queue_qos0_messages: bool = false,
     upgrade_outgoing_qos: bool = false,
     password_file: bool = false,
@@ -332,7 +346,15 @@ fn parseSources(
 
             if (std.mem.eql(u8, directive, "global_max_clients")) {
                 try markOnce(&global_seen.global_max_clients);
-                config.global_max_clients = try parseGlobalMaxClients(&words);
+                config.global_max_clients = try parsePositiveOrUnlimited(&words);
+            } else if (std.mem.eql(
+                u8,
+                directive,
+                "global_max_connections",
+            )) {
+                try markOnce(&global_seen.global_max_connections);
+                config.global_max_connections =
+                    try parsePositiveOrUnlimited(&words);
             } else if (std.mem.eql(u8, directive, "per_listener_settings")) {
                 try markOnce(&global_seen.per_listener_settings);
                 const enabled = try parseOneBool(&words);
@@ -810,7 +832,7 @@ fn parseOnePositive(
     return value;
 }
 
-fn parseGlobalMaxClients(words: anytype) error{
+fn parsePositiveOrUnlimited(words: anytype) error{
     InvalidDirective,
     InvalidInteger,
 }!usize {
@@ -888,6 +910,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     var config = try parse(allocator,
         \\# strict supported subset
         \\global_max_clients 128
+        \\global_max_connections 5
         \\queue_qos0_messages true
         \\upgrade_outgoing_qos true
         \\max_packet_size 2000000
@@ -939,6 +962,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     );
     defer config.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 128), config.global_max_clients);
+    try std.testing.expectEqual(@as(usize, 5), config.global_max_connections);
     try std.testing.expect(config.queue_qos0_messages);
     try std.testing.expect(config.upgrade_outgoing_qos);
     try std.testing.expectEqual(@as(usize, 2_000_000), config.max_packet_size);
@@ -971,6 +995,7 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expect(config.autosave_on_changes);
     try std.testing.expectEqual(@as(u32, 17), config.autosave_interval);
     try std.testing.expectEqual(@as(usize, 6), try config.totalMaxConnections());
+    try std.testing.expectEqual(@as(usize, 5), try config.activeConnectionLimit());
     try std.testing.expectEqual(@as(usize, 2), config.listeners.len);
     try std.testing.expect(config.listeners[0].protocol == .mqtt);
     try std.testing.expect(config.listeners[0].allow_anonymous);
@@ -1080,6 +1105,65 @@ test "MQTT broker config validates global client session limit" {
         parse(allocator,
             \\global_max_clients 1
             \\global_max_clients 2
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+}
+
+test "MQTT broker config validates global connection limit" {
+    const allocator = std.testing.allocator;
+
+    var unlimited = try parse(allocator,
+        \\global_max_connections -1
+        \\listener 1883
+        \\allow_anonymous true
+    );
+    defer unlimited.deinit(allocator);
+    try std.testing.expectEqual(
+        default_global_max_connections,
+        unlimited.global_max_connections,
+    );
+    try std.testing.expectEqual(
+        default_max_connections,
+        try unlimited.activeConnectionLimit(),
+    );
+
+    var omitted = try parse(allocator,
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer omitted.deinit(allocator);
+    try std.testing.expectEqual(
+        default_global_max_connections,
+        omitted.global_max_connections,
+    );
+
+    for ([_][]const u8{ "0", "-2", "2147483648", "invalid" }) |value| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "global_max_connections {s}\nlistener 1883\nallow_anonymous true\n",
+            .{value},
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\global_max_connections
+            \\listener 1883
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\global_max_connections 1
+            \\global_max_connections 2
             \\listener 1883
             \\allow_anonymous true
         ),

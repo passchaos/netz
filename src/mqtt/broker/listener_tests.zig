@@ -1573,7 +1573,93 @@ test "refused listener admission releases the only broker slot" {
     try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
 }
 
-test "listener supervisor replaces clients until graceful shutdown" {
+test "finite listeners share global admitted connection capacity" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var first_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer first_server.deinit();
+    var second_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer second_server.deinit();
+
+    const listeners = [_]mqtt.broker.Listener{
+        .{
+            .source = first_server.pendingSource(),
+            .connection_count = 1,
+        },
+        .{
+            .source = second_server.pendingSource(),
+            .connection_count = 2,
+        },
+    };
+    var serve = ListenerServeState{
+        .broker = &broker,
+        .listeners = &listeners,
+    };
+    const thread = try std.Thread.spawn(.{}, ListenerServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var held = try runtime.Client.connect(
+        allocator,
+        io,
+        first_server.address(),
+        .{ .protocol = .v5, .client_id = "global-capacity-held" },
+    );
+    defer held.close();
+    try held.ping();
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        runtime.Client.connect(
+            allocator,
+            io,
+            second_server.address(),
+            .{ .protocol = .v5, .client_id = "global-capacity-refused" },
+        ),
+    );
+
+    try held.disconnect(0);
+    try waitForPeerClose(&held);
+    var replacement = try runtime.Client.connect(
+        allocator,
+        io,
+        second_server.address(),
+        .{ .protocol = .v5, .client_id = "global-capacity-replacement" },
+    );
+    defer replacement.close();
+    try replacement.ping();
+    try replacement.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (serve.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+}
+
+test "listener supervisor rejects over-capacity peer and reuses slot" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1613,7 +1699,10 @@ test "listener supervisor replaces clients until graceful shutdown" {
     };
     var supervisor = Supervisor{
         .broker = &broker,
-        .endpoint = .{ .source = server.pendingSource() },
+        .endpoint = .{
+            .source = server.pendingSource(),
+            .accept_concurrency = 2,
+        },
     };
     const thread = try std.Thread.spawn(.{}, Supervisor.run, .{&supervisor});
     var joined = false;
@@ -1630,11 +1719,22 @@ test "listener supervisor replaces clients until graceful shutdown" {
     );
     defer first.close();
     try first.ping();
+
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        runtime.Client.connect(
+            allocator,
+            io,
+            server.address(),
+            .{ .protocol = .v5, .client_id = "supervised-over-capacity" },
+        ),
+    );
+    try first.ping();
     try first.disconnect(0);
     try waitForPeerClose(&first);
 
-    // `accept_concurrency=1` is a permanent accept/connection worker rather
-    // than a finite connection budget: it must accept again after teardown.
+    // Accept-worker concurrency is independent from the admitted connection
+    // limit. A worker must accept again after the live slot is released.
     var second = try runtime.Client.connect(
         allocator,
         io,
