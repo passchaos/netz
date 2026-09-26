@@ -33,6 +33,9 @@ const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
 const canonical_response_sizes = [_]usize{ 31_415, 9, 2_653, 58_979 };
 const metadata_request_size = 271_828;
 const metadata_response_size = 314_159;
+const slow_consumer_messages: usize = 2_000;
+const slow_consumer_response_size: usize = 1_030;
+const slow_consumer_delay = std.Io.Duration.fromMilliseconds(20);
 const initial_metadata_name = "x-grpc-test-echo-initial";
 const initial_metadata_value = "test_initial_metadata_value";
 const trailing_metadata_name = "x-grpc-test-echo-trailing-bin";
@@ -62,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
     const message_limit = messages.max_payload_size + 64;
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 64 * 1024,
-        .max_body_bytes = message_limit,
+        .max_body_bytes = 4 * 1024 * 1024,
         .initial_window_size = 512 * 1024,
         .initial_connection_window_size = 2 * 1024 * 1024,
         .handshake_timeout = .fromSeconds(5),
@@ -109,6 +112,7 @@ pub fn main(init: std.process.Init) !void {
 
     try runPingPong(allocator, &client, message_limit);
     try runHalfDuplex(allocator, &client, message_limit);
+    try runSlowConsumer(allocator, io, &client, message_limit);
     try runCancelAfterBegin(&client, message_limit);
     try runUnaryBasics(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
@@ -122,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
             "ping_pong=4 half_duplex=4 " ++
+            "slow_consumer=2000x1030@20ms " ++
             "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
             "status=unary+bidi+unicode " ++
@@ -132,6 +137,53 @@ pub fn main(init: std.process.Init) !void {
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+const SlowConsumer = struct {
+    io: std.Io,
+    count: usize = 0,
+
+    fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
+        if (message.was_compressed) return error.InvalidSlowConsumerResponse;
+        try messages.validateStreamingOutputCallResponse(
+            message.payload,
+            slow_consumer_response_size,
+        );
+        self.count += 1;
+        try std.Io.sleep(self.io, slow_consumer_delay, .awake);
+    }
+};
+
+fn runSlowConsumer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    const parameters = try allocator.alloc(
+        messages.ResponseParameter,
+        slow_consumer_messages,
+    );
+    defer allocator.free(parameters);
+    @memset(parameters, .{ .size = slow_consumer_response_size });
+    const request = try messages.encodeStreamingOutputCallParametersAlloc(
+        allocator,
+        parameters,
+    );
+    defer allocator.free(request);
+    var stream = try client.startStreaming(.{
+        .path = server_streaming_service_path,
+        .authority = authority,
+        .max_message_size = message_limit,
+    });
+    defer stream.deinit();
+    try stream.writeMessage(request);
+    var observer = SlowConsumer{ .io = io };
+    var response = try stream.finishAndRead(&observer, SlowConsumer.consume);
+    defer response.deinit();
+    if (response.status != .ok or observer.count != slow_consumer_messages) {
+        return error.InvalidSlowConsumerResponse;
+    }
 }
 
 fn runHalfDuplex(

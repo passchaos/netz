@@ -25,6 +25,8 @@ const echo_trailing_value = "\x0a\x0b\x0a\x0b\x0a\x0b";
 const canonical_request_sizes = [_]usize{ 27_182, 8, 1_828, 45_904 };
 const canonical_response_sizes = [_]usize{ 31_415, 9, 2_653, 58_979 };
 const canonical_response_sizes_u32 = [_]u32{ 31_415, 9, 2_653, 58_979 };
+const slow_consumer_messages: usize = 2_000;
+const slow_consumer_response_size: u32 = 1_030;
 const status_message = "This is a test message";
 const special_status_message =
     "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
@@ -47,6 +49,7 @@ const Scenario = enum {
     empty_unary,
     large_unary,
     half_duplex,
+    slow_consumer,
     client_streaming,
     server_streaming,
 
@@ -72,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
     const limits: netz.http2.runtime.Limits = .{
         .max_frame_payload = 64 * 1024,
-        .max_body_bytes = message_limit,
+        .max_body_bytes = 4 * 1024 * 1024,
         .initial_window_size = 512 * 1024,
         .initial_connection_window_size = 2 * 1024 * 1024,
         .handshake_timeout = .fromSeconds(5),
@@ -183,6 +186,7 @@ pub fn main(init: std.process.Init) !void {
         .empty_unary => try serveEmptyUnary(&connection),
         .large_unary => try serveLargeUnary(allocator, &connection),
         .half_duplex => try serveHalfDuplex(allocator, &connection),
+        .slow_consumer => try serveSlowConsumer(allocator, &connection),
         .cancel_after_begin => try serveCancelAfterBegin(&connection),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
@@ -201,6 +205,58 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveSlowConsumer(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var request = try connection.readUnary();
+    defer request.deinit();
+    if (!std.mem.eql(u8, request.request.path, server_streaming_service_path) or
+        request.request.was_compressed)
+    {
+        return error.UnexpectedMethod;
+    }
+    const storage = try allocator.alloc(
+        messages.ResponseParameter,
+        slow_consumer_messages,
+    );
+    defer allocator.free(storage);
+    const parameters = try messages.decodeStreamingOutputCallResponseParameters(
+        request.request.message.payload,
+        storage,
+    );
+    if (parameters.len != slow_consumer_messages) {
+        return error.UnexpectedRequest;
+    }
+    for (parameters) |parameter| {
+        if (parameter.size != slow_consumer_response_size or
+            parameter.interval_us != 0 or parameter.compressed != null)
+        {
+            return error.UnexpectedRequest;
+        }
+    }
+    var writer = try connection.startStreamingResponse(
+        request.request.stream_id,
+        .{
+            .request_accepted_encodings = request.request.accepted_encodings,
+            .max_message_size = message_limit,
+        },
+    );
+    defer writer.deinit();
+    const response = try messages.encodeStreamingOutputCallResponseAlloc(
+        allocator,
+        slow_consumer_response_size,
+    );
+    defer allocator.free(response);
+    for (0..slow_consumer_messages) |_| try writer.writeMessage(response);
+    try writer.finishOk();
+    // The one-shot fixture must not close TCP while grpc-cpp is deliberately
+    // delivering already-received messages to its application at 20 ms each.
+    // The graceful-shutdown PING is ordered after all response DATA, so its
+    // ACK proves the peer transport has received the complete stream.
+    try connection.connection.gracefulShutdownWithTimeout(.fromSeconds(10));
 }
 
 const HalfDuplexRequests = struct {
@@ -911,6 +967,7 @@ fn serveScenario(
         .empty_stream => try serveEmpty(stream, &queue, deadline),
         .cancel_after_begin => unreachable,
         .half_duplex => unreachable,
+        .slow_consumer => unreachable,
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
         .custom_metadata,

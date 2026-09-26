@@ -8,6 +8,7 @@ bazel_bin=${BAZEL:-}
 client=${GRPC_CPP_INTEROP_CLIENT:-}
 build_timeout=${GRPC_CPP_BUILD_TIMEOUT:-20m}
 case_timeout=${GRPC_CPP_CASE_TIMEOUT:-30s}
+slow_consumer_timeout=${GRPC_CPP_SLOW_CONSUMER_TIMEOUT:-90s}
 work=$(mktemp -d)
 server_pid=
 
@@ -147,8 +148,12 @@ PY
     return 1
   fi
 
+  local timeout_value=$case_timeout
+  if [[ "$scenario" == slow_consumer ]]; then
+    timeout_value=$slow_consumer_timeout
+  fi
   GRPC_DEFAULT_SSL_ROOTS_FILE_PATH="$work/netz-ca.pem" \
-    timeout "$case_timeout" "$client" "${client_args[@]}" \
+    timeout "$timeout_value" "$client" "${client_args[@]}" \
     >"$client_log" 2>&1
 
   # The client process exiting successfully is its assertion result. Require
@@ -189,6 +194,7 @@ for transport in h2c tls; do
     large_unary \
     ping_pong \
     half_duplex \
+    slow_consumer \
     empty_stream \
     cancel_after_begin \
     cancel_after_first_response \
@@ -209,4 +215,4 @@ for transport in h2c tls; do
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large ping_pong=true half_duplex=true empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

@@ -227,7 +227,7 @@ On 2026-09-26, both complete h2c/TLS directions
 passed on Linux AArch64 against the same pinned upstream commit with Bazel
 8.7.0 and GCC. The netz client completed the full forward harness, including
 the canonical compressed-streaming and status-message cases, while the
-official C++ client completed nineteen scenarios per transport. The upstream
+official C++ client completed twenty scenarios per transport. The upstream
 client's hard-coded 1 ms sleeping-server deadline can expire before either a
 cleartext or TLS accept creates an RPC; the runner accepts that local
 `DEADLINE_EXCEEDED` outcome only while the netz server remains alive and has
@@ -251,7 +251,8 @@ process-boundary client reported all four scenarios below as successful. Large
 responses crossed multiple HTTP/2 DATA frames, additionally exercising decoder
 progress events that contain a message fragment but no completed gRPC message.
 The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
-`empty_unary`, `large_unary`, `half_duplex`, `empty_stream`, `cancel_after_begin`,
+`empty_unary`, `large_unary`, `half_duplex`, `slow_consumer`, `empty_stream`,
+`cancel_after_begin`,
 `client_compressed_unary`,
 `server_compressed_unary`,
 `client_compressed_streaming`, `server_compressed_streaming`,
@@ -297,6 +298,12 @@ The half-duplex case sends all four canonical response-size requests before
 half-closing, then requires the peer to emit the four responses in order. Both
 netz and C++ server paths therefore prove response production begins only
 after request END_STREAM rather than reusing ping-pong behavior.
+The slow-consumer case retains upstream's 2000 responses of 1030 bytes and
+20 ms application delay. It exceeds both the initial stream and connection
+windows, requiring repeated WINDOW_UPDATE-driven progress while preserving all
+message boundaries. The one-shot netz server performs a bounded two-phase
+GOAWAY/PING synchronization after its final response, proving the peer
+transport received all DATA before teardown.
 The cancellation matrix now includes cancellation immediately after request
 metadata, with no request message, and cancellation after the first duplex
 response. The netz server requires an actual peer `RST_STREAM(CANCEL)` in both
