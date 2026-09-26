@@ -297,8 +297,9 @@ oversized directories fail before any listener is opened. Matching Mosquitto's
 transport limitation without silently weakening authentication, `capath` is
 rejected for WebSocket listeners. Optional
 `crlfile` PEM lists must be signed by a unique configured CA; Ed25519, P-256
-ECDSA with SHA-256, or 1024-4096-bit RSA PKCS#1 v1.5 signatures with SHA-256,
-cRLSign, thisUpdate/nextUpdate, extensions and leaf serials are validated before bind.
+ECDSA with SHA-256, P-384 ECDSA with SHA-384, or 1024-4096-bit RSA PKCS#1
+v1.5 signatures with SHA-256, cRLSign, thisUpdate/nextUpdate, extensions and leaf
+serials are validated before bind.
 Revoked clients are rejected during TLS. Indirect, delta,
 expired, future, malformed and unmatched CRLs fail closed. When
 `use_identity_as_username true` is also set, the verified leaf's unique Subject

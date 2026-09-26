@@ -2426,6 +2426,14 @@ def run_openssl(*arguments: object) -> None:
     )
 
 
+def signature_digest_arguments(algorithm: str) -> tuple[str, ...]:
+    if algorithm == "ed25519":
+        return ()
+    if algorithm == "p384":
+        return ("-sha384",)
+    return ("-sha256",)
+
+
 def create_ca(
     directory: Path,
     name: str,
@@ -2437,6 +2445,10 @@ def create_ca(
     if algorithm == "ec":
         run_openssl(
             "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
+        )
+    elif algorithm == "p384":
+        run_openssl(
+            "ecparam", "-name", "secp384r1", "-genkey", "-noout", "-out", key
         )
     elif algorithm == "rsa":
         run_openssl(
@@ -2452,14 +2464,13 @@ def create_ca(
         run_openssl("genpkey", "-algorithm", "ED25519", "-out", key)
     else:
         raise AssertionError(f"unsupported CA algorithm {algorithm}")
-    digest_arguments = () if algorithm == "ed25519" else ("-sha256",)
     run_openssl(
         "req",
         "-new",
         "-x509",
         "-key",
         key,
-        *digest_arguments,
+        *signature_digest_arguments(algorithm),
         "-days",
         "1",
         "-subj",
@@ -2503,6 +2514,10 @@ def create_signed_certificate(
         run_openssl(
             "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
         )
+    elif key_algorithm == "p384":
+        run_openssl(
+            "ecparam", "-name", "secp384r1", "-genkey", "-noout", "-out", key
+        )
     elif key_algorithm == "rsa":
         run_openssl(
             "genpkey",
@@ -2537,7 +2552,7 @@ def create_signed_certificate(
         serial,
         "-days",
         "1",
-        *(() if ca_key_algorithm == "ed25519" else ("-sha256",)),
+        *signature_digest_arguments(ca_key_algorithm),
         "-extfile",
         extensions,
         "-out",
@@ -2572,7 +2587,11 @@ def create_crl(
         f"private_key = {ca_key}\n"
         "serial = $dir/serial\n"
         "crlnumber = $dir/crlnumber\n"
-        f"default_md = {'default' if ca_key_algorithm == 'ed25519' else 'sha256'}\n"
+        f"default_md = {
+            'default' if ca_key_algorithm == 'ed25519'
+            else 'sha384' if ca_key_algorithm == 'p384'
+            else 'sha256'
+        }\n"
         "default_crl_days = 1\n"
         "policy = policy_any\n"
         "[ policy_any ]\n"
@@ -3359,12 +3378,16 @@ def run_signed_crl_listener_case(
     directory: Path,
     algorithm: str,
 ) -> None:
-    if algorithm not in ("rsa", "ed25519"):
+    if algorithm not in ("rsa", "p384", "ed25519"):
         raise AssertionError(f"unsupported CRL fixture algorithm {algorithm}")
     server_ca = directory / "server-ca.crt"
     server_certificate = directory / "mtls-server.crt"
     server_key = directory / "mtls-server.key"
-    label = "RSA" if algorithm == "rsa" else "Ed25519"
+    label = {
+        "rsa": "RSA",
+        "p384": "P-384",
+        "ed25519": "Ed25519",
+    }[algorithm]
     fixture_name = algorithm.replace("_", "-")
     client_ca, client_ca_key = create_ca(
         directory,
@@ -3456,15 +3479,15 @@ def run_signed_crl_listener_case(
         revoked_key,
     )
 
-    if algorithm != "ed25519":
+    if algorithm not in ("p384", "ed25519"):
         return
-    tampered_crl = directory / "ed25519-tampered.crl"
+    tampered_crl = directory / f"{fixture_name}-tampered.crl"
     tamper_pem_crl(crl, tampered_crl)
     cleartext_port = free_port()
     invalid_crl_port = free_port()
     while invalid_crl_port == cleartext_port:
         invalid_crl_port = free_port()
-    invalid_config = directory / "ed25519-crl-invalid.conf"
+    invalid_config = directory / f"{fixture_name}-crl-invalid.conf"
     invalid_config.write_text(
         f"listener {cleartext_port} 127.0.0.1\n"
         "allow_anonymous true\n"
@@ -3491,14 +3514,14 @@ def run_signed_crl_listener_case(
         or "InvalidCrl" not in invalid_result.stdout
     ):
         raise AssertionError(
-            "tampered Ed25519 CRL did not fail before listen: "
+            f"tampered {label} CRL did not fail before listen: "
             + invalid_result.stdout
         )
     with socket.socket() as probe:
         probe.settimeout(1)
         if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
             raise AssertionError(
-                "an earlier listener was bound before Ed25519 CRL validation"
+                f"an earlier listener was bound before {label} CRL validation"
             )
 
 
@@ -3884,6 +3907,7 @@ def main() -> None:
         run_mtls_subject_username_case(args.broker, directory)
         run_optional_client_certificate_case(args.broker, directory)
         run_signed_crl_listener_case(args.broker, directory, "rsa")
+        run_signed_crl_listener_case(args.broker, directory, "p384")
         run_signed_crl_listener_case(args.broker, directory, "ed25519")
         run_unsupported_tls_key_case(args.broker, directory)
     print(
@@ -3901,7 +3925,7 @@ def main() -> None:
         "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
-        "P-256/RSA/Ed25519 signed CRL revocation, strict TLS "
+        "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, and snapshot restore "
         + RUNTIME
     )

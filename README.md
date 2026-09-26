@@ -102,9 +102,10 @@ Current protocol coverage includes:
 - Strict owned PEM CA-file loading for TLS client authentication, with bounded
   certificate counts, validity and clientAuth CA-usage checks, duplicate-name
   rejection, and exact DER authority names for TLS 1.3 CertificateRequest
-- Strict owned Ed25519, P-256 ECDSA, or 1024-4096-bit RSA PKCS#1 v1.5
-  SHA-256 PEM CRL loading, including issuer/cRLSign, signature, update-window,
-  extension and leaf-serial validation before bind
+- Strict owned Ed25519, P-256 ECDSA/SHA-256, P-384 ECDSA/SHA-384, or
+  1024-4096-bit RSA PKCS#1 v1.5 SHA-256 PEM CRL loading, including
+  issuer/cRLSign, signature, update-window, extension and leaf-serial
+  validation before bind
 - Caller-supplied bounded caching of successful X.509 bundle verification for
   repeated exact hostname/DER chains; per-connection CertificateVerify remains
   mandatory, and replacing the trust bundle or time snapshot requires replacing
@@ -1138,7 +1139,7 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # policy, global/per-listener Mosquitto password hashes, authentication
 # rejection, isolated ACL read/write/deny/pattern behavior, OpenSSL-verified
 # optional/required TLS client authentication, acceptable CA names and
-# certificate CN/full-Subject username/Client-ID mapping, P-256/RSA/Ed25519
+# certificate CN/full-Subject username/Client-ID mapping, P-256/P-384/RSA/Ed25519
 # signed CRL revocation, strict
 # key/CA/EKU/identity/CRL rejection, and snapshot restore through the example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
