@@ -6,17 +6,20 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const netz = @import("netz");
-const source_acl = @import("support/mqtt_source_acl.zig");
+const reloadable_security = @import(
+    "support/mqtt_reloadable_security.zig",
+);
 
 const mqtt = netz.mqtt;
 
-var checkpoint_requested: u8 = 0;
+var checkpoint_requested: std.c.sig_atomic_t = 0;
+var security_reload_requested: std.c.sig_atomic_t = 0;
 
 const CheckpointSignal = if (builtin.os.tag == .linux) struct {
     previous: std.posix.Sigaction,
 
     fn install() @This() {
-        @atomicStore(u8, &checkpoint_requested, 0, .release);
+        @atomicStore(std.c.sig_atomic_t, &checkpoint_requested, 0, .release);
         const action: std.posix.Sigaction = .{
             .handler = .{ .handler = handle },
             .mask = std.posix.sigemptyset(),
@@ -29,12 +32,12 @@ const CheckpointSignal = if (builtin.os.tag == .linux) struct {
 
     fn deinit(self: *@This()) void {
         std.posix.sigaction(.USR1, &self.previous, null);
-        @atomicStore(u8, &checkpoint_requested, 0, .release);
+        @atomicStore(std.c.sig_atomic_t, &checkpoint_requested, 0, .release);
     }
 
     fn take() bool {
         return @atomicRmw(
-            u8,
+            std.c.sig_atomic_t,
             &checkpoint_requested,
             .Xchg,
             0,
@@ -43,7 +46,7 @@ const CheckpointSignal = if (builtin.os.tag == .linux) struct {
     }
 
     fn request() void {
-        @atomicStore(u8, &checkpoint_requested, 1, .release);
+        @atomicStore(std.c.sig_atomic_t, &checkpoint_requested, 1, .release);
     }
 
     fn handle(_: std.posix.SIG) callconv(.c) void {
@@ -63,6 +66,67 @@ const CheckpointSignal = if (builtin.os.tag == .linux) struct {
     }
 
     fn request() void {}
+};
+
+const ReloadSignal = if (builtin.os.tag == .linux) struct {
+    previous: std.posix.Sigaction,
+
+    fn install() @This() {
+        @atomicStore(
+            std.c.sig_atomic_t,
+            &security_reload_requested,
+            0,
+            .release,
+        );
+        const action: std.posix.Sigaction = .{
+            .handler = .{ .handler = handle },
+            .mask = std.posix.sigemptyset(),
+            .flags = std.posix.SA.RESTART,
+        };
+        var previous: std.posix.Sigaction = undefined;
+        std.posix.sigaction(.HUP, &action, &previous);
+        return .{ .previous = previous };
+    }
+
+    fn deinit(self: *@This()) void {
+        std.posix.sigaction(.HUP, &self.previous, null);
+        @atomicStore(
+            std.c.sig_atomic_t,
+            &security_reload_requested,
+            0,
+            .release,
+        );
+    }
+
+    fn take() bool {
+        return @atomicRmw(
+            std.c.sig_atomic_t,
+            &security_reload_requested,
+            .Xchg,
+            0,
+            .acq_rel,
+        ) != 0;
+    }
+
+    fn handle(_: std.posix.SIG) callconv(.c) void {
+        // Loading, allocation, locks, and logging remain in the supervisor.
+        @atomicStore(
+            std.c.sig_atomic_t,
+            &security_reload_requested,
+            1,
+            .release,
+        );
+    }
+} else struct {
+    fn install() @This() {
+        return .{};
+    }
+
+    fn deinit(_: *@This()) void {}
+
+    fn take() bool {
+        return false;
+    }
 };
 
 const checkpoint_signal_poll_interval: std.Io.Clock.Duration =
@@ -158,67 +222,35 @@ pub fn run(
         config.listeners.len
     else
         1;
-    const password_files = try allocator.alloc(
-        ?mqtt.password_file.File,
+    const security_paths = try allocator.alloc(
+        reloadable_security.Paths,
         security_file_count,
     );
-    defer allocator.free(password_files);
-    @memset(password_files, null);
-    defer for (password_files) |*file| {
-        if (file.*) |*loaded| loaded.deinit();
-    };
-    const acl_files = try allocator.alloc(
-        ?mqtt.acl_file.File,
-        security_file_count,
-    );
-    defer allocator.free(acl_files);
-    @memset(acl_files, null);
-    defer for (acl_files) |*file| {
-        if (file.*) |*loaded| loaded.deinit();
-    };
+    defer allocator.free(security_paths);
     for (0..security_file_count) |index| {
-        const password_path = if (config.per_listener_settings)
-            config.listeners[index].password_file
-        else
-            config.password_file;
-        if (password_path.len != 0) {
-            password_files[index] = try mqtt.password_file.load(
-                allocator,
-                io,
-                std.Io.Dir.cwd(),
-                password_path,
-            );
-        }
-        const acl_path = if (config.per_listener_settings)
-            config.listeners[index].acl_file
-        else
-            config.acl_file;
-        if (acl_path.len != 0) {
-            acl_files[index] = try mqtt.acl_file.load(
-                allocator,
-                io,
-                std.Io.Dir.cwd(),
-                acl_path,
-            );
-        }
+        security_paths[index] = if (config.per_listener_settings) .{
+            .password_file = config.listeners[index].password_file,
+            .acl_file = config.listeners[index].acl_file,
+        } else .{
+            .password_file = config.password_file,
+            .acl_file = config.acl_file,
+        };
     }
-    var source_acl_policy = source_acl.Policy{
-        .per_listener_settings = config.per_listener_settings,
-        .listeners = config.listeners,
-        .acl_files = acl_files,
-    };
-    const source_access_control: ?mqtt.broker.AccessControlHandler = blk: {
-        for (acl_files) |maybe_file| {
-            if (maybe_file != null) break :blk .{
-                .context = &source_acl_policy,
-                .authorize_publish = source_acl.Policy.authorizePublish,
-                .authorize_subscribe = source_acl.Policy.authorizeSubscribe,
-                .authorize_will = source_acl.Policy.authorizeWill,
-                .authorize_retained_source = source_acl.Policy.authorizeRetainedSource,
-            };
-        }
-        break :blk null;
-    };
+    const listener_ids = try allocator.alloc(u16, config.listeners.len);
+    defer allocator.free(listener_ids);
+    for (config.listeners, listener_ids) |listener, *id| {
+        id.* = listener.address.getPort();
+    }
+    var security = try reloadable_security.Security.init(
+        allocator,
+        io,
+        std.Io.Dir.cwd(),
+        security_paths,
+        listener_ids,
+        config.per_listener_settings,
+    );
+    defer security.deinit();
+    const source_access_control = security.sourceAccessControl();
     const max_inflight_messages = config.effectiveMaxInflightMessages();
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
@@ -274,6 +306,11 @@ pub fn run(
     else
         null;
     defer if (checkpoint_signal) |*signal| signal.deinit();
+    var reload_signal = if (security.hasReloadableFiles())
+        ReloadSignal.install()
+    else
+        null;
+    defer if (reload_signal) |*signal| signal.deinit();
 
     const identities = try allocator.alloc(
         ?netz.tls.server_identity_file.Identity,
@@ -396,16 +433,11 @@ pub fn run(
         config.listeners.len,
     );
     defer allocator.free(endpoints);
-    const authorizations = try allocator.alloc(
-        mqtt.password_file.Authorization,
+    const security_policies = try allocator.alloc(
+        reloadable_security.ListenerPolicy,
         config.listeners.len,
     );
-    defer allocator.free(authorizations);
-    const acl_policies = try allocator.alloc(
-        mqtt.acl_file.Policy,
-        config.listeners.len,
-    );
-    defer allocator.free(acl_policies);
+    defer allocator.free(security_policies);
 
     for (config.listeners, 0..) |configured, index| {
         servers[index] = if (identities[index]) |*identity|
@@ -472,29 +504,12 @@ pub fn run(
         accept.topic_alias_maximum = configured.max_topic_alias;
         accept.max_outgoing_topic_aliases =
             configured.max_topic_alias_broker;
-        const security_index = if (config.per_listener_settings) index else 0;
-        const listener_passwords = if (password_files[security_index]) |*file|
-            file
-        else
-            null;
-        if (listener_passwords) |file| {
-            authorizations[index] = .{
-                .passwords = file,
-                .allow_anonymous = configured.allow_anonymous,
-            };
-        }
-        const listener_access_control: ?mqtt.broker.ListenerAccessControlHandler =
-            if (acl_files[security_index]) |*file| blk: {
-                acl_policies[index] = .{ .acl = file };
-                break :blk .{
-                    .context = &acl_policies[index],
-                    .authorize_publish = mqtt.acl_file.Policy.authorizePublish,
-                    .authorize_subscribe = mqtt.acl_file.Policy.authorizeSubscribe,
-                    .authorize_unsubscribe = mqtt.acl_file.Policy.authorizeUnsubscribe,
-                    .authorize_delivery = mqtt.acl_file.Policy.authorizeDelivery,
-                    .authorize_will = mqtt.acl_file.Policy.authorizeWill,
-                };
-            } else null;
+        security_policies[index] = security.listenerPolicy(
+            index,
+            configured.allow_anonymous,
+        );
+        const listener_access_control = security_policies[index]
+            .accessControl();
         listeners[index] = .{
             .source = servers[index].pendingSource(),
             .namespace = try mqtt.listener_namespace.Namespace.init(
@@ -505,11 +520,12 @@ pub fn run(
             ),
             .accept = accept,
             .authorization = .{
-                .connect = if (listener_passwords != null and
+                .connect = if (security.hasPasswordFile(index) and
                     !configured.use_identity_as_username and
                     !configured.use_subject_as_username) .{
-                    .context = &authorizations[index],
-                    .authorize = mqtt.password_file.Authorization.authorize,
+                    .context = &security_policies[index],
+                    .authorize = reloadable_security.ListenerPolicy
+                        .authorizeConnect,
                 } else null,
                 .access_control = listener_access_control,
                 .use_username_as_client_id = configured.use_username_as_client_id,
@@ -572,17 +588,18 @@ pub fn run(
             .listeners = endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence) {
-        try serveWithPersistenceCheckpoints(
+    if (config.persistence or security.hasReloadableFiles()) {
+        try serveWithManagement(
             &broker,
             service,
             io,
-            persistence_path.?,
+            persistence_path,
             if (!config.autosave_on_changes and
                 config.autosave_interval != 0)
                 config.autosave_interval
             else
                 null,
+            if (security.hasReloadableFiles()) &security else null,
         );
     } else {
         try serveConfigured(&broker, service);
@@ -592,12 +609,13 @@ pub fn run(
     }
 }
 
-fn serveWithPersistenceCheckpoints(
+fn serveWithManagement(
     broker: *mqtt.broker.Broker,
     service: Service,
     io: std.Io,
-    persistence_path: []const u8,
+    persistence_path: ?[]const u8,
     interval_seconds: ?u32,
+    security: ?*reloadable_security.Security,
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
@@ -619,11 +637,13 @@ fn serveWithPersistenceCheckpoints(
         );
     }
     if (comptime builtin.os.tag == .linux) {
-        try select.concurrent(
-            .signal_poll,
-            waitInterval,
-            .{ io, checkpoint_signal_poll_interval },
-        );
+        if (persistence_path != null or security != null) {
+            try select.concurrent(
+                .signal_poll,
+                waitInterval,
+                .{ io, checkpoint_signal_poll_interval },
+            );
+        }
     }
     while (true) {
         switch (try select.await()) {
@@ -636,7 +656,7 @@ fn serveWithPersistenceCheckpoints(
                 try result;
                 broker.saveLiveSnapshot(
                     std.Io.Dir.cwd(),
-                    persistence_path,
+                    persistence_path orelse unreachable,
                 ) catch |err| switch (err) {
                     error.SnapshotBusy => {},
                     else => return err,
@@ -656,7 +676,7 @@ fn serveWithPersistenceCheckpoints(
                 if (CheckpointSignal.take()) {
                     broker.saveLiveSnapshot(
                         std.Io.Dir.cwd(),
-                        persistence_path,
+                        persistence_path orelse unreachable,
                     ) catch |err| switch (err) {
                         error.SnapshotBusy => CheckpointSignal.request(),
                         else => return err,
@@ -671,6 +691,28 @@ fn serveWithPersistenceCheckpoints(
                         // A request delivered during the completed snapshot
                         // still needs its own subsequent checkpoint.
                         CheckpointSignal.request();
+                    }
+                }
+                if (ReloadSignal.take()) {
+                    if (security) |policy| {
+                        policy.reload() catch |err| {
+                            std.debug.print(
+                                "netz MQTT security reload failed: " ++
+                                    "error={s} server_io=zio-std-io\n",
+                                .{@errorName(err)},
+                            );
+                            try select.concurrent(
+                                .signal_poll,
+                                waitInterval,
+                                .{ io, checkpoint_signal_poll_interval },
+                            );
+                            continue;
+                        };
+                        std.debug.print(
+                            "netz MQTT security reload completed: " ++
+                                "source=SIGHUP server_io=zio-std-io\n",
+                            .{},
+                        );
                     }
                 }
                 try select.concurrent(

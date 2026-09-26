@@ -807,7 +807,8 @@ Current protocol coverage includes:
   password-file authentication compatible with Argon2id, `$7$`
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   global or `per_listener_settings`-isolated Mosquitto password/ACL files
-  with anonymous/user scopes, exact per-listener WebSocket Origin allowlists,
+  with anonymous/user scopes and Linux SIGHUP atomic content reload with whole-
+  policy rollback, exact per-listener WebSocket Origin allowlists,
   a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and
   per-listener zero-length Client ID admission,
   separate global caps for simultaneously admitted connections and for active

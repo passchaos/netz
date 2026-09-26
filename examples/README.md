@@ -284,9 +284,9 @@ files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. RSA, other curves, encrypted keys, reload, plugin,
-bridge, and full Mosquitto configuration remain outside this subset and fail
-closed. `cafile` and/or `capath` enable optional
+filesystem expansion. RSA server keys, other curves, encrypted keys, broader
+configuration reload, plugins, bridges, and full Mosquitto configuration remain
+outside this subset and fail closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER
 Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;
@@ -320,7 +320,13 @@ rules are checked against every concrete live, retained, or resumed delivery.
 As in Mosquitto's current ACL-file plugin, SUBSCRIBE/UNSUBSCRIBE requests can be
 installed even when no read rule grants them; unauthorized publications remain
 undeliverable. Unknown directives/access modes and malformed patterns fail
-before listeners are bound.
+before listeners are bound. On Linux, `SIGHUP` atomically reloads the
+`password_file` and `acl_file` contents named by the initial configuration. All
+replacement files are parsed before one locked swap; any missing or invalid
+file keeps the complete previous policy. Existing clients immediately observe
+new ACL rules, while password changes apply to later CONNECT attempts. Listener
+topology, anonymous policy, TLS identity/trust/CRLs, limits, and persistence
+settings remain fixed until restart.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime

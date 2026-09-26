@@ -276,6 +276,33 @@ def mqtt_ping(sock: socket.socket) -> None:
         raise AssertionError(f"expected PINGRESP, got {response.hex()}")
 
 
+def wait_process_line(
+    process: subprocess.Popen[str],
+    needle: str,
+    label: str,
+    timeout: float = 5,
+) -> None:
+    assert process.stdout is not None
+    deadline = time.monotonic() + timeout
+    observed: list[str] = []
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        readable, _, _ = select.select([process.stdout], [], [], remaining)
+        if not readable:
+            break
+        line = process.stdout.readline()
+        if not line:
+            if process.poll() is not None:
+                break
+            continue
+        observed.append(line.rstrip())
+        if needle in line:
+            return
+    raise AssertionError(
+        f"{label}: did not observe {needle!r}; output={observed!r}"
+    )
+
+
 def websocket_mqtt_ping(sock: socket.socket) -> None:
     send_websocket_binary(sock, b"\xc0\x00")
     response = read_websocket_binary(sock)
@@ -1870,6 +1897,168 @@ def run_authentication_case(broker: Path, directory: Path) -> None:
     if return_code != 0:
         raise RuntimeError(
             f"authenticated broker exited {return_code}: {process.stdout.read()}"
+        )
+
+
+def run_security_reload_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    password_file = directory / "reload.pwfile"
+    acl_file = directory / "reload.acl"
+    config = directory / "reload.conf"
+    password_hash = (
+        "$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ=="
+    )
+    password_file.write_text(f"old:{password_hash}\n")
+    acl_file.write_text("user old\ntopic readwrite before/#\n")
+    config.write_text(
+        f"password_file {password_file}\n"
+        f"acl_file {acl_file}\n"
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous false\n"
+        "max_connections 6\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 6 clients" not in ready:
+        raise RuntimeError(f"security reload broker failed to start: {ready}")
+    listener = process.stdout.readline().strip()
+    if not listener.startswith("mqtt "):
+        raise RuntimeError(f"security reload listener missing: {listener}")
+
+    def connect(
+        client_id: str,
+        username: str,
+        expected_reason: int,
+    ) -> socket.socket:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        client.sendall(connect_packet(
+            client_id,
+            username=username,
+            password="password",
+        ))
+        reason = connack_reason(read_mqtt_packet(client))
+        if reason != expected_reason:
+            client.close()
+            raise AssertionError(
+                f"security reload {username} expected {expected_reason:#x}, "
+                f"received {reason:#x}"
+            )
+        return client
+
+    def expect_publish_reason(
+        client: socket.socket,
+        topic: str,
+        packet_id: int,
+        expected_reason: int,
+    ) -> None:
+        client.sendall(publish_packet(
+            topic, b"reload", qos=1, packet_id=packet_id
+        ))
+        reason = puback_reason(read_mqtt_packet(client), packet_id)
+        if reason != expected_reason:
+            raise AssertionError(
+                f"security reload publish {topic} expected "
+                f"{expected_reason:#x}, received {reason:#x}"
+            )
+
+    clients: list[socket.socket] = []
+    try:
+        old = connect("reload-old-live", "old", 0)
+        clients.append(old)
+        subscriber = connect("reload-old-subscriber", "old", 0)
+        clients.append(subscriber)
+        subscriber.sendall(subscribe_packet(1, "after/#"))
+        if read_mqtt_packet(subscriber) != bytes.fromhex("900400010000"):
+            raise AssertionError("security reload initial SUBACK mismatch")
+        expect_publish_reason(old, "before/value", 1, 0x10)
+
+        password_file.write_text(f"new:{password_hash}\n")
+        acl_file.write_text(
+            "user old\ntopic readwrite after/#\n"
+            "user new\ntopic write after/#\n"
+        )
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "successful security reload",
+        )
+        expect_publish_reason(old, "before/value", 2, 0x87)
+        expect_publish_reason(old, "after/value", 3, 0x00)
+        if read_mqtt_packet(subscriber) != publish_packet(
+            "after/value", b"reload"
+        ):
+            raise AssertionError(
+                "security reload did not update existing subscription ACL"
+            )
+
+        rejected_old = connect("reload-old-rejected", "old", 0x87)
+        rejected_old.close()
+        new = connect("reload-new", "new", 0)
+        clients.append(new)
+        expect_publish_reason(new, "after/new", 4, 0x00)
+        expected_delivery = publish_packet("after/new", b"reload")
+        if read_mqtt_packet(subscriber) != expected_delivery:
+            raise AssertionError(
+                "security reload did not update existing subscription ACL"
+            )
+        new.sendall(bytes.fromhex("e000"))
+        new.close()
+        clients.remove(new)
+
+        password_file.write_text(f"third:{password_hash}\n")
+        acl_file.write_text("unsupported directive\n")
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload failed: error=InvalidDirective",
+            "failed security reload",
+        )
+        mqtt_ping(old)
+        expect_publish_reason(old, "after/still-allowed", 5, 0x00)
+        expected_rollback_delivery = publish_packet(
+            "after/still-allowed", b"reload"
+        )
+        if read_mqtt_packet(subscriber) != expected_rollback_delivery:
+            raise AssertionError(
+                "failed security reload changed existing delivery ACL"
+            )
+
+        retained_new = connect("reload-new-retained", "new", 0)
+        clients.append(retained_new)
+        retained_new.sendall(bytes.fromhex("e000"))
+        retained_new.close()
+        clients.remove(retained_new)
+        rejected_third = connect("reload-third-rejected", "third", 0x87)
+        rejected_third.close()
+        old.sendall(bytes.fromhex("e000"))
+        old.close()
+        clients.remove(old)
+        subscriber.sendall(bytes.fromhex("e000"))
+        subscriber.close()
+        clients.remove(subscriber)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("security reload broker did not finish")
+    finally:
+        for client in clients:
+            client.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(
+            "security reload broker failed: " + process.stdout.read()
         )
 
 
@@ -4024,6 +4213,7 @@ def main() -> None:
         run_invalid_acl_file_case(args.broker, directory)
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
+        run_security_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -4054,6 +4244,7 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
+        "atomic password/ACL SIGHUP reload with rollback, "
         "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )
