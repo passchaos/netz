@@ -16,6 +16,7 @@ const messages = @import("grpc_cpp_messages.zig");
 
 const service_path = "/grpc.testing.TestService/FullDuplexCall";
 const unary_service_path = "/grpc.testing.TestService/UnaryCall";
+const empty_service_path = "/grpc.testing.TestService/EmptyCall";
 const client_streaming_service_path =
     "/grpc.testing.TestService/StreamingInputCall";
 const server_streaming_service_path =
@@ -105,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try runPingPong(allocator, &client, message_limit);
+    try runUnaryBasics(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
     try runStreamingCompression(allocator, &client, message_limit);
     try runStatusInterop(allocator, &client, message_limit);
@@ -116,6 +118,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
             "ping_pong=4 compression=unary+streaming-gzip+identity " ++
+            "unary=empty+large " ++
             "status=unary+bidi+unicode " ++
             "unimplemented=method+service " ++
             "metadata=initial+trailing-bin " ++
@@ -123,6 +126,51 @@ pub fn main(init: std.process.Init) !void {
             "deadline=DEADLINE_EXCEEDED-or-local-timeout+CANCEL " ++
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
+    );
+}
+
+fn runUnaryBasics(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    {
+        var response = try client.unary(.{
+            .path = empty_service_path,
+            .authority = authority,
+            .message = &.{},
+            .max_message_size = message_limit,
+        });
+        defer response.deinit();
+        if (response.status != .ok or
+            response.message == null or
+            response.message.?.payload.len != 0 or
+            response.was_compressed)
+        {
+            return error.InvalidEmptyUnaryResponse;
+        }
+    }
+
+    const request = try messages.encodeSimpleRequestAlloc(allocator, .{
+        .response_size = metadata_response_size,
+        .request_body_size = metadata_request_size,
+    });
+    defer allocator.free(request);
+    var response = try client.unary(.{
+        .path = unary_service_path,
+        .authority = authority,
+        .message = request,
+        .max_message_size = message_limit,
+    });
+    defer response.deinit();
+    if (response.status != .ok or response.message == null or
+        response.was_compressed)
+    {
+        return error.InvalidLargeUnaryResponse;
+    }
+    try messages.validateStreamingOutputCallResponse(
+        response.message.?.payload,
+        metadata_response_size,
     );
 }
 

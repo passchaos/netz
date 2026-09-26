@@ -6,6 +6,7 @@ const messages = @import("grpc_cpp_messages.zig");
 
 const duplex_service_path = "/grpc.testing.TestService/FullDuplexCall";
 const unary_service_path = "/grpc.testing.TestService/UnaryCall";
+const empty_service_path = "/grpc.testing.TestService/EmptyCall";
 const client_streaming_service_path =
     "/grpc.testing.TestService/StreamingInputCall";
 const server_streaming_service_path =
@@ -40,6 +41,8 @@ const Scenario = enum {
     special_status_message,
     unimplemented_method,
     unimplemented_service,
+    empty_unary,
+    large_unary,
     client_streaming,
     server_streaming,
 
@@ -173,6 +176,8 @@ pub fn main(init: std.process.Init) !void {
             &connection,
             unimplemented_service_path,
         ),
+        .empty_unary => try serveEmptyUnary(&connection),
+        .large_unary => try serveLargeUnary(allocator, &connection),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
         else => {
@@ -190,6 +195,46 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+fn serveEmptyUnary(
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var unary = try connection.readUnary();
+    defer unary.deinit();
+    if (!std.mem.eql(u8, unary.request.path, empty_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    if (unary.request.message.payload.len != 0 or
+        unary.request.was_compressed)
+    {
+        return error.UnexpectedRequest;
+    }
+    try connection.writeUnary(unary.request.stream_id, .{ .message = &.{} });
+}
+
+fn serveLargeUnary(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var unary = try connection.readUnary();
+    defer unary.deinit();
+    if (!std.mem.eql(u8, unary.request.path, unary_service_path) or
+        unary.request.was_compressed)
+    {
+        return error.UnexpectedMethod;
+    }
+    const request = try messages.decodeSimpleRequest(
+        unary.request.message.payload,
+    );
+    if (request.response_size != 314_159 or
+        request.request_body_size != 271_828 or
+        request.expect_compressed != null or
+        request.response_compressed != null)
+    {
+        return error.UnexpectedRequest;
+    }
+    try writeUnaryPayload(allocator, connection, &unary, false);
 }
 
 fn serveUnimplementedRoute(
@@ -774,6 +819,8 @@ fn serveScenario(
         .special_status_message,
         .unimplemented_method,
         .unimplemented_service,
+        .empty_unary,
+        .large_unary,
         .client_streaming,
         .server_streaming,
         => unreachable,
