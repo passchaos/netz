@@ -1560,8 +1560,12 @@ checks ordered exact-topic SUBSCRIBE/UNSUBSCRIBE, live QoS 0 publication,
 retained write/replacement/deletion and Retain Handling 0 replay. Explicit
 PINGREQ/PINGRESP barriers prove each expected queue is complete without timing
 sleeps, including a final empty barrier that rejects delayed extra delivery.
-Reconnect timing, bridge state and their multi-client packet I/O remain outside
-these fuzz surfaces.
+`fuzz-mqtt-reconnect` separately drives the production reconnect Client against
+a scripted real TCP peer across one bounded operation history. It checks QoS 1
+and QoS 2 success, lost-PUBACK/PUBREC PUBLISH replay with a stable Packet
+Identifier and DUP, lost-PUBCOMP PUBREL-only replay, fresh-Session transaction
+discard, preserved-Session resume, and ordered accepted-subscription replay.
+Bridge state and its multi-client packet I/O remain outside these fuzz surfaces.
 
 The reconnect layer's network owner remains synchronous internally. The public
 managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,

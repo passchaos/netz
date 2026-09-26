@@ -135,6 +135,27 @@ pub fn build(b: *std.Build) void {
     fuzz_mqtt_live_broker_step.dependOn(
         &run_mqtt_live_broker_fuzz_tests.step,
     );
+    const mqtt_reconnect_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/mqtt_reconnect_fuzz_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_mqtt_reconnect_fuzz_tests = b.addRunArtifact(
+        mqtt_reconnect_fuzz_tests,
+    );
+    const fuzz_mqtt_reconnect_step = b.step(
+        "fuzz-mqtt-reconnect",
+        "Fuzz live MQTT reconnect and Session recovery ordering",
+    );
+    fuzz_mqtt_reconnect_step.dependOn(
+        &run_mqtt_reconnect_fuzz_tests.step,
+    );
     const websocket_compression_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -545,6 +566,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_parser_fuzz_tests.step);
     test_step.dependOn(&run_stateful_fuzz_tests.step);
     test_step.dependOn(&run_mqtt_live_broker_fuzz_tests.step);
+    test_step.dependOn(&run_mqtt_reconnect_fuzz_tests.step);
     test_step.dependOn(&run_websocket_compression_fuzz_tests.step);
     test_step.dependOn(&run_websocket_context_fuzz_tests.step);
     test_step.dependOn(&run_websocket_h1_context_fuzz_tests.step);

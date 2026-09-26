@@ -19,6 +19,10 @@ loopback TCP clients for each bounded input. It checks exact-topic
 SUBSCRIBE/UNSUBSCRIBE ordering, live QoS 0 fanout, retained write, replacement,
 deletion and Retain Handling 0 replay against an independent delivery model,
 using PINGREQ/PINGRESP as deterministic no-sleep barriers.
+`zig build fuzz-mqtt-reconnect` drives a persistent reconnect client against a
+scripted real TCP peer. It verifies QoS 1/2 completion, lost-ACK PUBLISH replay
+with stable Packet Identifier and DUP, PUBREL-only recovery, fresh-Session
+transaction loss, and ordered accepted-subscription replay.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -51,12 +55,12 @@ STREAM/FIN and PING traffic, ACK/recovery, deliberate loss/reordering, duplicate
 and corrupted delivery, PTO retransmission, RESET_STREAM, application reads,
 and key updates across all supported traffic ciphers. It does not model TLS
 handshakes, path migration, or concurrent event-loop ownership. The pinned GitHub Actions
-workflow replays all eleven corpora and the complete test gate on pushes and
-pull requests, then runs the eleven coverage-guided targets daily and on
+workflow replays all twelve corpora and the complete test gate on pushes and
+pull requests, then runs the twelve coverage-guided targets daily and on
 demand. The live HTTP/1 and HTTP/2 targets default to 256 daily connections,
-H3 to 128 authenticated sessions, live MQTT to 128 three-client broker runs,
-and the in-memory targets to 10,000 iterations. A manual `fuzz_runs` value
-overrides all targets. Because
+H3 to 128 authenticated sessions, each live MQTT target to 128 real-network
+runs, and the in-memory targets to 10,000 iterations. A manual `fuzz_runs`
+value overrides all targets. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
