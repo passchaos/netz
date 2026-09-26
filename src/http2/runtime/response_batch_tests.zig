@@ -1204,6 +1204,25 @@ test "HTTP/2 response body batch validation is transactional" {
             &.{ 1, 3 },
             &.{
                 .{ .body = "valid" },
+                .{ .status = 205, .body = "forbidden" },
+            },
+            4096,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(i64, 65_535),
+        connection.send_connection_window.value,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        connection.active_peer_streams.items.len,
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        connection.writeResponseBodyBatch(
+            &.{ 1, 3 },
+            &.{
+                .{ .body = "valid" },
                 .{
                     .headers = &.{.{
                         .name = "content-length",

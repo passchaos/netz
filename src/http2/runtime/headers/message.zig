@@ -469,6 +469,42 @@ pub fn validateResponseBodyForStatusWithLength(
     if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 
+pub fn validateOutgoingResponseBodyForStatus(
+    status: u16,
+    headers: []const http2.Hpack.HeaderField,
+    body: []const u8,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
+    try validateOutgoingResponseBodyForStatusWithLength(
+        status,
+        try contentLength(headers),
+        body,
+        trailers,
+    );
+}
+
+pub fn validateOutgoingResponseBodyForStatusWithLength(
+    status: u16,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const http2.Hpack.HeaderField,
+) Error!void {
+    try validateResponseBodyForStatusWithLength(
+        status,
+        declared_content_length,
+        body,
+        trailers,
+    );
+    // RFC 9110 Section 15.3.6 forbids response content for 205. Keep this
+    // separate from `responseForbidsBody`: HTTP/2 still uses END_STREAM to
+    // delimit the response and may carry a trailer section after zero DATA.
+    if (status != 205) return;
+    if (body.len != 0) return error.InvalidContentLength;
+    if (declared_content_length) |length| {
+        if (length != 0) return error.InvalidContentLength;
+    }
+}
+
 pub fn validateResponseBodyForRequestSemantics(
     status: u16,
     semantics: ResponseBodySemantics,

@@ -1422,6 +1422,19 @@ pub fn validateResponseBodyForStatus(status: u16, headers: []const Header, body:
     if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 
+pub fn validateOutgoingResponseBodyForStatus(status: u16, headers: []const Header, body: []const u8, trailers: []const Header) Error!void {
+    try validateResponseBodyForStatus(status, headers, body, trailers);
+    // RFC 9110 Section 15.3.6 forbids a server from generating content in a
+    // 205 response. Unlike 1xx/204/304, however, RFC 9112 does not make 205
+    // intrinsically bodyless for message framing. Keep this sender-only check
+    // separate so recipients still consume a peer's framed content.
+    if (status != 205) return;
+    if (body.len != 0) return error.InvalidContentLength;
+    if (try contentLength(headers)) |declared| {
+        if (declared != 0) return error.InvalidContentLength;
+    }
+}
+
 fn responseForbidsBody(status: u16, request_method: ?Method) bool {
     if (statusCodeForbidsBody(status)) return true;
     return switch (request_method orelse return false) {
@@ -1507,7 +1520,7 @@ pub fn writeResponse(
     if (version == .http_0_9) return error.InvalidVersion;
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
-    try validateResponseBodyForStatus(status, headers, body, &.{});
+    try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
     try list.ensureUnusedCapacity(allocator, try responseWireLen(version, status, reason, headers, body));
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
@@ -1534,7 +1547,7 @@ pub fn writeResponseChecked(
     if (version == .http_0_9) return error.InvalidVersion;
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
-    try validateResponseBodyForStatus(status, headers, body, &.{});
+    try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
     try list.ensureUnusedCapacity(allocator, try responseWireLen(version, status, reason, headers, body));
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
@@ -2742,6 +2755,41 @@ test "HTTP/1 writers reject forbidden response bodies" {
         .name = "Content-Length",
         .value = "0",
     }}, ""));
+    try std.testing.expectError(error.InvalidContentLength, writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        205,
+        "Reset Content",
+        &.{},
+        "body",
+    ));
+    try std.testing.expectError(error.InvalidContentLength, writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        205,
+        "Reset Content",
+        &.{.{ .name = "Content-Length", .value = "1" }},
+        "",
+    ));
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        205,
+        "Reset Content",
+        &.{.{ .name = "Content-Length", .value = "0" }},
+        "",
+    );
+    try std.testing.expect(!statusCodeForbidsBody(205));
+    var received_205 = try parseResponse(
+        allocator,
+        "HTTP/1.1 205 Reset Content\r\nContent-Length: 4\r\n\r\nbody",
+        .{},
+    );
+    defer received_205.deinit(allocator);
+    try std.testing.expectEqualStrings("body", received_205.body);
 
     try writeResponseChecked(&encoded, allocator, .http_1_1, 304, "Not Modified", &.{.{
         .name = "Content-Length",

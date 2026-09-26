@@ -8479,9 +8479,17 @@ test "HTTP/1 aggregate write validation errors remain retryable" {
     );
     try std.testing.expectError(
         error.InvalidContentLength,
+        connection.writeResponse(.{ .status = 205, .body = "forbidden" }),
+    );
+    try std.testing.expectEqual(
+        body_writer.State.Phase.idle,
+        connection.writer_state.phase,
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
         connection.writeResponses(&.{
             .{ .body = "ok" },
-            .{ .status = 204, .body = "forbidden" },
+            .{ .status = 205, .body = "forbidden" },
         }),
     );
     try std.testing.expectEqual(
@@ -11471,6 +11479,100 @@ test "HTTP/1 status-forbidden body preserves pipelined response without request 
     var second_response = try readResponseFromStreamBuffered(allocator, io, client.stream, client.limits, .{}, &client.inbuf);
     defer second_response.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 200), second_response.response.status);
+    try std.testing.expectEqualStrings("pong", second_response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 client consumes framed 205 content before next response" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var first = try connection.readRequest(.{});
+            defer first.deinit(server_ptr.allocator);
+            var second = try connection.readRequest(.{});
+            defer second.deinit(server_ptr.allocator);
+
+            try writeAllToStream(
+                server_ptr.io,
+                connection.stream,
+                "HTTP/1.1 205 Reset Content\r\n" ++
+                    "Content-Length: 4\r\n" ++
+                    "Connection: keep-alive\r\n\r\nbody" ++
+                    "HTTP/1.1 200 OK\r\n" ++
+                    "Content-Length: 4\r\n" ++
+                    "Connection: close\r\n\r\npong",
+            );
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_head_bytes = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+    const headers = [_]http1.Header{
+        .{ .name = "Connection", .value = "keep-alive" },
+        .{ .name = "Host", .value = "localhost" },
+    };
+    try writeRequestToStream(allocator, io, client.stream, .{
+        .target = "/reset",
+        .headers = &headers,
+    });
+    try writeRequestToStream(allocator, io, client.stream, .{
+        .target = "/next",
+        .headers = &headers,
+    });
+
+    var first_response = try readResponseFromStreamBuffered(
+        allocator,
+        io,
+        client.stream,
+        client.limits,
+        .{},
+        &client.inbuf,
+    );
+    defer first_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 205), first_response.response.status);
+    try std.testing.expectEqualStrings("body", first_response.response.body);
+
+    var second_response = try readResponseFromStreamBuffered(
+        allocator,
+        io,
+        client.stream,
+        client.limits,
+        .{},
+        &client.inbuf,
+    );
+    defer second_response.deinit(allocator);
     try std.testing.expectEqualStrings("pong", second_response.response.body);
 
     thread.join();

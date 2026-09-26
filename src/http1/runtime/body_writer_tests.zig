@@ -526,6 +526,97 @@ test "HTTP/1 response writer suppresses forbidden bodies" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/1 streaming 205 rejects content and preserves reuse" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *runtime.Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest(.{});
+            defer first.deinit(server_ptr.allocator);
+            var reset = try connection.startResponse(.{
+                .status = 205,
+                .reason = "Reset Content",
+                .headers = &.{.{
+                    .name = "Transfer-Encoding",
+                    .value = "chunked",
+                }},
+                .request_method = first.request.method,
+            });
+            defer reset.deinit();
+            try std.testing.expectError(
+                error.InvalidContentLength,
+                reset.write("forbidden"),
+            );
+            try reset.finish();
+
+            var second = try connection.readRequest(.{});
+            defer second.deinit(server_ptr.allocator);
+            try connection.writeResponse(.{
+                .headers = &.{.{
+                    .name = "Connection",
+                    .value = "close",
+                }},
+                .body = "after",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    var reset_response = try client.request(.{
+        .target = "/reset",
+        .host = "localhost",
+    });
+    defer reset_response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 205), reset_response.response.status);
+    try std.testing.expectEqual(
+        http1.BodyFraming.chunked,
+        reset_response.response.body_framing,
+    );
+    try std.testing.expectEqualStrings("", reset_response.response.body);
+
+    var second_response = try client.request(.{
+        .target = "/after",
+        .host = "localhost",
+    });
+    defer second_response.deinit(allocator);
+    try std.testing.expectEqualStrings("after", second_response.response.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/1 abandoned request writer makes connection unusable" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

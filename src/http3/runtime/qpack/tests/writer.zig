@@ -250,6 +250,39 @@ test "HTTP/3 streaming response head enforces bodyless status" {
             &encoder,
         ),
     );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        (http3.Response{
+            .status = 205,
+        }).writeStreamingHeadDynamic(
+            &encoded,
+            allocator,
+            .{},
+            12,
+            1,
+            &encoder,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    const reset = try (http3.Response{
+        .status = 205,
+        .headers = &.{.{
+            .name = "content-length",
+            .value = "0",
+        }},
+    }).writeStreamingHeadDynamic(
+        &encoded,
+        allocator,
+        .{},
+        16,
+        null,
+        &encoder,
+    );
+    try std.testing.expectEqual(@as(?usize, 0), reset.expected_length);
+    try std.testing.expect(reset.body_allowed);
 }
 
 fn checkDynamicWriterAllocationFailure(allocator: std.mem.Allocator) !void {

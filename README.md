@@ -57,7 +57,7 @@ Current protocol coverage includes:
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection, keep-alive/upgrade handling, pipelined
   byte buffering with exact-message ownership transfer, allocation-free caller-storage request-pipeline batch parsing with transactional in-place chunk decoding and one-prefix consumption, reusable runtime header/trailer/encoding scratch for persistent connections, and aggregate Content-Length/Transfer-Encoding/chunk/trailer boundary decisions grouped under `http1/runtime/message/`, non-chunked header/body vectored writes, transactional batched response validation and one-flush pipeline writes, method-aware response body
-  handling for HEAD and successful CONNECT, stateful incremental request/response writers with fixed-length or chunked framing, cross-write Content-Length enforcement, announced/merged trailers, exact response handoff, client-side `Expect: 100-continue` gating with early-final-response handoff, and connection-poisoning abandonment semantics, plus callback-based streaming request and response readers with owned heads/trailers, fixed/chunked/close-delimited framing, pipelined-suffix preservation, and no body-sized aggregation, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
+  handling for HEAD and successful CONNECT, sender-side RFC 9110 enforcement that 205 responses contain no content while receivers still consume their declared framing, stateful incremental request/response writers with fixed-length or chunked framing, cross-write Content-Length enforcement, announced/merged trailers, exact response handoff, client-side `Expect: 100-continue` gating with early-final-response handoff, and connection-poisoning abandonment semantics, plus callback-based streaming request and response readers with owned heads/trailers, fixed/chunked/close-delimited framing, pipelined-suffix preservation, and no body-sized aggregation, Host/authority delimiter validation, strict authority-form CONNECT target delimiter/userinfo rejection, malformed absolute-form authority validation including bracketed IPv6, and CONNECT tunnel helpers, interim 1xx response skipping plus
   server-side `Expect: 100-continue` handling even when body bytes are pre-read, with full request-head/Host/framing/size validation before any interim response, pure-digit Content-Length enforcement,
   TE-over-CL precedence with parsed `Content-Length` stripping and mandatory connection retirement on ambiguous requests, ambiguous body-length rejection
   across repeated/coalesced `Content-Length`, unsupported transfer-coding and HTTP/1.0 transfer-coding rejection, strict-by-default opt-in Hyper-shaped repeated request-line SP, response-only whitespace-before-colon compatibility, and direction-specific invalid-header skipping that still rejects ambiguous NUL/CR boundaries,
@@ -131,7 +131,8 @@ Current protocol coverage includes:
   connection-specific header rejection including `TE` rules and stack-first,
   exact-capacity removal of every `Connection`-nominated hop-by-hop field
   without a fixed field-count ceiling,
-  status-forbidden response-body write rejection,
+  status-forbidden response-body write rejection plus sender-side empty-content
+  enforcement for 205 without changing DATA/END_STREAM receive framing,
   Hyper-style default automatic server `date` generation for ordinary,
   streaming, batched, pushed, and CONNECT final responses, with explicit-field
   preservation, informational-response exclusion, and an opt-out limit,
@@ -225,7 +226,8 @@ Current protocol coverage includes:
   so they cannot invalidate the aggregate reader that owns the borrowed head,
   HTTP/3 pseudo-header/lowercase field-name, `:method` token validation with case-sensitive CONNECT/OPTIONS semantics, SETTINGS-gated `:protocol` token, URI scheme/origin-form path/authority, Host/`:authority`, traditional CONNECT body rules, and connection-specific header validation,
   DATA-frame aggregation, pure-digit content-length, three-digit `:status`,
-  status-forbidden response-body validation, and request-aware HEAD/traditional
+  status-forbidden response-body validation, sender-side empty-content
+  enforcement for 205 without changing DATA/FIN receive framing, and request-aware HEAD/traditional
   CONNECT body suppression and client validation across aggregate and
   incremental APIs, stateless QPACK helpers with RFC 9204 static-table
   references, Huffman string literals, and literal fallback, a cleartext development runtime over the QUIC

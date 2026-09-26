@@ -304,7 +304,7 @@ fn prepareStreamingResponseWithDefaultDate(
         options.headers,
         options.trailer_names,
     );
-    try http1.validateResponseBodyForStatus(
+    try http1.validateOutgoingResponseBodyForStatus(
         options.status,
         options.headers,
         &.{},
@@ -334,9 +334,17 @@ fn prepareStreamingResponseWithDefaultDate(
     }
     if (head_response and trailers_requested) return error.InvalidTrailer;
     const declared_length = try http1.contentLength(options.headers);
+    const content_forbidden = options.status == 205;
+    if (content_forbidden and (options.body_length orelse 0) != 0) {
+        return error.InvalidContentLength;
+    }
+    if (content_forbidden and (declared_length orelse 0) != 0) {
+        return error.InvalidContentLength;
+    }
     const use_chunked = !suppress_body and
         (explicit_chunked or
-            (declared_length == null and options.body_length == null));
+            (declared_length == null and options.body_length == null and
+                !content_forbidden));
     // A HEAD response may describe the transfer coding a corresponding GET
     // would use, but no chunk terminator follows the head. Preserve an
     // explicitly supplied coding while still returning suppressed framing.
@@ -409,7 +417,7 @@ fn prepareStreamingResponseWithDefaultDate(
             .{ .fixed = fixed_length },
         .reusable_after_finish = !successful_connect and
             http1.headersKeepAlive(options.version, options.headers),
-        .expected_length = if (suppress_body)
+        .expected_length = if (suppress_body or content_forbidden)
             0
         else if (use_chunked)
             options.body_length
@@ -546,6 +554,89 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
             head_response.head,
             "Transfer-Encoding: chunked\r\n",
         ) != null,
+    );
+}
+
+test "HTTP/1 response writers enforce empty 205 content" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        prepareResponse(allocator, .{
+            .status = 205,
+            .reason = "Reset Content",
+            .body = "forbidden",
+        }, &scratch),
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        prepareResponse(allocator, .{
+            .status = 205,
+            .reason = "Reset Content",
+            .headers = &.{.{
+                .name = "Content-Length",
+                .value = "1",
+            }},
+        }, &scratch),
+    );
+
+    const fixed = try prepareResponse(allocator, .{
+        .status = 205,
+        .reason = "Reset Content",
+    }, &scratch);
+    try std.testing.expectEqualStrings("", fixed.body);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        fixed.header,
+        "Content-Length: 0\r\n",
+    ) != null);
+
+    const chunked = try prepareResponse(allocator, .{
+        .status = 205,
+        .reason = "Reset Content",
+        .headers = &.{.{
+            .name = "Transfer-Encoding",
+            .value = "chunked",
+        }},
+    }, &scratch);
+    try std.testing.expectEqualStrings("", chunked.body);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        chunked.header,
+        "\r\n0\r\n\r\n",
+    ));
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        prepareResponseParts(allocator, &.{
+            .{ .body = "valid prefix" },
+            .{ .status = 205, .body = "forbidden" },
+        }, &scratch),
+    );
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        prepareStreamingResponse(allocator, .{
+            .status = 205,
+            .body_length = 1,
+        }, &scratch),
+    );
+    const reset_streaming = try prepareStreamingResponse(allocator, .{
+        .status = 205,
+        .headers = &.{.{
+            .name = "Transfer-Encoding",
+            .value = "chunked",
+        }},
+    }, &scratch);
+    try std.testing.expectEqual(
+        StreamingFraming.chunked,
+        reset_streaming.framing,
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        reset_streaming.expected_length,
     );
 }
 
@@ -930,7 +1021,7 @@ fn prepareResponseFraming(
     if (options.version == .http_0_9) return error.InvalidVersion;
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
-    try http1.validateResponseBodyForStatus(
+    try http1.validateOutgoingResponseBodyForStatus(
         options.status,
         options.headers,
         options.body,

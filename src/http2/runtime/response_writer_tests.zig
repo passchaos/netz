@@ -205,6 +205,82 @@ test "HTTP/2 response writer length errors are transactional" {
     try std.testing.expectEqualStrings("abcde", consumer.storage[0..consumer.len]);
 }
 
+test "HTTP/2 response writer enforces empty 205 content" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_body_bytes = 4096, .max_frame_payload = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(server_ptr.allocator);
+
+            var response = try connection.startResponse(
+                request.stream_id,
+                .{ .status = 205 },
+            );
+            defer response.deinit();
+            try std.testing.expectError(
+                error.InvalidContentLength,
+                response.write("forbidden"),
+            );
+            try response.finishTrailers(&.{.{
+                .name = "x-reset-complete",
+                .value = "yes",
+            }});
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_body_bytes = 4096, .max_frame_payload = 4096 },
+    );
+    defer client.close();
+    var response = try client.request(.{
+        .path = "/reset-content",
+        .authority = "localhost",
+    });
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 205), response.status);
+    try std.testing.expectEqualStrings("", response.body);
+    try std.testing.expectEqualStrings(
+        "yes",
+        runtime.testing.findHeader(
+            response.trailers,
+            "x-reset-complete",
+        ).?,
+    );
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 response writer ends HEAD response at headers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

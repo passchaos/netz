@@ -52,6 +52,10 @@ const validateResponseBodyForStatus =
     message_headers.validateResponseBodyForStatus;
 const validateResponseBodyForStatusWithLength =
     message_headers.validateResponseBodyForStatusWithLength;
+const validateOutgoingResponseBodyForStatus =
+    message_headers.validateOutgoingResponseBodyForStatus;
+const validateOutgoingResponseBodyForStatusWithLength =
+    message_headers.validateOutgoingResponseBodyForStatusWithLength;
 const validateResponseBodyForRequestSemantics =
     message_headers.validateResponseBodyForRequestSemantics;
 const validateResponseBodyForRequestSemanticsWithLength =
@@ -9523,7 +9527,7 @@ pub const Connection = struct {
             try stripSuccessfulConnectContentLength(&fields);
         }
         const declared_length = try contentLength(fields.items);
-        try validateResponseBodyForStatusWithLength(
+        try validateOutgoingResponseBodyForStatusWithLength(
             options.status,
             declared_length,
             options.body,
@@ -9630,7 +9634,7 @@ pub const Connection = struct {
             try stripSuccessfulConnectContentLength(&fields);
         }
         const declared_response_length = try contentLength(fields.items);
-        try validateResponseBodyForStatusWithLength(options.status, declared_response_length, options.body, options.trailers);
+        try validateOutgoingResponseBodyForStatusWithLength(options.status, declared_response_length, options.body, options.trailers);
         try validateResponseBodyForRequestSemanticsWithLength(options.status, semantics, declared_response_length, options.body, options.trailers);
         try validateDeclaredResponseLengthValue(options.status, semantics, declared_response_length, options.body.len);
         if (responseShouldDefaultContentLengthValue(options.status, semantics, declared_response_length, options.body.len)) {
@@ -9748,11 +9752,12 @@ pub const Connection = struct {
             try stripSuccessfulConnectContentLength(&fields);
         }
         const declared_length = try contentLength(fields.items);
-        if ((statusIsInformational(options.status) or
-            options.status == 204) and declared_length != null)
-        {
-            return error.InvalidContentLength;
-        }
+        try validateOutgoingResponseBodyForStatusWithLength(
+            options.status,
+            declared_length,
+            &.{},
+            &.{},
+        );
         if (semantics.traditional_connect and
             options.status >= 200 and options.status < 300 and
             (declared_length orelse 0) != 0)
@@ -9783,7 +9788,10 @@ pub const Connection = struct {
         return .{
             .connection = self,
             .stream_id = stream_id,
-            .expected_length = declared_length,
+            .expected_length = if (options.status == 205)
+                0
+            else
+                declared_length,
             .finished = ends_at_headers,
         };
     }
@@ -9873,7 +9881,7 @@ pub const Connection = struct {
                 try stripSuccessfulConnectContentLength(&fields);
             }
             const declared_length = try contentLength(fields.items);
-            try validateResponseBodyForStatusWithLength(
+            try validateOutgoingResponseBodyForStatusWithLength(
                 options.status,
                 declared_length,
                 &.{},
@@ -10321,7 +10329,7 @@ pub const Connection = struct {
             .response,
         );
         const declared_length = try contentLength(fields.items);
-        try validateResponseBodyForStatusWithLength(
+        try validateOutgoingResponseBodyForStatusWithLength(
             options.status,
             declared_length,
             options.body,
@@ -10786,7 +10794,7 @@ pub const Connection = struct {
             &fields,
             .response,
         );
-        try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
+        try validateOutgoingResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         try validateHeaderBlock(fields.items, .response);
         // HTTP/2 informational responses never end the stream; the final
         // response HEADERS still owns END_STREAM/body/trailer semantics.  This
@@ -13666,7 +13674,7 @@ pub const Connection = struct {
             &fields,
             .response,
         );
-        try validateResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
+        try validateOutgoingResponseBodyForStatus(status_code, fields.items, &.{}, &.{});
         if (status_code >= 200 and status_code < 300) {
             try stripSuccessfulConnectContentLength(&fields);
         }
@@ -27723,6 +27731,83 @@ test "HTTP/2 runtime validates response content-length and method body rules" {
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 client consumes framed 205 content and reuses connection" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var first = try connection.readRequest();
+            defer first.deinit(server_ptr.allocator);
+            // Bypass the high-level sender to model a non-conforming peer.
+            // A recipient still follows HTTP/2 framing and consumes DATA up
+            // to END_STREAM instead of treating 205 like 204 or 304.
+            try connection.writeHeaders(first.stream_id, &.{
+                .{ .name = ":status", .value = "205" },
+                .{ .name = "content-length", .value = "4" },
+            }, false);
+            try connection.writeData(first.stream_id, "body", true);
+            connection.releasePeerStream(first.stream_id);
+
+            var second = try connection.readRequest();
+            defer second.deinit(server_ptr.allocator);
+            try connection.writeResponse(second.stream_id, .{
+                .body = "after",
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(allocator, io, server.address(), .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    });
+    defer client.close();
+
+    var reset = try client.request(.{
+        .path = "/reset",
+        .authority = "localhost",
+    });
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 205), reset.status);
+    try std.testing.expectEqualStrings("body", reset.body);
+
+    var after = try client.request(.{
+        .path = "/after",
+        .authority = "localhost",
+    });
+    defer after.deinit(allocator);
+    try std.testing.expectEqualStrings("after", after.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 response writer defaults content-length for known body" {
     const allocator = std.testing.allocator;
 
@@ -28627,6 +28712,12 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try validateResponseBodyForStatus(304, &.{.{ .name = "content-length", .value = "123" }}, "", &.{});
     try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(304, &.{}, "body", &.{}));
     try std.testing.expectError(error.InvalidContentLength, validateResponseBodyForStatus(103, &.{.{ .name = "content-length", .value = "0" }}, "", &.{}));
+    // Receive validation follows stream framing for 205; only outgoing
+    // validation enforces the RFC 9110 server requirement.
+    try validateResponseBodyForStatus(205, &.{.{ .name = "content-length", .value = "4" }}, "body", &.{});
+    try std.testing.expectError(error.InvalidContentLength, validateOutgoingResponseBodyForStatus(205, &.{}, "body", &.{}));
+    try std.testing.expectError(error.InvalidContentLength, validateOutgoingResponseBodyForStatus(205, &.{.{ .name = "content-length", .value = "1" }}, "", &.{}));
+    try validateOutgoingResponseBodyForStatus(205, &.{.{ .name = "content-length", .value = "0" }}, "", &.{.{ .name = "x-checksum", .value = "ok" }});
 
     var connection = Connection{
         .io = undefined,
@@ -28647,6 +28738,10 @@ test "HTTP/2 writers reject status-forbidden response bodies" {
     try connection.reservePeerStream(1);
     try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
         .status = 204,
+        .body = "body",
+    }));
+    try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
+        .status = 205,
         .body = "body",
     }));
     try std.testing.expectError(error.InvalidContentLength, connection.writeResponse(1, .{
@@ -31747,6 +31842,33 @@ test "HTTP/2 response batch validates transactionally" {
     try std.testing.expect(connection.outboundStreamIsActive(3));
     // Full preflight rejects the invalid member before staging any HPACK or
     // wire bytes, which is stronger than merely allowing partial scratch.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.write_batch.items.len,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        connection.writeResponseBatch(
+            &.{ 1, 3 },
+            &.{
+                .{},
+                .{
+                    .status = 205,
+                    .headers = &.{.{
+                        .name = "content-length",
+                        .value = "1",
+                    }},
+                },
+            },
+        ),
+    );
+    try std.testing.expect(connection.outboundStreamIsActive(1));
+    try std.testing.expect(connection.outboundStreamIsActive(3));
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.write_batch.items.len,

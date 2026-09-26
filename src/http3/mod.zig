@@ -2906,7 +2906,7 @@ pub const Response = struct {
     /// DATA, and trailers into independent transport operations.
     pub fn validateBodySemantics(self: Response) Error!void {
         const declared_content_length = try contentLength(self.headers);
-        try validateResponseBodyForStatusWithLength(
+        try validateOutgoingResponseBodyForStatusWithLength(
             self.status,
             declared_content_length,
             self.body,
@@ -2965,7 +2965,7 @@ pub const Response = struct {
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateResponseBodyForStatusWithLength(
+        try validateOutgoingResponseBodyForStatusWithLength(
             self.status,
             declared_content_length,
             self.body,
@@ -3037,7 +3037,7 @@ pub const Response = struct {
         try validateHeaderBlock(self.trailers, .trailers);
         try validateFieldSectionSize(fields, peer_settings.max_field_section_size);
         try validateFieldSectionSize(self.trailers, peer_settings.max_field_section_size);
-        try validateResponseBodyForStatusWithLength(
+        try validateOutgoingResponseBodyForStatusWithLength(
             self.status,
             declared_content_length,
             self.body,
@@ -3146,7 +3146,8 @@ pub const Response = struct {
             return .{ .expected_length = 0, .body_allowed = false };
         }
         var content_length_buf: [32]u8 = undefined;
-        const effective_length = try applyStreamingContentLength(
+        const effective_length = try applyStreamingResponseContentLength(
+            self.status,
             fields_buf,
             &fields,
             body_length,
@@ -3157,7 +3158,12 @@ pub const Response = struct {
             fields,
             peer_settings.max_field_section_size,
         );
-        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+        try validateOutgoingResponseBodyForStatusWithLength(
+            self.status,
+            effective_length,
+            &.{},
+            &.{},
+        );
         try writeHeadersFrame(list, allocator, fields);
         return .{
             .expected_length = effective_length,
@@ -3249,7 +3255,8 @@ pub const Response = struct {
             return .{ .expected_length = 0, .body_allowed = false };
         }
         var content_length_buf: [32]u8 = undefined;
-        const effective_length = try applyStreamingContentLength(
+        const effective_length = try applyStreamingResponseContentLength(
+            self.status,
             fields_buf,
             &fields,
             body_length,
@@ -3260,7 +3267,12 @@ pub const Response = struct {
             fields,
             peer_settings.max_field_section_size,
         );
-        try validateResponseBodyForStatus(self.status, fields, &.{}, &.{});
+        try validateOutgoingResponseBodyForStatusWithLength(
+            self.status,
+            effective_length,
+            &.{},
+            &.{},
+        );
         try writeHeadersFrameDynamic(
             list,
             allocator,
@@ -3275,6 +3287,28 @@ pub const Response = struct {
         };
     }
 };
+
+fn applyStreamingResponseContentLength(
+    status: u16,
+    fields_buf: []Qpack.HeaderField,
+    fields: *[]Qpack.HeaderField,
+    requested: ?usize,
+    content_length_buf: *[32]u8,
+) Error!?usize {
+    if (status != 205) {
+        return applyStreamingContentLength(
+            fields_buf,
+            fields,
+            requested,
+            content_length_buf,
+        );
+    }
+    const declared = try contentLength(fields.*);
+    if ((requested orelse 0) != 0 or (declared orelse 0) != 0) {
+        return error.InvalidContentLength;
+    }
+    return 0;
+}
 
 fn applyStreamingContentLength(
     fields_buf: []Qpack.HeaderField,
@@ -4940,6 +4974,27 @@ fn validateResponseBodyForStatus(
         body,
         trailers,
     );
+}
+
+fn validateOutgoingResponseBodyForStatusWithLength(
+    status: u16,
+    declared_content_length: ?usize,
+    body: []const u8,
+    trailers: []const Qpack.HeaderField,
+) Error!void {
+    try validateResponseBodyForStatusWithLength(
+        status,
+        declared_content_length,
+        body,
+        trailers,
+    );
+    // RFC 9110 Section 15.3.6: 205 has ordinary HTTP/3 stream framing but a
+    // server MUST NOT generate response content. Trailer fields are not
+    // content and remain permitted after a zero-length DATA sequence.
+    if (status != 205) return;
+    if (body.len != 0 or (declared_content_length orelse 0) != 0) {
+        return error.InvalidContentLength;
+    }
 }
 
 fn validateResponseBodyForStatusWithLength(
@@ -8155,6 +8210,53 @@ test "HTTP/3 response encode decode" {
         .status = 204,
         .body = "body",
     }).write(&encoded, allocator));
+    try std.testing.expectError(error.InvalidContentLength, (Response{
+        .status = 205,
+        .body = "body",
+    }).write(&encoded, allocator));
+    try std.testing.expectError(error.InvalidContentLength, (Response{
+        .status = 205,
+        .headers = &.{.{ .name = "content-length", .value = "1" }},
+    }).write(&encoded, allocator));
+    try validateResponseBodyForStatusWithLength(
+        205,
+        4,
+        "body",
+        &.{},
+    );
+    var peer_reset_bytes: std.ArrayList(u8) = .empty;
+    defer peer_reset_bytes.deinit(allocator);
+    var peer_reset_fields: std.ArrayList(u8) = .empty;
+    defer peer_reset_fields.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&peer_reset_fields, allocator, &.{
+        .{ .name = ":status", .value = "205" },
+        .{ .name = "content-length", .value = "4" },
+    });
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = peer_reset_fields.items,
+        .consumed = 0,
+    }).write(&peer_reset_bytes, allocator);
+    try (Frame{
+        .frame_type = FrameType.data,
+        .payload = "body",
+        .consumed = 0,
+    }).write(&peer_reset_bytes, allocator);
+    var peer_reset = try decodeResponse(allocator, peer_reset_bytes.items);
+    defer peer_reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 205), peer_reset.status);
+    try std.testing.expectEqualStrings("body", peer_reset.body);
+    encoded.clearRetainingCapacity();
+    try (Response{
+        .status = 205,
+        .headers = &.{.{ .name = "content-length", .value = "0" }},
+        .trailers = &.{.{ .name = "x-reset-complete", .value = "yes" }},
+    }).write(&encoded, allocator);
+    var reset = try decodeResponse(allocator, encoded.items);
+    defer reset.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 205), reset.status);
+    try std.testing.expectEqualStrings("", reset.body);
+    try std.testing.expectEqual(@as(usize, 1), reset.trailers.len);
     try std.testing.expectError(error.InvalidStatus, (Response{
         .status = 103,
     }).write(&encoded, allocator));
