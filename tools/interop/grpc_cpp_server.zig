@@ -5,6 +5,8 @@ const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
 
 const duplex_service_path = "/grpc.testing.TestService/FullDuplexCall";
+const half_duplex_service_path =
+    "/grpc.testing.TestService/HalfDuplexCall";
 const unary_service_path = "/grpc.testing.TestService/UnaryCall";
 const empty_service_path = "/grpc.testing.TestService/EmptyCall";
 const client_streaming_service_path =
@@ -44,6 +46,7 @@ const Scenario = enum {
     unimplemented_service,
     empty_unary,
     large_unary,
+    half_duplex,
     client_streaming,
     server_streaming,
 
@@ -179,6 +182,7 @@ pub fn main(init: std.process.Init) !void {
         ),
         .empty_unary => try serveEmptyUnary(&connection),
         .large_unary => try serveLargeUnary(allocator, &connection),
+        .half_duplex => try serveHalfDuplex(allocator, &connection),
         .cancel_after_begin => try serveCancelAfterBegin(&connection),
         .client_streaming => try serveClientStreaming(allocator, &connection),
         .server_streaming => try serveServerStreaming(allocator, &connection),
@@ -197,6 +201,73 @@ pub fn main(init: std.process.Init) !void {
             "client_io=grpc-cpp-posix-event-engine server_io=zio-std-io\n",
         .{ @tagName(scenario), if (tls_enabled) "tls" else "h2c" },
     );
+}
+
+const HalfDuplexRequests = struct {
+    allocator: std.mem.Allocator,
+    sizes: std.ArrayList(u32) = .empty,
+
+    fn deinit(self: *@This()) void {
+        self.sizes.deinit(self.allocator);
+    }
+
+    fn consume(self: *@This(), message: netz.grpc.StreamingMessage) !void {
+        if (message.was_compressed) return error.UnexpectedRequest;
+        var storage: [1]messages.ResponseParameter = undefined;
+        const parameters = try messages.decodeStreamingOutputCallResponseParameters(
+            message.payload,
+            &storage,
+        );
+        if (parameters.len != 1 or parameters[0].interval_us != 0 or
+            parameters[0].compressed != null)
+        {
+            return error.UnexpectedRequest;
+        }
+        try self.sizes.append(self.allocator, parameters[0].size);
+    }
+};
+
+fn serveHalfDuplex(
+    allocator: std.mem.Allocator,
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var stream = try connection.acceptDuplex();
+    defer stream.deinit();
+    if (!std.mem.eql(u8, stream.path, half_duplex_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    var requests = HalfDuplexRequests{ .allocator = allocator };
+    defer requests.deinit();
+    while (true) {
+        var event = try stream.readRequestEvent(
+            &requests,
+            HalfDuplexRequests.consume,
+        );
+        defer event.deinit();
+        switch (event) {
+            .messages => {},
+            .finished => break,
+            .reset => return error.UnexpectedReset,
+        }
+    }
+    if (!std.mem.eql(u32, requests.sizes.items, &canonical_response_sizes_u32)) {
+        return error.UnexpectedRequest;
+    }
+    try stream.startResponse(.{
+        .request_accepted_encodings = stream.accepted_encodings,
+        .max_message_size = message_limit,
+    });
+    for (requests.sizes.items) |size| {
+        const response = try messages.encodeStreamingOutputCallResponseAlloc(
+            allocator,
+            size,
+        );
+        defer allocator.free(response);
+        if (try stream.writeMessage(response) != .complete) {
+            return error.UnexpectedResponseEvent;
+        }
+    }
+    try stream.finishOk();
 }
 
 fn serveCancelAfterBegin(
@@ -839,6 +910,7 @@ fn serveScenario(
         .ping_pong => try servePingPong(io, stream, &queue, deadline),
         .empty_stream => try serveEmpty(stream, &queue, deadline),
         .cancel_after_begin => unreachable,
+        .half_duplex => unreachable,
         .cancel_after_first_response => try serveCancellation(io, stream, &queue, deadline),
         .timeout_on_sleeping_server => try serveSleepingDeadline(io, stream, &queue),
         .custom_metadata,

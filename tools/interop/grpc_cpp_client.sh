@@ -188,6 +188,7 @@ for transport in h2c tls; do
     empty_unary \
     large_unary \
     ping_pong \
+    half_duplex \
     empty_stream \
     cancel_after_begin \
     cancel_after_first_response \
@@ -208,4 +209,4 @@ for transport in h2c tls; do
   done
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large ping_pong=true empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large ping_pong=true half_duplex=true empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

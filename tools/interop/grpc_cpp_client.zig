@@ -15,6 +15,8 @@ const netz = @import("netz");
 const messages = @import("grpc_cpp_messages.zig");
 
 const service_path = "/grpc.testing.TestService/FullDuplexCall";
+const half_duplex_service_path =
+    "/grpc.testing.TestService/HalfDuplexCall";
 const unary_service_path = "/grpc.testing.TestService/UnaryCall";
 const empty_service_path = "/grpc.testing.TestService/EmptyCall";
 const client_streaming_service_path =
@@ -106,6 +108,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try runPingPong(allocator, &client, message_limit);
+    try runHalfDuplex(allocator, &client, message_limit);
     try runCancelAfterBegin(&client, message_limit);
     try runUnaryBasics(allocator, &client, message_limit);
     try runUnaryCompression(allocator, &client, message_limit);
@@ -118,7 +121,8 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print(
         "netz gRPC client interoperated with grpc-cpp: transport={s} " ++
-            "ping_pong=4 compression=unary+streaming-gzip+identity " ++
+            "ping_pong=4 half_duplex=4 " ++
+            "compression=unary+streaming-gzip+identity " ++
             "unary=empty+large " ++
             "status=unary+bidi+unicode " ++
             "unimplemented=method+service " ++
@@ -128,6 +132,38 @@ pub fn main(init: std.process.Init) !void {
             "client_io=zio-std-io server_io=grpc-cpp-posix-event-engine\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
+}
+
+fn runHalfDuplex(
+    allocator: std.mem.Allocator,
+    client: *netz.grpc.runtime.Client,
+    message_limit: usize,
+) !void {
+    var stream = try client.startDuplex(.{
+        .path = half_duplex_service_path,
+        .authority = authority,
+        .max_message_size = message_limit,
+    });
+    defer stream.deinit();
+    var observer = Observer{ .expected_sizes = &canonical_response_sizes };
+    for (canonical_response_sizes) |response_size| {
+        const parameters = [_]messages.ResponseParameter{
+            .{ .size = @intCast(response_size) },
+        };
+        const request = try messages.encodeStreamingOutputCallParametersAlloc(
+            allocator,
+            &parameters,
+        );
+        defer allocator.free(request);
+        try writeMessageFully(allocator, &stream, request, &observer);
+    }
+    try finishRequestFully(allocator, &stream, &observer);
+    try readThroughTerminal(allocator, &stream, &observer);
+    if (observer.message_count != canonical_response_sizes.len or
+        observer.terminal_status != .ok)
+    {
+        return error.InvalidHalfDuplexResponse;
+    }
 }
 
 fn runCancelAfterBegin(

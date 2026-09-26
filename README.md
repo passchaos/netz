@@ -403,7 +403,8 @@ Current protocol coverage includes:
   whitespace, and trailers-only `UNIMPLEMENTED` results for both unknown
   methods and unknown services. They also cover canonical empty and 271828-byte
   request/314159-byte response unary calls, plus cancellation immediately
-  after request metadata and after the first response. The official reflection
+  after request metadata and after the first response, and half-duplex buffering
+  that emits four ordered responses only after request END_STREAM. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core
