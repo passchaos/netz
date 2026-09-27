@@ -1088,6 +1088,90 @@ test "MQTT reconnect poll preserves inbound publish across keep alive" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT reconnect poll can defer reconnect after transport failure" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        first_closed: std.Io.Event = .unset,
+        second_accepted: std.atomic.Value(bool) = .init(false),
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+                self.first_closed.set(self.server.io);
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept(.{ .protocol = .v5 });
+            first.connection.shutdown() catch {};
+            first.deinit(self.server.allocator);
+            self.first_closed.set(self.server.io);
+
+            var second = try self.server.accept(.{ .protocol = .v5 });
+            self.second_accepted.store(true, .release);
+            second.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    var server_future = try std.Io.concurrent(io, Shared.run, .{&shared});
+    var server_done = false;
+    defer if (!server_done) server_future.cancel(io);
+
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "deferred-reconnect" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+            .max_attempts = 1,
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connect();
+    try shared.first_closed.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+    if (shared.err) |err| return err;
+
+    const first_poll = try client.pollWithOptions(.{
+        .timeout = .fromSeconds(1),
+        .cancellation_check_interval = .fromMilliseconds(5),
+        .reconnect_after_transport_error = false,
+    });
+    try std.testing.expect(first_poll == null);
+    try std.testing.expect(client.connection() == null);
+    try std.testing.expect(!shared.second_accepted.load(.acquire));
+
+    var reconnected = (try client.pollWithTimeout(.fromSeconds(1))).?;
+    defer reconnected.deinit(allocator);
+    try std.testing.expect(reconnected == .connected);
+
+    server_future.await(io);
+    server_done = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(shared.second_accepted.load(.acquire));
+}
+
 test "MQTT reconnect poll reconnects after silent ping timeout and keeps QoS" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

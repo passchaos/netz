@@ -829,12 +829,13 @@ pub const Bridge = struct {
         errdefer self.source.disconnectTransport();
         var target_packet_id = target_result.published orelse
             return error.UnexpectedPacket;
+        const fair_source_poll = bridgePollOptions(poll_options);
         while (true) {
-            const bounded_poll = bridgeClientPollOptions(
+            const target_poll = bridgeClientPollOptions(
                 &self.target,
                 poll_options,
             );
-            const maybe_target_event = self.target.pollWithOptions(bounded_poll) catch |err|
+            const maybe_target_event = self.target.pollWithOptions(target_poll) catch |err|
                 switch (err) {
                     error.PublishRefused => {
                         if (!self.target_delivery.completed or
@@ -913,7 +914,10 @@ pub const Bridge = struct {
                     },
                 }
             }
-            try self.serviceSourceWhileWaiting(source_publish, bounded_poll);
+            try self.serviceSourceWhileWaiting(
+                source_publish,
+                fair_source_poll,
+            );
         }
     }
 
@@ -1807,6 +1811,11 @@ fn bridgePollOptions(options: reconnect.PollOptions) reconnect.PollOptions {
         bounded.cancellation_check_interval.nanoseconds,
         bounded.timeout.nanoseconds,
     ));
+    // A transport failure found during this short fairness slice must not
+    // force a complete TCP/TLS/MQTT reconnect into the same 50-ms budget.
+    // The next bridge turn sees a disconnected endpoint and preserves the
+    // caller's full timeout for that indivisible connection attempt.
+    bounded.reconnect_after_transport_error = false;
     return bounded;
 }
 
@@ -1836,12 +1845,20 @@ test "outbound bridge preserves reconnect budget across fairness slices" {
         options.timeout.nanoseconds,
         bridgeEndpointPollOptions(false, options).timeout.nanoseconds,
     );
+    try std.testing.expect(
+        bridgeEndpointPollOptions(false, options)
+            .reconnect_after_transport_error,
+    );
     try std.testing.expectEqual(
         @as(
             @TypeOf(options.timeout.nanoseconds),
             50 * std.time.ns_per_ms,
         ),
         bridgeEndpointPollOptions(true, options).timeout.nanoseconds,
+    );
+    try std.testing.expect(
+        !bridgeEndpointPollOptions(true, options)
+            .reconnect_after_transport_error,
     );
 }
 

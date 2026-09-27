@@ -178,6 +178,11 @@ The bridge serializes one source publication through the target acknowledgement
 boundary and has no unbounded intermediate queue. While waiting for the target,
 it alternates bounded polling of both reconnect clients so Keep Alive, AUTH,
 disconnect, and retry traffic continue to make progress. A second QoS 1
+delivery cannot be starved by an indivisible reconnect: an established
+endpoint's short fairness turn reports transport loss without starting a TLS
+handshake, the next disconnected-endpoint turn retains the caller's full
+connection budget, and servicing the opposite endpoint remains capped at the
+short fairness interval after that reconnect completes. A second QoS 1
 delivery is left to the persistent source Session rather than copied into a
 bridge queue. Topic Alias, Subscription
 Identifier, DUP, and Packet Identifier are connection-scoped and never cross

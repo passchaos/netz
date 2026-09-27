@@ -268,6 +268,11 @@ pub const PollOptions = struct {
     /// shared shutdown event. Short bounded reads preserve single ownership
     /// while making cancellation independent of the MQTT Keep Alive value.
     cancellation_check_interval: std.Io.Duration = .fromMilliseconds(100),
+    /// Whether a retryable error on an established transport may reconnect
+    /// within this call. Fair schedulers can disable this for short read
+    /// slices, then give the now-disconnected client a full connection budget
+    /// on their next turn. Initial connection attempts are unaffected.
+    reconnect_after_transport_error: bool = true,
 };
 
 /// Internal scheduling options for an already-absolute poll budget. Timestamps
@@ -276,6 +281,7 @@ pub const PollOptions = struct {
 pub const DeadlinePollOptions = struct {
     ping_response_timeout: ?std.Io.Duration = null,
     cancellation_check_interval: std.Io.Duration = .fromMilliseconds(100),
+    reconnect_after_transport_error: bool = true,
 };
 
 pub const QueuedServeOptions = struct {
@@ -2466,8 +2472,10 @@ pub const Client = struct {
     }
 
     /// Drive exactly one ordered client event, returning null when the caller's
-    /// bound expires first. The method is the sole reader and performs all QoS
-    /// acknowledgements, keep-alive probes, and retryable reconnects itself.
+    /// bound expires first or when an established transport is retired and
+    /// `reconnect_after_transport_error` is false. The method is the sole
+    /// reader and performs all QoS acknowledgements, keep-alive probes, and
+    /// enabled retryable reconnects itself.
     /// Applications must not mix it concurrently with typed reads or
     /// `completeNextPublish`.
     pub fn pollWithOptions(
@@ -2479,6 +2487,7 @@ pub const Client = struct {
             std.Io.Clock.awake.now(self.io).addDuration(options.timeout),
             options.ping_response_timeout,
             options.cancellation_check_interval,
+            options.reconnect_after_transport_error,
         );
     }
 
@@ -2496,6 +2505,7 @@ pub const Client = struct {
             deadline,
             options.ping_response_timeout,
             options.cancellation_check_interval,
+            options.reconnect_after_transport_error,
         );
     }
 
@@ -2504,6 +2514,7 @@ pub const Client = struct {
         call_deadline: std.Io.Timestamp,
         ping_response_timeout: ?std.Io.Duration,
         cancellation_check_interval: std.Io.Duration,
+        reconnect_after_transport_error: bool,
     ) (Error || std.Io.Cancelable)!?ClientEvent {
         if (ping_response_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.Timeout;
@@ -2522,6 +2533,7 @@ pub const Client = struct {
             if (self.ping_response_deadline) |deadline| {
                 if (now.nanoseconds >= deadline.nanoseconds) {
                     self.disconnectTransport();
+                    if (!reconnect_after_transport_error) return null;
                     return try self.connectEventBefore(call_deadline);
                 }
             } else if (self.keepAliveDeadline()) |deadline| {
@@ -2531,6 +2543,7 @@ pub const Client = struct {
                         const retryable = retryableConnectError(err);
                         self.retireConnectionAfterOperationError(err);
                         if (!retryable) return err;
+                        if (!reconnect_after_transport_error) return null;
                         return try self.connectEventBefore(call_deadline);
                     };
                     const sent_at = std.Io.Clock.awake.now(self.io);
@@ -2564,6 +2577,7 @@ pub const Client = struct {
                     return err;
                 }
                 self.disconnectTransport();
+                if (!reconnect_after_transport_error) return null;
                 return try self.connectEventBefore(call_deadline);
             };
             var packet_owned = true;
