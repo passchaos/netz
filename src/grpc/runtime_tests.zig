@@ -86,6 +86,95 @@ test "gRPC h2c runtime reuses one channel" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "gRPC bounded accept and idle unary read preserve reuse" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(.fromMilliseconds(20)),
+    );
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        idle_timeout_complete: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.acceptWithDeadline(.fromNow(
+                self.server.transport.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            ));
+            defer connection.deinit();
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readUnaryWithTimeout(.fromMilliseconds(20)),
+            );
+            self.idle_timeout_complete.set(self.server.transport.io);
+            var request = try connection.readUnaryWithDeadline(.fromNow(
+                self.server.transport.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            ));
+            defer request.deinit();
+            try std.testing.expectEqualStrings(
+                "after-timeout",
+                request.request.message.payload,
+            );
+            try connection.writeUnary(request.request.stream_id, .{
+                .message = "reused",
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    shared.idle_timeout_complete.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } }) catch |err| {
+        thread.join();
+        joined = true;
+        if (shared.err) |server_err| return server_err;
+        return err;
+    };
+    var response = try client.unary(.{
+        .path = "/demo.Timeout/Unary",
+        .authority = "localhost",
+        .message = "after-timeout",
+    });
+    defer response.deinit();
+    try std.testing.expectEqualStrings("reused", response.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC Bearer rejection preserves channel for an authorized RPC" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -1440,6 +1529,7 @@ test "gRPC h2c runtime composes sequential message streams" {
     const Shared = struct {
         server: *grpc.runtime.Server,
         received: usize = 0,
+        idle_timeout_complete: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn consume(
@@ -1466,7 +1556,23 @@ test "gRPC h2c runtime composes sequential message streams" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept();
             defer connection.deinit();
-            var request = try connection.readStreaming(self, consume);
+            try std.testing.expectError(
+                error.Timeout,
+                connection.readStreamingWithTimeout(
+                    .fromMilliseconds(20),
+                    self,
+                    consume,
+                ),
+            );
+            self.idle_timeout_complete.set(self.server.transport.io);
+            var request = try connection.readStreamingWithDeadline(
+                .fromNow(self.server.transport.io, .{
+                    .raw = .fromSeconds(2),
+                    .clock = .awake,
+                }),
+                self,
+                consume,
+            );
             defer request.deinit();
             if (!std.mem.eql(u8, request.service, "demo.Echo") or
                 !std.mem.eql(u8, request.method, "Stream") or
@@ -1522,6 +1628,15 @@ test "gRPC h2c runtime composes sequential message streams" {
         .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
     );
     defer client.deinit();
+    shared.idle_timeout_complete.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } }) catch |err| {
+        thread.join();
+        joined = true;
+        if (shared.err) |server_err| return server_err;
+        return err;
+    };
     var authorization_storage: ["Bearer stream-token".len]u8 = undefined;
     const authorization = try grpc.bearerAuthorizationInto(
         &authorization_storage,
@@ -2299,6 +2414,10 @@ test "gRPC TLS runtime verifies ALPN and reuses one channel" {
         } },
     );
     defer server.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(.fromMilliseconds(20)),
+    );
 
     const Shared = struct {
         server: *grpc.runtime.TlsServer,
@@ -2306,7 +2425,10 @@ test "gRPC TLS runtime verifies ALPN and reuses one channel" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            var connection = self.server.accept() catch |err| {
+            var connection = self.server.acceptWithDeadline(.fromNow(
+                self.server.transport.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            )) catch |err| {
                 self.err = err;
                 return;
             };

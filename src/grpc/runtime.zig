@@ -333,6 +333,26 @@ pub const Server = struct {
             .max_message_size = self.max_message_size,
         };
     }
+
+    pub fn acceptWithTimeout(
+        self: *Server,
+        timeout: std.Io.Duration,
+    ) Error!ServerConnection {
+        return .{
+            .connection = try self.transport.acceptWithTimeout(timeout),
+            .max_message_size = self.max_message_size,
+        };
+    }
+
+    pub fn acceptWithDeadline(
+        self: *Server,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ServerConnection {
+        return .{
+            .connection = try self.transport.acceptWithDeadline(deadline),
+            .max_message_size = self.max_message_size,
+        };
+    }
 };
 
 /// TLS 1.3 gRPC listener with mandatory HTTP/2 ALPN.
@@ -375,6 +395,26 @@ pub const TlsServer = struct {
             .max_message_size = self.max_message_size,
         };
     }
+
+    pub fn acceptWithTimeout(
+        self: *TlsServer,
+        timeout: std.Io.Duration,
+    ) Error!ServerConnection {
+        return .{
+            .connection = try self.transport.acceptWithTimeout(timeout),
+            .max_message_size = self.max_message_size,
+        };
+    }
+
+    pub fn acceptWithDeadline(
+        self: *TlsServer,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ServerConnection {
+        return .{
+            .connection = try self.transport.acceptWithDeadline(deadline),
+            .max_message_size = self.max_message_size,
+        };
+    }
 };
 
 pub const ServerConnection = struct {
@@ -387,7 +427,35 @@ pub const ServerConnection = struct {
     }
 
     pub fn readUnary(self: *ServerConnection) Error!OwnedUnaryRequest {
-        var transport = try self.connection.readRequest();
+        return self.readUnaryMaybeBefore(null);
+    }
+
+    pub fn readUnaryWithTimeout(
+        self: *ServerConnection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedUnaryRequest {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readUnaryWithDeadline(.fromNow(
+            self.connection.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn readUnaryWithDeadline(
+        self: *ServerConnection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedUnaryRequest {
+        return self.readUnaryMaybeBefore(deadline);
+    }
+
+    fn readUnaryMaybeBefore(
+        self: *ServerConnection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedUnaryRequest {
+        var transport = if (deadline) |absolute|
+            try self.connection.readRequestWithDeadline(absolute)
+        else
+            try self.connection.readRequest();
         errdefer transport.deinit(self.connection.allocator);
         const request = call.parseUnaryRequest(
             self.connection.allocator,
@@ -481,6 +549,38 @@ pub const ServerConnection = struct {
             &self.connection,
             self.connection.allocator,
             self.max_message_size,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readStreamingWithTimeout(
+        self: *ServerConnection,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime consume: anytype,
+    ) !streaming.Request {
+        return streaming.readRequestWithTimeout(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            timeout,
+            context,
+            consume,
+        );
+    }
+
+    pub fn readStreamingWithDeadline(
+        self: *ServerConnection,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime consume: anytype,
+    ) !streaming.Request {
+        return streaming.readRequestWithDeadline(
+            &self.connection,
+            self.connection.allocator,
+            self.max_message_size,
+            deadline,
             context,
             consume,
         );

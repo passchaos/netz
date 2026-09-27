@@ -52,6 +52,11 @@ existing HTTP/2 runtime:
   metadata or envelopes receive `RST_STREAM(INTERNAL_ERROR)` and retire local
   HTTP/2 concurrency, response-semantics, and flow-window state even if the
   best-effort reset write fails,
+- cleartext and TLS server accept timeout/deadline entry points covering socket
+  acceptance through HTTP/2 bootstrap, plus bounded unary and sequential
+  streaming request reads. An idle pre-request timeout leaves the channel
+  reusable; an aggregate timeout after stream admission retains the lower
+  HTTP/2 fail-closed behavior because parser state is not resumable,
 - unary client deadlines captured once from `grpc-timeout` at API entry and
   enforced locally with the awake clock across request setup and the complete
   HTTP/2 exchange; expiration returns `error.Timeout` and emits

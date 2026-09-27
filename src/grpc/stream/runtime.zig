@@ -433,11 +433,21 @@ pub fn readRequest(
         context,
     );
     defer bridge.deinit();
-    var request = try connection.readRequestStreamingWithHead(
+    const request = try connection.readRequestStreamingWithHead(
         &bridge,
         @TypeOf(bridge).begin,
         @TypeOf(bridge).consumeData,
     );
+    return finishRequest(connection, allocator, &bridge, request);
+}
+
+fn finishRequest(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    bridge: anytype,
+    request_value: http2.runtime.StreamingRequest,
+) !Request {
+    var request = request_value;
     errdefer request.deinit(allocator);
     bridge.finish() catch |err| {
         // HTTP/2 END_STREAM with a partial gRPC prefix/payload is a stream
@@ -462,6 +472,48 @@ pub fn readRequest(
         .accepted_encodings = parsed.accepted_encodings,
         .message_count = bridge.message_count,
     };
+}
+
+pub fn readRequestWithTimeout(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    max_message_size: usize,
+    timeout: std.Io.Duration,
+    context: anytype,
+    comptime consume: anytype,
+) !Request {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return readRequestWithDeadline(
+        connection,
+        allocator,
+        max_message_size,
+        .fromNow(connection.io, .{ .raw = timeout, .clock = .awake }),
+        context,
+        consume,
+    );
+}
+
+pub fn readRequestWithDeadline(
+    connection: *http2.runtime.Connection,
+    allocator: std.mem.Allocator,
+    max_message_size: usize,
+    deadline: std.Io.Clock.Timestamp,
+    context: anytype,
+    comptime consume: anytype,
+) !Request {
+    var bridge = ServerRequestBridge(@TypeOf(context), consume).init(
+        allocator,
+        max_message_size,
+        context,
+    );
+    defer bridge.deinit();
+    const request = try connection.readRequestStreamingWithHeadAndDeadline(
+        deadline,
+        &bridge,
+        @TypeOf(bridge).begin,
+        @TypeOf(bridge).consumeData,
+    );
+    return finishRequest(connection, allocator, &bridge, request);
 }
 
 pub const ResponseOptions = struct {

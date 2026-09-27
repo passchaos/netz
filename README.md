@@ -494,7 +494,8 @@ Current protocol coverage includes:
   stream-level encoding with per-message compression opt-out on sequential and
   duplex client/server writers,
   plus unary and sequential request/response message-stream h2c client/server
-  helpers with opaque protobuf payloads, initial/trailing metadata,
+  helpers with opaque protobuf payloads, listener/HTTP2-bootstrap and request
+  timeout/deadline entry points, initial/trailing metadata,
   final HEADERS-before-DATA callbacks, arbitrary prefix/payload split
   reassembly, several messages per DATA callback, zero-copy complete
   uncompressed messages, exact allocation for split messages, independent

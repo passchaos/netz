@@ -139,6 +139,38 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc.runtime.ServerConnection,
+        "readUnaryWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "readUnaryWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "readStreamingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
+        "readStreamingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Server,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.Server,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.TlsServer,
+        "acceptWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.TlsServer,
+        "acceptWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc.runtime.ServerConnection,
         "startStreamingResponse",
     ));
     try std.testing.expect(@hasDecl(
@@ -176,6 +208,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.grpc,
         "readStreamingRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "readStreamingRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "readStreamingRequestWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.grpc,
