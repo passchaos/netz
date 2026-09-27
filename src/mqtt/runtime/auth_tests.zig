@@ -33,9 +33,14 @@ test "MQTT enhanced authentication connects and reauthenticates" {
         }
 
         fn runFallible(server_ptr: *Server) !void {
-            var pending = try server_ptr.acceptPending(.{
-                .protocol = .v5,
-            });
+            const deadline = std.Io.Clock.Timestamp.fromNow(
+                server_ptr.io,
+                .{ .raw = .fromSeconds(3), .clock = .awake },
+            );
+            var pending = try server_ptr.acceptPendingWithDeadline(
+                .{ .protocol = .v5 },
+                deadline,
+            );
             var pending_owned = true;
             defer if (pending_owned) {
                 pending.deinit(server_ptr.allocator);
@@ -52,8 +57,21 @@ test "MQTT enhanced authentication connects and reauthenticates" {
                     pending.connect.connect.properties,
                 ).?,
             );
-            try pending.challengeAuthentication("1pets");
-            var response = try pending.receiveAuthentication();
+            try std.testing.expectError(
+                error.Timeout,
+                pending.challengeAuthenticationWithDeadline(
+                    "not-sent",
+                    .{ .raw = .zero, .clock = .awake },
+                ),
+            );
+            try std.testing.expect(pending.connection.isUsable());
+            try pending.challengeAuthenticationWithDeadline(
+                "1pets",
+                deadline,
+            );
+            var response = try pending.receiveAuthenticationWithDeadline(
+                deadline,
+            );
             defer response.deinit(server_ptr.allocator);
             try std.testing.expectEqualStrings(
                 "supercalifragilisticexpialidocious",
@@ -64,7 +82,10 @@ test "MQTT enhanced authentication connects and reauthenticates" {
             try pending.authorizeAuthenticationWithData(
                 "initial-final",
             );
-            var accepted = try pending.finish(.{ .protocol = .v5 });
+            var accepted = try pending.finishWithDeadline(
+                .{ .protocol = .v5 },
+                deadline,
+            );
             pending_owned = false;
             defer accepted.deinit(server_ptr.allocator);
 

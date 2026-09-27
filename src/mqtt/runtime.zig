@@ -1265,9 +1265,41 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         data: []const u8,
     ) Error!void {
+        return self.challengeAuthenticationMaybeBefore(data, null);
+    }
+
+    pub fn challengeAuthenticationWithTimeout(
+        self: *PendingAcceptedClient,
+        data: []const u8,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.challengeAuthenticationWithDeadline(data, .fromNow(
+            self.connection.transport.ioHandle(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn challengeAuthenticationWithDeadline(
+        self: *PendingAcceptedClient,
+        data: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        _ = try deadline_policy.usableAwake(
+            self.connection.transport.ioHandle(),
+            deadline,
+        );
+        return self.challengeAuthenticationMaybeBefore(data, deadline);
+    }
+
+    fn challengeAuthenticationMaybeBefore(
+        self: *PendingAcceptedClient,
+        data: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         const method = self.connection.authentication.method orelse
             return error.AuthenticationNotConfigured;
-        try self.connection.writeAuth(0x18, &.{
+        const properties = [_]mqtt.Property{
             .{ .utf8 = .{
                 .id = .authentication_method,
                 .value = method,
@@ -1276,14 +1308,54 @@ pub const PendingAcceptedClient = struct {
                 .id = .authentication_data,
                 .value = data,
             } },
-        });
+        };
+        if (deadline) |absolute|
+            try self.connection.writeAuthWithDeadline(
+                0x18,
+                &properties,
+                absolute,
+            )
+        else
+            try self.connection.writeAuth(0x18, &properties);
     }
 
     /// Receive and validate one client Continue Authentication packet.
     pub fn receiveAuthentication(
         self: *PendingAcceptedClient,
     ) Error!OwnedAuth {
-        var auth = try self.connection.readAuth();
+        return self.receiveAuthenticationMaybeBefore(null);
+    }
+
+    pub fn receiveAuthenticationWithTimeout(
+        self: *PendingAcceptedClient,
+        timeout: std.Io.Duration,
+    ) Error!OwnedAuth {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveAuthenticationWithDeadline(.fromNow(
+            self.connection.transport.ioHandle(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn receiveAuthenticationWithDeadline(
+        self: *PendingAcceptedClient,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedAuth {
+        _ = try deadline_policy.usableAwake(
+            self.connection.transport.ioHandle(),
+            deadline,
+        );
+        return self.receiveAuthenticationMaybeBefore(deadline);
+    }
+
+    fn receiveAuthenticationMaybeBefore(
+        self: *PendingAcceptedClient,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedAuth {
+        var auth = if (deadline) |absolute|
+            try self.connection.readAuthWithDeadline(absolute)
+        else
+            try self.connection.readAuth();
         errdefer auth.deinit(self.connection.allocator);
         try self.connection.authentication.receiveInitialAuth(
             auth.auth,
@@ -4689,7 +4761,36 @@ pub const Connection = struct {
     }
 
     pub fn readAuth(self: *Connection) Error!OwnedAuth {
-        var packet = try self.readPacket();
+        return self.readAuthMaybeBefore(null);
+    }
+
+    pub fn readAuthWithTimeout(
+        self: *Connection,
+        timeout: std.Io.Duration,
+    ) Error!OwnedAuth {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.readAuthWithDeadline(self.transport.deadlineFromNow(timeout));
+    }
+
+    pub fn readAuthWithDeadline(
+        self: *Connection,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedAuth {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
+        return self.readAuthMaybeBefore(deadline);
+    }
+
+    fn readAuthMaybeBefore(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!OwnedAuth {
+        var packet = if (deadline) |absolute|
+            try self.readPacketWithDeadline(absolute)
+        else
+            try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .auth) return error.UnexpectedPacket;
         const auth_packet = try self.parseIncomingAuth(packet.bytes);

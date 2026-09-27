@@ -5928,7 +5928,23 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.PendingAcceptedClient,
+        "challengeAuthenticationWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "challengeAuthenticationWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
         "receiveAuthentication",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "receiveAuthenticationWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "receiveAuthenticationWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.PendingAcceptedClient,

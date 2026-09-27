@@ -1694,6 +1694,9 @@ complete MQTT CONNECT admission and the final CONNACK write; configured proxy,
 TLS, and CONNECT limits can only shorten it. A timed-out accept closes a
 concurrently completed socket that
 lost the timer race, so it cannot consume the next caller's connection.
+Two-phase server admission exposes matching challenge and response deadline
+methods, allowing one absolute timestamp to span every enhanced-authentication
+round and the final CONNACK without silently restarting the budget.
 Raw TCP server accept and already-accepted-stream APIs expose the same bounded
 admission contract, including listener acceptance and a shared budget with a
 trusted PROXY preface when enabled.
