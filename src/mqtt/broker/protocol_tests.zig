@@ -1508,15 +1508,19 @@ test "broker rejects disabled protocol version before registration" {
     );
     defer broker.deinit();
 
-    var serve = ServeState{
+    var refusal_serve = ServeState{
         .broker = &broker,
-        .connection_count = 2,
+        .connection_count = 1,
     };
-    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
-    var joined = false;
-    defer if (!joined) thread.join();
+    var refusal_future = try std.Io.concurrent(
+        io,
+        ServeState.run,
+        .{&refusal_serve},
+    );
+    var refusal_joined = false;
+    defer if (!refusal_joined) refusal_future.cancel(io);
 
-    var refused = try context.runtime_mod.Client.connectAttempt(
+    var refused = try context.runtime_mod.Client.connectAttemptWithTimeout(
         allocator,
         io,
         broker.address(),
@@ -1524,6 +1528,7 @@ test "broker rejects disabled protocol version before registration" {
             .protocol = .v3_1_1,
             .client_id = "disabled-v311",
         },
+        .fromSeconds(3),
     );
     defer refused.deinit(allocator);
     try std.testing.expect(!refused.accepted());
@@ -1531,22 +1536,44 @@ test "broker rejects disabled protocol version before registration" {
         @as(u8, 0x01),
         refused.connack.connack.reason_code,
     );
+    refusal_future.await(io);
+    refusal_joined = true;
+    if (refusal_serve.err) |err| return err;
     const after_refusal = broker.stats();
     try std.testing.expectEqual(@as(usize, 0), after_refusal.active_connections);
     try std.testing.expectEqual(@as(usize, 0), after_refusal.sessions);
     try std.testing.expectEqual(@as(usize, 0), after_refusal.subscriptions);
     try std.testing.expectEqual(@as(usize, 0), after_refusal.scheduled_wills);
 
-    var allowed = try connectWithOptions(
+    // A second finite batch proves that the rejected connection released its
+    // transport, listener capacity, and broker slot before the statistics
+    // above were observed. Keeping each batch to one accept also prevents an
+    // early assertion failure from stranding the server on a future accept.
+    var allowed_serve = ServeState{
+        .broker = &broker,
+        .connection_count = 1,
+    };
+    var allowed_future = try std.Io.concurrent(
+        io,
+        ServeState.run,
+        .{&allowed_serve},
+    );
+    var allowed_joined = false;
+    defer if (!allowed_joined) allowed_future.cancel(io);
+
+    var allowed = try context.runtime_mod.Client.connectWithTimeout(
         allocator,
         io,
-        broker,
+        broker.address(),
         .{ .protocol = .v5, .client_id = "allowed-v5" },
+        .fromSeconds(3),
     );
     defer allowed.close();
-    try allowed.ping();
+    try allowed.pingWithTimeout(.fromSeconds(3));
     try allowed.disconnect(0);
-    try joinServer(thread, &joined, &serve);
+    allowed_future.await(io);
+    allowed_joined = true;
+    if (allowed_serve.err) |err| return err;
 }
 
 test "broker applies MQTT 3.1.1 persistent and clean Session semantics" {
