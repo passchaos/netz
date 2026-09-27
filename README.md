@@ -1666,11 +1666,13 @@ pbz commits into that layout. WebSocket/gRPC DEFLATE support is included under
 `src/internal`, and the published path set includes all example, benchmark,
 documentation, test, and interop sources referenced by the build graph. The
 `release-source` target emits `zig-out/artifacts/netz-<version>-source.tar.gz`
+and its `.sha256` sidecar
 with those exact vail and pbz commits plus the hash-verified zio package under
 `deps/`, rewrites the release manifest to local paths, and records SHA-256 for
 every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty source
 repositories or dependency revision drift. `verify-release-source` checks the
-archive shape and hashes, extracts it outside the workspace layout, builds its
+whole-archive checksum, archive shape and internal file hashes, extracts it
+outside the workspace layout, builds its
 public-package test, then imports it from a separate consumer package. Both
 builds use isolated local and global Zig caches.
 

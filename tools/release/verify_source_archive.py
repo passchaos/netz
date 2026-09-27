@@ -12,6 +12,8 @@ import subprocess
 import tarfile
 import tempfile
 
+from archive_checksum import verify as verify_checksum
+
 
 FORBIDDEN_PARTS = {
     ".git",
@@ -174,7 +176,8 @@ def run_zig_test(root: Path, zig: str, cache: Path, step: str) -> None:
     )
 
 
-def verify_archive(archive_path: Path, zig: str) -> None:
+def verify_archive(archive_path: Path, checksum_path: Path, zig: str) -> None:
+    verify_checksum(archive_path, checksum_path)
     with tempfile.TemporaryDirectory(prefix="netz-release-verify-") as temp_name:
         temp = Path(temp_name)
         with tarfile.open(archive_path, mode="r:gz") as archive:
@@ -192,9 +195,10 @@ def verify_archive(archive_path: Path, zig: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive", type=Path)
+    parser.add_argument("--checksum", type=Path, required=True)
     parser.add_argument("--zig", required=True)
     args = parser.parse_args()
-    verify_archive(args.archive, args.zig)
+    verify_archive(args.archive, args.checksum, args.zig)
 
 
 if __name__ == "__main__":

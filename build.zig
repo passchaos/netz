@@ -1051,6 +1051,9 @@ pub fn build(b: *std.Build) void {
     source_archive_tests.addFileInput(b.path(
         "tools/release/source_archive.py",
     ));
+    source_archive_tests.addFileInput(b.path(
+        "tools/release/archive_checksum.py",
+    ));
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -1513,22 +1516,39 @@ pub fn build(b: *std.Build) void {
             b.fmt("netz-{s}-source.tar.gz", .{package_version}),
         );
         source_archive.has_side_effects = true;
+        const archive_checksum = b.addSystemCommand(&.{
+            "python3",
+            "tools/release/archive_checksum.py",
+        });
+        archive_checksum.addFileArg(source_archive_path);
+        archive_checksum.addArg("--write");
+        const archive_checksum_path = archive_checksum.addOutputFileArg(
+            b.fmt("netz-{s}-source.tar.gz.sha256", .{package_version}),
+        );
         const install_source_archive = b.addInstallFileWithDir(
             source_archive_path,
             .{ .custom = "artifacts" },
             b.fmt("netz-{s}-source.tar.gz", .{package_version}),
+        );
+        const install_archive_checksum = b.addInstallFileWithDir(
+            archive_checksum_path,
+            .{ .custom = "artifacts" },
+            b.fmt("netz-{s}-source.tar.gz.sha256", .{package_version}),
         );
         const release_source_step = b.step(
             "release-source",
             "Build a deterministic source archive with vendored path dependencies",
         );
         release_source_step.dependOn(&install_source_archive.step);
+        release_source_step.dependOn(&install_archive_checksum.step);
 
         const verify_source_archive = b.addSystemCommand(&.{
             "python3",
             "tools/release/verify_source_archive.py",
         });
         verify_source_archive.addFileArg(source_archive_path);
+        verify_source_archive.addArg("--checksum");
+        verify_source_archive.addFileArg(archive_checksum_path);
         verify_source_archive.addArgs(&.{ "--zig", b.graph.zig_exe });
         const verify_release_source_step = b.step(
             "verify-release-source",

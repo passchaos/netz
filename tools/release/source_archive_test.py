@@ -21,6 +21,13 @@ VERIFY_SPEC = importlib.util.spec_from_file_location(
 assert VERIFY_SPEC is not None and VERIFY_SPEC.loader is not None
 VERIFY_ARCHIVE = importlib.util.module_from_spec(VERIFY_SPEC)
 VERIFY_SPEC.loader.exec_module(VERIFY_ARCHIVE)
+CHECKSUM_MODULE = Path(__file__).with_name("archive_checksum.py")
+CHECKSUM_SPEC = importlib.util.spec_from_file_location(
+    "archive_checksum", CHECKSUM_MODULE
+)
+assert CHECKSUM_SPEC is not None and CHECKSUM_SPEC.loader is not None
+CHECKSUM = importlib.util.module_from_spec(CHECKSUM_SPEC)
+CHECKSUM_SPEC.loader.exec_module(CHECKSUM)
 
 
 def initialize_repository(root: Path, files: dict[str, bytes]) -> str:
@@ -232,6 +239,20 @@ class SourceArchiveTest(unittest.TestCase):
         )
         self.assertIn('.netz = .{ .path = "../netz-0.1.0" }', manifest)
         self.assertIn('@import("netz")', (consumer / "src/main.zig").read_text())
+
+    def test_checksum_sidecar_detects_tampering_and_wrong_name(self) -> None:
+        archive = Path(self.temporary.name) / "netz.tar.gz"
+        checksum = Path(self.temporary.name) / "netz.tar.gz.sha256"
+        archive.write_bytes(b"release")
+        CHECKSUM.write(archive, checksum)
+        CHECKSUM.verify(archive, checksum)
+
+        archive.write_bytes(b"tampered")
+        with self.assertRaisesRegex(RuntimeError, "SHA-256 mismatch"):
+            CHECKSUM.verify(archive, checksum)
+        checksum.write_text("0" * 64 + "  other.tar.gz\n", encoding="ascii")
+        with self.assertRaisesRegex(RuntimeError, "checksum names"):
+            CHECKSUM.verify(archive, checksum)
 
 
 if __name__ == "__main__":
