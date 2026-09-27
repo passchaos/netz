@@ -8,6 +8,17 @@ const reconnect = mqtt.reconnect;
 const runtime = mqtt.runtime;
 
 pub fn runSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, false);
+}
+
+pub fn runTlsSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, true);
+}
+
+fn runSequenceWithTransport(
+    input: []const u8,
+    comptime tls: bool,
+) !model.Summary {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -15,23 +26,51 @@ pub fn runSequence(input: []const u8) !model.Summary {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var server = try runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_packet_size = 4096 },
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
     );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const Server = if (tls) mqtt.tls_runtime.Server else runtime.Server;
+    var server: Server = if (tls)
+        try mqtt.tls_runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .limits = .{ .max_packet_size = 4096 },
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"mqtt"},
+                .tls_handshake_timeout = model.packet_timeout,
+            },
+        )
+    else
+        try runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .max_packet_size = 4096 },
+        );
     var server_open = true;
     defer if (server_open) server.deinit();
 
     const sequence = input[0..@min(input.len, model.max_operations)];
-    var server_state = peer.ServerState{
+    const ServerState = peer.ServerState(Server, tls);
+    var server_state = ServerState{
         .server = &server,
         .input = sequence,
     };
     const server_thread = try std.Thread.spawn(
         .{},
-        peer.ServerState.run,
+        ServerState.run,
         .{&server_state},
     );
     var joined = false;
@@ -46,28 +85,55 @@ pub fn runSequence(input: []const u8) !model.Summary {
         .id = .session_expiry_interval,
         .value = 60,
     } }};
-    var client = try reconnect.Client.initWithOptions(
-        allocator,
-        io,
-        server.address(),
-        .{
-            .protocol = .v5,
-            .client_id = "fuzz-reconnect",
-            .clean_start = false,
-            .connect_timeout = model.packet_timeout,
-            .properties = &connect_properties,
+    var connector = if (tls) mqtt.tls_runtime.ReconnectConnector{
+        .address = server.address(),
+        .tls_host = "localhost",
+        .options = .{
+            .mqtt = .{ .client_id = "connector-placeholder" },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls_handshake_timeout = model.packet_timeout,
         },
-        .{
-            .initial_delay = .fromMilliseconds(1),
-            .max_delay = .fromMilliseconds(1),
-            .max_attempts = 1,
-        },
-        &shutdown,
-        .{ .max_subscriptions = model.topics.len },
-    );
+    } else {};
+    const connect_options: runtime.ConnectOptions = .{
+        .protocol = .v5,
+        .client_id = "fuzz-reconnect",
+        .clean_start = false,
+        .connect_timeout = model.packet_timeout,
+        .properties = &connect_properties,
+    };
+    const policy: reconnect.ReconnectPolicy = .{
+        .initial_delay = .fromMilliseconds(1),
+        .max_delay = .fromMilliseconds(1),
+        .max_attempts = 1,
+    };
+    var client = if (tls)
+        try reconnect.Client.initConnectorWithOptions(
+            allocator,
+            io,
+            connector.connector(),
+            connect_options,
+            policy,
+            &shutdown,
+            .{ .max_subscriptions = model.topics.len },
+        )
+    else
+        try reconnect.Client.initWithOptions(
+            allocator,
+            io,
+            server.address(),
+            connect_options,
+            policy,
+            &shutdown,
+            .{ .max_subscriptions = model.topics.len },
+        );
     defer client.deinit();
     const initial = try client.connect();
     try std.testing.expect(!initial.session_present);
+    if (tls) try validateTls(client.connection().?, &certificate_der);
 
     var expected_subscriptions: [model.topics.len]bool = .{ false, false };
     for (sequence, 0..) |operation, index| {
@@ -170,6 +236,7 @@ pub fn runSequence(input: []const u8) !model.Summary {
                 @as(usize, @intFromBool(expected_subscriptions[1])),
             client.subscriptionCount(),
         );
+        if (tls) try validateTls(client.connection().?, &certificate_der);
     }
 
     try client.disconnect(0);
@@ -177,6 +244,27 @@ pub fn runSequence(input: []const u8) !model.Summary {
     joined = true;
     if (server_state.err) |err| return err;
     return server_state.summary;
+}
+
+fn validateTls(
+    connection: *runtime.Connection,
+    certificate_der: []const u8,
+) !void {
+    try std.testing.expectEqualStrings(
+        "mqtt",
+        connection.negotiatedAlpn() orelse return error.InvalidAlpn,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        connection.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.TranscriptHash.sha256,
+        connection.negotiatedTranscriptHash().?,
+    );
+    const chain = connection.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqualSlices(u8, certificate_der, chain[0]);
 }
 
 fn publishQoS1(

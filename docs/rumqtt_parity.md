@@ -1570,6 +1570,10 @@ a scripted real TCP peer across one bounded operation history. It checks QoS 1
 and QoS 2 success, lost-PUBACK/PUBREC PUBLISH replay with a stable Packet
 Identifier and DUP, lost-PUBCOMP PUBREL-only replay, fresh-Session transaction
 discard, preserved-Session resume, and ordered accepted-subscription replay.
+`fuzz-mqtt-tls-reconnect` reuses the same peer and state oracle through the
+native TLS reconnect connector. Every initial or replacement connection is
+certificate-pinned and must report `mqtt` ALPN plus AES-128-GCM/SHA-256 before
+QoS replay or subscription recovery can proceed.
 `fuzz-mqtt-bridge` then composes a scripted upstream TCP peer, production
 inbound Bridge, local production broker, live subscriber and retained-state
 probe. Its model checks QoS 0/1 topic mapping, acknowledgement ordering,

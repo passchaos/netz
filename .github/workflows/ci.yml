@@ -79,7 +79,7 @@ jobs:
         run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
 
       - name: Replay bounded fuzz corpora
-        run: zig build fuzz-parsers fuzz-stateful fuzz-http1-connection fuzz-http1-tls-connection fuzz-http2-connection fuzz-http2-tls-connection fuzz-http3-connection fuzz-webtransport-endpoint fuzz-mqtt-live-broker fuzz-mqtt-tls-live-broker fuzz-mqtt-reconnect fuzz-mqtt-bridge fuzz-mqtt-bridge-qos2 fuzz-mqtt-outbound-bridge fuzz-mqtt-outbound-bridge-qos2 fuzz-websocket-compression fuzz-websocket-context fuzz-websocket-h1-context fuzz-websocket-h1-tls-context fuzz-websocket-h2-context fuzz-websocket-h2-tls-context fuzz-websocket-h3-context fuzz-quic-wire fuzz-quic-protection fuzz-quic-connection fuzz-quic-path fuzz-quic-handshake fuzz-quic-endpoint
+        run: zig build fuzz-parsers fuzz-stateful fuzz-http1-connection fuzz-http1-tls-connection fuzz-http2-connection fuzz-http2-tls-connection fuzz-http3-connection fuzz-webtransport-endpoint fuzz-mqtt-live-broker fuzz-mqtt-tls-live-broker fuzz-mqtt-reconnect fuzz-mqtt-tls-reconnect fuzz-mqtt-bridge fuzz-mqtt-bridge-qos2 fuzz-mqtt-outbound-bridge fuzz-mqtt-outbound-bridge-qos2 fuzz-websocket-compression fuzz-websocket-context fuzz-websocket-h1-context fuzz-websocket-h1-tls-context fuzz-websocket-h2-context fuzz-websocket-h2-tls-context fuzz-websocket-h3-context fuzz-quic-wire fuzz-quic-protection fuzz-quic-connection fuzz-quic-path fuzz-quic-handshake fuzz-quic-endpoint
 
       - name: Run bounded QUIC endpoint soak
         run: zig build test-quic-endpoint-soak --summary all
@@ -117,6 +117,8 @@ jobs:
             default_runs: 32
           - target: fuzz-mqtt-reconnect
             default_runs: 128
+          - target: fuzz-mqtt-tls-reconnect
+            default_runs: 16
           - target: fuzz-mqtt-bridge
             default_runs: 128
           - target: fuzz-mqtt-bridge-qos2

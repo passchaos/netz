@@ -8,70 +8,22 @@ const std = @import("std");
 const harness = @import("mqtt_reconnect_fuzz/harness.zig");
 const model = @import("mqtt_reconnect_fuzz/model.zig");
 
-fn smithSliceSeed(comptime input: []const u8) [4 + input.len]u8 {
-    var result: [4 + input.len]u8 = undefined;
-    std.mem.writeInt(u32, result[0..4], input.len, .little);
-    @memcpy(result[4..], input);
-    return result;
-}
-
-const qos_recovery_seed = smithSliceSeed(&.{
-    0x00, // QoS 1 success.
-    0x09, // QoS 1 loses PUBACK, preserved Session replays PUBLISH.
-    0x03, // QoS 2 loses PUBREC, fresh Session drops the transaction.
-    0x0b, // QoS 2 loses PUBREC, preserved Session replays PUBLISH.
-    0x02, // QoS 2 completes without reconnecting.
-    0x0c, // QoS 2 loses PUBCOMP, preserved Session replays PUBREL.
-    0x04, // QoS 2 loses PUBCOMP, fresh Session drops the transaction.
-});
-
-const subscription_seed = smithSliceSeed(&.{
-    0x05, // Subscribe topic zero at QoS 0.
-    0x55, // Subscribe topic one at QoS 1.
-    0x0f, // Preserved Session: reconnect without SUBSCRIBE replay.
-    0x07, // Fresh Session: replay both subscriptions in order.
-    0x06, // Unsubscribe topic zero.
-    0x07, // Fresh Session: replay only topic one.
-    0x16, // Unsubscribe topic one.
-    0x0f, // Preserved empty Session.
-});
-
-const mixed_seed = smithSliceSeed(&.{
-    0x45, // Subscribe topic zero at QoS 1.
-    0x29, // Retained QoS 1 loses PUBACK and loses the broker Session.
-    0x47, // Fresh Session replays the subscription again.
-    0x7b, // Retained QoS 2 loses PUBREC, preserved Session replays PUBLISH.
-    0x36, // Unsubscribe absent topic one.
-    0x7c, // Retained QoS 2 loses PUBCOMP, preserved Session replays PUBREL.
-});
-
-const corpus = &.{
-    &qos_recovery_seed,
-    &subscription_seed,
-    &mixed_seed,
-};
-
 test "structured live MQTT reconnect sequences reach recovery states" {
-    const qos = try harness.runSequence(qos_recovery_seed[4..]);
-    try std.testing.expect(qos.reconnects >= 5);
-    try std.testing.expect(qos.fresh_sessions >= 2);
-    try std.testing.expect(qos.resumed_sessions >= 3);
-    try std.testing.expect(qos.publish_replays >= 2);
-    try std.testing.expect(qos.pubrel_replays >= 1);
-    try std.testing.expect(qos.session_losses >= 2);
+    const qos = try harness.runSequence(model.qos_recovery_seed[4..]);
+    try model.requireQosRecovery(qos);
 
-    const subscriptions = try harness.runSequence(subscription_seed[4..]);
+    const subscriptions = try harness.runSequence(model.subscription_seed[4..]);
     try std.testing.expect(subscriptions.subscription_replays >= 3);
     try std.testing.expect(subscriptions.empty_reconnect_barriers >= 2);
 }
 
 test "fuzz bounded live MQTT reconnect ordering" {
-    try std.testing.fuzz({}, fuzzSequences, .{ .corpus = corpus });
+    try std.testing.fuzz({}, fuzzSequences, .{ .corpus = model.corpus });
 }
 
 test "bounded deterministic live MQTT reconnect mutation smoke" {
     var mutated: [model.max_operations]u8 = undefined;
-    inline for (corpus) |seed_with_prefix| {
+    inline for (model.corpus) |seed_with_prefix| {
         const seed = seed_with_prefix[4..];
         for (0..seed.len + 1) |length| {
             _ = try harness.runSequence(seed[0..length]);

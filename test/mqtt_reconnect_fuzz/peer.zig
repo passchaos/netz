@@ -5,253 +5,272 @@ const model = @import("model.zig");
 const mqtt = netz.mqtt;
 const runtime = mqtt.runtime;
 
-pub const ServerState = struct {
-    server: *runtime.Server,
-    input: []const u8,
-    summary: model.Summary = .{},
-    err: ?anyerror = null,
+pub fn ServerState(comptime Server: type, comptime tls: bool) type {
+    return struct {
+        server: *Server,
+        input: []const u8,
+        summary: model.Summary = .{},
+        err: ?anyerror = null,
 
-    pub fn run(self: *@This()) void {
-        self.runFallible() catch |err| {
-            self.err = err;
-        };
-    }
+        pub fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
 
-    fn runFallible(self: *@This()) !void {
-        var active: ?runtime.AcceptedClient = try self.server.accept(.{
-            .protocol = .v5,
-        });
-        defer if (active) |*connection| {
-            connection.deinit(self.server.allocator);
-        };
-        try validateConnect(active.?.connect.connect);
+        fn runFallible(self: *@This()) !void {
+            var active: ?runtime.AcceptedClient = try self.server.accept(.{
+                .protocol = .v5,
+            });
+            defer if (active) |*connection| {
+                connection.deinit(self.server.allocator);
+            };
+            try validateConnect(active.?.connect.connect);
+            if (tls) try validateTls(&active.?.connection);
 
-        var subscriptions = model.SubscriptionModel{};
-        for (
-            self.input[0..@min(self.input.len, model.max_operations)],
-            0..,
-        ) |operation, index| {
-            const topic_index: usize = (operation >> 4) & 0x01;
-            const retain = operation & 0x20 != 0;
-            const subscription_qos: mqtt.QoS = if (operation & 0x40 != 0)
-                .at_least_once
-            else
-                .at_most_once;
-            const session_present = operation & 0x08 != 0;
-            const payload = model.Payload.init(operation, index);
-            switch (operation & 0x07) {
-                0 => try handleQoS1Success(
-                    &active.?.connection,
-                    topic_index,
-                    retain,
-                    payload,
-                ),
-                1 => try self.handleQoS1Reconnect(
-                    &active,
-                    subscriptions,
-                    topic_index,
-                    retain,
-                    payload,
-                    session_present,
-                ),
-                2 => try handleQoS2Success(
-                    &active.?.connection,
-                    topic_index,
-                    retain,
-                    payload,
-                ),
-                3 => try self.handleQoS2PublishReconnect(
-                    &active,
-                    subscriptions,
-                    topic_index,
-                    retain,
-                    payload,
-                    session_present,
-                ),
-                4 => try self.handleQoS2PubRelReconnect(
-                    &active,
-                    subscriptions,
-                    topic_index,
-                    retain,
-                    payload,
-                    session_present,
-                ),
-                5 => try handleSubscribe(
-                    &active.?.connection,
-                    &subscriptions,
-                    topic_index,
-                    subscription_qos,
-                ),
-                6 => try handleUnsubscribe(
-                    &active.?.connection,
-                    &subscriptions,
-                    topic_index,
-                ),
-                7 => {
-                    try self.replaceConnection(
+            var subscriptions = model.SubscriptionModel{};
+            for (
+                self.input[0..@min(self.input.len, model.max_operations)],
+                0..,
+            ) |operation, index| {
+                const topic_index: usize = (operation >> 4) & 0x01;
+                const retain = operation & 0x20 != 0;
+                const subscription_qos: mqtt.QoS = if (operation & 0x40 != 0)
+                    .at_least_once
+                else
+                    .at_most_once;
+                const session_present = operation & 0x08 != 0;
+                const payload = model.Payload.init(operation, index);
+                switch (operation & 0x07) {
+                    0 => try handleQoS1Success(
+                        &active.?.connection,
+                        topic_index,
+                        retain,
+                        payload,
+                    ),
+                    1 => try self.handleQoS1Reconnect(
                         &active,
-                        &subscriptions,
+                        subscriptions,
+                        topic_index,
+                        retain,
+                        payload,
                         session_present,
-                    );
-                    try pingBarrier(&active.?.connection);
-                    self.summary.empty_reconnect_barriers += 1;
-                },
-                else => unreachable,
+                    ),
+                    2 => try handleQoS2Success(
+                        &active.?.connection,
+                        topic_index,
+                        retain,
+                        payload,
+                    ),
+                    3 => try self.handleQoS2PublishReconnect(
+                        &active,
+                        subscriptions,
+                        topic_index,
+                        retain,
+                        payload,
+                        session_present,
+                    ),
+                    4 => try self.handleQoS2PubRelReconnect(
+                        &active,
+                        subscriptions,
+                        topic_index,
+                        retain,
+                        payload,
+                        session_present,
+                    ),
+                    5 => try handleSubscribe(
+                        &active.?.connection,
+                        &subscriptions,
+                        topic_index,
+                        subscription_qos,
+                    ),
+                    6 => try handleUnsubscribe(
+                        &active.?.connection,
+                        &subscriptions,
+                        topic_index,
+                    ),
+                    7 => {
+                        try self.replaceConnection(
+                            &active,
+                            &subscriptions,
+                            session_present,
+                        );
+                        try pingBarrier(&active.?.connection);
+                        self.summary.empty_reconnect_barriers += 1;
+                    },
+                    else => unreachable,
+                }
+            }
+
+            var event = try active.?.connection.readBrokerEventWithTimeout(
+                model.packet_timeout,
+            );
+            defer event.deinit(self.server.allocator);
+            switch (event) {
+                .disconnect => |disconnect| try std.testing.expectEqual(
+                    @as(u8, 0),
+                    disconnect.disconnect.reason_code,
+                ),
+                else => return error.ExpectedDisconnect,
             }
         }
 
-        var event = try active.?.connection.readBrokerEventWithTimeout(
-            model.packet_timeout,
-        );
-        defer event.deinit(self.server.allocator);
-        switch (event) {
-            .disconnect => |disconnect| try std.testing.expectEqual(
-                @as(u8, 0),
-                disconnect.disconnect.reason_code,
-            ),
-            else => return error.ExpectedDisconnect,
-        }
-    }
+        fn replaceConnection(
+            self: *@This(),
+            active: *?runtime.AcceptedClient,
+            subscriptions: *const model.SubscriptionModel,
+            session_present: bool,
+        ) !void {
+            if (active.*) |*connection| {
+                connection.connection.shutdown() catch {};
+                connection.deinit(self.server.allocator);
+                active.* = null;
+            }
 
-    fn replaceConnection(
-        self: *@This(),
-        active: *?runtime.AcceptedClient,
-        subscriptions: *const model.SubscriptionModel,
-        session_present: bool,
-    ) !void {
-        if (active.*) |*connection| {
-            connection.connection.shutdown() catch {};
-            connection.deinit(self.server.allocator);
-            active.* = null;
+            var pending = try self.server.acceptPending(.{ .protocol = .v5 });
+            errdefer pending.deinit(self.server.allocator);
+            active.* = try pending.finish(.{
+                .protocol = .v5,
+                .session_present = session_present,
+            });
+            try validateConnect(active.*.?.connect.connect);
+            if (tls) try validateTls(&active.*.?.connection);
+            self.summary.reconnects += 1;
+            if (session_present) {
+                self.summary.resumed_sessions += 1;
+            } else {
+                self.summary.fresh_sessions += 1;
+                try replaySubscriptions(
+                    &active.*.?.connection,
+                    subscriptions.*,
+                    &self.summary,
+                );
+            }
         }
 
-        var pending = try self.server.acceptPending(.{ .protocol = .v5 });
-        errdefer pending.deinit(self.server.allocator);
-        active.* = try pending.finish(.{
-            .protocol = .v5,
-            .session_present = session_present,
-        });
-        try validateConnect(active.*.?.connect.connect);
-        self.summary.reconnects += 1;
-        if (session_present) {
-            self.summary.resumed_sessions += 1;
-        } else {
-            self.summary.fresh_sessions += 1;
-            try replaySubscriptions(
+        fn handleQoS1Reconnect(
+            self: *@This(),
+            active: *?runtime.AcceptedClient,
+            subscriptions: model.SubscriptionModel,
+            topic_index: usize,
+            retain: bool,
+            payload: model.Payload,
+            session_present: bool,
+        ) !void {
+            const packet_id = try expectPublish(
                 &active.*.?.connection,
-                subscriptions.*,
-                &self.summary,
+                topic_index,
+                retain,
+                payload,
+                .at_least_once,
+                false,
             );
+            try self.replaceConnection(active, &subscriptions, session_present);
+            if (!session_present) {
+                self.summary.session_losses += 1;
+                try pingBarrier(&active.*.?.connection);
+                return;
+            }
+            const replay_id = try expectPublish(
+                &active.*.?.connection,
+                topic_index,
+                retain,
+                payload,
+                .at_least_once,
+                true,
+            );
+            try std.testing.expectEqual(packet_id, replay_id);
+            try active.*.?.connection.writePubAck(replay_id, 0);
+            self.summary.publish_replays += 1;
         }
-    }
 
-    fn handleQoS1Reconnect(
-        self: *@This(),
-        active: *?runtime.AcceptedClient,
-        subscriptions: model.SubscriptionModel,
-        topic_index: usize,
-        retain: bool,
-        payload: model.Payload,
-        session_present: bool,
-    ) !void {
-        const packet_id = try expectPublish(
-            &active.*.?.connection,
-            topic_index,
-            retain,
-            payload,
-            .at_least_once,
-            false,
-        );
-        try self.replaceConnection(active, &subscriptions, session_present);
-        if (!session_present) {
-            self.summary.session_losses += 1;
-            try pingBarrier(&active.*.?.connection);
-            return;
+        fn handleQoS2PublishReconnect(
+            self: *@This(),
+            active: *?runtime.AcceptedClient,
+            subscriptions: model.SubscriptionModel,
+            topic_index: usize,
+            retain: bool,
+            payload: model.Payload,
+            session_present: bool,
+        ) !void {
+            const packet_id = try expectPublish(
+                &active.*.?.connection,
+                topic_index,
+                retain,
+                payload,
+                .exactly_once,
+                false,
+            );
+            try self.replaceConnection(active, &subscriptions, session_present);
+            if (!session_present) {
+                self.summary.session_losses += 1;
+                try pingBarrier(&active.*.?.connection);
+                return;
+            }
+            const replay_id = try expectPublish(
+                &active.*.?.connection,
+                topic_index,
+                retain,
+                payload,
+                .exactly_once,
+                true,
+            );
+            try std.testing.expectEqual(packet_id, replay_id);
+            try finishQoS2(&active.*.?.connection, replay_id);
+            self.summary.publish_replays += 1;
         }
-        const replay_id = try expectPublish(
-            &active.*.?.connection,
-            topic_index,
-            retain,
-            payload,
-            .at_least_once,
-            true,
-        );
-        try std.testing.expectEqual(packet_id, replay_id);
-        try active.*.?.connection.writePubAck(replay_id, 0);
-        self.summary.publish_replays += 1;
-    }
 
-    fn handleQoS2PublishReconnect(
-        self: *@This(),
-        active: *?runtime.AcceptedClient,
-        subscriptions: model.SubscriptionModel,
-        topic_index: usize,
-        retain: bool,
-        payload: model.Payload,
-        session_present: bool,
-    ) !void {
-        const packet_id = try expectPublish(
-            &active.*.?.connection,
-            topic_index,
-            retain,
-            payload,
-            .exactly_once,
-            false,
-        );
-        try self.replaceConnection(active, &subscriptions, session_present);
-        if (!session_present) {
-            self.summary.session_losses += 1;
-            try pingBarrier(&active.*.?.connection);
-            return;
+        fn handleQoS2PubRelReconnect(
+            self: *@This(),
+            active: *?runtime.AcceptedClient,
+            subscriptions: model.SubscriptionModel,
+            topic_index: usize,
+            retain: bool,
+            payload: model.Payload,
+            session_present: bool,
+        ) !void {
+            const packet_id = try expectPublish(
+                &active.*.?.connection,
+                topic_index,
+                retain,
+                payload,
+                .exactly_once,
+                false,
+            );
+            try active.*.?.connection.writePubRec(packet_id, 0);
+            var pubrel = try active.*.?.connection.readPubRel();
+            try std.testing.expectEqual(packet_id, pubrel.ack.packet_id);
+            pubrel.deinit(self.server.allocator);
+
+            try self.replaceConnection(active, &subscriptions, session_present);
+            if (!session_present) {
+                self.summary.session_losses += 1;
+                try pingBarrier(&active.*.?.connection);
+                return;
+            }
+            var replay = try active.*.?.connection.readSessionPubRel();
+            defer replay.deinit(self.server.allocator);
+            try std.testing.expectEqual(packet_id, replay.ack.packet_id);
+            try active.*.?.connection.writePubComp(packet_id, 0);
+            self.summary.pubrel_replays += 1;
         }
-        const replay_id = try expectPublish(
-            &active.*.?.connection,
-            topic_index,
-            retain,
-            payload,
-            .exactly_once,
-            true,
-        );
-        try std.testing.expectEqual(packet_id, replay_id);
-        try finishQoS2(&active.*.?.connection, replay_id);
-        self.summary.publish_replays += 1;
-    }
+    };
+}
 
-    fn handleQoS2PubRelReconnect(
-        self: *@This(),
-        active: *?runtime.AcceptedClient,
-        subscriptions: model.SubscriptionModel,
-        topic_index: usize,
-        retain: bool,
-        payload: model.Payload,
-        session_present: bool,
-    ) !void {
-        const packet_id = try expectPublish(
-            &active.*.?.connection,
-            topic_index,
-            retain,
-            payload,
-            .exactly_once,
-            false,
-        );
-        try active.*.?.connection.writePubRec(packet_id, 0);
-        var pubrel = try active.*.?.connection.readPubRel();
-        try std.testing.expectEqual(packet_id, pubrel.ack.packet_id);
-        pubrel.deinit(self.server.allocator);
-
-        try self.replaceConnection(active, &subscriptions, session_present);
-        if (!session_present) {
-            self.summary.session_losses += 1;
-            try pingBarrier(&active.*.?.connection);
-            return;
-        }
-        var replay = try active.*.?.connection.readSessionPubRel();
-        defer replay.deinit(self.server.allocator);
-        try std.testing.expectEqual(packet_id, replay.ack.packet_id);
-        try active.*.?.connection.writePubComp(packet_id, 0);
-        self.summary.pubrel_replays += 1;
-    }
-};
+fn validateTls(connection: *runtime.Connection) !void {
+    try std.testing.expectEqualStrings(
+        "mqtt",
+        connection.negotiatedAlpn() orelse return error.InvalidAlpn,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        connection.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.TranscriptHash.sha256,
+        connection.negotiatedTranscriptHash().?,
+    );
+}
 
 fn validateConnect(connect: mqtt.Connect) !void {
     try std.testing.expect(!connect.clean_start);

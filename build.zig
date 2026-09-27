@@ -177,6 +177,27 @@ pub fn build(b: *std.Build) void {
     fuzz_mqtt_reconnect_step.dependOn(
         &run_mqtt_reconnect_fuzz_tests.step,
     );
+    const mqtt_tls_reconnect_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/mqtt_tls_reconnect_fuzz_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_mqtt_tls_reconnect_fuzz_tests = b.addRunArtifact(
+        mqtt_tls_reconnect_fuzz_tests,
+    );
+    const fuzz_mqtt_tls_reconnect_step = b.step(
+        "fuzz-mqtt-tls-reconnect",
+        "Fuzz authenticated TLS MQTT reconnect and Session recovery",
+    );
+    fuzz_mqtt_tls_reconnect_step.dependOn(
+        &run_mqtt_tls_reconnect_fuzz_tests.step,
+    );
     const mqtt_bridge_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -921,6 +942,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mqtt_live_broker_fuzz_tests.step);
     test_step.dependOn(&run_mqtt_tls_live_broker_fuzz_tests.step);
     test_step.dependOn(&run_mqtt_reconnect_fuzz_tests.step);
+    test_step.dependOn(&run_mqtt_tls_reconnect_fuzz_tests.step);
     test_step.dependOn(&run_mqtt_bridge_fuzz_tests.step);
     test_step.dependOn(&run_mqtt_bridge_qos2_fuzz_tests.step);
     test_step.dependOn(&run_mqtt_outbound_bridge_fuzz_tests.step);

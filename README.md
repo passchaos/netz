@@ -49,6 +49,9 @@ modeled publishes and subscription changes.
 scripted real TCP peer. It verifies QoS 1/2 completion, lost-ACK PUBLISH replay
 with stable Packet Identifier and DUP, PUBREL-only recovery, fresh-Session
 transaction loss, and ordered accepted-subscription replay.
+`zig build fuzz-mqtt-tls-reconnect` applies the same fault schedule through a
+certificate-pinned native TLS connector and validates `mqtt` ALPN plus
+AES-128-GCM/SHA-256 on every replacement connection.
 `zig build fuzz-mqtt-bridge` adds a real upstream TCP peer, the production
 inbound bridge, a local production broker and two local clients. It checks
 QoS 0/1 mapping and acknowledgement ordering, retained replacement/deletion,
@@ -119,15 +122,15 @@ After all four protocol combinations warm retained capacity, every generation
 must return connection, pending-handshake, CID-route, and allocator live-byte
 state to the same baseline; final endpoint teardown must return live bytes to
 zero. Multi-hour, high-concurrency stability remains outside these bounded
-models. The pinned GitHub Actions workflow replays all twenty-eight
+models. The pinned GitHub Actions workflow replays all twenty-nine
 corpora and the complete test gate on pushes and pull requests, then runs the
-twenty-eight coverage-guided targets
+twenty-nine coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
 sessions, the WebSocket H3 target to 128 authenticated sessions, ordinary live
-MQTT targets to 128 real-network runs, the TLS live-broker target to 32
-authenticated runs, inbound/outbound durable
+MQTT targets to 128 real-network runs, the TLS live-broker target to 32 and the
+TLS reconnect target to 16 authenticated runs, inbound/outbound durable
 MQTT bridge QoS 2 to 64/32 runs, the WebTransport endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000

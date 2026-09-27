@@ -9,6 +9,28 @@ pub const topics = [2][]const u8{
     "fuzz/reconnect/one",
 };
 
+fn smithSliceSeed(comptime input: []const u8) [4 + input.len]u8 {
+    var result: [4 + input.len]u8 = undefined;
+    @import("std").mem.writeInt(u32, result[0..4], input.len, .little);
+    @memcpy(result[4..], input);
+    return result;
+}
+
+pub const qos_recovery_seed = smithSliceSeed(&.{
+    0x00, 0x09, 0x03, 0x0b, 0x02, 0x0c, 0x04,
+});
+pub const subscription_seed = smithSliceSeed(&.{
+    0x05, 0x55, 0x0f, 0x07, 0x06, 0x07, 0x16, 0x0f,
+});
+pub const mixed_seed = smithSliceSeed(&.{
+    0x45, 0x29, 0x47, 0x7b, 0x36, 0x7c,
+});
+pub const corpus = &.{
+    &qos_recovery_seed,
+    &subscription_seed,
+    &mixed_seed,
+};
+
 pub const Payload = struct {
     bytes: [3]u8,
 
@@ -63,3 +85,13 @@ pub const Summary = struct {
     session_losses: usize = 0,
     empty_reconnect_barriers: usize = 0,
 };
+
+pub fn requireQosRecovery(summary: Summary) !void {
+    const testing = @import("std").testing;
+    try testing.expect(summary.reconnects >= 5);
+    try testing.expect(summary.fresh_sessions >= 2);
+    try testing.expect(summary.resumed_sessions >= 3);
+    try testing.expect(summary.publish_replays >= 2);
+    try testing.expect(summary.pubrel_replays >= 1);
+    try testing.expect(summary.session_losses >= 2);
+}
