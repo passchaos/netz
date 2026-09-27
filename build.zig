@@ -629,6 +629,27 @@ pub fn build(b: *std.Build) void {
     fuzz_quic_endpoint_step.dependOn(
         &run_quic_endpoint_fuzz_tests.step,
     );
+    const quic_endpoint_soak_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/quic_endpoint_soak_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_quic_endpoint_soak_tests = b.addRunArtifact(
+        quic_endpoint_soak_tests,
+    );
+    const test_quic_endpoint_soak_step = b.step(
+        "test-quic-endpoint-soak",
+        "Soak authenticated QUIC endpoint connection reclamation",
+    );
+    test_quic_endpoint_soak_step.dependOn(
+        &run_quic_endpoint_soak_tests.step,
+    );
     const quic_handshake_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -901,6 +922,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_quic_path_fuzz_tests.step);
     test_step.dependOn(&run_quic_handshake_fuzz_tests.step);
     test_step.dependOn(&run_quic_endpoint_fuzz_tests.step);
+    test_step.dependOn(&run_quic_endpoint_soak_tests.step);
     test_step.dependOn(&run_quic_handshake_bench_tests.step);
     test_step.dependOn(&run_quic_persistent_bench_tests.step);
     test_step.dependOn(&run_quic_quic_go_churn_tests.step);

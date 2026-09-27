@@ -109,7 +109,12 @@ validating Retry, bounded timeout, and post-handshake 1-RTT traffic.
 `fuzz-quic-endpoint` runs four authenticated v1/v2 clients against one
 socket-owning endpoint with a two-connection limit, verifies limit rejection,
 removal and retry admission, exact per-connection STREAM routing, and stale-CID
-isolation. Longer-running resource stability remains outside these bounded fuzz
+isolation. `zig build test-quic-endpoint-soak` additionally cycles 64
+authenticated v1/v2 and AES-128/AES-256 connections through one server socket.
+After all four protocol combinations warm retained capacity, every generation
+must return connection, pending-handshake, CID-route, and allocator live-byte
+state to the same baseline; final endpoint teardown must return live bytes to
+zero. Multi-hour, high-concurrency stability remains outside these bounded
 models. The pinned GitHub Actions workflow replays all twenty-seven
 corpora and the complete test gate on pushes and pull requests, then runs the
 twenty-seven coverage-guided targets

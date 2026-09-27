@@ -72,7 +72,13 @@ two-connection admission cap is hit and surfaced before each removal; the same
 waiting client is then admitted, exchanges an isolated STREAM/FIN echo, and the
 old CID is observed only as unrouted traffic. The target also found and fixed
 shared-endpoint workers defaulting every admitted v2 Initial back to v1 instead
-of preserving the dispatcher's authenticated version choice.
+of preserving the dispatcher's authenticated version choice. The CI-backed
+`test-quic-endpoint-soak` gate then establishes 64 sequential authenticated
+connections on one endpoint, alternating both versions and both AES suites.
+After warming the four combinations, every removal must restore zero live
+connections, workers, pending routes, and established CID routes plus the same
+tracked allocator live-byte baseline; full teardown must reach zero live bytes.
+Multi-hour and high-concurrency resource soaks remain separate future evidence.
 The first extended run exposed an RFC 9001 Section 6.2 state conflation: netz
 rejected a valid peer update after it had sent the required new-phase ACK merely
 because that ACK packet had not itself been acknowledged. Receive-update

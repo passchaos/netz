@@ -448,6 +448,17 @@ pub const Server = struct {
         return self.active_workers.load(.acquire);
     }
 
+    /// Number of established connection-ID routes retained by the endpoint.
+    /// Resource monitors can pair this with `connectionCount` after removals.
+    pub fn connectionRouteCount(self: *const Server) usize {
+        return self.dispatcher.routeCount();
+    }
+
+    /// Number of in-progress handshake route sets retained by the endpoint.
+    pub fn pendingHandshakeRouteCount(self: *const Server) usize {
+        return self.dispatcher.pendingHandshakeCount();
+    }
+
     pub fn connectionIdReplenishmentFailures(self: *const Server) u64 {
         return self.connection_id_replenishment_failures;
     }
