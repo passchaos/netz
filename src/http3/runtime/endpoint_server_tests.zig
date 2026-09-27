@@ -1855,11 +1855,14 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
             if (self.wait_before_request) {
                 try self.second_request.wait(self.io);
             }
-            var response = try client.request(.{
-                .method = "GET",
-                .path = self.path,
-                .authority = "localhost",
-            });
+            var response = try client.requestWithTimeout(
+                .{
+                    .method = "GET",
+                    .path = self.path,
+                    .authority = "localhost",
+                },
+                .fromSeconds(5),
+            );
             defer response.deinit(allocator);
             try std.testing.expectEqual(@as(u16, 200), response.response.status);
             try std.testing.expectEqualStrings(
@@ -1986,9 +1989,14 @@ test "HTTP/3 endpoint callback loop serves concurrent connections" {
                                         value.session.established.connection
                                             .endpoint.io,
                                     ).nanoseconds;
+                                    // Pin the empty pacer bucket beyond any
+                                    // scheduler delay between this hook and
+                                    // the one-attempt send. Using `now` made
+                                    // the expected backpressure race with
+                                    // byte-granular budget replenishment.
                                     quic.one_rtt.testing.exhaustPacingAt(
                                         &value.session.established.connection,
-                                        @intCast(now),
+                                        @intCast(now + std.time.ns_per_s),
                                     );
                                     try std.testing.expectError(
                                         error.PacingLimited,
