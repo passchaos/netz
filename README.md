@@ -80,6 +80,10 @@ the durable coordinator, publisher, subscriber and restartable OutboundBridge.
 It verifies end-to-end exactly-once delivery, pre-wire and PUBREL-phase journal
 restore, independent source/target reconnects, retained replacement/deletion
 and connection-scoped property isolation.
+`zig build fuzz-mqtt-tls-outbound-bridge-qos2` runs that same crash-recovery
+oracle with every publisher, subscriber, source, and target connection over
+certificate-pinned native TLS, checking `mqtt` ALPN and AES-128-GCM/SHA-256
+after each bridge reconnect or recreation.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -131,9 +135,9 @@ After all four protocol combinations warm retained capacity, every generation
 must return connection, pending-handshake, CID-route, and allocator live-byte
 state to the same baseline; final endpoint teardown must return live bytes to
 zero. Multi-hour, high-concurrency stability remains outside these bounded
-models. The pinned GitHub Actions workflow replays all thirty-two
+models. The pinned GitHub Actions workflow replays all thirty-three
 corpora and the complete test gate on pushes and pull requests, then runs the
-thirty-two coverage-guided targets
+thirty-three coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
@@ -142,7 +146,8 @@ MQTT targets to 128 real-network runs, the TLS live-broker target to 32, the
 TLS reconnect target to 16, the WSS reconnect target to 8 and the TLS inbound-
 bridge target to 16 authenticated runs, inbound/outbound durable
 MQTT bridge QoS 2 to 64/32 runs, the TLS outbound-bridge target to 8
-authenticated runs, the WebTransport endpoint target to 32
+authenticated runs, its durable QoS 2 counterpart to 4, the WebTransport
+endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
 iterations. A manual `fuzz_runs` value overrides all targets. Because

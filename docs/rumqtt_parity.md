@@ -1607,7 +1607,12 @@ production brokers, a durable coordinator, live publisher/subscriber and
 restartable OutboundBridge. It verifies exactly-once delivery across
 pre-target-wire and target-PUBREL journal restoration, independent
 source/target reconnects, retained replacement/deletion, and connection-scoped
-property isolation. Cross-process crash injection below the filesystem syscall
+property isolation. `fuzz-mqtt-tls-outbound-bridge-qos2` applies that same
+durability oracle to two native-TLS broker listeners: publisher, subscriber,
+source, and target connections are certificate-pinned, while every bridge
+reconnect and journal recreation must renegotiate `mqtt` ALPN with
+AES-128-GCM/SHA-256 before exactly-once progress resumes. Cross-process crash
+injection below the filesystem syscall
 boundary remains the responsibility of the commit-log and atomic-file fault
 tests rather than the socket fuzzers.
 

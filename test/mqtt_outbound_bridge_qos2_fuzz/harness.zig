@@ -1,23 +1,24 @@
 const std = @import("std");
 const netz = @import("netz");
 const model = @import("model.zig");
+const oracle = @import("oracle.zig");
+const transport = @import("transport.zig");
 
 const mqtt = netz.mqtt;
 const outbound = mqtt.bridge.outbound;
 const Broker = mqtt.broker.Broker;
 const runtime = mqtt.runtime;
 
-const local_subscription_id = 113;
-
 const BrokerRunner = struct {
     broker: *Broker,
+    source: runtime.PendingSource,
     accept_concurrency: usize,
     shutdown: std.Io.Event = .unset,
     err: ?anyerror = null,
 
     fn run(self: *@This()) void {
         self.broker.serveListenersUntil(&.{.{
-            .source = self.broker.server.?.pendingSource(),
+            .source = self.source,
             .accept_concurrency = self.accept_concurrency,
         }}, .{
             .shutdown = &self.shutdown,
@@ -34,6 +35,17 @@ const BrokerRunner = struct {
 };
 
 pub fn runSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, false);
+}
+
+pub fn runTlsSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, true);
+}
+
+fn runSequenceWithTransport(
+    input: []const u8,
+    comptime tls: bool,
+) !model.Summary {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -43,16 +55,43 @@ pub fn runSequence(input: []const u8) !model.Summary {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var source = try listenBroker(allocator, io, 2);
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const certificate_chain = [_][]const u8{&certificate_der};
+
+    var source = try initBroker(allocator, io, 2);
     defer source.deinit();
-    var target = try listenBroker(allocator, io, 3);
+    var target = try initBroker(allocator, io, 3);
     defer target.deinit();
+    var source_server = try transport.listen(
+        tls,
+        allocator,
+        io,
+        &certificate_chain,
+        key_pair,
+    );
+    defer source_server.deinit();
+    var target_server = try transport.listen(
+        tls,
+        allocator,
+        io,
+        &certificate_chain,
+        key_pair,
+    );
+    defer target_server.deinit();
     var source_runner = BrokerRunner{
         .broker = &source,
+        .source = source_server.pendingSource(),
         .accept_concurrency = 2,
     };
     var target_runner = BrokerRunner{
         .broker = &target,
+        .source = target_server.pendingSource(),
         .accept_concurrency = 3,
     };
     const source_thread = try std.Thread.spawn(
@@ -76,16 +115,18 @@ pub fn runSequence(input: []const u8) !model.Summary {
         target_thread.join();
     };
 
-    var subscriber = try connect(
+    var subscriber = try transport.connect(
+        tls,
         allocator,
         io,
-        target,
+        target_server.address(),
         "fuzz-outbound-qos2-subscriber",
+        public_key,
     );
     defer subscriber.close();
     const subscription_properties = [_]mqtt.Property{.{ .varint = .{
         .id = .subscription_identifier,
-        .value = local_subscription_id,
+        .value = model.local_subscription_id,
     } }};
     var suback = try subscriber.subscribe(&.{.{
         .topic_filter = "remote/#",
@@ -99,20 +140,33 @@ pub fn runSequence(input: []const u8) !model.Summary {
         suback.suback.reason_codes,
     );
 
-    var publisher = try connect(
+    var publisher = try transport.connect(
+        tls,
         allocator,
         io,
-        source,
+        source_server.address(),
         "fuzz-outbound-qos2-publisher",
+        public_key,
     );
     defer publisher.close();
 
     var shutdown: std.Io.Event = .unset;
+    var source_connector = if (tls) transport.tlsConnector(
+        source_server.address(),
+        public_key,
+    ) else {};
+    var target_connector = if (tls) transport.tlsConnector(
+        target_server.address(),
+        public_key,
+    ) else {};
     var bridge: ?outbound.Bridge = try initBridge(
+        tls,
         allocator,
         io,
-        source.address(),
-        target.address(),
+        source_server.address(),
+        target_server.address(),
+        if (tls) &source_connector else {},
+        if (tls) &target_connector else {},
         &shutdown,
         tmp.dir,
         .create,
@@ -121,6 +175,7 @@ pub fn runSequence(input: []const u8) !model.Summary {
     const connected = try bridge.?.connect();
     try std.testing.expect(!connected.source_session_present);
     try std.testing.expect(!connected.target_session_present);
+    if (tls) try transport.validateBridge(&bridge.?);
 
     const sequence = input[0..@min(input.len, model.max_operations)];
     var state = model.State{};
@@ -149,6 +204,7 @@ pub fn runSequence(input: []const u8) !model.Summary {
             bridge.?.source.disconnectTransport();
             const resumed = try bridge.?.connect();
             try std.testing.expect(resumed.source_session_present);
+            if (tls) try transport.validateBridge(&bridge.?);
             summary.source_resumes += 1;
         }
 
@@ -159,20 +215,23 @@ pub fn runSequence(input: []const u8) !model.Summary {
         switch (model.mode(operation)) {
             0 => {
                 try outbound.testing.flushDurableTarget(&bridge.?);
-                try finishTransaction(&bridge.?);
+                try finishTransaction(io, &bridge.?);
                 summary.ordinary += 1;
             },
             1 => {
                 try recreateBridge(
+                    tls,
                     allocator,
                     io,
                     &bridge,
-                    source.address(),
-                    target.address(),
+                    source_server.address(),
+                    target_server.address(),
+                    if (tls) &source_connector else {},
+                    if (tls) &target_connector else {},
                     &shutdown,
                     tmp.dir,
                 );
-                try finishTransaction(&bridge.?);
+                try finishTransaction(io, &bridge.?);
                 summary.pre_wire_restores += 1;
             },
             2 => {
@@ -181,39 +240,51 @@ pub fn runSequence(input: []const u8) !model.Summary {
                     .timeout = model.packet_timeout,
                 });
                 try recreateBridge(
+                    tls,
                     allocator,
                     io,
                     &bridge,
-                    source.address(),
-                    target.address(),
+                    source_server.address(),
+                    target_server.address(),
+                    if (tls) &source_connector else {},
+                    if (tls) &target_connector else {},
                     &shutdown,
                     tmp.dir,
                 );
-                try finishTransaction(&bridge.?);
+                try finishTransaction(io, &bridge.?);
                 summary.pubrel_restores += 1;
             },
             3 => {
                 try outbound.testing.flushDurableTarget(&bridge.?);
                 bridge.?.target.disconnectTransport();
-                try finishTransaction(&bridge.?);
+                try finishTransaction(io, &bridge.?);
                 summary.target_resumes += 1;
             },
         }
         try std.testing.expect(!bridge.?.hasPendingDurableQoS2());
+        if (tls) try transport.validateBridge(&bridge.?);
         state.apply(operation, index);
         summary.retained_writes += @intFromBool(model.retain(operation) and
             !model.deletesRetained(operation));
         summary.retained_deletes += @intFromBool(
             model.deletesRetained(operation),
         );
-        try drainSubscriber(&subscriber, operation, index);
+        try oracle.drainSubscriber(&subscriber, operation, index);
         summary.delivered += 1;
     }
-    try drainNoDelivery(&subscriber);
+    try oracle.drainNoDelivery(&subscriber);
 
     try bridge.?.disconnect(0);
     try publisher.disconnect(0);
-    try verifyRetainedState(allocator, io, target, state, &summary);
+    try oracle.verifyRetainedState(
+        allocator,
+        io,
+        target_server.address(),
+        public_key,
+        tls,
+        state,
+        &summary,
+    );
     try subscriber.disconnect(0);
     try source_runner.stop(io, source_thread);
     source_joined = true;
@@ -222,12 +293,12 @@ pub fn runSequence(input: []const u8) !model.Summary {
     return summary;
 }
 
-fn listenBroker(
+fn initBroker(
     allocator: std.mem.Allocator,
     io: std.Io,
     max_connections: usize,
 ) !Broker {
-    return Broker.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{
+    return Broker.init(allocator, io, .{
         .limits = .{
             .max_connections = max_connections,
             .max_queued_deliveries_per_connection = model.max_operations,
@@ -237,30 +308,14 @@ fn listenBroker(
     });
 }
 
-fn connect(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    broker: Broker,
-    client_id: []const u8,
-) !runtime.Connection {
-    return runtime.Client.connectWithTimeout(
-        allocator,
-        io,
-        broker.address(),
-        .{
-            .protocol = .v5,
-            .client_id = client_id,
-            .topic_alias_maximum = 0,
-        },
-        model.packet_timeout,
-    );
-}
-
 fn initBridge(
+    comptime tls: bool,
     allocator: std.mem.Allocator,
     io: std.Io,
     source_address: std.Io.net.IpAddress,
     target_address: std.Io.net.IpAddress,
+    source_connector: if (tls) *mqtt.tls_runtime.ReconnectConnector else void,
+    target_connector: if (tls) *mqtt.tls_runtime.ReconnectConnector else void,
     shutdown: *std.Io.Event,
     dir: std.Io.Dir,
     mode: outbound.CoordinatorMode,
@@ -269,77 +324,94 @@ fn initBridge(
         .id = .session_expiry_interval,
         .value = 60,
     } }};
-    return outbound.Bridge.initMany(
-        allocator,
-        io,
-        source_address,
-        target_address,
-        .{
-            .source_connect = .{
-                .protocol = .v5,
-                .client_id = "fuzz-outbound-qos2-source",
-                .clean_start = false,
-                .connect_timeout = model.packet_timeout,
-                .properties = &session_expiry,
+    const options: outbound.MultiOptions = .{
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = "fuzz-outbound-qos2-source",
+            .clean_start = false,
+            .connect_timeout = model.packet_timeout,
+            .properties = &session_expiry,
+        },
+        .target_connect = .{
+            .protocol = .v5,
+            .client_id = "fuzz-outbound-qos2-target",
+            .clean_start = false,
+            .connect_timeout = model.packet_timeout,
+            .properties = &session_expiry,
+        },
+        .source_reconnect_policy = .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+            .max_attempts = 1,
+        },
+        .target_reconnect_policy = .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+            .max_attempts = 1,
+        },
+        .rules = &.{
+            .{
+                .filter = model.bridge_filters[0],
+                .qos = .exactly_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
             },
-            .target_connect = .{
-                .protocol = .v5,
-                .client_id = "fuzz-outbound-qos2-target",
-                .clean_start = false,
-                .connect_timeout = model.packet_timeout,
-                .properties = &session_expiry,
-            },
-            .source_reconnect_policy = .{
-                .initial_delay = .fromMilliseconds(1),
-                .max_delay = .fromMilliseconds(1),
-                .max_attempts = 1,
-            },
-            .target_reconnect_policy = .{
-                .initial_delay = .fromMilliseconds(1),
-                .max_delay = .fromMilliseconds(1),
-                .max_attempts = 1,
-            },
-            .rules = &.{
-                .{
-                    .filter = model.bridge_filters[0],
-                    .qos = .exactly_once,
-                    .local_prefix = "local/",
-                    .remote_prefix = "remote/",
-                },
-                .{
-                    .filter = model.bridge_filters[1],
-                    .qos = .exactly_once,
-                    .local_prefix = "local/",
-                    .remote_prefix = "remote/",
-                },
-            },
-            .coordinator = .{
-                .bridge_id = model.bridge_id,
-                .dir = dir,
-                .sub_path = "outbound-qos2-fuzz.log",
-                .mode = mode,
+            .{
+                .filter = model.bridge_filters[1],
+                .qos = .exactly_once,
+                .local_prefix = "local/",
+                .remote_prefix = "remote/",
             },
         },
-        shutdown,
-    );
+        .coordinator = .{
+            .bridge_id = model.bridge_id,
+            .dir = dir,
+            .sub_path = "outbound-qos2-fuzz.log",
+            .mode = mode,
+        },
+    };
+    return if (tls)
+        outbound.Bridge.initConnectorMany(
+            allocator,
+            io,
+            source_connector.connector(),
+            target_connector.connector(),
+            options,
+            shutdown,
+        )
+    else
+        outbound.Bridge.initMany(
+            allocator,
+            io,
+            source_address,
+            target_address,
+            options,
+            shutdown,
+        );
 }
 
 fn recreateBridge(
+    comptime tls: bool,
     allocator: std.mem.Allocator,
     io: std.Io,
     bridge: *?outbound.Bridge,
     source_address: std.Io.net.IpAddress,
     target_address: std.Io.net.IpAddress,
+    source_connector: if (tls) *mqtt.tls_runtime.ReconnectConnector else void,
+    target_connector: if (tls) *mqtt.tls_runtime.ReconnectConnector else void,
     shutdown: *std.Io.Event,
     dir: std.Io.Dir,
 ) !void {
     bridge.*.?.deinit();
     bridge.* = null;
     bridge.* = try initBridge(
+        tls,
         allocator,
         io,
         source_address,
         target_address,
+        source_connector,
+        target_connector,
         shutdown,
         dir,
         .restore,
@@ -347,187 +419,24 @@ fn recreateBridge(
     const connected = try bridge.*.?.connect();
     try std.testing.expect(connected.source_session_present);
     try std.testing.expect(connected.target_session_present);
+    if (tls) try transport.validateBridge(&bridge.*.?);
 }
 
-fn finishTransaction(bridge: *outbound.Bridge) !void {
+fn finishTransaction(io: std.Io, bridge: *outbound.Bridge) !void {
+    const deadline = std.Io.Clock.awake.now(io).addDuration(
+        model.coordination_timeout,
+    );
     var attempts: usize = 0;
     while (bridge.hasPendingDurableQoS2()) {
         if (attempts == 64) return error.BridgeProgressLimitExceeded;
+        const remaining = std.Io.Clock.awake.now(io).durationTo(deadline);
+        if (remaining.nanoseconds <= 0) {
+            return error.BridgeProgressLimitExceeded;
+        }
         _ = try bridge.step(.{
-            .timeout = model.packet_timeout,
+            .timeout = remaining,
             .cancellation_check_interval = .fromMilliseconds(5),
         });
         attempts += 1;
-    }
-}
-
-fn drainSubscriber(
-    connection: *runtime.Connection,
-    operation: u8,
-    index: usize,
-) !void {
-    try connection.writePingReq();
-    var pending_id: ?u16 = null;
-    var delivered = false;
-    while (true) {
-        var event = try connection.readClientPacketEventWithTimeout(
-            model.packet_timeout,
-        );
-        defer event.deinit(std.testing.allocator);
-        switch (event) {
-            .publish => |publish| {
-                if (pending_id != null or delivered) {
-                    return error.UnexpectedTargetDelivery;
-                }
-                try validateDelivery(publish.publish, operation, index);
-                pending_id = publish.publish.packet_id.?;
-                try connection.writePubRec(pending_id.?, 0);
-            },
-            .pubrel => |release| {
-                try std.testing.expectEqual(pending_id.?, release.ack.packet_id);
-                try connection.writePubComp(release.ack.packet_id, 0);
-                pending_id = null;
-                delivered = true;
-            },
-            .pingresp => {
-                if (pending_id != null) {
-                    try connection.writePingReq();
-                    continue;
-                }
-                try std.testing.expect(delivered);
-                return;
-            },
-            else => return error.UnexpectedClientPacket,
-        }
-    }
-}
-
-fn drainNoDelivery(connection: *runtime.Connection) !void {
-    try connection.writePingReq();
-    var event = try connection.readClientPacketEventWithTimeout(
-        model.packet_timeout,
-    );
-    defer event.deinit(std.testing.allocator);
-    try std.testing.expect(event == .pingresp);
-}
-
-fn validateDelivery(
-    publish: mqtt.Publish,
-    operation: u8,
-    index: usize,
-) !void {
-    const payload = model.Payload.init(operation, index);
-    try std.testing.expectEqualStrings(
-        model.target_topics[model.topicIndex(operation)],
-        publish.topic,
-    );
-    try std.testing.expectEqualSlices(
-        u8,
-        if (model.deletesRetained(operation)) &.{} else &payload.bytes,
-        publish.payload,
-    );
-    try std.testing.expectEqual(mqtt.QoS.exactly_once, publish.qos);
-    try std.testing.expectEqual(model.retain(operation), publish.retain);
-    try std.testing.expect(!publish.dup);
-    var user_properties: usize = 0;
-    var subscription_identifiers: usize = 0;
-    for (publish.properties) |property| switch (property) {
-        .utf8_pair => |value| if (value.id == .user_property) {
-            try std.testing.expectEqualStrings("origin", value.key);
-            try std.testing.expectEqualStrings("source-broker", value.value);
-            user_properties += 1;
-        },
-        .varint => |value| if (value.id == .subscription_identifier) {
-            try std.testing.expectEqual(local_subscription_id, value.value);
-            subscription_identifiers += 1;
-        },
-        .two_byte => |value| if (value.id == .topic_alias) {
-            return error.SourceTopicAliasLeaked;
-        },
-        else => {},
-    };
-    try std.testing.expectEqual(@as(usize, 1), user_properties);
-    try std.testing.expectEqual(@as(usize, 1), subscription_identifiers);
-}
-
-fn verifyRetainedState(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    target: Broker,
-    state: model.State,
-    summary: *model.Summary,
-) !void {
-    var probe = try connect(
-        allocator,
-        io,
-        target,
-        "fuzz-outbound-qos2-retained-probe",
-    );
-    defer probe.close();
-    for (model.target_topics, 0..) |topic, topic_index| {
-        var suback = try probe.subscribe(&.{.{
-            .topic_filter = topic,
-            .qos = .exactly_once,
-            .retain_as_published = true,
-        }}, .{});
-        defer suback.deinit(allocator);
-        if (state.retained[topic_index]) |retained| {
-            try drainRetained(
-                &probe,
-                topic_index,
-                retained,
-            );
-            summary.retained_probe_deliveries += 1;
-        } else {
-            try drainNoDelivery(&probe);
-        }
-    }
-    try probe.disconnect(0);
-}
-
-fn drainRetained(
-    connection: *runtime.Connection,
-    topic_index: usize,
-    retained: model.Retained,
-) !void {
-    try connection.writePingReq();
-    var pending_id: ?u16 = null;
-    var delivered = false;
-    while (true) {
-        var event = try connection.readClientPacketEventWithTimeout(
-            model.packet_timeout,
-        );
-        defer event.deinit(std.testing.allocator);
-        switch (event) {
-            .publish => |publish| {
-                try std.testing.expectEqualStrings(
-                    model.target_topics[topic_index],
-                    publish.publish.topic,
-                );
-                try std.testing.expectEqualSlices(
-                    u8,
-                    retained.payload[0..retained.payload_len],
-                    publish.publish.payload,
-                );
-                try std.testing.expect(publish.publish.retain);
-                pending_id = publish.publish.packet_id.?;
-                try connection.writePubRec(pending_id.?, 0);
-            },
-            .pubrel => |release| {
-                try std.testing.expectEqual(pending_id.?, release.ack.packet_id);
-                try connection.writePubComp(release.ack.packet_id, 0);
-                pending_id = null;
-                delivered = true;
-            },
-            .pingresp => {
-                if (pending_id != null) {
-                    try connection.writePingReq();
-                    continue;
-                }
-                try std.testing.expect(delivered);
-                return;
-            },
-            else => return error.UnexpectedClientPacket,
-        }
     }
 }
