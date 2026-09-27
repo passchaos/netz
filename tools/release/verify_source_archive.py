@@ -21,6 +21,40 @@ FORBIDDEN_PARTS = {
     "target",
     "__pycache__",
 }
+CONSUMER_BUILD = """const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const netz = b.dependency("netz", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{
+                .name = "netz",
+                .module = netz.module("netz"),
+            }},
+        }),
+    });
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Test the packaged Netz dependency");
+    test_step.dependOn(&run_tests.step);
+}
+"""
+CONSUMER_TEST = """const std = @import("std");
+const netz = @import("netz");
+
+test "standalone release exposes every protocol family" {
+    inline for (&.{ "http1", "http2", "http3", "websocket", "webtransport", "mqtt" }) |name| {
+        try std.testing.expect(@hasDecl(netz, name));
+    }
+}
+"""
 
 
 def validate_members(members: list[tarfile.TarInfo]) -> str:
@@ -97,6 +131,49 @@ def verify_layout(root: Path) -> None:
         raise RuntimeError("release package retains a sibling dependency path")
 
 
+def write_consumer(consumer: Path, package_root: Path) -> None:
+    (consumer / "src").mkdir(parents=True)
+    relative_package = os.path.relpath(package_root, consumer).replace(os.sep, "/")
+    (consumer / "build.zig").write_text(CONSUMER_BUILD, encoding="utf-8")
+    (consumer / "build.zig.zon").write_text(
+        """.{
+    .name = .netz_release_consumer,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .netz = .{ .path = \""""
+        + relative_package
+        + """\" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+    .fingerprint = 0x6d2da937bf16cc65,
+}
+""",
+        encoding="utf-8",
+    )
+    (consumer / "src/main.zig").write_text(CONSUMER_TEST, encoding="utf-8")
+
+
+def run_zig_test(root: Path, zig: str, cache: Path, step: str) -> None:
+    subprocess.run(
+        [
+            zig,
+            "build",
+            step,
+            "-j1",
+            "--summary",
+            "all",
+            "--cache-dir",
+            str(cache / "local"),
+            "--global-cache-dir",
+            str(cache / "global"),
+        ],
+        cwd=root,
+        env={**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(cache / "global")},
+        check=True,
+    )
+
+
 def verify_archive(archive_path: Path, zig: str) -> None:
     with tempfile.TemporaryDirectory(prefix="netz-release-verify-") as temp_name:
         temp = Path(temp_name)
@@ -106,23 +183,10 @@ def verify_archive(archive_path: Path, zig: str) -> None:
             archive.extractall(temp, filter="data")
         root = temp / root_name
         verify_layout(root)
-        subprocess.run(
-            [
-                zig,
-                "build",
-                "test-package",
-                "-j1",
-                "--summary",
-                "all",
-                "--cache-dir",
-                str(temp / "local-cache"),
-                "--global-cache-dir",
-                str(temp / "global-cache"),
-            ],
-            cwd=root,
-            env={**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(temp / "global-cache")},
-            check=True,
-        )
+        run_zig_test(root, zig, temp / "package-cache", "test-package")
+        consumer = temp / "consumer"
+        write_consumer(consumer, root)
+        run_zig_test(consumer, zig, temp / "consumer-cache", "test")
 
 
 def main() -> None:

@@ -1670,8 +1670,9 @@ with those exact vail and pbz commits plus the hash-verified zio package under
 `deps/`, rewrites the release manifest to local paths, and records SHA-256 for
 every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty source
 repositories or dependency revision drift. `verify-release-source` checks the
-archive shape and hashes, extracts it outside the workspace layout, and builds
-its public-package test with isolated local and global Zig caches.
+archive shape and hashes, extracts it outside the workspace layout, builds its
+public-package test, then imports it from a separate consumer package. Both
+builds use isolated local and global Zig caches.
 
 ## Implementation order
 

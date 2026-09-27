@@ -221,6 +221,18 @@ class SourceArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "file manifest"):
             VERIFY_ARCHIVE.verify_layout(root)
 
+    def test_consumer_manifest_targets_extracted_package(self) -> None:
+        base = Path(self.temporary.name)
+        package = base / "netz-0.1.0"
+        consumer = base / "consumer"
+        package.mkdir()
+        VERIFY_ARCHIVE.write_consumer(consumer, package)
+        manifest = (consumer / "build.zig.zon").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('.netz = .{ .path = "../netz-0.1.0" }', manifest)
+        self.assertIn('@import("netz")', (consumer / "src/main.zig").read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
