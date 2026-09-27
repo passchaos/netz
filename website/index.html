@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Focus analytics dashboard for tracking traffic and regional performance."
+    />
+    <title>Focus Analytics</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <div class="brand" aria-label="Focus">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>Focus</span>
+        </div>
+
+        <nav class="nav-list">
+          <a class="nav-item active" href="#overview" data-section="Overview">
+            <span class="nav-icon icon-grid" aria-hidden="true"></span>
+            Overview
+          </a>
+          <a class="nav-item" href="#queries" data-section="Queries">
+            <span class="nav-icon icon-query" aria-hidden="true"></span>
+            Queries
+          </a>
+          <a class="nav-item" href="#dashboards" data-section="Dashboards">
+            <span class="nav-icon icon-dashboard" aria-hidden="true"></span>
+            Dashboards
+          </a>
+          <a class="nav-item" href="#alerts" data-section="Alerts">
+            <span class="nav-icon icon-bell" aria-hidden="true"></span>
+            Alerts
+          </a>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <a class="nav-item" href="#settings" data-section="Settings">
+            <span class="nav-icon icon-gear" aria-hidden="true"></span>
+            Settings
+          </a>
+          <button class="user-card" id="userMenu" type="button" aria-label="Open account menu">
+            <span class="avatar">JD</span>
+            <span class="user-copy">
+              <strong>Jordan Davis</strong>
+              <small>Admin</small>
+            </span>
+            <span class="ellipsis" aria-hidden="true">•••</span>
+          </button>
+        </div>
+      </aside>
+
+      <main class="workspace" id="overview">
+        <section class="query-strip" aria-label="Analytics query">
+          <div class="query-header">
+            <label for="queryInput">Query</label>
+            <button class="bookmark-button" id="saveView" type="button" aria-label="Save this view">
+              <span aria-hidden="true">☆</span> Save view
+            </button>
+          </div>
+          <div class="query-row">
+            <div class="query-field">
+              <span class="prompt" aria-hidden="true">›_</span>
+              <input
+                id="queryInput"
+                type="text"
+                value="events | where timestamp &gt; now() - 7d | summarize count() by region"
+                spellcheck="false"
+                aria-label="Query expression"
+              />
+              <button class="run-button" id="runQuery" type="button">
+                <span class="play" aria-hidden="true">▶</span> Run query
+              </button>
+            </div>
+            <label class="refresh-control">
+              <span>Auto-refresh</span>
+              <select id="refreshInterval" aria-label="Auto-refresh interval">
+                <option value="0">Off</option>
+                <option value="5">5s</option>
+                <option value="15">15s</option>
+                <option value="30">30s</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="dashboard">
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">Analytics workspace</p>
+              <h1>Traffic Overview</h1>
+              <p>Monitor key traffic metrics and user activity in real time.</p>
+            </div>
+            <div class="header-actions">
+              <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle theme">☼</button>
+              <button class="button secondary" id="shareButton" type="button"><span aria-hidden="true">↗</span> Share</button>
+              <button class="button primary" id="exportButton" type="button"><span aria-hidden="true">⇩</span> Export</button>
+            </div>
+          </header>
+
+          <section class="filters" aria-label="Dashboard filters">
+            <label>
+              <span>Date range</span>
+              <select id="dateRange">
+                <option value="7">Last 7 days</option>
+                <option value="14">Last 14 days</option>
+                <option value="30">Last 30 days</option>
+              </select>
+            </label>
+            <label>
+              <span>Environment</span>
+              <select id="environment">
+                <option>All environments</option>
+                <option>Production</option>
+                <option>Staging</option>
+              </select>
+            </label>
+            <label>
+              <span>Region</span>
+              <select id="regionFilter">
+                <option>All regions</option>
+                <option>US East</option>
+                <option>US West</option>
+                <option>Europe</option>
+                <option>Asia Pacific</option>
+              </select>
+            </label>
+          </section>
+
+          <section class="metric-grid" aria-label="Key metrics">
+            <article class="metric-card">
+              <div class="metric-title"><span>Total Requests</span><span class="info">i</span></div>
+              <strong id="requestsMetric">24.7M</strong>
+              <p><span class="trend up">↗ 12.4%</span> <span>vs previous period</span></p>
+            </article>
+            <article class="metric-card">
+              <div class="metric-title"><span>Unique Users</span><span class="info">i</span></div>
+              <strong id="usersMetric">1.82M</strong>
+              <p><span class="trend up">↗ 8.7%</span> <span>vs previous period</span></p>
+            </article>
+            <article class="metric-card">
+              <div class="metric-title"><span>Avg. Response Time</span><span class="info">i</span></div>
+              <strong id="latencyMetric">186<span>ms</span></strong>
+              <p><span class="trend down">↘ 4.1%</span> <span>vs previous period</span></p>
+            </article>
+            <article class="metric-card">
+              <div class="metric-title"><span>Error Rate</span><span class="info">i</span></div>
+              <strong id="errorMetric">0.34%</strong>
+              <p><span class="trend down">↘ 0.08%</span> <span>vs previous period</span></p>
+            </article>
+          </section>
+
+          <section class="panel chart-panel">
+            <div class="panel-heading">
+              <div>
+                <h2>Requests over time</h2>
+                <p id="chartSubtitle">Sep 20 – Sep 26 · 7 days</p>
+              </div>
+              <div class="legend" aria-label="Chart legend">
+                <span><i class="legend-dot total"></i>Total</span>
+                <span><i class="legend-dot successful"></i>Successful</span>
+              </div>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="trafficChart" role="img" aria-label="Total and successful requests from September 20 to September 26"></canvas>
+              <div class="chart-tooltip" id="chartTooltip" role="status"></div>
+            </div>
+          </section>
+
+          <section class="panel region-panel">
+            <div class="panel-heading table-heading">
+              <div>
+                <h2>Traffic by region</h2>
+                <p>Top regions by request volume</p>
+              </div>
+              <button class="link-button" id="viewAll" type="button">View all <span aria-hidden="true">→</span></button>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Region</th>
+                    <th>Requests</th>
+                    <th>Share</th>
+                    <th>Avg. response</th>
+                    <th>Error rate</th>
+                  </tr>
+                </thead>
+                <tbody id="regionRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <footer class="status-bar">
+            <span><i class="status-dot"></i>All systems operational</span>
+            <span id="updatedAt">Updated just now</span>
+          </footer>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
