@@ -90,6 +90,13 @@ test "MQTT server caller timeout bounds the complete CONNECT" {
         .{ .max_packet_size = 4096 },
     );
     defer server.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptPendingWithTimeout(
+            .{ .connect_timeout = .fromSeconds(1) },
+            .fromMilliseconds(20),
+        ),
+    );
 
     const Shared = struct {
         server: *runtime.Server,

@@ -31,7 +31,6 @@ test "MQTT Unix server handles concurrent clients" {
         server.deinit();
         std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
     }
-
     const Shared = struct {
         server: *runtime.UnixServer,
         result: ?runtime.ConcurrentServeResult = null,
@@ -170,6 +169,10 @@ test "MQTT Unix server caller timeout bounds CONNECT admission" {
         server.deinit();
         std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
     }
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptPendingWithTimeout(.{}, .fromMilliseconds(20)),
+    );
 
     const Shared = struct {
         server: *runtime.UnixServer,

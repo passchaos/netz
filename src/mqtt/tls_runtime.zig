@@ -5,6 +5,7 @@ const http1_runtime = @import("../http1/mod.zig").runtime;
 const socket_options = @import("../internal/socket_options.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const network_endpoint = @import("runtime/network_endpoint.zig");
+const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
@@ -120,7 +121,11 @@ pub const Server = struct {
         deadline: std.Io.Clock.Timestamp,
     ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStreamPendingMaybeBefore(
             stream,
             options,
@@ -134,9 +139,7 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) mqtt_runtime.Error!mqtt_runtime.PendingAcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamPendingMaybeBefore(
-            stream,
+        return self.acceptPendingWithDeadline(
             options,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );

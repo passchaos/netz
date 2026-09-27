@@ -61,7 +61,6 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
         },
     );
     defer server.deinit();
-
     const Shared = struct {
         server: *mqtt_tls.Server,
         err: ?anyerror = null,
@@ -298,7 +297,6 @@ test "MQTT TLS server completes verified MQTT 5 QoS 1" {
         },
     );
     defer server.deinit();
-
     const Shared = struct {
         server: *mqtt_tls.Server,
         err: ?anyerror = null,
@@ -867,6 +865,13 @@ test "MQTT TLS server caller timeout spans TLS and CONNECT" {
         },
     );
     defer server.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptWithTimeout(
+            .{ .connect_timeout = .fromSeconds(1) },
+            .fromMilliseconds(20),
+        ),
+    );
 
     const Shared = struct {
         server: *mqtt_tls.Server,

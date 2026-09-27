@@ -1686,14 +1686,17 @@ public MQTT connection-level absolute-deadline entry point validates the
 awake-clock domain before sending PINGREQ, consuming a queued event, or reading
 transport bytes, so a mismatched timestamp cannot mutate protocol state. Current
 MQTT-over-TLS server accept APIs also carry one caller-owned deadline through
-trusted PROXY parsing, the TLS 1.3 handshake, and complete MQTT CONNECT
-admission; configured proxy, TLS, and CONNECT limits can only shorten it.
+TCP listener acceptance, trusted PROXY parsing, the TLS 1.3 handshake, and
+complete MQTT CONNECT admission; configured proxy, TLS, and CONNECT limits can
+only shorten it. A timed-out accept closes a concurrently completed socket that
+lost the timer race, so it cannot consume the next caller's connection.
 Raw TCP server accept and already-accepted-stream APIs expose the same bounded
-CONNECT admission contract, including a shared budget with a trusted PROXY
-preface when enabled.
-Raw Unix-domain MQTT listeners expose matching post-accept timeout/deadline
-forms for pending and completed CONNECT admission, including an already
-accepted-stream timeout/deadline pair. Raw TCP exposes the same pair, and an
+admission contract, including listener acceptance and a shared budget with a
+trusted PROXY preface when enabled.
+Raw Unix-domain MQTT listeners expose matching end-to-end timeout/deadline
+forms for pending and completed CONNECT admission, including listener
+acceptance and an already accepted-stream timeout/deadline pair. Raw TCP
+exposes the same pair, and an
 already-open client transport can negotiate CONNECT/CONNACK under either a
 relative timeout or a caller-owned absolute deadline without reopening it.
 WS, Unix-WS, and WSS server accept APIs carry the same outer deadline through

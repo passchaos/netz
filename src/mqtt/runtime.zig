@@ -7,6 +7,7 @@ const http1_runtime = @import("../http1/mod.zig").runtime;
 const packet_transport = @import("runtime/packet_transport.zig");
 const packet_identifiers = @import("runtime/packet_identifiers.zig");
 const stream_io = @import("../internal/stream_io.zig");
+const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const auth_runtime = @import("runtime/auth.zig");
 const topic_alias = @import("runtime/topic_alias.zig");
@@ -214,7 +215,11 @@ pub const Server = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!PendingAcceptedClient {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStreamPendingWithDeadline(
             stream,
             options,
@@ -228,9 +233,7 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) Error!PendingAcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamPendingWithDeadline(
-            stream,
+        return self.acceptPendingWithDeadline(
             options,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
@@ -432,9 +435,8 @@ pub const UnixServer = struct {
         return pending.finish(options);
     }
 
-    /// Accept a Unix stream, then bound the complete MQTT CONNECT admission
-    /// with one caller-owned awake-clock deadline. Listener accept remains
-    /// unbounded because std.Io does not expose a timed accept operation.
+    /// Apply one caller-owned awake-clock deadline to Unix accept and the
+    /// complete MQTT CONNECT admission.
     pub fn acceptWithDeadline(
         self: *UnixServer,
         options: AcceptOptions,
@@ -470,7 +472,11 @@ pub const UnixServer = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!PendingAcceptedClient {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        const stream = try self.listener.accept(self.io);
+        const stream = try accept_deadline.withDeadline(
+            &self.listener,
+            self.io,
+            deadline,
+        );
         return self.acceptStreamPendingBefore(stream, options, deadline);
     }
 
@@ -480,9 +486,7 @@ pub const UnixServer = struct {
         timeout: std.Io.Duration,
     ) Error!PendingAcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.listener.accept(self.io);
-        return self.acceptStreamPendingBefore(
-            stream,
+        return self.acceptPendingWithDeadline(
             options,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
