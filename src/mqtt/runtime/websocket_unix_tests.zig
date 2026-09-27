@@ -2,7 +2,7 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const mqtt_ws = @import("../websocket_runtime.zig");
 
-test "MQTT over WebSocket Unix server handles concurrent clients" {
+test "MQTT over WebSocket Unix server times out idle accept then handles concurrent clients" {
     if (comptime @import("builtin").os.tag == .windows) {
         return error.SkipZigTest;
     }
@@ -32,6 +32,10 @@ test "MQTT over WebSocket Unix server handles concurrent clients" {
         server.deinit();
         std.Io.Dir.deleteFileAbsolute(io, full_path) catch {};
     }
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptPendingWithTimeout(.{}, .fromMilliseconds(20)),
+    );
 
     const Shared = struct {
         server: *mqtt_ws.UnixServer,
