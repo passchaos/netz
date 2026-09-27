@@ -480,7 +480,9 @@ Current protocol coverage includes:
   content-type/TE/method-path/custom-metadata validation, unpadded binary
   metadata Base64 sending with padded/unpadded/comma-joined receive support,
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
-  comparison, and a server helper that returns trailers-only
+  comparison, a caller-buffer client field constructor that always requests
+  HPACK Never Indexed across unary and streaming calls, and a server helper
+  that returns trailers-only
   `UNAUTHENTICATED` while preserving the HTTP/2 channel for later RPCs;
   duplex servers can apply the same check immediately after request HEADERS,
   before reading DATA, and then boundedly drain a rejected upload;

@@ -94,6 +94,8 @@ pub const validateCustomBinaryMetadata =
 pub const validateMessageEncoding = call.validateMessageEncoding;
 pub const parseBearerToken = auth.parseBearerToken;
 pub const bearerTokenMatches = auth.bearerTokenMatches;
+pub const bearerAuthorizationValueLen = auth.bearerAuthorizationValueLen;
+pub const bearerAuthorizationInto = auth.bearerAuthorizationInto;
 
 test {
     _ = auth;

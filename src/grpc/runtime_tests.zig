@@ -167,14 +167,16 @@ test "gRPC Bearer rejection preserves channel for an authorized RPC" {
         .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
     );
     defer client.deinit();
+    var rejected_authorization_storage: ["Bearer wrong-token".len]u8 = undefined;
+    const rejected_authorization = try grpc.bearerAuthorizationInto(
+        &rejected_authorization_storage,
+        "wrong-token",
+    );
     var rejected = try client.unary(.{
         .path = "/demo.Auth/Unary",
         .authority = "localhost",
         .message = "first",
-        .metadata = &.{.{
-            .name = "authorization",
-            .value = "Bearer wrong-token",
-        }},
+        .metadata = &.{rejected_authorization},
     });
     defer rejected.deinit();
     try std.testing.expectEqual(grpc.Status.unauthenticated, rejected.status);
@@ -184,14 +186,16 @@ test "gRPC Bearer rejection preserves channel for an authorized RPC" {
     );
     try std.testing.expect(rejected.message == null);
 
+    var accepted_authorization_storage: ["Bearer correct-token".len]u8 = undefined;
+    const accepted_authorization = try grpc.bearerAuthorizationInto(
+        &accepted_authorization_storage,
+        "correct-token",
+    );
     var accepted = try client.unary(.{
         .path = "/demo.Auth/Unary",
         .authority = "localhost",
         .message = "second",
-        .metadata = &.{.{
-            .name = "authorization",
-            .value = "Bearer correct-token",
-        }},
+        .metadata = &.{accepted_authorization},
     });
     defer accepted.deinit();
     try std.testing.expectEqual(grpc.Status.ok, accepted.status);
@@ -282,13 +286,15 @@ test "gRPC duplex Bearer rejection precedes DATA and preserves channel" {
         .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
     );
     defer client.deinit();
+    var rejected_authorization_storage: ["Bearer wrong-token".len]u8 = undefined;
+    const rejected_authorization = try grpc.bearerAuthorizationInto(
+        &rejected_authorization_storage,
+        "wrong-token",
+    );
     var rejected = try client.startDuplex(.{
         .path = "/demo.Auth/Duplex",
         .authority = "localhost",
-        .metadata = &.{.{
-            .name = "authorization",
-            .value = "Bearer wrong-token",
-        }},
+        .metadata = &.{rejected_authorization},
     });
     var rejected_live = true;
     defer if (rejected_live) rejected.deinit();
@@ -307,14 +313,16 @@ test "gRPC duplex Bearer rejection precedes DATA and preserves channel" {
     rejected.deinit();
     rejected_live = false;
 
+    var accepted_authorization_storage: ["Bearer correct-token".len]u8 = undefined;
+    const accepted_authorization = try grpc.bearerAuthorizationInto(
+        &accepted_authorization_storage,
+        "correct-token",
+    );
     var accepted = try client.unary(.{
         .path = "/demo.Auth/Unary",
         .authority = "localhost",
         .message = "after-rejection",
-        .metadata = &.{.{
-            .name = "authorization",
-            .value = "Bearer correct-token",
-        }},
+        .metadata = &.{accepted_authorization},
     });
     defer accepted.deinit();
     try std.testing.expectEqual(grpc.Status.ok, accepted.status);
@@ -1462,7 +1470,11 @@ test "gRPC h2c runtime composes sequential message streams" {
             defer request.deinit();
             if (!std.mem.eql(u8, request.service, "demo.Echo") or
                 !std.mem.eql(u8, request.method, "Stream") or
-                request.message_count != 2)
+                request.message_count != 2 or
+                !grpc.bearerTokenMatches(
+                    request.transport.headers,
+                    "stream-token",
+                ))
             {
                 return error.InvalidGrpcRequest;
             }
@@ -1510,9 +1522,15 @@ test "gRPC h2c runtime composes sequential message streams" {
         .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
     );
     defer client.deinit();
+    var authorization_storage: ["Bearer stream-token".len]u8 = undefined;
+    const authorization = try grpc.bearerAuthorizationInto(
+        &authorization_storage,
+        "stream-token",
+    );
     var stream = try client.startStreaming(.{
         .path = "/demo.Echo/Stream",
         .authority = "localhost",
+        .metadata = &.{authorization},
     });
     defer stream.deinit();
     try stream.writeMessage("one");

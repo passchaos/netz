@@ -8,6 +8,35 @@ pub const Error = error{
     DuplicateAuthorization,
     InvalidAuthorization,
 };
+pub const BearerFieldError = error{ InvalidAuthorization, BufferTooSmall };
+pub const bearer_prefix = "Bearer ";
+
+/// Return the exact storage required by `bearerAuthorizationInto`.
+pub fn bearerAuthorizationValueLen(
+    token: []const u8,
+) BearerFieldError!usize {
+    try validateToken68(token);
+    return std.math.add(usize, bearer_prefix.len, token.len) catch
+        return error.BufferTooSmall;
+}
+
+/// Build a sensitive Authorization field without allocation. The returned
+/// value borrows `buffer` and is always marked Never Indexed for HPACK.
+/// `buffer` and `token` must not overlap.
+pub fn bearerAuthorizationInto(
+    buffer: []u8,
+    token: []const u8,
+) BearerFieldError!http2.Hpack.HeaderField {
+    const required = try bearerAuthorizationValueLen(token);
+    if (buffer.len < required) return error.BufferTooSmall;
+    @memcpy(buffer[0..bearer_prefix.len], bearer_prefix);
+    @memcpy(buffer[bearer_prefix.len..required], token);
+    return .{
+        .name = "authorization",
+        .value = buffer[0..required],
+        .never_index = true,
+    };
+}
 
 /// Parse one RFC 6750 Bearer credential from gRPC request metadata.
 ///
@@ -36,6 +65,11 @@ pub fn parseBearerToken(
     }
     if (token_start == value.len) return error.InvalidAuthorization;
     const token = value[token_start..];
+    try validateToken68(token);
+    return token;
+}
+
+fn validateToken68(token: []const u8) error{InvalidAuthorization}!void {
     var data_bytes: usize = 0;
     var padding = false;
     for (token) |byte| {
@@ -49,7 +83,6 @@ pub fn parseBearerToken(
         data_bytes += 1;
     }
     if (data_bytes == 0) return error.InvalidAuthorization;
-    return token;
 }
 
 /// Validate one Bearer credential and compare its token without a
@@ -120,4 +153,24 @@ test "Bearer metadata rejects absent duplicate and malformed credentials" {
             }}),
         );
     }
+}
+
+test "Bearer metadata construction is exact and never indexed" {
+    var storage: ["Bearer token-._~+/=".len]u8 = undefined;
+    const field = try bearerAuthorizationInto(&storage, "token-._~+/=");
+    try std.testing.expectEqualStrings("authorization", field.name);
+    try std.testing.expectEqualStrings("Bearer token-._~+/=", field.value);
+    try std.testing.expect(field.never_index);
+    try std.testing.expectEqual(
+        storage.len,
+        try bearerAuthorizationValueLen("token-._~+/="),
+    );
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        bearerAuthorizationInto(storage[0 .. storage.len - 1], "token-._~+/="),
+    );
+    try std.testing.expectError(
+        error.InvalidAuthorization,
+        bearerAuthorizationInto(&storage, "bad token"),
+    );
 }

@@ -18,6 +18,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.grpc, "Timeout"));
     try std.testing.expect(@hasDecl(netz.grpc, "parseBearerToken"));
     try std.testing.expect(@hasDecl(netz.grpc, "bearerTokenMatches"));
+    try std.testing.expect(@hasDecl(
+        netz.grpc,
+        "bearerAuthorizationInto",
+    ));
     try std.testing.expect(@hasDecl(netz.grpc, "BinaryMetadata"));
     try std.testing.expect(@hasDecl(
         netz.grpc,
