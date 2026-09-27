@@ -2,6 +2,7 @@ const std = @import("std");
 const netz = @import("netz");
 const model = @import("model.zig");
 const peer = @import("peer.zig");
+const transport = @import("transport.zig");
 
 const mqtt = netz.mqtt;
 const bridge_mod = mqtt.bridge;
@@ -24,14 +25,25 @@ const BrokerRunner = struct {
         };
     }
 
-    fn stop(self: *@This(), io: std.Io, thread: std.Thread) !void {
+    fn stop(self: *@This(), io: std.Io, thread: std.Thread) ?anyerror {
         self.shutdown.set(io);
         thread.join();
-        if (self.err) |err| return err;
+        return self.err;
     }
 };
 
 pub fn runSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, false);
+}
+
+pub fn runTlsSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, true);
+}
+
+fn runSequenceWithTransport(
+    input: []const u8,
+    comptime tls: bool,
+) !model.Summary {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -92,51 +104,73 @@ pub fn runSequence(input: []const u8) !model.Summary {
         suback.suback.reason_codes,
     );
 
-    var remote = try runtime.Server.listen(
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const certificate_chain = [_][]const u8{&certificate_der};
+    var remote = try transport.listen(
+        tls,
         allocator,
         io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_packet_size = 4096 },
+        &certificate_chain,
+        key_pair,
     );
     var remote_open = true;
     defer if (remote_open) remote.deinit();
     const sequence = input[0..@min(input.len, model.max_operations)];
-    var peer_state = peer.State{
+    const PeerState = peer.State(transport.Server(tls), tls);
+    var peer_state = PeerState{
         .server = &remote,
         .input = sequence,
     };
-    const peer_thread = try std.Thread.spawn(.{}, peer.State.run, .{&peer_state});
+    const peer_thread = try std.Thread.spawn(.{}, PeerState.run, .{&peer_state});
     var peer_joined = false;
 
     var shutdown: std.Io.Event = .unset;
+    var connector = if (tls) transport.tlsConnector(
+        remote.address(),
+        public_key,
+    ) else {};
     var bridge: ?bridge_mod.Bridge = initBridge(
+        tls,
         allocator,
         io,
         &local,
         remote.address(),
+        if (tls) &connector else {},
         &shutdown,
     ) catch |err| {
+        transport.shutdownListener(&remote, io);
+        peer_thread.join();
         remote.deinit();
         remote_open = false;
-        peer_thread.join();
         return err;
     };
     defer if (bridge) |*value| value.deinit();
     defer if (!peer_joined) {
+        if (bridge) |*value| {
+            if (value.client.connection()) |connection| {
+                connection.shutdown() catch {};
+            }
+        }
+        transport.shutdownListener(&remote, io);
+        peer_thread.join();
         remote.deinit();
         remote_open = false;
-        peer_thread.join();
     };
     const initial = try bridge.?.connect();
     try std.testing.expect(!initial.session_present);
+    if (tls) try transport.validateBridge(&bridge.?, &certificate_der);
 
     var state = model.State{};
     var summary = model.Summary{};
     for (sequence, 0..) |operation, index| {
         const kind = operation & 0x03;
-        try std.testing.expect(try bridge.?.step(.{
-            .timeout = model.packet_timeout,
-        }));
+        try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
         try std.testing.expectEqual(
             summary.released,
             local.stats().publish_messages_received,
@@ -151,41 +185,36 @@ pub fn runSequence(input: []const u8) !model.Summary {
 
         switch (kind) {
             0 => {
-                try std.testing.expect(try bridge.?.step(.{
-                    .timeout = model.packet_timeout,
-                }));
+                try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
                 summary.ordinary += 1;
             },
             1 => {
-                try std.testing.expect(try bridge.?.step(.{
-                    .timeout = model.packet_timeout,
-                }));
-                try std.testing.expect(try bridge.?.step(.{
-                    .timeout = model.packet_timeout,
-                }));
+                try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
+                try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
                 summary.transport_resumes += 1;
             },
             2 => {
                 bridge.?.deinit();
                 bridge = null;
                 bridge = try initBridge(
+                    tls,
                     allocator,
                     io,
                     &local,
                     remote.address(),
+                    if (tls) &connector else {},
                     &shutdown,
                 );
                 const resumed = try bridge.?.connect();
                 try std.testing.expect(resumed.session_present);
-                try std.testing.expect(try bridge.?.step(.{
-                    .timeout = model.packet_timeout,
-                }));
+                if (tls) {
+                    try transport.validateBridge(&bridge.?, &certificate_der);
+                }
+                try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
                 summary.process_resumes += 1;
             },
             3 => {
-                try std.testing.expect(try bridge.?.step(.{
-                    .timeout = model.packet_timeout,
-                }));
+                try std.testing.expect(try stepBridge(&bridge.?, &peer_state));
                 summary.fresh_session_discards += 1;
                 try expectTransactionCount(
                     allocator,
@@ -197,6 +226,7 @@ pub fn runSequence(input: []const u8) !model.Summary {
             },
             else => unreachable,
         }
+        if (tls) try transport.validateBridge(&bridge.?, &certificate_der);
 
         state.release(operation, index);
         summary.released += 1;
@@ -230,9 +260,22 @@ pub fn runSequence(input: []const u8) !model.Summary {
 
     try verifyRetainedState(allocator, io, local, state, &summary);
     try subscriber.disconnect(0);
-    try local_runner.stop(io, local_thread);
+    const local_error = local_runner.stop(io, local_thread);
     local_joined = true;
+    if (local_error) |err| return err;
     return summary;
+}
+
+fn stepBridge(bridge: *bridge_mod.Bridge, peer_state: anytype) !bool {
+    if (peer_state.failed.load(.acquire)) return peer_state.err.?;
+    const progressed = bridge.step(.{
+        .timeout = model.packet_timeout,
+    }) catch |err| {
+        if (peer_state.failed.load(.acquire)) return peer_state.err.?;
+        return err;
+    };
+    if (peer_state.failed.load(.acquire)) return peer_state.err.?;
+    return progressed;
 }
 
 fn expectTransactionCount(
@@ -254,50 +297,63 @@ fn expectTransactionCount(
 }
 
 fn initBridge(
+    comptime tls: bool,
     allocator: std.mem.Allocator,
     io: std.Io,
     local: *Broker,
     remote_address: std.Io.net.IpAddress,
+    connector: if (tls) *mqtt.tls_runtime.ReconnectConnector else void,
     shutdown: *std.Io.Event,
 ) !bridge_mod.Bridge {
     const properties = [_]mqtt.Property{.{ .four_byte = .{
         .id = .session_expiry_interval,
         .value = 60,
     } }};
-    return bridge_mod.Bridge.initMany(
-        allocator,
-        io,
-        local,
-        remote_address,
-        .{
-            .connect = .{
-                .protocol = .v5,
-                .client_id = "fuzz-qos2-bridge",
-                .clean_start = false,
-                .connect_timeout = model.packet_timeout,
-                .properties = &properties,
-            },
-            .reconnect_policy = .{
-                .initial_delay = .fromMilliseconds(1),
-                .max_delay = .fromMilliseconds(1),
-                .max_attempts = 1,
-            },
-            .rules = &.{
-                .{
-                    .filter = model.remote_topics[0],
-                    .qos = .exactly_once,
-                    .local_prefix = "mirror/",
-                },
-                .{
-                    .filter = model.remote_topics[1],
-                    .qos = .exactly_once,
-                    .local_prefix = "mirror/",
-                },
-            },
-            .bridge_id = model.bridge_id,
+    const options: bridge_mod.MultiOptions = .{
+        .connect = .{
+            .protocol = .v5,
+            .client_id = "fuzz-qos2-bridge",
+            .clean_start = false,
+            .connect_timeout = model.packet_timeout,
+            .properties = &properties,
         },
-        shutdown,
-    );
+        .reconnect_policy = .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+            .max_attempts = 1,
+        },
+        .rules = &.{
+            .{
+                .filter = model.remote_topics[0],
+                .qos = .exactly_once,
+                .local_prefix = "mirror/",
+            },
+            .{
+                .filter = model.remote_topics[1],
+                .qos = .exactly_once,
+                .local_prefix = "mirror/",
+            },
+        },
+        .bridge_id = model.bridge_id,
+    };
+    return if (tls)
+        bridge_mod.Bridge.initConnectorMany(
+            allocator,
+            io,
+            local,
+            connector.connector(),
+            options,
+            shutdown,
+        )
+    else
+        bridge_mod.Bridge.initMany(
+            allocator,
+            io,
+            local,
+            remote_address,
+            options,
+            shutdown,
+        );
 }
 
 const Expected = struct {

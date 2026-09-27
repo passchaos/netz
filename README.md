@@ -67,6 +67,9 @@ AES-128-GCM/SHA-256 on every replacement upstream connection.
 transaction across PUBREC/PUBREL/PUBCOMP, transport reconnect, complete Bridge
 recreation, fresh-Session epoch replacement, local exactly-once fanout and
 retained replay through a crash-safe commit log.
+`zig build fuzz-mqtt-tls-bridge-qos2` runs that durability oracle through a
+certificate-pinned native TLS upstream, requiring `mqtt` ALPN and
+AES-128-GCM/SHA-256 after initial connection, reconnect, and Bridge recreation.
 `zig build fuzz-mqtt-outbound-bridge` drives the two-client outbound Bridge
 between independent real TCP peers. Its model checks topic and property
 mapping, source acknowledgement after target delivery, retained propagation,
@@ -135,9 +138,9 @@ After all four protocol combinations warm retained capacity, every generation
 must return connection, pending-handshake, CID-route, and allocator live-byte
 state to the same baseline; final endpoint teardown must return live bytes to
 zero. Multi-hour, high-concurrency stability remains outside these bounded
-models. The pinned GitHub Actions workflow replays all thirty-three
+models. The pinned GitHub Actions workflow replays all thirty-four
 corpora and the complete test gate on pushes and pull requests, then runs the
-thirty-three coverage-guided targets
+thirty-four coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
@@ -145,8 +148,9 @@ sessions, the WebSocket H3 target to 128 authenticated sessions, ordinary live
 MQTT targets to 128 real-network runs, the TLS live-broker target to 32, the
 TLS reconnect target to 16, the WSS reconnect target to 8 and the TLS inbound-
 bridge target to 16 authenticated runs, inbound/outbound durable
-MQTT bridge QoS 2 to 64/32 runs, the TLS outbound-bridge target to 8
-authenticated runs, its durable QoS 2 counterpart to 4, the WebTransport
+MQTT bridge QoS 2 to 64/32 runs, the TLS durable inbound bridge target to 8,
+the TLS outbound-bridge target to 8 authenticated runs, its durable QoS 2
+counterpart to 4, the WebTransport
 endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
