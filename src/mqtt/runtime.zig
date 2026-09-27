@@ -2950,7 +2950,13 @@ pub const Connection = struct {
             allocator,
             self.write_property_scratch.items,
         );
-        try self.writePacket(self.write_scratch.items);
+        if (connect_deadline) |deadline|
+            try self.writePacketWithDeadline(
+                self.write_scratch.items,
+                deadline,
+            )
+        else
+            try self.writePacket(self.write_scratch.items);
         const auth_handler = options.authentication;
         var auth_rounds: usize = 0;
         var connack: OwnedConnAck = while (true) {
@@ -2992,7 +2998,14 @@ pub const Connection = struct {
                         }
                         return err;
                     };
-                    try self.writeAuth(0x18, response);
+                    if (connect_deadline) |deadline|
+                        try self.writeAuthWithDeadline(
+                            0x18,
+                            response,
+                            deadline,
+                        )
+                    else
+                        try self.writeAuth(0x18, response);
                     packet.deinit(allocator);
                 },
                 .connack => {
@@ -4350,6 +4363,28 @@ pub const Connection = struct {
     }
 
     pub fn writeAuth(self: *Connection, reason_code: u8, properties: []const mqtt.Property) Error!void {
+        return self.writeAuthMaybeBefore(reason_code, properties, null);
+    }
+
+    fn writeAuthWithDeadline(
+        self: *Connection,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
+        return self.writeAuthMaybeBefore(reason_code, properties, deadline);
+    }
+
+    fn writeAuthMaybeBefore(
+        self: *Connection,
+        reason_code: u8,
+        properties: []const mqtt.Property,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.validateOutgoingAuthReason(reason_code);
         self.write_property_scratch.clearRetainingCapacity();
         const outgoing_properties = try self.outgoingProblemProperties(
@@ -4359,11 +4394,15 @@ pub const Connection = struct {
         );
         if (outgoing_properties.len == 0) {
             var encoded: [mqtt.Auth.no_properties_max_len]u8 = undefined;
-            return self.writePacket(try mqtt.Auth.writeNoPropertiesInto(
+            const bytes = try mqtt.Auth.writeNoPropertiesInto(
                 &encoded,
                 self.protocol,
                 reason_code,
-            ));
+            );
+            return if (deadline) |absolute|
+                self.writePacketWithDeadline(bytes, absolute)
+            else
+                self.writePacket(bytes);
         }
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Auth.write(
@@ -4373,7 +4412,13 @@ pub const Connection = struct {
             reason_code,
             outgoing_properties,
         );
-        try self.writePacket(self.write_scratch.items);
+        if (deadline) |absolute|
+            try self.writePacketWithDeadline(
+                self.write_scratch.items,
+                absolute,
+            )
+        else
+            try self.writePacket(self.write_scratch.items);
     }
 
     fn validateOutgoingAuthReason(

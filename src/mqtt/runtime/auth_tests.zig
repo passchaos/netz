@@ -194,6 +194,136 @@ test "MQTT enhanced authentication connects and reauthenticates" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT client connect deadline bounds enhanced authentication reply" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const method = "deadline-auth";
+    const ServerState = struct {
+        server: *Server,
+        auth_received: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.acceptPending(.{ .protocol = .v5 });
+            defer pending.deinit(self.server.allocator);
+            try pending.challengeAuthentication("challenge");
+            var event = pending.connection.readBrokerEventWithTimeout(
+                .fromSeconds(1),
+            ) catch |err| switch (err) {
+                error.Timeout,
+                error.ConnectionClosed,
+                error.ConnectionResetByPeer,
+                error.SocketUnconnected,
+                error.UnexpectedEof,
+                => return,
+                else => return err,
+            };
+            defer event.deinit(self.server.allocator);
+            self.auth_received = event == .auth;
+        }
+    };
+    var server_state = ServerState{ .server = &server };
+    var server_future = try std.Io.concurrent(
+        io,
+        ServerState.run,
+        .{&server_state},
+    );
+    var server_done = false;
+    defer if (!server_done) server_future.cancel(io);
+
+    const Handler = struct {
+        io: std.Io,
+        called: bool = false,
+
+        fn respond(
+            context_ptr: *anyopaque,
+            _: mqtt.Auth,
+        ) Error![]const mqtt.Property {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.called = true;
+            try std.Io.sleep(
+                self.io,
+                .fromMilliseconds(1100),
+                .awake,
+            );
+            return &.{
+                .{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = method,
+                } },
+                .{ .binary = .{
+                    .id = .authentication_data,
+                    .value = "response",
+                } },
+            };
+        }
+    };
+    const stream = try server.address().connect(io, .{ .mode = .stream });
+    var connection = runtime.Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, stream),
+    };
+    var connection_open = true;
+    defer if (connection_open) connection.close();
+    var handler = Handler{ .io = io };
+    try std.testing.expectError(
+        error.Timeout,
+        connection.establishClientWithDeadline(
+            .{
+                .protocol = .v5,
+                .client_id = "bounded-auth-reply",
+                .properties = &.{
+                    .{ .utf8 = .{
+                        .id = .authentication_method,
+                        .value = method,
+                    } },
+                    .{ .binary = .{
+                        .id = .authentication_data,
+                        .value = "initial",
+                    } },
+                },
+                .authentication = .{
+                    .context = &handler,
+                    .respond = Handler.respond,
+                },
+            },
+            .{
+                .raw = .fromNanoseconds(
+                    std.Io.Clock.awake.now(io).nanoseconds +
+                        std.time.ns_per_s,
+                ),
+                .clock = .awake,
+            },
+        ),
+    );
+    try std.testing.expect(handler.called);
+
+    connection.close();
+    connection_open = false;
+    server_future.await(io);
+    server_done = true;
+    if (server_state.err) |err| return err;
+    try std.testing.expect(!server_state.auth_received);
+}
+
 test "MQTT Request Problem Information preserves AUTH protocol fields" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

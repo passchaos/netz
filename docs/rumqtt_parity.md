@@ -1656,7 +1656,10 @@ WebSocket connectors receive that same absolute attempt budget; custom
 connectors without bounded support fail explicitly. Current
 connection APIs also accept relative timeouts and caller-owned absolute
 deadlines for CONNECT, PINGRESP, and ordered client or broker packet events.
-These budgets span the complete MQTT Control Packet and preserve partial TCP,
+The CONNECT budget starts before the initial request write and is retained
+through every enhanced-authentication reply and the final CONNACK; a timed
+write retires the connection because its committed wire prefix is ambiguous.
+Receive budgets span the complete MQTT Control Packet and preserve partial TCP,
 TLS, or WebSocket framing for a later call. The reconnect poller accepts an
 awake-clock absolute deadline while still shortening individual waits for
 Keep Alive and shutdown checks; neither mechanism renews the application

@@ -219,6 +219,80 @@ test "MQTT already-open client rejects a zero CONNECT timeout" {
     );
 }
 
+test "MQTT client deadline expires before CONNECT write" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    const server_stream = try listener.accept(io);
+    var peer = runtime.Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, server_stream),
+    };
+    defer peer.close();
+
+    const AdvancingClockIo = struct {
+        delegate: std.Io,
+        now_ns: i96,
+        now_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            defer self.now_calls += 1;
+            return .fromNanoseconds(self.now_ns +
+                @as(i96, @intCast(self.now_calls)) * std.time.ns_per_s);
+        }
+    };
+    var timed = AdvancingClockIo{
+        .delegate = io,
+        .now_ns = std.Io.Clock.awake.now(io).nanoseconds,
+    };
+    var timed_vtable = io.vtable.*;
+    timed_vtable.now = AdvancingClockIo.now;
+    const timed_io: std.Io = .{
+        .userdata = &timed,
+        .vtable = &timed_vtable,
+    };
+    var connection = runtime.Connection{
+        .allocator = allocator,
+        .transport = .initTcp(timed_io, client_stream),
+    };
+    defer {
+        connection.transport.tcp.io = io;
+        connection.close();
+    }
+
+    try std.testing.expectError(
+        error.Timeout,
+        connection.establishClientWithDeadline(
+            .{ .client_id = "expired-connect-write" },
+            .{
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+                .clock = .awake,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), timed.now_calls);
+    try std.testing.expect(connection.isUsable());
+
+    try std.testing.expectError(
+        error.Timeout,
+        peer.readConnectWithTimeout(.fromMilliseconds(20)),
+    );
+}
+
 test "MQTT accepted TCP stream timeout bounds CONNECT admission" {
     const allocator = std.testing.allocator;
     const connect = try encodedConnect(allocator, "stream-timeout");
