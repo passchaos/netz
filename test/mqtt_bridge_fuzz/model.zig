@@ -14,6 +14,21 @@ pub const local_topics = [2][]const u8{
     "mirror/source/one",
 };
 
+fn smithSliceSeed(comptime input: []const u8) [4 + input.len]u8 {
+    var result: [4 + input.len]u8 = undefined;
+    std.mem.writeInt(u32, result[0..4], input.len, .little);
+    @memcpy(result[4..], input);
+    return result;
+}
+
+pub const routing_seed = smithSliceSeed(&.{
+    0x00, 0x09, 0x02, 0x0b, 0x03, 0x0c, 0x07,
+});
+pub const reconnect_seed = smithSliceSeed(&.{
+    0x03, 0x05, 0x09, 0x06, 0x08, 0x0d, 0x0f,
+});
+pub const corpus = &.{ &routing_seed, &reconnect_seed };
+
 pub const Payload = struct {
     bytes: [3]u8,
 
@@ -115,3 +130,12 @@ pub const Summary = struct {
     subscription_replays: usize = 0,
     retained_probe_deliveries: usize = 0,
 };
+
+pub fn requireRouting(summary: Summary) !void {
+    try std.testing.expect(summary.deliveries >= 7);
+    try std.testing.expect(summary.qos1_acknowledgements >= 5);
+    try std.testing.expect(summary.retained_writes >= 3);
+    try std.testing.expect(summary.retained_deletes >= 1);
+    try std.testing.expect(summary.duplicate_inputs >= 1);
+    try std.testing.expect(summary.retained_probe_deliveries >= 1);
+}

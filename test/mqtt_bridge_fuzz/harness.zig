@@ -34,6 +34,17 @@ const BrokerRunner = struct {
 };
 
 pub fn runSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, false);
+}
+
+pub fn runTlsSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, true);
+}
+
+fn runSequenceWithTransport(
+    input: []const u8,
+    comptime tls: bool,
+) !model.Summary {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -95,20 +106,52 @@ pub fn runSequence(input: []const u8) !model.Summary {
         suback.suback.reason_codes,
     );
 
-    var remote = try runtime.Server.listen(
-        allocator,
-        io,
-        .{ .ip4 = .loopback(0) },
-        .{ .max_packet_size = 4096 },
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
     );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const Server = if (tls) mqtt.tls_runtime.Server else runtime.Server;
+    var remote: Server = if (tls)
+        try mqtt.tls_runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .limits = .{ .max_packet_size = 4096 },
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"mqtt"},
+                .tls_handshake_timeout = model.packet_timeout,
+            },
+        )
+    else
+        try runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .max_packet_size = 4096 },
+        );
     var remote_open = true;
     defer if (remote_open) remote.deinit();
     const sequence = input[0..@min(input.len, model.max_operations)];
-    var peer_state = peer.State{
+    const PeerState = peer.State(Server, tls);
+    var peer_state = PeerState{
         .server = &remote,
         .input = sequence,
     };
-    const peer_thread = try std.Thread.spawn(.{}, peer.State.run, .{&peer_state});
+    const peer_thread = try std.Thread.spawn(
+        .{},
+        PeerState.run,
+        .{&peer_state},
+    );
     var peer_joined = false;
 
     var bridge_shutdown: std.Io.Event = .unset;
@@ -116,39 +159,63 @@ pub fn runSequence(input: []const u8) !model.Summary {
         .id = .session_expiry_interval,
         .value = 60,
     } }};
-    var bridge = bridge_mod.Bridge.initMany(
-        allocator,
-        io,
-        &local,
-        remote.address(),
-        .{
-            .connect = .{
-                .protocol = .v5,
-                .client_id = "fuzz-inbound-bridge",
-                .clean_start = false,
-                .connect_timeout = model.packet_timeout,
-                .properties = &connect_properties,
+    var connector = if (tls) mqtt.tls_runtime.ReconnectConnector{
+        .address = remote.address(),
+        .tls_host = "localhost",
+        .options = .{
+            .mqtt = .{ .client_id = "connector-placeholder" },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
             },
-            .reconnect_policy = .{
-                .initial_delay = .fromMilliseconds(1),
-                .max_delay = .fromMilliseconds(1),
-                .max_attempts = 1,
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls_handshake_timeout = model.packet_timeout,
+        },
+    } else {};
+    const options: bridge_mod.MultiOptions = .{
+        .connect = .{
+            .protocol = .v5,
+            .client_id = "fuzz-inbound-bridge",
+            .clean_start = false,
+            .connect_timeout = model.packet_timeout,
+            .properties = &connect_properties,
+        },
+        .reconnect_policy = .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+            .max_attempts = 1,
+        },
+        .rules = &.{
+            .{
+                .filter = model.remote_topics[0],
+                .qos = .at_least_once,
+                .local_prefix = "mirror/",
             },
-            .rules = &.{
-                .{
-                    .filter = model.remote_topics[0],
-                    .qos = .at_least_once,
-                    .local_prefix = "mirror/",
-                },
-                .{
-                    .filter = model.remote_topics[1],
-                    .qos = .at_least_once,
-                    .local_prefix = "mirror/",
-                },
+            .{
+                .filter = model.remote_topics[1],
+                .qos = .at_least_once,
+                .local_prefix = "mirror/",
             },
         },
-        &bridge_shutdown,
-    ) catch |err| {
+    };
+    var bridge = (if (tls)
+        bridge_mod.Bridge.initConnectorMany(
+            allocator,
+            io,
+            &local,
+            connector.connector(),
+            options,
+            &bridge_shutdown,
+        )
+    else
+        bridge_mod.Bridge.initMany(
+            allocator,
+            io,
+            &local,
+            remote.address(),
+            options,
+            &bridge_shutdown,
+        )) catch |err| {
         remote.deinit();
         remote_open = false;
         peer_thread.join();
@@ -163,6 +230,7 @@ pub fn runSequence(input: []const u8) !model.Summary {
 
     const connected = try bridge.connect();
     try std.testing.expect(!connected.session_present);
+    if (tls) try validateTls(bridge.client.connection().?, &certificate_der);
     var expected = model.State{};
     var summary = model.Summary{};
     for (sequence, 0..) |operation, index| {
@@ -170,6 +238,9 @@ pub fn runSequence(input: []const u8) !model.Summary {
         try std.testing.expect(try bridge.step(.{
             .timeout = model.packet_timeout,
         }));
+        if (tls) {
+            try validateTls(bridge.client.connection().?, &certificate_der);
+        }
         if (kind == 5 or kind == 6) {
             try drainThroughPing(&subscriber, null, &summary);
             continue;
@@ -197,6 +268,27 @@ pub fn runSequence(input: []const u8) !model.Summary {
     try local_runner.stop(io, local_thread);
     local_joined = true;
     return summary;
+}
+
+fn validateTls(
+    connection: *runtime.Connection,
+    certificate_der: []const u8,
+) !void {
+    try std.testing.expectEqualStrings(
+        "mqtt",
+        connection.negotiatedAlpn() orelse return error.InvalidAlpn,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        connection.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectEqual(
+        netz.tls.stream.TranscriptHash.sha256,
+        connection.negotiatedTranscriptHash().?,
+    );
+    const chain = connection.peerCertificates() orelse
+        return error.MissingPeerCertificate;
+    try std.testing.expectEqualSlices(u8, certificate_der, chain[0]);
 }
 
 fn drainThroughPing(
