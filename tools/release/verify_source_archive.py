@@ -133,9 +133,28 @@ def verify_layout(root: Path) -> None:
         raise RuntimeError("release package retains a sibling dependency path")
 
 
-def write_consumer(consumer: Path, package_root: Path) -> None:
+def package_hash(archive: Path, zig: str, cache: Path) -> str:
+    return subprocess.run(
+        [
+            zig,
+            "fetch",
+            "--global-cache-dir",
+            str(cache),
+            str(archive),
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+
+def write_consumer(
+    consumer: Path,
+    archive: Path,
+    archive_package_hash: str,
+) -> None:
     (consumer / "src").mkdir(parents=True)
-    relative_package = os.path.relpath(package_root, consumer).replace(os.sep, "/")
+    archive_url = archive.resolve().as_uri()
     (consumer / "build.zig").write_text(CONSUMER_BUILD, encoding="utf-8")
     (consumer / "build.zig.zon").write_text(
         """.{
@@ -143,9 +162,14 @@ def write_consumer(consumer: Path, package_root: Path) -> None:
     .version = "0.0.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .netz = .{ .path = \""""
-        + relative_package
-        + """\" },
+        .netz = .{
+            .url = \""""
+        + archive_url
+        + """\",
+            .hash = \""""
+        + archive_package_hash
+        + """\",
+        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
     .fingerprint = 0xf452144c05b1b1d8,
@@ -187,8 +211,13 @@ def verify_archive(archive_path: Path, checksum_path: Path, zig: str) -> None:
         root = temp / root_name
         verify_layout(root)
         run_zig_test(root, zig, temp / "package-cache", "test-package")
+        archive_package_hash = package_hash(
+            archive_path,
+            zig,
+            temp / "hash-cache",
+        )
         consumer = temp / "consumer"
-        write_consumer(consumer, root)
+        write_consumer(consumer, archive_path, archive_package_hash)
         run_zig_test(consumer, zig, temp / "consumer-cache", "test")
 
 

@@ -1673,8 +1673,9 @@ every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty source
 repositories or dependency revision drift. `verify-release-source` checks the
 whole-archive checksum, archive shape and internal file hashes, extracts it
 outside the workspace layout, builds its
-public-package test, then imports it from a separate consumer package. Both
-builds use isolated local and global Zig caches.
+public-package test, then imports the `.tar.gz` itself through a `file://` URL
+and Zig package hash from a separate consumer package. All hash and build
+stages use isolated local or global Zig caches.
 
 ## Implementation order
 

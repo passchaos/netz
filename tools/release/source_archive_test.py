@@ -228,16 +228,17 @@ class SourceArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "file manifest"):
             VERIFY_ARCHIVE.verify_layout(root)
 
-    def test_consumer_manifest_targets_extracted_package(self) -> None:
+    def test_consumer_manifest_targets_release_archive(self) -> None:
         base = Path(self.temporary.name)
-        package = base / "netz-0.1.0"
+        archive = base / "netz-0.1.0-source.tar.gz"
+        archive.write_bytes(b"archive")
         consumer = base / "consumer"
-        package.mkdir()
-        VERIFY_ARCHIVE.write_consumer(consumer, package)
+        VERIFY_ARCHIVE.write_consumer(consumer, archive, "netz-0.1.0-testhash")
         manifest = (consumer / "build.zig.zon").read_text(
             encoding="utf-8"
         )
-        self.assertIn('.netz = .{ .path = "../netz-0.1.0" }', manifest)
+        self.assertIn(f'.url = "{archive.resolve().as_uri()}"', manifest)
+        self.assertIn('.hash = "netz-0.1.0-testhash"', manifest)
         self.assertIn('@import("netz")', (consumer / "src/main.zig").read_text())
 
     def test_checksum_sidecar_detects_tampering_and_wrong_name(self) -> None:
