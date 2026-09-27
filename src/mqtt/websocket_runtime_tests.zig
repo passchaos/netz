@@ -44,7 +44,6 @@ test "MQTT 5 WebSocket runtime negotiates mqtt and completes QoS 1 and 2" {
         },
     );
     defer server.deinit();
-
     const Shared = struct {
         server: *mqtt_ws.Server,
         err: ?anyerror = null,
@@ -133,6 +132,13 @@ test "MQTT WebSocket server caller timeout spans Upgrade and CONNECT" {
         },
     );
     defer server.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptPendingWithTimeout(
+            .{ .connect_timeout = .fromSeconds(1) },
+            .fromMilliseconds(20),
+        ),
+    );
 
     const Shared = struct {
         server: *mqtt_ws.Server,
@@ -1666,6 +1672,13 @@ test "MQTT WSS listener bounds an idle TLS handshake" {
         },
     );
     defer server.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        server.acceptPendingWithTimeout(
+            .{ .connect_timeout = .fromSeconds(1) },
+            .fromMilliseconds(20),
+        ),
+    );
 
     const Shared = struct {
         server: *mqtt_ws.TlsServer,

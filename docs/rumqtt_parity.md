@@ -1699,9 +1699,10 @@ acceptance and an already accepted-stream timeout/deadline pair. Raw TCP
 exposes the same pair, and an
 already-open client transport can negotiate CONNECT/CONNACK under either a
 relative timeout or a caller-owned absolute deadline without reopening it.
-WS, Unix-WS, and WSS server accept APIs carry the same outer deadline through
-their WebSocket Upgrade and MQTT CONNECT phases; WSS additionally includes TLS
-and trusted PROXY parsing in that unchanged timestamp.
+WS, Unix-WS, and WSS server accept APIs carry the same outer deadline from
+listener acceptance through WebSocket Upgrade and MQTT CONNECT; WSS
+additionally includes TLS and trusted PROXY parsing in that unchanged
+timestamp, and canceled TCP accepts cannot consume a later connection.
 Current
 tests cover real two-connection QoS 1 PUBLISH/DUP and outgoing QoS 2 PUBREL
 continuation, incoming QoS 1 delivery across a keep-alive cycle, inbound QoS 2

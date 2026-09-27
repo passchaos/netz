@@ -5,6 +5,7 @@ const runtime = @import("runtime.zig");
 const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
+const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const vail = @import("vail");
 
@@ -120,11 +121,7 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) runtime.Error!runtime.PendingAcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.websocket_server.http.listener.accept(
-            self.websocket_server.http.io,
-        );
-        return self.acceptStreamPendingMaybeBefore(
-            stream,
+        return self.acceptPendingWithDeadline(
             options,
             .fromNow(
                 self.websocket_server.http.io,
@@ -138,9 +135,16 @@ pub const Server = struct {
         options: runtime.AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) runtime.Error!runtime.PendingAcceptedClient {
-        const stream = try self.websocket_server.http.listener.accept(
-            self.websocket_server.http.io,
-        );
+        const stream = if (deadline) |absolute|
+            try accept_deadline.withDeadline(
+                &self.websocket_server.http.listener,
+                self.websocket_server.http.io,
+                absolute,
+            )
+        else
+            try self.websocket_server.http.listener.accept(
+                self.websocket_server.http.io,
+            );
         return self.acceptStreamPendingMaybeBefore(stream, options, deadline);
     }
 
@@ -606,11 +610,7 @@ pub const TlsServer = struct {
         timeout: std.Io.Duration,
     ) runtime.Error!runtime.PendingAcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        const stream = try self.websocket_server.listener.accept(
-            self.websocket_server.io,
-        );
-        return self.acceptStreamPendingMaybeBefore(
-            stream,
+        return self.acceptPendingWithDeadline(
             options,
             .fromNow(
                 self.websocket_server.io,
@@ -624,9 +624,16 @@ pub const TlsServer = struct {
         options: runtime.AcceptOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) runtime.Error!runtime.PendingAcceptedClient {
-        const stream = try self.websocket_server.listener.accept(
-            self.websocket_server.io,
-        );
+        const stream = if (deadline) |absolute|
+            try accept_deadline.withDeadline(
+                &self.websocket_server.listener,
+                self.websocket_server.io,
+                absolute,
+            )
+        else
+            try self.websocket_server.listener.accept(
+                self.websocket_server.io,
+            );
         return self.acceptStreamPendingMaybeBefore(stream, options, deadline);
     }
 
