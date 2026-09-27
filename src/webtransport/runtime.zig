@@ -15002,13 +15002,17 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         server: *ProtectedServer,
         io: std.Io,
         initial_timeout_done: std.Io.Event = .unset,
+        close_sent: std.Io.Event = .unset,
         sibling_stream_id: u62 = 4,
         err: ?anyerror = null,
+        failed: std.atomic.Value(bool) = .init(false),
 
         fn run(shared: *@This()) void {
             shared.runFallible() catch |err| {
                 shared.err = err;
+                shared.failed.store(true, .release);
                 shared.initial_timeout_done.set(shared.io);
+                shared.close_sent.set(shared.io);
             };
         }
 
@@ -15058,9 +15062,10 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             const expected_control = "protected-client-control";
             var control_len: usize = 0;
             while (control_len < expected_control.len) {
-                const control = try server_ptr.receiveSessionData(
+                const control = try server_ptr.receiveSessionDataWithTimeout(
                     accepted.session_id,
                     control_buffer[control_len..],
+                    .fromSeconds(3),
                 );
                 try std.testing.expect(!control.fin);
                 control_len += control.bytes;
@@ -15094,10 +15099,11 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
             try std.testing.expect(
                 sibling_finished.message.value == .finished,
             );
-            try server_ptr.h3.sendResponse(
+            try server_ptr.h3.sendResponseWithTimeout(
                 accepted.request.from,
                 shared.sibling_stream_id,
                 .{ .status = 204 },
+                .fromSeconds(3),
             );
             try std.testing.expectError(
                 error.Timeout,
@@ -15152,7 +15158,9 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
                 testing.pendingDrainProgress(&accepted) == null,
             );
             try std.testing.expect(accepted.control.control.local_drain_sent);
-            var maximum = try server_ptr.receiveDatagram();
+            var maximum = try server_ptr.receiveDatagramWithTimeout(
+                .fromSeconds(3),
+            );
             defer maximum.deinit(
                 server_ptr.h3.quic_server.endpoint.allocator,
             );
@@ -15170,7 +15178,9 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
                 0x5a,
             ));
             for ([_][]const u8{ "protected-client-one", "protected-client-two" }) |expected| {
-                var datagram = try server_ptr.receiveDatagram();
+                var datagram = try server_ptr.receiveDatagramWithTimeout(
+                    .fromSeconds(3),
+                );
                 defer datagram.deinit(
                     server_ptr.h3.quic_server.endpoint.allocator,
                 );
@@ -15205,6 +15215,15 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
                 .fromSeconds(1),
             );
             try std.testing.expectEqual(@as(usize, 2), server_committed);
+            // The client first forces a partial CLOSE write, then resumes it.
+            // Wait for the complete close before constraining the response
+            // direction so this assertion does not race UDP delivery.
+            try shared.close_sent.waitTimeout(shared.io, .{
+                .duration = .{
+                    .raw = .fromSeconds(3),
+                    .clock = .awake,
+                },
+            });
             const response_entry = server_ptr.h3.outbound_bodies.find(
                 accepted.session_id.value,
             ).?;
@@ -15246,7 +15265,12 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
 
     var shared = Shared{ .server = &server, .io = io };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    try shared.initial_timeout_done.wait(io);
+    var joined = false;
+    defer if (!joined) thread.join();
+    try shared.initial_timeout_done.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(3),
+        .clock = .awake,
+    } });
 
     const connect_options: ProtectedConnectOptions = .{
         .authority = "localhost",
@@ -15333,25 +15357,36 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         client.responseHeader("x-protected-admission").?,
     );
 
-    const sibling_stream_id = try client.h3.sendRequest(.{
-        .method = "GET",
-        .path = "/protected-sibling",
-        .authority = "localhost",
-    });
+    const sibling_stream_id = try client.h3.sendRequestWithTimeout(
+        .{
+            .method = "GET",
+            .path = "/protected-sibling",
+            .authority = "localhost",
+        },
+        .fromSeconds(3),
+    );
     try std.testing.expectEqual(shared.sibling_stream_id, sibling_stream_id);
-    try client.sendSessionData("protected-client-control", false);
-    var sibling_response = try client.h3.receiveResponseWithTimeout(
+    var session_data_progress: http3.runtime.BodyWriteProgress = .{};
+    try client.sendSessionDataWithTimeout(
+        "protected-client-control",
+        false,
+        &session_data_progress,
+        .fromSeconds(3),
+    );
+    var sibling_response = client.h3.receiveResponseWithTimeout(
         sibling_stream_id,
         .fromSeconds(1),
-    );
+    ) catch |err| return preferPeerError(&shared, err);
     defer sibling_response.deinit(allocator);
     try std.testing.expectEqual(
         @as(u16, 204),
         sibling_response.response.status,
     );
-    const drain = try client.receiveSessionEvent();
+    const drain = client.receiveSessionEventWithTimeout(
+        .fromSeconds(3),
+    ) catch |err| return preferPeerError(&shared, err);
     try std.testing.expect(drain == .draining);
-    try client.sendDatagram(maximum_datagram);
+    try client.sendDatagramWithTimeout(maximum_datagram, .fromSeconds(3));
     const datagram_packet_number = client.h3.next_packet_number;
     try std.testing.expectError(
         error.Timeout,
@@ -15369,7 +15404,9 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     );
     try std.testing.expectEqual(@as(usize, 2), client_committed);
     for ([_][]const u8{ "protected-server-one", "protected-server-two" }) |expected| {
-        var response = try client.receiveDatagram();
+        var response = client.receiveDatagramWithTimeout(
+            .fromSeconds(3),
+        ) catch |err| return preferPeerError(&shared, err);
         defer response.deinit(allocator);
         try std.testing.expectEqual(
             client.session_id.value,
@@ -15415,19 +15452,28 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
     try std.testing.expect(!client.control.control.local_close_sent);
     client.h3.quic_client.endpoint.io = timed.delegate;
     try client.closeWithTimeout(91, "protected done", .fromSeconds(1));
+    shared.close_sent.set(io);
     try std.testing.expect(testing.pendingCloseProgress(&client) == null);
     try std.testing.expect(client.control.control.local_close_sent);
     try std.testing.expectError(
         error.InvalidSessionState,
         client.sendDatagram("protected-late"),
     );
-    const peer_fin = try client.receiveSessionEvent();
+    const peer_fin = client.receiveSessionEventWithTimeout(
+        .fromSeconds(3),
+    ) catch |err| return preferPeerError(&shared, err);
     try std.testing.expect(peer_fin == .closed);
     try std.testing.expectEqual(@as(u32, 0), peer_fin.closed.code);
     try std.testing.expectEqualStrings("", peer_fin.closed.reason);
 
     thread.join();
+    joined = true;
     if (shared.err) |err| return err;
+}
+
+fn preferPeerError(shared: anytype, fallback: anyerror) anyerror {
+    if (shared.failed.load(.acquire)) return shared.err.?;
+    return fallback;
 }
 
 test "WebTransport protected session DATA slices resume exact suffix" {
