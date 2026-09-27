@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const http2 = @import("../../http2/mod.zig");
+const auth = @import("../auth.zig");
 const call = @import("../call.zig");
 const compression = @import("../compression.zig");
 const metadata = @import("../metadata.zig");
@@ -763,6 +764,22 @@ pub const ServerDuplex = struct {
 
     pub fn responseFinished(self: ServerDuplex) bool {
         return self.transport.responseFinished();
+    }
+
+    /// Require one Bearer credential before reading request DATA. A failed
+    /// check completes only the response half with UNAUTHENTICATED; call
+    /// `drainRequestAfterResponseWithDeadline` to retire the upload safely.
+    pub fn requireBearer(
+        self: *ServerDuplex,
+        expected_token: []const u8,
+        status_message: ?[]const u8,
+    ) Error!bool {
+        if (auth.bearerTokenMatches(
+            self.requestHeaders(),
+            expected_token,
+        )) return true;
+        try self.finish(.unauthenticated, status_message, &.{}, &.{});
+        return false;
     }
 
     pub fn checkDeadline(self: ServerDuplex) Error!void {

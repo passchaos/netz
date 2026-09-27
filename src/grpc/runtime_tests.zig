@@ -206,6 +206,125 @@ test "gRPC Bearer rejection preserves channel for an authorized RPC" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "gRPC duplex Bearer rejection precedes DATA and preserves channel" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.deinit();
+            var rejected = try connection.acceptDuplex();
+            var rejected_live = true;
+            defer if (rejected_live) rejected.deinit();
+            try std.testing.expect(!rejected.requestFinished());
+            try std.testing.expect(!try rejected.requireBearer(
+                "correct-token",
+                "valid Bearer token required",
+            ));
+            const drained = try rejected.drainRequestAfterResponseWithDeadline(
+                .fromNow(self.server.transport.io, .{
+                    .raw = .fromSeconds(2),
+                    .clock = .awake,
+                }),
+            );
+            try std.testing.expect(drained == .finished);
+            try std.testing.expectEqual(@as(usize, 0), rejected.message_count);
+            rejected.deinit();
+            rejected_live = false;
+
+            var request = try connection.readUnary();
+            defer request.deinit();
+            try std.testing.expect(try connection.requireBearer(
+                request.request.stream_id,
+                request.request.headers,
+                "correct-token",
+                null,
+            ));
+            try connection.writeUnary(request.request.stream_id, .{
+                .message = "reused",
+            });
+        }
+    };
+    const NoMessages = struct {
+        fn consume(_: void, _: grpc.StreamingMessage) !void {
+            return error.UnexpectedMessage;
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 64, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var rejected = try client.startDuplex(.{
+        .path = "/demo.Auth/Duplex",
+        .authority = "localhost",
+        .metadata = &.{.{
+            .name = "authorization",
+            .value = "Bearer wrong-token",
+        }},
+    });
+    var rejected_live = true;
+    defer if (rejected_live) rejected.deinit();
+    var terminal = try rejected.readResponseEvent({}, NoMessages.consume);
+    defer terminal.deinit(allocator);
+    try std.testing.expect(terminal == .terminal);
+    try std.testing.expectEqual(
+        grpc.Status.unauthenticated,
+        terminal.terminal.status,
+    );
+    try std.testing.expectEqualStrings(
+        "valid Bearer token required",
+        terminal.terminal.status_message,
+    );
+    try std.testing.expect(rejected.requestFinished());
+    rejected.deinit();
+    rejected_live = false;
+
+    var accepted = try client.unary(.{
+        .path = "/demo.Auth/Unary",
+        .authority = "localhost",
+        .message = "after-rejection",
+        .metadata = &.{.{
+            .name = "authorization",
+            .value = "Bearer correct-token",
+        }},
+    });
+    defer accepted.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, accepted.status);
+    try std.testing.expectEqualStrings("reused", accepted.message.?.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "gRPC malformed unary resets stream and releases concurrency" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

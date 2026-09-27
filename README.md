@@ -482,6 +482,8 @@ Current protocol coverage includes:
   strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
   comparison, and a server helper that returns trailers-only
   `UNAUTHENTICATED` while preserving the HTTP/2 channel for later RPCs;
+  duplex servers can apply the same check immediately after request HEADERS,
+  before reading DATA, and then boundedly drain a rejected upload;
   `authorization` remains automatically HPACK never-indexed,
   strict per-message gzip and RFC 1950 zlib-wrapped `deflate` codecs backed by
   a package-local focused DEFLATE backend, bounded decompression, typed

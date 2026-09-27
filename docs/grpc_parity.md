@@ -29,7 +29,9 @@ existing HTTP/2 runtime:
 - strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
   duplicate, malformed, or ambiguous credentials; token comparison visits all
   bytes at a matching public length, and server rejection emits trailers-only
-  `UNAUTHENTICATED` without retiring the HTTP/2 channel,
+  `UNAUTHENTICATED` without retiring the HTTP/2 channel. Duplex servers expose
+  the same check immediately after request HEADERS and before reading DATA,
+  after which the existing bounded drain safely retires a rejected upload,
 - HTTP status fallback mapping when a broken intermediary omits `grpc-status`,
 - typed `identity`, `deflate`, and `gzip` algorithms plus
   `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
