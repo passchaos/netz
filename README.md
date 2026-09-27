@@ -479,6 +479,10 @@ Current protocol coverage includes:
   fallback mapping, tolerant percent-encoded `grpc-message` handling,
   content-type/TE/method-path/custom-metadata validation, unpadded binary
   metadata Base64 sending with padded/unpadded/comma-joined receive support,
+  strict allocation-free RFC 6750 Bearer metadata parsing, constant-time token
+  comparison, and a server helper that returns trailers-only
+  `UNAUTHENTICATED` while preserving the HTTP/2 channel for later RPCs;
+  `authorization` remains automatically HPACK never-indexed,
   strict per-message gzip and RFC 1950 zlib-wrapped `deflate` codecs backed by
   a package-local focused DEFLATE backend, bounded decompression, typed
   `grpc-accept-encoding` negotiation, asymmetric request/response algorithms,
@@ -513,7 +517,8 @@ Current protocol coverage includes:
   the application reads one every 20 ms; a 100-iteration large-unary RPC soak
   additionally verifies persistent-channel stream retirement. A matching
   100-iteration channel soak recreates TCP/TLS/ALPN/certificate state for every
-  large unary RPC. The official reflection
+  large unary RPC. An authenticated EmptyCall additionally carries Bearer
+  metadata from grpc-cpp to netz over both h2c and TLS. The official reflection
   and generated-pbz gates also use zio, with the pbz server scheduled through
   `std.Io.async`.
 - QUIC varints with encode length reuse, preallocated direct writes, long-header parsing, stream IDs, transport parameters, and core

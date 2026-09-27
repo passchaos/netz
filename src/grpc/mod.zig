@@ -6,6 +6,7 @@
 //! implementation.
 
 pub const wire = @import("wire.zig");
+pub const auth = @import("auth.zig");
 pub const metadata = @import("metadata.zig");
 pub const compression = @import("compression.zig");
 pub const stream = @import("stream/mod.zig");
@@ -91,8 +92,11 @@ pub const validateCustomMetadata = call.validateCustomMetadata;
 pub const validateCustomBinaryMetadata =
     call.validateCustomBinaryMetadata;
 pub const validateMessageEncoding = call.validateMessageEncoding;
+pub const parseBearerToken = auth.parseBearerToken;
+pub const bearerTokenMatches = auth.bearerTokenMatches;
 
 test {
+    _ = auth;
     _ = @import("tests.zig");
     _ = @import("runtime_tests.zig");
     _ = runtime;

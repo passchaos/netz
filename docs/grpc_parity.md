@@ -26,6 +26,10 @@ existing HTTP/2 runtime:
   bounded scratch,
 - tolerant `grpc-message` percent decoding that preserves malformed percent
   sequences as required by the protocol,
+- strict allocation-free RFC 6750 Bearer metadata parsing that rejects absent,
+  duplicate, malformed, or ambiguous credentials; token comparison visits all
+  bytes at a matching public length, and server rejection emits trailers-only
+  `UNAUTHENTICATED` without retiring the HTTP/2 channel,
 - HTTP status fallback mapping when a broken intermediary omits `grpc-status`,
 - typed `identity`, `deflate`, and `gzip` algorithms plus
   `grpc-accept-encoding` parsing/formatting that ignores unknown extensions,
@@ -257,6 +261,7 @@ The reverse gate builds upstream's `interop_client` and verifies `ping_pong`,
 `client_compressed_unary`,
 `server_compressed_unary`,
 `client_compressed_streaming`, `server_compressed_streaming`,
+`authenticated_empty_unary`,
 `status_code_and_message`, `special_status_message`,
 `unimplemented_method`, `unimplemented_service`,
 `client_streaming`, `server_streaming`,
@@ -407,8 +412,14 @@ upstream gRPC Core's `ServerEarlyReturnTest`.
    streaming cases against netz over both transports. The forward gate
    independently covers the same gzip/identity unary and per-message streaming
    matrices against the C++ server, plus the canonical ordinary and Unicode
-   status-message cases. Broader upstream authentication cases remain future
-   work.
+   status-message cases. A dedicated authenticated EmptyCall sends an RFC 6750
+   Bearer credential through grpc-cpp's metadata interceptor over h2c and TLS;
+   the netz server uses its strict, allocation-free parser and constant-time
+   token comparison before dispatch. Local channel-reuse coverage additionally
+   rejects a bad token with trailers-only `UNAUTHENTICATED`, then accepts a
+   valid token on the same HTTP/2 connection. Cloud identity discovery, token
+   issuance, refresh, and JWT signature verification remain application or
+   identity-provider responsibilities rather than transport behavior.
 3. Add broader conformance/interop runners. Reflection accepts standard
    descriptor sets directly and
    is covered by an independent official `grpc_cli` process-boundary gate.

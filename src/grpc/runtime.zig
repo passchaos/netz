@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const http2 = @import("../http2/mod.zig");
+const auth = @import("auth.zig");
 const call = @import("call.zig");
 const health = @import("health.zig");
 const reflection = @import("reflection.zig");
@@ -413,6 +414,25 @@ pub const ServerConnection = struct {
             stream_id,
             options,
         );
+    }
+
+    /// Require one RFC 6750 Bearer credential before application dispatch.
+    /// Rejection is a trailers-only UNAUTHENTICATED response and affects only
+    /// this stream, so the HTTP/2 channel remains available for another RPC.
+    pub fn requireBearer(
+        self: *ServerConnection,
+        stream_id: u31,
+        headers: []const http2.Hpack.HeaderField,
+        expected_token: []const u8,
+        status_message: ?[]const u8,
+    ) Error!bool {
+        if (auth.bearerTokenMatches(headers, expected_token)) return true;
+        try self.writeUnary(stream_id, .{
+            .status = .unauthenticated,
+            .status_message = status_message,
+            .trailers_only = true,
+        });
+        return false;
     }
 
     pub fn writeHealthCheck(

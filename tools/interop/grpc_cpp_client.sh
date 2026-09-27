@@ -105,6 +105,8 @@ EOF
 run_case() {
   local scenario=$1
   local transport=$2
+  local client_scenario=${3:-$scenario}
+  local additional_metadata=${4:-}
   local port server_log client_log
   port=$(python3 - <<'PY'
 import socket
@@ -120,8 +122,11 @@ PY
   local client_args=(
     --server_host=127.0.0.1
     --server_port="$port"
-    --test_case="$scenario"
+    --test_case="$client_scenario"
   )
+  if [[ -n "$additional_metadata" ]]; then
+    client_args+=(--additional_metadata="$additional_metadata")
+  fi
   if [[ "$scenario" == rpc_soak || "$scenario" == channel_soak ]]; then
     client_args+=(
       --soak_iterations=100
@@ -232,6 +237,11 @@ for transport in h2c tls; do
   do
     run_case "$scenario" "$transport"
   done
+  run_case \
+    authenticated_empty_unary \
+    "$transport" \
+    empty_unary \
+    'authorization:Bearer interop-token'
 done
 
-echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'
+echo 'grpc-cpp client interoperated with netz: transport=h2c+tls unary=empty+large rpc_soak=100x271828/314159 channel_soak=100x271828/314159 ping_pong=true half_duplex=true slow_consumer=2000x1030@20ms empty_stream=true compression=unary+streaming-gzip+identity status=unary+bidi+unicode unimplemented=method+service client_streaming=true server_streaming=true cancel=begin+after-response deadline=DEADLINE_EXCEEDED metadata=unary+bidi auth=bearer certificate=verified alpn=h2 client_io=grpc-cpp-posix-event-engine server_io=zio-std-io'

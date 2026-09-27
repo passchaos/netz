@@ -34,6 +34,7 @@ const special_status_message =
     "\t\ntest with whitespace\r\nand Unicode BMP ☺ and non-BMP 😈\t\n";
 
 const Scenario = enum {
+    authenticated_empty_unary,
     ping_pong,
     empty_stream,
     cancel_after_begin,
@@ -169,6 +170,9 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidAlpn;
     }
     switch (scenario) {
+        .authenticated_empty_unary => try serveAuthenticatedEmptyUnary(
+            &connection,
+        ),
         .custom_metadata => try serveCustomMetadata(allocator, &connection),
         .client_compressed_unary => try serveClientCompressedUnary(
             allocator,
@@ -433,6 +437,28 @@ fn serveEmptyUnary(
     if (!std.mem.eql(u8, unary.request.path, empty_service_path)) {
         return error.UnexpectedMethod;
     }
+    if (unary.request.message.payload.len != 0 or
+        unary.request.was_compressed)
+    {
+        return error.UnexpectedRequest;
+    }
+    try connection.writeUnary(unary.request.stream_id, .{ .message = &.{} });
+}
+
+fn serveAuthenticatedEmptyUnary(
+    connection: *netz.grpc.runtime.ServerConnection,
+) !void {
+    var unary = try connection.readUnary();
+    defer unary.deinit();
+    if (!std.mem.eql(u8, unary.request.path, empty_service_path)) {
+        return error.UnexpectedMethod;
+    }
+    if (!try connection.requireBearer(
+        unary.request.stream_id,
+        unary.request.headers,
+        "interop-token",
+        "valid Bearer token required",
+    )) return error.UnexpectedAuthorization;
     if (unary.request.message.payload.len != 0 or
         unary.request.was_compressed)
     {
@@ -1052,6 +1078,7 @@ fn serveScenario(
         .special_status_message,
         .unimplemented_method,
         .unimplemented_service,
+        .authenticated_empty_unary,
         .empty_unary,
         .large_unary,
         .client_streaming,

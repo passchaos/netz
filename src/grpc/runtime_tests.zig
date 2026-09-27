@@ -86,6 +86,126 @@ test "gRPC h2c runtime reuses one channel" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
+test "gRPC Bearer rejection preserves channel for an authorized RPC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try grpc.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+        1024,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *grpc.runtime.Server,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = self.server.accept() catch |err| {
+                self.err = err;
+                return;
+            };
+            self.accepts += 1;
+            defer connection.deinit();
+            for (0..2) |index| {
+                var request = connection.readUnary() catch |err| {
+                    self.err = err;
+                    return;
+                };
+                defer request.deinit();
+                var authorization_never_indexed = false;
+                for (request.request.headers) |header| {
+                    if (std.ascii.eqlIgnoreCase(
+                        header.name,
+                        "authorization",
+                    )) {
+                        authorization_never_indexed = header.never_index;
+                    }
+                }
+                if (!authorization_never_indexed) {
+                    self.err = error.InvalidMetadata;
+                    return;
+                }
+                const authorized = connection.requireBearer(
+                    request.request.stream_id,
+                    request.request.headers,
+                    "correct-token",
+                    "valid Bearer token required",
+                ) catch |err| {
+                    self.err = err;
+                    return;
+                };
+                if (authorized != (index == 1)) {
+                    self.err = error.InvalidGrpcRequest;
+                    return;
+                }
+                if (authorized) {
+                    connection.writeUnary(request.request.stream_id, .{
+                        .message = "authorized",
+                    }) catch |err| {
+                        self.err = err;
+                        return;
+                    };
+                }
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try grpc.runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_frame_payload = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.deinit();
+    var rejected = try client.unary(.{
+        .path = "/demo.Auth/Unary",
+        .authority = "localhost",
+        .message = "first",
+        .metadata = &.{.{
+            .name = "authorization",
+            .value = "Bearer wrong-token",
+        }},
+    });
+    defer rejected.deinit();
+    try std.testing.expectEqual(grpc.Status.unauthenticated, rejected.status);
+    try std.testing.expectEqualStrings(
+        "valid Bearer token required",
+        rejected.status_message,
+    );
+    try std.testing.expect(rejected.message == null);
+
+    var accepted = try client.unary(.{
+        .path = "/demo.Auth/Unary",
+        .authority = "localhost",
+        .message = "second",
+        .metadata = &.{.{
+            .name = "authorization",
+            .value = "Bearer correct-token",
+        }},
+    });
+    defer accepted.deinit();
+    try std.testing.expectEqual(grpc.Status.ok, accepted.status);
+    try std.testing.expectEqualStrings(
+        "authorized",
+        accepted.message.?.payload,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.accepts);
+}
+
 test "gRPC malformed unary resets stream and releases concurrency" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
