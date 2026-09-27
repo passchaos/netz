@@ -260,17 +260,27 @@ pub const Transport = union(enum) {
         self.* = undefined;
     }
 
-    /// Stop both directions of a TCP transport without releasing ownership.
+    /// Stop both directions of a socket transport without releasing ownership.
     ///
     /// Tests and broker shutdown paths use this to wake a concurrent reader;
     /// the normal `close` owner still performs the eventual descriptor close.
     pub fn shutdown(self: *Transport) Error!void {
         switch (self.*) {
             .tcp => |tcp| try tcp.stream.shutdown(tcp.io, .both),
-            // TLS/WebSocket transports currently expose only owning close
-            // operations. Their protocol-specific servers coordinate shutdown
-            // outside this raw packet transport.
-            .tls, .tls_vail, .tls_server, .websocket => {},
+            .tls => |transport| try transport.connection.stream.shutdown(
+                transport.connection.io,
+                .both,
+            ),
+            .tls_vail => |transport| try transport.connection.stream.shutdown(
+                transport.connection.io,
+                .both,
+            ),
+            .tls_server => |transport| try transport.connection.stream.shutdown(
+                transport.connection.io,
+                .both,
+            ),
+            // WebSocket close is owning and cannot be used only as a wakeup.
+            .websocket => {},
         }
     }
 
@@ -586,6 +596,10 @@ fn readStreamExactWithDeadline(
             connection.read(buffer[offset..]);
         const received = count catch |err| {
             if (err == error.Timeout and offset != 0) return offset;
+            // TLS reports a socket EOF at a record boundary as UnexpectedEof
+            // when the peer omits close_notify. MQTT treats that exactly like
+            // a cleartext EOF so reconnecting clients can recover uniformly.
+            if (err == error.UnexpectedEof) return error.ConnectionClosed;
             return err;
         };
         if (received == 0) return error.ConnectionClosed;
@@ -1067,6 +1081,48 @@ fn writeAll(
         if (n == 0) return error.SocketUnconnected;
         written += n;
     }
+}
+
+test "TLS record-boundary EOF is an MQTT connection close" {
+    const FakeConnection = struct {
+        io: std.Io,
+        failure: Error,
+
+        fn read(self: *@This(), _: []u8) Error!usize {
+            return self.failure;
+        }
+
+        fn readWithDeadline(
+            self: *@This(),
+            _: []u8,
+            _: std.Io.Clock.Timestamp,
+        ) Error!usize {
+            return self.failure;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var byte: [1]u8 = undefined;
+
+    var eof = FakeConnection{
+        .io = io,
+        .failure = error.UnexpectedEof,
+    };
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        readStreamExactWithDeadline(&eof, &byte, null),
+    );
+
+    var truncated = FakeConnection{
+        .io = io,
+        .failure = error.TruncatedRecord,
+    };
+    try std.testing.expectError(
+        error.TruncatedRecord,
+        readStreamExactWithDeadline(&truncated, &byte, null),
+    );
 }
 
 test "packet length waits for a complete MQTT remaining length" {

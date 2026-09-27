@@ -169,6 +169,101 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT native TLS shutdown wakes a blocked packet reader" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+
+    const ServerState = struct {
+        server: *mqtt_tls.Server,
+        release: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{ .protocol = .v5 }) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer accepted.deinit(self.server.allocator);
+            self.release.waitUncancelable(self.server.io);
+        }
+    };
+    var server_state = ServerState{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerState.run,
+        .{&server_state},
+    );
+    var server_joined = false;
+    defer if (!server_joined) {
+        server_state.release.set(io);
+        server_thread.join();
+    };
+
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "tls-shutdown-reader",
+            },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+        },
+    );
+    defer client.close();
+
+    const ReaderState = struct {
+        connection: *runtime.Connection,
+        result: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var event = self.connection.readClientPacketEvent() catch |err| {
+                self.result = err;
+                return;
+            };
+            event.deinit(self.connection.allocator);
+            self.result = error.TestUnexpectedResult;
+        }
+    };
+    var reader = ReaderState{ .connection = &client };
+    const reader_thread = try std.Thread.spawn(.{}, ReaderState.run, .{&reader});
+    try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    try client.shutdown();
+    reader_thread.join();
+    try std.testing.expectEqual(error.ConnectionClosed, reader.result.?);
+
+    server_state.release.set(io);
+    server_thread.join();
+    server_joined = true;
+    if (server_state.err) |err| return err;
+}
+
 test "MQTT TLS server completes verified MQTT 5 QoS 1" {
     const allocator = std.testing.allocator;
 

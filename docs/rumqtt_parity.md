@@ -1598,6 +1598,10 @@ path with independent real source and target TCP peers: QoS 0/1 mapping, target
 delivery before source PUBACK, retained propagation, target retransmission
 under preserved/fresh Sessions, source Session transitions, subscription
 replay, DUP normalization, and connection-scoped property isolation.
+`fuzz-mqtt-tls-outbound-bridge` runs the same source/target state machine over
+two independent certificate-pinned TLS connectors. Both broker legs must
+report `mqtt` ALPN and AES-128-GCM/SHA-256 after every reconnect before source
+acknowledgement ordering, target resend, and Session transitions continue.
 `fuzz-mqtt-outbound-bridge-qos2` completes this bounded bridge matrix with two
 production brokers, a durable coordinator, live publisher/subscriber and
 restartable OutboundBridge. It verifies exactly-once delivery across

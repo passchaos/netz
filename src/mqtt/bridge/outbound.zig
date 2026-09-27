@@ -682,11 +682,16 @@ pub const Bridge = struct {
         }
         const source_turn = self.poll_source_next;
         self.poll_source_next = !source_turn;
-        const bounded = bridgePollOptions(poll_options);
         return if (source_turn)
-            self.stepSource(bounded, poll_options)
+            self.stepSource(
+                bridgeClientPollOptions(&self.source, poll_options),
+                poll_options,
+            )
         else
-            self.stepTarget(bounded);
+            self.stepTarget(bridgeClientPollOptions(
+                &self.target,
+                poll_options,
+            ));
     }
 
     fn stepSource(
@@ -825,7 +830,10 @@ pub const Bridge = struct {
         var target_packet_id = target_result.published orelse
             return error.UnexpectedPacket;
         while (true) {
-            const bounded_poll = bridgePollOptions(poll_options);
+            const bounded_poll = bridgeClientPollOptions(
+                &self.target,
+                poll_options,
+            );
             const maybe_target_event = self.target.pollWithOptions(bounded_poll) catch |err|
                 switch (err) {
                     error.PublishRefused => {
@@ -1026,13 +1034,18 @@ pub const Bridge = struct {
             if (try self.commitCompletedTargetDelivery()) continue;
             if (try self.reconcileDurableTargetState()) continue;
             if (try self.completeDurableSourceIfReady()) continue;
-            const bounded = bridgePollOptions(poll_options);
             if (self.poll_source_next) {
                 self.poll_source_next = false;
-                try self.driveDurableSource(bounded);
+                try self.driveDurableSource(bridgeClientPollOptions(
+                    &self.source,
+                    poll_options,
+                ));
             } else {
                 self.poll_source_next = true;
-                try self.driveDurableTarget(bounded);
+                try self.driveDurableTarget(bridgeClientPollOptions(
+                    &self.target,
+                    poll_options,
+                ));
             }
         }
     }
@@ -1313,7 +1326,9 @@ pub const Bridge = struct {
     ) (Error || std.Io.Cancelable)!void {
         const bounded = bridgePollOptions(poll_options);
         while (self.target.connection() == null) {
-            var event = try self.target.pollWithOptions(bounded) orelse {
+            var event = try self.target.pollWithOptions(
+                bridgeClientPollOptions(&self.target, poll_options),
+            ) orelse {
                 try self.serviceSourceWhileWaiting(current, bounded);
                 continue;
             };
@@ -1793,6 +1808,41 @@ fn bridgePollOptions(options: reconnect.PollOptions) reconnect.PollOptions {
         bounded.timeout.nanoseconds,
     ));
     return bounded;
+}
+
+fn bridgeClientPollOptions(
+    client: *reconnect.Client,
+    options: reconnect.PollOptions,
+) reconnect.PollOptions {
+    // A TCP/TLS/MQTT connection attempt cannot be paused at the bridge's
+    // fairness boundary. Preserve the caller's complete deadline while an
+    // endpoint reconnects; only established idle reads use the short slice.
+    return bridgeEndpointPollOptions(client.connection() != null, options);
+}
+
+fn bridgeEndpointPollOptions(
+    connected: bool,
+    options: reconnect.PollOptions,
+) reconnect.PollOptions {
+    return if (connected) bridgePollOptions(options) else options;
+}
+
+test "outbound bridge preserves reconnect budget across fairness slices" {
+    const options: reconnect.PollOptions = .{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    };
+    try std.testing.expectEqual(
+        options.timeout.nanoseconds,
+        bridgeEndpointPollOptions(false, options).timeout.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        @as(
+            @TypeOf(options.timeout.nanoseconds),
+            50 * std.time.ns_per_ms,
+        ),
+        bridgeEndpointPollOptions(true, options).timeout.nanoseconds,
+    );
 }
 
 fn keepStableProperty(property: mqtt.Property) bool {
