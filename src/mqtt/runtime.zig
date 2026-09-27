@@ -1040,6 +1040,10 @@ pub const AcceptedClient = struct {
 pub const PendingAcceptedClient = struct {
     connection: Connection,
     connect: OwnedConnect,
+    /// Effective deadline established while CONNECT was received. Two-phase
+    /// admission keeps it so policy and authentication code cannot
+    /// accidentally renew or discard the original budget.
+    admission_deadline: ?std.Io.Clock.Timestamp = null,
     protocol_allowed: bool = true,
     authentication_authorized: bool = false,
     authentication_data: ?[]u8 = null,
@@ -1048,7 +1052,7 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         options: AcceptOptions,
     ) Error!AcceptedClient {
-        return self.finishMaybeBefore(options, null);
+        return self.finishMaybeBefore(options, self.admission_deadline);
     }
 
     pub fn finishWithTimeout(
@@ -1072,7 +1076,10 @@ pub const PendingAcceptedClient = struct {
             self.connection.transport.ioHandle(),
             deadline,
         );
-        return self.finishMaybeBefore(options, deadline);
+        return self.finishMaybeBefore(
+            options,
+            earliestClockDeadline(self.admission_deadline, deadline),
+        );
     }
 
     fn finishMaybeBefore(
@@ -1265,7 +1272,10 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         data: []const u8,
     ) Error!void {
-        return self.challengeAuthenticationMaybeBefore(data, null);
+        return self.challengeAuthenticationMaybeBefore(
+            data,
+            self.admission_deadline,
+        );
     }
 
     pub fn challengeAuthenticationWithTimeout(
@@ -1289,7 +1299,10 @@ pub const PendingAcceptedClient = struct {
             self.connection.transport.ioHandle(),
             deadline,
         );
-        return self.challengeAuthenticationMaybeBefore(data, deadline);
+        return self.challengeAuthenticationMaybeBefore(
+            data,
+            earliestClockDeadline(self.admission_deadline, deadline),
+        );
     }
 
     fn challengeAuthenticationMaybeBefore(
@@ -1323,7 +1336,9 @@ pub const PendingAcceptedClient = struct {
     pub fn receiveAuthentication(
         self: *PendingAcceptedClient,
     ) Error!OwnedAuth {
-        return self.receiveAuthenticationMaybeBefore(null);
+        return self.receiveAuthenticationMaybeBefore(
+            self.admission_deadline,
+        );
     }
 
     pub fn receiveAuthenticationWithTimeout(
@@ -1345,7 +1360,9 @@ pub const PendingAcceptedClient = struct {
             self.connection.transport.ioHandle(),
             deadline,
         );
-        return self.receiveAuthenticationMaybeBefore(deadline);
+        return self.receiveAuthenticationMaybeBefore(
+            earliestClockDeadline(self.admission_deadline, deadline),
+        );
     }
 
     fn receiveAuthenticationMaybeBefore(
@@ -2832,7 +2849,7 @@ pub const Connection = struct {
             self.readConnectPacketWithDeadline(absolute)
         else
             self.readConnectPacket()) catch |err| {
-            self.writeConnectErrorConnAck(err) catch {};
+            self.writeConnectErrorConnAckMaybeBefore(err, deadline) catch {};
             return err;
         };
         errdefer connect.deinit(self.allocator);
@@ -2847,6 +2864,7 @@ pub const Connection = struct {
             return .{
                 .connection = owned_connection,
                 .connect = connect,
+                .admission_deadline = deadline,
                 .protocol_allowed = false,
             };
         }
@@ -2855,13 +2873,19 @@ pub const Connection = struct {
         if (connect.connect.will) |will| {
             if (@intFromEnum(will.qos) > @intFromEnum(maximum_qos)) {
                 if (connect.connect.protocol == .v5) {
-                    try self.writeConnAck(.{ .reason_code = 0x9b });
+                    try self.writeConnAckMaybeBefore(
+                        .{ .reason_code = 0x9b },
+                        deadline,
+                    );
                 }
                 return error.InvalidQoS;
             }
             if (will.retain and !options.retain_available) {
                 if (connect.connect.protocol == .v5) {
-                    try self.writeConnAck(.{ .reason_code = 0x9a });
+                    try self.writeConnAckMaybeBefore(
+                        .{ .reason_code = 0x9a },
+                        deadline,
+                    );
                 }
                 return error.InvalidProperty;
             }
@@ -2891,6 +2915,7 @@ pub const Connection = struct {
         return .{
             .connection = owned_connection,
             .connect = connect,
+            .admission_deadline = deadline,
         };
     }
 
@@ -3207,9 +3232,10 @@ pub const Connection = struct {
         return .{ .packet = packet, .connect = connect };
     }
 
-    fn writeConnectErrorConnAck(
+    fn writeConnectErrorConnAckMaybeBefore(
         self: *Connection,
         err: anyerror,
+        deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         const raw_level = self.incoming_connect_level orelse return;
         const level = raw_level & 0x7f;
@@ -3242,12 +3268,16 @@ pub const Connection = struct {
         };
         self.protocol = response_protocol;
         var encoded: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
-        try self.writePacket(try mqtt.ConnAck.writeNoPropertiesInto(
+        const bytes = try mqtt.ConnAck.writeNoPropertiesInto(
             &encoded,
             response_protocol,
             false,
             reason_code,
-        ));
+        );
+        if (deadline) |absolute|
+            try self.writePacketWithDeadline(bytes, absolute)
+        else
+            try self.writePacket(bytes);
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {

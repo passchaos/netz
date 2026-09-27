@@ -1696,7 +1696,11 @@ concurrently completed socket that
 lost the timer race, so it cannot consume the next caller's connection.
 Two-phase server admission exposes matching challenge and response deadline
 methods, allowing one absolute timestamp to span every enhanced-authentication
-round and the final CONNACK without silently restarting the budget.
+round and the final CONNACK without silently restarting the budget. Pending
+admissions retain the effective CONNECT deadline, so broker-managed
+authentication policy, ordinary challenge/response calls, authorization
+refusals, and successful CONNACK writes inherit that same budget
+automatically; an explicit shorter deadline can tighten but never extend it.
 Raw TCP server accept and already-accepted-stream APIs expose the same bounded
 admission contract, including listener acceptance and a shared budget with a
 trusted PROXY preface when enabled.

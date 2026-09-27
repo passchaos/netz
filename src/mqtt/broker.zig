@@ -356,7 +356,10 @@ pub const RetainedSourceAuthorization = struct {
 pub const AuthenticationHandler = struct {
     context: *anyopaque,
     /// Complete any CONNECT-before-CONNACK exchange and call
-    /// `pending.authorizeAuthentication()` only after policy success.
+    /// `pending.authorizeAuthentication()` only after policy success. The
+    /// pending client's ordinary challenge, receive, and finish operations
+    /// inherit the original CONNECT admission deadline; explicit deadlines
+    /// may shorten that budget but cannot extend it.
     start: *const fn (
         context: *anyopaque,
         pending: *runtime.PendingAcceptedClient,
@@ -3037,14 +3040,11 @@ pub const Broker = struct {
         // The configured queue count is also the memory bound. Reserve it once
         // during setup so routing performs no destination queue allocation
         // while holding the global router lock.
-        slot.queue.ensureTotalCapacity(
+        try slot.queue.ensureTotalCapacity(
             self.allocator,
             self.options.limits
                 .max_queued_deliveries_per_connection,
-        ) catch |err| {
-            slot.active = false;
-            return err;
-        };
+        );
         const id = subscriberId(slot_index, slot.generation);
         const now = std.Io.Clock.awake.now(self.io);
         // `find` removes an expired Session without exposing its route ID.
@@ -3058,13 +3058,10 @@ pub const Broker = struct {
         }
         var effective_connect = connect;
         if (connect.client_id.len == 0) {
-            effective_connect.client_id = self.assignClientIdLocked(
+            effective_connect.client_id = try self.assignClientIdLocked(
                 slot,
                 auto_client_id_prefix,
-            ) catch |err| {
-                slot.active = false;
-                return err;
-            };
+            );
         }
         const previous_session_handle = self.sessions.find(
             effective_connect.client_id,
@@ -3090,18 +3087,12 @@ pub const Broker = struct {
                 null
         else
             null;
-        const opened_session = self.sessions.open(
+        const opened_session = try self.sessions.open(
             effective_connect.client_id,
             effective_connect.clean_start,
             self.sessionExpiryForConnect(effective_connect),
             now,
-        ) catch |err| {
-            // The caller owns the claimed slot until preparePending returns.
-            // Preserve that reservation while a protocol-level capacity
-            // refusal is written so another accept worker cannot claim it.
-            if (err != error.SessionLimitExceeded) slot.active = false;
-            return err;
-        };
+        );
         if (previous_route_id) |route_id| {
             _ = self.session_owners.remove(route_id);
         }
@@ -3144,7 +3135,6 @@ pub const Broker = struct {
                 opened_session.session_present,
                 now,
             );
-            slot.active = false;
             return err;
         };
         const previous_handle = self.wills.handleForClient(
@@ -3163,7 +3153,6 @@ pub const Broker = struct {
                 opened_session.session_present,
                 now,
             );
-            slot.active = false;
             return err;
         };
         if (accepted_will.previous == .canceled) {
@@ -3437,7 +3426,9 @@ pub const Broker = struct {
             _ = self.will_publishers.remove(handle);
             _ = self.wills.close(handle, .normal_disconnect, .zero) catch {};
         }
-        slot.active = false;
+        // The preparePending caller still owns the reservation until a
+        // ClientTask is returned. Keep it active across this rollback so no
+        // concurrent accept can reuse it before that caller releases it.
         slot.connection = null;
         slot.session_handle = null;
         slot.session_present = false;
@@ -5981,6 +5972,7 @@ test "MQTT failed Clean Start journals the durable deletion" {
             &progress,
         ),
     );
+    broker.releaseClaimedSlot(slot_index);
     try std.testing.expect(progress.rollback_changed);
     failing.fail_index = std.math.maxInt(usize);
     broker.finishPartialPersistentChange(progress.rollback_changed);
