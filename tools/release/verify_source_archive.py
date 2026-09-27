@@ -146,7 +146,7 @@ def write_consumer(consumer: Path, package_root: Path) -> None:
         + """\" },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
-    .fingerprint = 0x6d2da937bf16cc65,
+    .fingerprint = 0xf452144c05b1b1d8,
 }
 """,
         encoding="utf-8",
