@@ -1574,6 +1574,10 @@ discard, preserved-Session resume, and ordered accepted-subscription replay.
 native TLS reconnect connector. Every initial or replacement connection is
 certificate-pinned and must report `mqtt` ALPN plus AES-128-GCM/SHA-256 before
 QoS replay or subscription recovery can proceed.
+`fuzz-mqtt-wss-reconnect` adds HTTP/1 Upgrade, WebSocket framing/masking, and
+MQTT byte-stream reassembly to the same recovery schedule. Its vail-backed WSS
+connections must report `http/1.1` ALPN, AES-128-GCM/SHA-256, and the pinned
+server certificate on every replacement transport.
 `fuzz-mqtt-bridge` then composes a scripted upstream TCP peer, production
 inbound Bridge, local production broker, live subscriber and retained-state
 probe. Its model checks QoS 0/1 topic mapping, acknowledgement ordering,

@@ -118,10 +118,9 @@ pub const Transport = union(enum) {
         return switch (self.*) {
             .tls_vail => |transport| transport.connection.negotiatedAlpn(),
             .tls_server => |transport| transport.connection.negotiatedAlpn(),
-            // Zig's standard TLS client does not currently expose ALPN, and
-            // MQTT-over-WebSocket negotiates its application protocol through
-            // Sec-WebSocket-Protocol rather than the underlying TLS session.
-            .tcp, .tls, .websocket => null,
+            .websocket => |*ws| ws.connection.negotiatedAlpn(),
+            // Zig's standard TLS client does not currently expose ALPN.
+            .tcp, .tls => null,
         };
     }
 

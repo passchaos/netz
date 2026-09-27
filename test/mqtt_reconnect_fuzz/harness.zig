@@ -8,16 +8,22 @@ const reconnect = mqtt.reconnect;
 const runtime = mqtt.runtime;
 
 pub fn runSequence(input: []const u8) !model.Summary {
-    return runSequenceWithTransport(input, false);
+    return runSequenceWithTransport(input, .tcp);
 }
 
 pub fn runTlsSequence(input: []const u8) !model.Summary {
-    return runSequenceWithTransport(input, true);
+    return runSequenceWithTransport(input, .tls);
 }
+
+pub fn runWssSequence(input: []const u8) !model.Summary {
+    return runSequenceWithTransport(input, .wss);
+}
+
+const Transport = enum { tcp, tls, wss };
 
 fn runSequenceWithTransport(
     input: []const u8,
-    comptime tls: bool,
+    comptime transport: Transport,
 ) !model.Summary {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -33,8 +39,12 @@ fn runSequenceWithTransport(
     );
     const key_pair = try netz.tls.testing.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
-    const Server = if (tls) mqtt.tls_runtime.Server else runtime.Server;
-    var server: Server = if (tls)
+    const Server = switch (transport) {
+        .tcp => runtime.Server,
+        .tls => mqtt.tls_runtime.Server,
+        .wss => mqtt.websocket_runtime.TlsServer,
+    };
+    var server: Server = if (transport == .tls)
         try mqtt.tls_runtime.Server.listen(
             allocator,
             io,
@@ -52,6 +62,25 @@ fn runSequenceWithTransport(
                 .tls_handshake_timeout = model.packet_timeout,
             },
         )
+    else if (transport == .wss)
+        try mqtt.websocket_runtime.TlsServer.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{
+                .identity = .{
+                    .certificate_chain = &.{&certificate_der},
+                    .signer = .{ .ecdsa_p256_sha256 = .{
+                        .key_pair = key_pair,
+                    } },
+                },
+                .limits = .{ .max_packet_size = 4096 },
+                .max_head_bytes = 4096,
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .alpn_protocols = &.{"http/1.1"},
+                .tls_handshake_timeout = model.packet_timeout,
+            },
+        )
     else
         try runtime.Server.listen(
             allocator,
@@ -63,7 +92,12 @@ fn runSequenceWithTransport(
     defer if (server_open) server.deinit();
 
     const sequence = input[0..@min(input.len, model.max_operations)];
-    const ServerState = peer.ServerState(Server, tls);
+    const expected_alpn: ?[]const u8 = switch (transport) {
+        .tcp => null,
+        .tls => "mqtt",
+        .wss => "http/1.1",
+    };
+    const ServerState = peer.ServerState(Server, expected_alpn);
     var server_state = ServerState{
         .server = &server,
         .input = sequence,
@@ -85,7 +119,7 @@ fn runSequenceWithTransport(
         .id = .session_expiry_interval,
         .value = 60,
     } }};
-    var connector = if (tls) mqtt.tls_runtime.ReconnectConnector{
+    var tls_connector = if (transport == .tls) mqtt.tls_runtime.ReconnectConnector{
         .address = server.address(),
         .tls_host = "localhost",
         .options = .{
@@ -98,6 +132,25 @@ fn runSequenceWithTransport(
             .tls_handshake_timeout = model.packet_timeout,
         },
     } else {};
+    var wss_connector = if (transport == .wss)
+        mqtt.websocket_runtime.TlsAddressReconnectConnector{
+            .address = server.address(),
+            .tls_host = "localhost",
+            .options = .{
+                .mqtt = .{ .client_id = "connector-placeholder" },
+                .host = "localhost",
+                .target = "/mqtt",
+                .max_head_bytes = 4096,
+                .use_vail_tls = true,
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .alpn_protocols = &.{"http/1.1"},
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .tls_handshake_timeout = model.packet_timeout,
+            },
+        }
+    else {};
     const connect_options: runtime.ConnectOptions = .{
         .protocol = .v5,
         .client_id = "fuzz-reconnect",
@@ -110,18 +163,8 @@ fn runSequenceWithTransport(
         .max_delay = .fromMilliseconds(1),
         .max_attempts = 1,
     };
-    var client = if (tls)
-        try reconnect.Client.initConnectorWithOptions(
-            allocator,
-            io,
-            connector.connector(),
-            connect_options,
-            policy,
-            &shutdown,
-            .{ .max_subscriptions = model.topics.len },
-        )
-    else
-        try reconnect.Client.initWithOptions(
+    var client = switch (transport) {
+        .tcp => try reconnect.Client.initWithOptions(
             allocator,
             io,
             server.address(),
@@ -129,11 +172,32 @@ fn runSequenceWithTransport(
             policy,
             &shutdown,
             .{ .max_subscriptions = model.topics.len },
-        );
+        ),
+        .tls => try reconnect.Client.initConnectorWithOptions(
+            allocator,
+            io,
+            tls_connector.connector(),
+            connect_options,
+            policy,
+            &shutdown,
+            .{ .max_subscriptions = model.topics.len },
+        ),
+        .wss => try reconnect.Client.initConnectorWithOptions(
+            allocator,
+            io,
+            wss_connector.connector(),
+            connect_options,
+            policy,
+            &shutdown,
+            .{ .max_subscriptions = model.topics.len },
+        ),
+    };
     defer client.deinit();
     const initial = try client.connect();
     try std.testing.expect(!initial.session_present);
-    if (tls) try validateTls(client.connection().?, &certificate_der);
+    if (expected_alpn) |alpn| {
+        try validateTls(client.connection().?, &certificate_der, alpn);
+    }
 
     var expected_subscriptions: [model.topics.len]bool = .{ false, false };
     for (sequence, 0..) |operation, index| {
@@ -236,7 +300,9 @@ fn runSequenceWithTransport(
                 @as(usize, @intFromBool(expected_subscriptions[1])),
             client.subscriptionCount(),
         );
-        if (tls) try validateTls(client.connection().?, &certificate_der);
+        if (expected_alpn) |alpn| {
+            try validateTls(client.connection().?, &certificate_der, alpn);
+        }
     }
 
     try client.disconnect(0);
@@ -249,9 +315,10 @@ fn runSequenceWithTransport(
 fn validateTls(
     connection: *runtime.Connection,
     certificate_der: []const u8,
+    expected_alpn: []const u8,
 ) !void {
     try std.testing.expectEqualStrings(
-        "mqtt",
+        expected_alpn,
         connection.negotiatedAlpn() orelse return error.InvalidAlpn,
     );
     try std.testing.expectEqual(

@@ -533,6 +533,7 @@ pub const TlsServer = struct {
                     .max_client_handshake_size = options.max_client_handshake_size,
                     .tls_handshake_timeout = options.tls_handshake_timeout,
                     .client_auth = options.client_auth,
+                    .alpn_protocols = options.alpn_protocols,
                     .tcp_nodelay = options.tcp_nodelay,
                 },
             ),
@@ -757,6 +758,8 @@ pub const TlsListenOptions = struct {
     /// Absolute TLS handshake receive budget before the HTTP Upgrade budget.
     tls_handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?@import("vail").tls.client_auth.ServerPolicy = null,
+    /// Optional TLS ALPN selection before the HTTP/1.1 WebSocket Upgrade.
+    alpn_protocols: []const []const u8 = &.{},
     tcp_nodelay: bool = true,
     /// Optional exact Origin allowlist for browser MQTT clients.
     allowed_origins: []const []const u8 = &.{},
@@ -1922,6 +1925,8 @@ pub const ConnectOptions = struct {
     /// Optional pin/custom trust callback for the client-identity path.
     /// Otherwise `tls.ca_bundle` or system roots verify the server and host.
     server_verifier: ?ClientCertificateVerifier = null,
+    /// Ordered TLS ALPN offers for WSS, typically `http/1.1`.
+    alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_server_handshake_size: usize = 256 * 1024,
@@ -2192,6 +2197,7 @@ fn websocketConnectOptions(
             .{
                 .identity = options.client_identity,
                 .server_verifier = options.server_verifier,
+                .alpn_protocols = options.alpn_protocols,
                 .cipher_suites = options.cipher_suites,
                 .max_server_handshake_size = options.max_server_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,

@@ -5,7 +5,10 @@ const model = @import("model.zig");
 const mqtt = netz.mqtt;
 const runtime = mqtt.runtime;
 
-pub fn ServerState(comptime Server: type, comptime tls: bool) type {
+pub fn ServerState(
+    comptime Server: type,
+    comptime expected_alpn: ?[]const u8,
+) type {
     return struct {
         server: *Server,
         input: []const u8,
@@ -26,7 +29,9 @@ pub fn ServerState(comptime Server: type, comptime tls: bool) type {
                 connection.deinit(self.server.allocator);
             };
             try validateConnect(active.?.connect.connect);
-            if (tls) try validateTls(&active.?.connection);
+            if (expected_alpn) |alpn| {
+                try validateTls(&active.?.connection, alpn);
+            }
 
             var subscriptions = model.SubscriptionModel{};
             for (
@@ -134,7 +139,9 @@ pub fn ServerState(comptime Server: type, comptime tls: bool) type {
                 .session_present = session_present,
             });
             try validateConnect(active.*.?.connect.connect);
-            if (tls) try validateTls(&active.*.?.connection);
+            if (expected_alpn) |alpn| {
+                try validateTls(&active.*.?.connection, alpn);
+            }
             self.summary.reconnects += 1;
             if (session_present) {
                 self.summary.resumed_sessions += 1;
@@ -257,9 +264,9 @@ pub fn ServerState(comptime Server: type, comptime tls: bool) type {
     };
 }
 
-fn validateTls(connection: *runtime.Connection) !void {
+fn validateTls(connection: *runtime.Connection, expected_alpn: []const u8) !void {
     try std.testing.expectEqualStrings(
-        "mqtt",
+        expected_alpn,
         connection.negotiatedAlpn() orelse return error.InvalidAlpn,
     );
     try std.testing.expectEqual(

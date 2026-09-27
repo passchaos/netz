@@ -6269,6 +6269,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.websocket_runtime.ConnectOptions,
+        "alpn_protocols",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
         "use_vail_tls",
     ));
     try std.testing.expect(@hasDecl(
