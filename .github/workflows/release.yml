@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: netz-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: netz
+    steps:
+      - name: Checkout netz tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: netz
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require sibling dependency credentials
+        env:
+          DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+        run: |
+          if [ -z "$DEPENDENCIES_TOKEN" ]; then
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail"
+            exit 1
+          fi
+
+      - name: Checkout pinned vail
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vail
+          ref: fc856b91d944bd390dfedc600b8c88ba4b994e6a
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vail
+          persist-credentials: false
+
+      - name: Checkout pinned pbz
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/pbz
+          ref: 6513ef1f8b130b308bd86ba0bd02f6acc2be64e8
+          path: pbz
+          persist-credentials: false
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      - name: Validate tag and package version
+        run: >-
+          python3 tools/release/validate_tag.py
+          --tag "$GITHUB_REF_NAME"
+          --manifest build.zig.zon
+
+      - name: Check formatting
+        run: zig fmt --check build.zig build.zig.zon src test examples benchmarks tools
+
+      - name: Run complete test gate
+        run: zig build test -j1 --summary all
+
+      - name: Build and verify standalone source release
+        run: |
+          zig build verify-release-source --summary all
+          zig build release-source --summary all
+          cd zig-out/artifacts
+          sha256sum -c netz-${GITHUB_REF_NAME#v}-source.tar.gz.sha256
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive=zig-out/artifacts/netz-${GITHUB_REF_NAME#v}-source.tar.gz
+          checksum=$archive.sha256
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$archive" "$checksum" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$archive" "$checksum" \
+              --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+          fi

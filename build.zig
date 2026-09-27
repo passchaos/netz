@@ -1054,6 +1054,13 @@ pub fn build(b: *std.Build) void {
     source_archive_tests.addFileInput(b.path(
         "tools/release/archive_checksum.py",
     ));
+    const release_tag_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/release/validate_tag_test.py",
+    });
+    release_tag_tests.addFileInput(b.path(
+        "tools/release/validate_tag.py",
+    ));
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -1126,6 +1133,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&webtransport_churn_checker_tests.step);
     test_step.dependOn(&quic_datagram_benchmark_checker_tests.step);
     test_step.dependOn(&source_archive_tests.step);
+    test_step.dependOn(&release_tag_tests.step);
     test_step.dependOn(&run_quic_datagram_bench_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{

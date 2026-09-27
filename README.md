@@ -1683,6 +1683,10 @@ outside the workspace layout, builds its
 public-package test, then imports the `.tar.gz` itself through a `file://` URL
 and Zig package hash from a separate consumer package. All hash and build
 stages use isolated local or global Zig caches.
+Pushing a `v<SemVer>` tag whose value exactly matches `build.zig.zon` runs the
+full test gate, rebuilds and verifies these artifacts, and publishes them to an
+idempotently updateable GitHub Release; malformed or version-mismatched tags
+fail before publication.
 
 ## Implementation order
 
