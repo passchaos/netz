@@ -1142,6 +1142,10 @@ authenticate those inputs.
 
 ```sh
 zig build test
+# Build a deterministic source archive containing pinned vail, pbz, and zio.
+zig build release-source
+# Extract the archive in isolation and compile its public-package test.
+zig build verify-release-source
 # Optional accelerated QUIC AES packet protection (requires a built AWS-LC or
 # BoringSSL-compatible prefix with build/crypto/libcrypto.a).
 zig build test -Daws-lc-path=/path/to/aws-lc -Daws-lc-link=true
@@ -1660,9 +1664,14 @@ The development package manifest uses sibling `../vail` and `../pbz` checkouts
 and pins `zio` by immutable URL and content hash. CI checks out exact vail and
 pbz commits into that layout. WebSocket/gRPC DEFLATE support is included under
 `src/internal`, and the published path set includes all example, benchmark,
-documentation, test, and interop sources referenced by the build graph. A
-standalone release archive must vendor or rewrite the two sibling dependencies;
-release packaging automation for that step remains future work.
+documentation, test, and interop sources referenced by the build graph. The
+`release-source` target emits `zig-out/artifacts/netz-<version>-source.tar.gz`
+with those exact vail and pbz commits plus the hash-verified zio package under
+`deps/`, rewrites the release manifest to local paths, and records SHA-256 for
+every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty source
+repositories or dependency revision drift. `verify-release-source` checks the
+archive shape and hashes, extracts it outside the workspace layout, and builds
+its public-package test with isolated local and global Zig caches.
 
 ## Implementation order
 

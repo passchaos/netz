@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const required_zig_version = "0.16.0";
+const package_version = @import("build.zig.zon").version;
 
 pub fn build(b: *std.Build) void {
     comptime {
@@ -78,6 +79,11 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     const run_package_tests = b.addRunArtifact(package_tests);
+    const test_package_step = b.step(
+        "test-package",
+        "Compile and test the public Netz package surface",
+    );
+    test_package_step.dependOn(&run_package_tests.step);
     const parser_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/parser_fuzz_test.zig"),
@@ -1038,6 +1044,13 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/quic_datagram_benchmark_check_test.py",
     });
+    const source_archive_tests = b.addSystemCommand(&.{"python3"});
+    source_archive_tests.addFileArg(b.path(
+        "tools/release/source_archive_test.py",
+    ));
+    source_archive_tests.addFileInput(b.path(
+        "tools/release/source_archive.py",
+    ));
 
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(&run_lib_tests.step);
@@ -1109,6 +1122,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&webtransport_benchmark_checker_tests.step);
     test_step.dependOn(&webtransport_churn_checker_tests.step);
     test_step.dependOn(&quic_datagram_benchmark_checker_tests.step);
+    test_step.dependOn(&source_archive_tests.step);
     test_step.dependOn(&run_quic_datagram_bench_tests.step);
 
     const mqtt_mtls_server = b.addExecutable(.{
@@ -1480,6 +1494,48 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     })) |pbz_dep| {
+        const source_archive = b.addSystemCommand(&.{
+            "python3",
+            "tools/release/source_archive.py",
+            "--root",
+        });
+        source_archive.addDirectoryArg(b.path("."));
+        source_archive.addArg("--vail");
+        source_archive.addDirectoryArg(vail_dep.path("."));
+        source_archive.addArg("--pbz");
+        source_archive.addDirectoryArg(pbz_dep.path("."));
+        source_archive.addArg("--zio");
+        source_archive.addDirectoryArg(zio_dep.path("."));
+        source_archive.addArgs(&.{ "--zig", b.graph.zig_exe });
+        source_archive.addArgs(&.{ "--version", package_version });
+        source_archive.addArg("--output");
+        const source_archive_path = source_archive.addOutputFileArg(
+            b.fmt("netz-{s}-source.tar.gz", .{package_version}),
+        );
+        source_archive.has_side_effects = true;
+        const install_source_archive = b.addInstallFileWithDir(
+            source_archive_path,
+            .{ .custom = "artifacts" },
+            b.fmt("netz-{s}-source.tar.gz", .{package_version}),
+        );
+        const release_source_step = b.step(
+            "release-source",
+            "Build a deterministic source archive with vendored path dependencies",
+        );
+        release_source_step.dependOn(&install_source_archive.step);
+
+        const verify_source_archive = b.addSystemCommand(&.{
+            "python3",
+            "tools/release/verify_source_archive.py",
+        });
+        verify_source_archive.addFileArg(source_archive_path);
+        verify_source_archive.addArgs(&.{ "--zig", b.graph.zig_exe });
+        const verify_release_source_step = b.step(
+            "verify-release-source",
+            "Build and test the source archive outside the workspace layout",
+        );
+        verify_release_source_step.dependOn(&verify_source_archive.step);
+
         const generate_grpc_pbz = b.addSystemCommand(&.{"protoc"});
         generate_grpc_pbz.addPrefixedArtifactArg(
             "--plugin=protoc-gen-pbz=",
