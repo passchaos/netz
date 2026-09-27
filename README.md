@@ -41,6 +41,10 @@ loopback TCP clients for each bounded input. It checks exact-topic
 SUBSCRIBE/UNSUBSCRIBE ordering, live QoS 0 fanout, retained write, replacement,
 deletion and Retain Handling 0 replay against an independent delivery model,
 using PINGREQ/PINGRESP as deterministic no-sleep barriers.
+`zig build fuzz-mqtt-tls-live-broker` runs the same broker model through three
+certificate-pinned native TLS 1.3 clients, requires `mqtt` ALPN and
+AES-128-GCM/SHA-256, and rotates traffic keys in both directions before the
+modeled publishes and subscription changes.
 `zig build fuzz-mqtt-reconnect` drives a persistent reconnect client against a
 scripted real TCP peer. It verifies QoS 1/2 completion, lost-ACK PUBLISH replay
 with stable Packet Identifier and DUP, PUBREL-only recovery, fresh-Session
@@ -115,14 +119,15 @@ After all four protocol combinations warm retained capacity, every generation
 must return connection, pending-handshake, CID-route, and allocator live-byte
 state to the same baseline; final endpoint teardown must return live bytes to
 zero. Multi-hour, high-concurrency stability remains outside these bounded
-models. The pinned GitHub Actions workflow replays all twenty-seven
+models. The pinned GitHub Actions workflow replays all twenty-eight
 corpora and the complete test gate on pushes and pull requests, then runs the
-twenty-seven coverage-guided targets
+twenty-eight coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
-sessions, the WebSocket H3 target to 128 authenticated sessions,
-ordinary live MQTT targets to 128 real-network runs, inbound/outbound durable
+sessions, the WebSocket H3 target to 128 authenticated sessions, ordinary live
+MQTT targets to 128 real-network runs, the TLS live-broker target to 32
+authenticated runs, inbound/outbound durable
 MQTT bridge QoS 2 to 64/32 runs, the WebTransport endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000

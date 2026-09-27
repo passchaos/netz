@@ -1560,6 +1560,11 @@ checks ordered exact-topic SUBSCRIBE/UNSUBSCRIBE, live QoS 0 publication,
 retained write/replacement/deletion and Retain Handling 0 replay. Explicit
 PINGREQ/PINGRESP barriers prove each expected queue is complete without timing
 sleeps, including a final empty barrier that rejects delayed extra delivery.
+`fuzz-mqtt-tls-live-broker` reuses that exact state oracle with the production
+heterogeneous-listener broker path and three certificate-pinned native TLS 1.3
+clients. It requires `mqtt` ALPN, AES-128-GCM/SHA-256 metadata, and one
+reciprocal KeyUpdate per connection before subscriptions, retained mutations,
+delivery ordering, and PING barriers proceed.
 `fuzz-mqtt-reconnect` separately drives the production reconnect Client against
 a scripted real TCP peer across one bounded operation history. It checks QoS 1
 and QoS 2 success, lost-PUBACK/PUBREC PUBLISH replay with a stable Packet
