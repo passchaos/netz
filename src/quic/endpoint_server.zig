@@ -126,6 +126,7 @@ const Admission = struct {
         quic.endpoint_dispatcher.default_server_connection_id_len
     ]u8 = undefined,
     preferred_endpoints: PreferredEndpointSet = .{},
+    version: quic.Version,
     deadline_ns: u64,
     registered: bool = true,
     initial_owned: bool = true,
@@ -1556,6 +1557,7 @@ pub const Server = struct {
             .initial = event.takeNewInitial().?,
             .server_connection_id = undefined,
             .preferred_endpoints = self.preferred_endpoints,
+            .version = @enumFromInt(initial.version),
             .deadline_ns = handshakeDeadlineNs(
                 self.endpoint.io,
                 self.options.handshake_timeout_ms,
@@ -1769,6 +1771,7 @@ fn runWorker(
 ) std.Io.Cancelable!void {
     var options = context.options;
     options.local_connection_id = &admission.server_connection_id;
+    options.version = admission.version;
     if (admission.preferred_endpoints.present()) {
         const key = options.initial_one_rtt_config
             .local_stateless_reset_key orelse unreachable;

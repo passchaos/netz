@@ -603,10 +603,16 @@ test "QUIC endpoint server routes two authenticated connections on one socket" {
             random[0] +%= self.index;
             var secret = [_]u8{0x70} ** 32;
             secret[0] +%= self.index;
+            const version: quic.Version = if (self.index == 0)
+                .version_1
+            else
+                .version_2;
             var established = try quic.handshake.connectWithTimeout(
                 &endpoint,
                 self.peer,
                 .{
+                    .version = version,
+                    .available_versions = &.{version},
                     .original_destination_connection_id = &original_dcid,
                     .local_connection_id = &client_cid,
                     .server_name = "localhost",

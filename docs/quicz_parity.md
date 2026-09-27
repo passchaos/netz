@@ -65,8 +65,14 @@ bidirectional stream traffic after path changes. `fuzz-quic-handshake` covers
 the integrated QUIC/TLS layer across v1/v2, AES-128/SHA-256 and
 AES-256/SHA-384, X25519/P-256/P-384, first-flight loss and corruption on either
 side, Retry, bounded timeout, and post-handshake 1-RTT traffic. Long-running
-connection limits and concurrent event-loop ownership remain outside these
-bounded fuzz models.
+connection limits remain outside these bounded fuzz models. The companion
+`fuzz-quic-endpoint` target adds four authenticated v1/v2 clients and
+AES-128/SHA-256 or AES-256/SHA-384 across one server-owned UDP socket. Its
+two-connection admission cap is hit and surfaced before each removal; the same
+waiting client is then admitted, exchanges an isolated STREAM/FIN echo, and the
+old CID is observed only as unrouted traffic. The target also found and fixed
+shared-endpoint workers defaulting every admitted v2 Initial back to v1 instead
+of preserving the dispatcher's authenticated version choice.
 The first extended run exposed an RFC 9001 Section 6.2 state conflation: netz
 rejected a valid peer update after it had sent the required new-phase ACK merely
 because that ACK packet had not itself been acknowledged. Receive-update

@@ -105,11 +105,14 @@ NAT rebinding, and bidirectional stream traffic after path changes. The QUIC
 targets are joined by `zig build fuzz-quic-handshake`, which negotiates QUIC
 v1/v2, AES-128/SHA-256 or AES-256/SHA-384, and X25519/P-256/P-384 while
 recovering from dropped or authentication-failed client/server flights and
-validating Retry, bounded timeout, and post-handshake 1-RTT traffic. Long-running
-connection limits and concurrent event-loop ownership remain outside these
-bounded fuzz models. The pinned GitHub Actions workflow replays all twenty-six
+validating Retry, bounded timeout, and post-handshake 1-RTT traffic.
+`fuzz-quic-endpoint` runs four authenticated v1/v2 clients against one
+socket-owning endpoint with a two-connection limit, verifies limit rejection,
+removal and retry admission, exact per-connection STREAM routing, and stale-CID
+isolation. Longer-running resource stability remains outside these bounded fuzz
+models. The pinned GitHub Actions workflow replays all twenty-seven
 corpora and the complete test gate on pushes and pull requests, then runs the
-twenty-six coverage-guided targets
+twenty-seven coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
@@ -117,8 +120,8 @@ sessions, the WebSocket H3 target to 128 authenticated sessions,
 ordinary live MQTT targets to 128 real-network runs, inbound/outbound durable
 MQTT bridge QoS 2 to 64/32 runs, the WebTransport endpoint target to 32
 two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
-to 32 runs, and the in-memory targets to 10,000 iterations. A manual `fuzz_runs` value
-overrides all targets. Because
+and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
+iterations. A manual `fuzz_runs` value overrides all targets. Because
 the source
 checkout currently uses sibling `../vail` and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
