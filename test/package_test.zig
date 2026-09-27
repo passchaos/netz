@@ -5777,12 +5777,24 @@ test "public modules are reachable" {
         netz.mqtt.runtime,
         "PendingAcceptedClient",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "finishWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.PendingAcceptedClient,
+        "finishWithDeadline",
+    ));
     try std.testing.expect(@hasField(
         netz.mqtt.runtime.AcceptOptions,
         "assigned_client_identifier",
     ));
     try std.testing.expect(@hasField(netz.mqtt.runtime.Connection, "max_outgoing_inflight"));
     try std.testing.expect(@hasDecl(netz.mqtt.runtime.Connection, "readPubAck"));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "writeConnAckWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "readConnectWithDeadline",

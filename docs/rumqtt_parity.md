@@ -1687,8 +1687,9 @@ awake-clock domain before sending PINGREQ, consuming a queued event, or reading
 transport bytes, so a mismatched timestamp cannot mutate protocol state. Current
 MQTT-over-TLS server accept APIs also carry one caller-owned deadline through
 TCP listener acceptance, trusted PROXY parsing, the TLS 1.3 handshake, and
-complete MQTT CONNECT admission; configured proxy, TLS, and CONNECT limits can
-only shorten it. A timed-out accept closes a concurrently completed socket that
+complete MQTT CONNECT admission and the final CONNACK write; configured proxy,
+TLS, and CONNECT limits can only shorten it. A timed-out accept closes a
+concurrently completed socket that
 lost the timer race, so it cannot consume the next caller's connection.
 Raw TCP server accept and already-accepted-stream APIs expose the same bounded
 admission contract, including listener acceptance and a shared budget with a

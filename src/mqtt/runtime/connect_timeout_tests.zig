@@ -124,6 +124,76 @@ test "MQTT server caller timeout bounds the complete CONNECT" {
     try std.testing.expectEqual(error.Timeout, shared.err.?);
 }
 
+test "MQTT pending accept rejects an expired CONNACK deadline before writing" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const ClientState = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        address: net.IpAddress,
+        connected: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var connection = runtime.Client.connectWithTimeout(
+                self.allocator,
+                self.io,
+                self.address,
+                .{ .client_id = "bounded-connack" },
+                .fromSeconds(2),
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer connection.close();
+            self.connected = true;
+        }
+    };
+    var client = ClientState{
+        .allocator = allocator,
+        .io = io,
+        .address = server.address(),
+    };
+    var client_future = try std.Io.concurrent(io, ClientState.run, .{&client});
+    var client_done = false;
+    defer if (!client_done) client_future.cancel(io);
+
+    var pending = try server.acceptPendingWithTimeout(
+        .{ .connect_timeout = .fromSeconds(1) },
+        .fromSeconds(1),
+    );
+    var pending_owned = true;
+    defer if (pending_owned) pending.deinit(allocator);
+    try std.testing.expectError(
+        error.Timeout,
+        pending.finishWithDeadline(.{}, .{
+            .raw = .zero,
+            .clock = .awake,
+        }),
+    );
+    try std.testing.expect(pending.connection.isUsable());
+
+    var accepted = try pending.finishWithTimeout(.{}, .fromSeconds(1));
+    pending_owned = false;
+    defer accepted.deinit(allocator);
+    client_future.await(io);
+    client_done = true;
+    if (client.err) |err| return err;
+    try std.testing.expect(client.connected);
+}
+
 test "MQTT zero CONNECT timeout fails before reading" {
     var connection = runtime.Connection{
         .allocator = std.testing.allocator,

@@ -90,7 +90,7 @@ pub const Server = struct {
     ) mqtt_runtime.Error!mqtt_runtime.AcceptedClient {
         var pending = try self.acceptPendingWithDeadline(options, deadline);
         errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return pending.finishWithDeadline(options, deadline);
     }
 
     pub fn acceptWithTimeout(
@@ -99,9 +99,10 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) mqtt_runtime.Error!mqtt_runtime.AcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        var pending = try self.acceptPendingWithTimeout(options, timeout);
-        errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return self.acceptWithDeadline(options, .fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     /// Complete transport setup and parse CONNECT without sending CONNACK.

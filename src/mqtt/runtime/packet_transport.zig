@@ -304,6 +304,69 @@ pub const Transport = union(enum) {
         }
     }
 
+    /// Write one complete MQTT packet under a caller-owned deadline. A
+    /// timeout may leave transport-specific partial state, so protocol
+    /// callers that cannot resume the identical bytes must retire the
+    /// connection.
+    pub fn writePacketWithDeadline(
+        self: *Transport,
+        bytes: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        switch (self.*) {
+            .tcp => |tcp| {
+                var committed: usize = 0;
+                try stream_io.writeAllTrackedWithDeadline(
+                    tcp.io,
+                    tcp.stream,
+                    bytes,
+                    &committed,
+                    deadline,
+                );
+            },
+            .tls => |transport| {
+                var committed: usize = 0;
+                try transport.connection.writeAllWithDeadline(
+                    bytes,
+                    &committed,
+                    deadline,
+                );
+            },
+            .tls_vail => |transport| {
+                var committed: usize = 0;
+                try transport.connection.writeAllWithDeadline(
+                    bytes,
+                    &committed,
+                    deadline,
+                );
+            },
+            .tls_server => |transport| {
+                var committed: usize = 0;
+                try transport.connection.writeAllWithDeadline(
+                    bytes,
+                    &committed,
+                    deadline,
+                );
+            },
+            .websocket => |*ws| {
+                var progress: websocket_runtime.MessageWriteProgress = .{};
+                if (ws.connection.role == .client) {
+                    try ws.connection.sendBinaryInPlaceWithDeadline(
+                        bytes,
+                        &progress,
+                        deadline,
+                    );
+                } else {
+                    try ws.connection.sendBinaryWithDeadline(
+                        bytes,
+                        &progress,
+                        deadline,
+                    );
+                }
+            },
+        }
+    }
+
     /// Write a packet prefix and borrowed application payload as one logical
     /// transport operation. Stream transports use scatter/gather directly;
     /// WebSocket emits one binary frame and applies one continuous client mask

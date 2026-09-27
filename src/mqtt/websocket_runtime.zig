@@ -89,7 +89,7 @@ pub const Server = struct {
     ) runtime.Error!runtime.AcceptedClient {
         var pending = try self.acceptPendingWithDeadline(options, deadline);
         errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return pending.finishWithDeadline(options, deadline);
     }
 
     pub fn acceptWithTimeout(
@@ -98,9 +98,10 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) runtime.Error!runtime.AcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        var pending = try self.acceptPendingWithTimeout(options, timeout);
-        errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return self.acceptWithDeadline(options, .fromNow(
+            self.websocket_server.http.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn acceptPendingWithDeadline(
@@ -346,7 +347,7 @@ pub const UnixServer = struct {
     ) runtime.Error!runtime.AcceptedClient {
         var pending = try self.acceptPendingWithDeadline(options, deadline);
         errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return pending.finishWithDeadline(options, deadline);
     }
 
     pub fn acceptWithTimeout(
@@ -355,9 +356,10 @@ pub const UnixServer = struct {
         timeout: std.Io.Duration,
     ) runtime.Error!runtime.AcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        var pending = try self.acceptPendingWithTimeout(options, timeout);
-        errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return self.acceptWithDeadline(options, .fromNow(
+            self.websocket_server.http.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn acceptPendingWithDeadline(
@@ -578,7 +580,7 @@ pub const TlsServer = struct {
     ) runtime.Error!runtime.AcceptedClient {
         var pending = try self.acceptPendingWithDeadline(options, deadline);
         errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return pending.finishWithDeadline(options, deadline);
     }
 
     pub fn acceptWithTimeout(
@@ -587,9 +589,10 @@ pub const TlsServer = struct {
         timeout: std.Io.Duration,
     ) runtime.Error!runtime.AcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        var pending = try self.acceptPendingWithTimeout(options, timeout);
-        errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return self.acceptWithDeadline(options, .fromNow(
+            self.websocket_server.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn acceptPendingWithDeadline(

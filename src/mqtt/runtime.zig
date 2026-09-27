@@ -187,7 +187,7 @@ pub const Server = struct {
     ) Error!AcceptedClient {
         var pending = try self.acceptPendingWithDeadline(options, deadline);
         errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return pending.finishWithDeadline(options, deadline);
     }
 
     pub fn acceptWithTimeout(
@@ -196,9 +196,10 @@ pub const Server = struct {
         timeout: std.Io.Duration,
     ) Error!AcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        var pending = try self.acceptPendingWithTimeout(options, timeout);
-        errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return self.acceptWithDeadline(options, .fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn acceptPending(
@@ -444,7 +445,7 @@ pub const UnixServer = struct {
     ) Error!AcceptedClient {
         var pending = try self.acceptPendingWithDeadline(options, deadline);
         errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return pending.finishWithDeadline(options, deadline);
     }
 
     pub fn acceptWithTimeout(
@@ -453,9 +454,10 @@ pub const UnixServer = struct {
         timeout: std.Io.Duration,
     ) Error!AcceptedClient {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        var pending = try self.acceptPendingWithTimeout(options, timeout);
-        errdefer pending.deinit(self.allocator);
-        return pending.finish(options);
+        return self.acceptWithDeadline(options, .fromNow(
+            self.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
     }
 
     pub fn acceptPending(
@@ -1046,6 +1048,38 @@ pub const PendingAcceptedClient = struct {
         self: *PendingAcceptedClient,
         options: AcceptOptions,
     ) Error!AcceptedClient {
+        return self.finishMaybeBefore(options, null);
+    }
+
+    pub fn finishWithTimeout(
+        self: *PendingAcceptedClient,
+        options: AcceptOptions,
+        timeout: std.Io.Duration,
+    ) Error!AcceptedClient {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishWithDeadline(options, .fromNow(
+            self.connection.transport.ioHandle(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn finishWithDeadline(
+        self: *PendingAcceptedClient,
+        options: AcceptOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!AcceptedClient {
+        _ = try deadline_policy.usableAwake(
+            self.connection.transport.ioHandle(),
+            deadline,
+        );
+        return self.finishMaybeBefore(options, deadline);
+    }
+
+    fn finishMaybeBefore(
+        self: *PendingAcceptedClient,
+        options: AcceptOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!AcceptedClient {
         const resolved = try self.resolvedOptions(options);
         self.connection.peer_topic_alias_maximum = @min(
             self.connection.peer_topic_alias_maximum,
@@ -1109,7 +1143,7 @@ pub const PendingAcceptedClient = struct {
             } };
             property_count += 1;
         }
-        try self.connection.writeConnAck(.{
+        const connack_options: ConnAckOptions = .{
             .session_present = resolved.session_present,
             .reason_code = resolved.reason_code,
             .properties = properties[0..property_count],
@@ -1121,7 +1155,14 @@ pub const PendingAcceptedClient = struct {
             .wildcard_subscription_available = resolved.wildcard_subscription_available,
             .subscription_identifier_available = resolved.subscription_identifier_available,
             .shared_subscription_available = resolved.shared_subscription_available,
-        });
+        };
+        if (deadline) |absolute|
+            try self.connection.writeConnAckWithDeadline(
+                connack_options,
+                absolute,
+            )
+        else
+            try self.connection.writeConnAck(connack_options);
         if (resolved.reason_code == 0 and
             self.connection.authentication.phase == .authenticating)
         {
@@ -3125,6 +3166,26 @@ pub const Connection = struct {
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
+        return self.writeConnAckMaybeBefore(options, null);
+    }
+
+    pub fn writeConnAckWithDeadline(
+        self: *Connection,
+        options: ConnAckOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
+        return self.writeConnAckMaybeBefore(options, deadline);
+    }
+
+    fn writeConnAckMaybeBefore(
+        self: *Connection,
+        options: ConnAckOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
         try self.validateOutgoingPacketType(.connack);
         self.write_property_scratch.clearRetainingCapacity();
         try self.write_property_scratch.appendSlice(
@@ -3195,7 +3256,10 @@ pub const Connection = struct {
             );
             break :blk self.write_scratch.items;
         };
-        try self.writePacket(bytes);
+        if (deadline) |absolute|
+            try self.writePacketWithDeadline(bytes, absolute)
+        else
+            try self.writePacket(bytes);
         if (accepted) {
             // This is the Server's own inbound QoS 1/2 limit. MQTT 5 also
             // advertises it as Receive Maximum; MQTT 3.1.1 has no property,
@@ -5171,6 +5235,30 @@ pub const Connection = struct {
         );
         if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
         try self.writeTransportPacket(bytes);
+        self.recordPacketSent(bytes.len);
+    }
+
+    fn writePacketWithDeadline(
+        self: *Connection,
+        bytes: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        _ = try deadline_policy.usableAwake(
+            self.transport.ioHandle(),
+            deadline,
+        );
+        const fixed = try mqtt.FixedHeader.parse(bytes);
+        try mqtt.validatePacketFlags(self.protocol, fixed);
+        try self.validateOutgoingPacketType(fixed.packet_type);
+        try self.authentication.ensurePacketAllowed(fixed.packet_type);
+        if (bytes.len > self.peer_max_packet_size) {
+            return error.OutgoingPacketTooLarge;
+        }
+        self.transport.writePacketWithDeadline(bytes, deadline) catch |err| {
+            self.transport_unusable.store(true, .release);
+            return err;
+        };
         self.recordPacketSent(bytes.len);
     }
 
