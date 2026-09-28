@@ -5700,6 +5700,23 @@ A CPU-0 fixed-binary 4-KiB echo check after the extraction produced
 too wide for a performance verdict, so it is retained only as a functional
 benchmark pass and does not replace the isolated ranges above.
 
+The current-key borrowed visitor receive path now prevalidates each packet
+number once and carries that fact into ACK-range commit. Ordered traffic can
+extend the newest range directly; reordered packets retain the complete
+bounded-range validation, duplicate rejection, range merge, and ECN accounting
+paths. A deterministic tracker regression covers continuous extension, a gap,
+gap closure, all ECN codepoints, and a duplicate after merge. The existing
+connection-level regression independently verifies that a duplicate packet is
+dropped before STREAM side effects or visitor delivery.
+
+Five order-alternated fixed-binary runs on 2026-09-28 used the same
+`bench-quic-one-rtt-receive` visitor/STREAM workload with 500 warmups and
+20,000 iterations (1,080,000 packets per arm). Baseline `34c38fb4` measured
+2,891-2,924 ns/packet with a 2,911 ns median; candidate `0e722992` measured
+2,876-2,899 ns/packet with a 2,891 ns median. The candidate won all five pairs
+and reduced the median by 0.7%. This is a same-host internal receive-hot-path
+result, not an end-to-end or cross-stack throughput claim.
+
 ## Gaps before a completion audit can pass
 
 - Extend the new cross-process raw QUIC aggregate matrix into connection-count
