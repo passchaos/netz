@@ -19,6 +19,14 @@ pub const EndpointTimerDeadline = struct {
 };
 
 pub const EndpointTimers = struct {
+    /// Keep small endpoints on the lower-constant-cost unordered array. Large
+    /// endpoints use the same storage as an indexed min-heap so postponing or
+    /// removing the current minimum does not scan every connection. Separate
+    /// enter/leave thresholds prevent connection churn around the boundary
+    /// from repeatedly rebuilding the representation.
+    const heap_activation_count: usize = 128;
+    const heap_deactivation_count: usize = 64;
+
     allocator: std.mem.Allocator,
     entries: std.ArrayList(EndpointTimerDeadline) = .empty,
     /// Maps endpoint-owned connection handles to their current slot in
@@ -28,6 +36,7 @@ pub const EndpointTimers = struct {
     /// must repair the moved connection's slot before future lookups.
     entry_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     earliest_index: ?usize = null,
+    heap_enabled: bool = false,
     recompute_count: if (builtin.is_test) usize else void =
         if (builtin.is_test) 0 else {},
 
@@ -84,15 +93,29 @@ pub const EndpointTimers = struct {
                 const existing_timer = self.entries.items[existing].timer;
                 if (std.meta.eql(existing_timer, deadline)) return;
                 self.entries.items[existing] = entry;
-                self.refreshEarliestAfterUpdate(
-                    existing,
-                    existing_timer.deadline_ns,
-                );
+                if (self.heap_enabled) {
+                    self.refreshHeapAfterUpdate(
+                        existing,
+                        existing_timer.deadline_ns,
+                    );
+                } else {
+                    self.refreshEarliestAfterUpdate(
+                        existing,
+                        existing_timer.deadline_ns,
+                    );
+                }
             } else {
                 errdefer _ = self.entry_index.remove(connection_id);
                 try self.entries.ensureUnusedCapacity(self.allocator, 1);
                 self.appendEntryAssumeCapacity(entry, slot.value_ptr);
-                self.considerEarliestIndex(self.entries.items.len - 1);
+                if (self.heap_enabled) {
+                    self.siftUp(self.entries.items.len - 1);
+                    self.earliest_index = 0;
+                } else if (self.entries.items.len >= heap_activation_count) {
+                    self.enableHeap();
+                } else {
+                    self.considerEarliestIndex(self.entries.items.len - 1);
+                }
             }
             return;
         }
@@ -137,6 +160,9 @@ pub const EndpointTimers = struct {
         const earliest = self.earliest_index orelse return 0;
         std.debug.assert(earliest < self.entries.items.len);
         if (self.entries.items[earliest].timer.deadline_ns > now_ns) return 0;
+        if (self.heap_enabled) {
+            return self.dueHeapConnectionIdsInto(now_ns, output);
+        }
 
         var due_count: usize = 0;
         for (self.entries.items) |entry| {
@@ -144,6 +170,44 @@ pub const EndpointTimers = struct {
             if (due_count == output.len) break;
             output[due_count] = entry.connection_id;
             due_count += 1;
+        }
+        return due_count;
+    }
+
+    fn dueHeapConnectionIdsInto(
+        self: *const EndpointTimers,
+        now_ns: u64,
+        output: []u64,
+    ) usize {
+        std.debug.assert(self.heap_enabled);
+        std.debug.assert(self.entries.items.len != 0);
+        var pending: [@bitSizeOf(usize) + 1]usize = undefined;
+        var pending_count: usize = 1;
+        pending[0] = 0;
+        var due_count: usize = 0;
+        while (pending_count != 0 and due_count != output.len) {
+            pending_count -= 1;
+            const index = pending[pending_count];
+            const entry = self.entries.items[index];
+            if (entry.timer.deadline_ns > now_ns) continue;
+            output[due_count] = entry.connection_id;
+            due_count += 1;
+
+            // In a min-heap every descendant is no earlier than its parent.
+            // Visit only children of due entries and let the deadline check
+            // prune complete future subtrees. Depth-first traversal needs at
+            // most one pending sibling per machine-word-sized heap level.
+            if (index > (self.entries.items.len - 2) / 2) continue;
+            const left = index * 2 + 1;
+            const right = left + 1;
+            if (right < self.entries.items.len) {
+                std.debug.assert(pending_count < pending.len);
+                pending[pending_count] = right;
+                pending_count += 1;
+            }
+            std.debug.assert(pending_count < pending.len);
+            pending[pending_count] = left;
+            pending_count += 1;
         }
         return due_count;
     }
@@ -218,7 +282,110 @@ pub const EndpointTimers = struct {
             const moved = self.entries.items[index];
             self.entry_index.getPtr(moved.connection_id).?.* = index;
         }
-        self.refreshEarliestAfterSwapRemove(index, old_len);
+        if (self.heap_enabled) {
+            if (self.entries.items.len < heap_deactivation_count) {
+                self.heap_enabled = false;
+                self.recomputeEarliest();
+            } else {
+                if (index < self.entries.items.len) {
+                    self.restoreHeapAt(index);
+                }
+                self.earliest_index = 0;
+            }
+        } else {
+            self.refreshEarliestAfterSwapRemove(index, old_len);
+        }
+    }
+
+    fn enableHeap(self: *EndpointTimers) void {
+        std.debug.assert(!self.heap_enabled);
+        std.debug.assert(self.entries.items.len >= heap_activation_count);
+        var parent = self.entries.items.len / 2;
+        while (parent != 0) {
+            parent -= 1;
+            self.siftDown(parent);
+        }
+        self.heap_enabled = true;
+        self.earliest_index = 0;
+    }
+
+    fn refreshHeapAfterUpdate(
+        self: *EndpointTimers,
+        updated_index: usize,
+        previous_deadline_ns: u64,
+    ) void {
+        const deadline_ns =
+            self.entries.items[updated_index].timer.deadline_ns;
+        if (updated_index == 0 and deadline_ns <= previous_deadline_ns) {
+            self.earliest_index = 0;
+            return;
+        }
+        if (deadline_ns < previous_deadline_ns) {
+            self.siftUp(updated_index);
+        } else if (deadline_ns > previous_deadline_ns) {
+            self.siftDown(updated_index);
+        }
+        self.earliest_index = 0;
+    }
+
+    fn restoreHeapAt(self: *EndpointTimers, index: usize) void {
+        if (index != 0) {
+            const parent = (index - 1) / 2;
+            if (deadlineLess(
+                self.entries.items[index],
+                self.entries.items[parent],
+            )) {
+                self.siftUp(index);
+                return;
+            }
+        }
+        self.siftDown(index);
+    }
+
+    fn siftUp(self: *EndpointTimers, start: usize) void {
+        var index = start;
+        while (index != 0) {
+            const parent = (index - 1) / 2;
+            if (!deadlineLess(
+                self.entries.items[index],
+                self.entries.items[parent],
+            )) return;
+            self.swapEntries(index, parent);
+            index = parent;
+        }
+    }
+
+    fn siftDown(self: *EndpointTimers, start: usize) void {
+        var index = start;
+        while (true) {
+            if (index >= self.entries.items.len / 2) return;
+            const left = index * 2 + 1;
+            const right = left + 1;
+            const child = if (right < self.entries.items.len and deadlineLess(
+                self.entries.items[right],
+                self.entries.items[left],
+            )) right else left;
+            if (!deadlineLess(
+                self.entries.items[child],
+                self.entries.items[index],
+            )) return;
+            self.swapEntries(index, child);
+            index = child;
+        }
+    }
+
+    fn swapEntries(self: *EndpointTimers, a: usize, b: usize) void {
+        std.mem.swap(
+            EndpointTimerDeadline,
+            &self.entries.items[a],
+            &self.entries.items[b],
+        );
+        self.entry_index.getPtr(
+            self.entries.items[a].connection_id,
+        ).?.* = a;
+        self.entry_index.getPtr(
+            self.entries.items[b].connection_id,
+        ).?.* = b;
     }
 
     fn refreshEarliestAfterSwapRemove(
@@ -276,6 +443,10 @@ pub const EndpointTimers = struct {
         self.earliest_index = earliest;
     }
 };
+
+fn deadlineLess(a: EndpointTimerDeadline, b: EndpointTimerDeadline) bool {
+    return a.timer.deadline_ns < b.timer.deadline_ns;
+}
 
 const FakeConnection = struct {
     timer: ?one_rtt.TimerDeadline = null,
@@ -391,6 +562,198 @@ test "QUIC endpoint timers retain earliest for non-later update" {
     try timers.update(1, .{ .kind = .keep_alive, .deadline_ns = 300 });
     try std.testing.expectEqual(recomputes_before + 1, timers.recompute_count);
     try std.testing.expectEqual(@as(u64, 2), timers.earliestDeadline().?.connection_id);
+}
+
+test "QUIC endpoint timers adapt to large indexed heap schedules" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    try timers.ensureCapacity(EndpointTimers.heap_activation_count);
+    for (0..EndpointTimers.heap_activation_count) |connection_id| {
+        try timers.update(
+            @intCast(connection_id),
+            .{
+                .kind = .idle_timeout,
+                .deadline_ns = @intCast(connection_id + 100),
+            },
+        );
+    }
+    try std.testing.expect(timers.heap_enabled);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        timers.earliestDeadline().?.connection_id,
+    );
+
+    const recomputes_before = timers.recompute_count;
+    try timers.update(0, .{ .kind = .pto, .deadline_ns = 10_000 });
+    try std.testing.expectEqual(recomputes_before, timers.recompute_count);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        timers.earliestDeadline().?.connection_id,
+    );
+    try timers.update(127, .{ .kind = .ack_delay, .deadline_ns = 1 });
+    try std.testing.expectEqual(
+        @as(u64, 127),
+        timers.earliestDeadline().?.connection_id,
+    );
+    try std.testing.expect(timers.disarmConnection(127));
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        timers.earliestDeadline().?.connection_id,
+    );
+
+    var connection_id: u64 = 126;
+    while (timers.count() >= EndpointTimers.heap_deactivation_count) {
+        if (connection_id != 1) {
+            try std.testing.expect(timers.disarmConnection(connection_id));
+        }
+        connection_id -= 1;
+    }
+    try std.testing.expect(!timers.heap_enabled);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        timers.earliestDeadline().?.connection_id,
+    );
+    try std.testing.expectEqual(
+        @as(u64, 10_000),
+        timers.deadlineForConnection(0).?.timer.deadline_ns,
+    );
+}
+
+test "QUIC endpoint timer adaptive schedule matches deterministic model" {
+    const allocator = std.testing.allocator;
+    const connection_count = 256;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+    try timers.ensureCapacity(connection_count);
+
+    var model: [connection_count]?u64 = @splat(null);
+    var due_storage: [connection_count]u64 = undefined;
+    var due_seen: [connection_count]bool = undefined;
+    for (0..connection_count) |connection_id| {
+        const deadline_ns = @as(u64, @intCast(connection_count - connection_id));
+        model[connection_id] = deadline_ns;
+        try timers.update(
+            @intCast(connection_id),
+            .{ .kind = .idle_timeout, .deadline_ns = deadline_ns },
+        );
+    }
+
+    var state: u64 = 0x4d595df4d0f33173;
+    for (0..5_000) |operation| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        const connection_id: usize = @intCast(state % connection_count);
+        if ((state >> 8) & 3 == 0) {
+            const expected = model[connection_id] != null;
+            try std.testing.expectEqual(
+                expected,
+                timers.disarmConnection(@intCast(connection_id)),
+            );
+            model[connection_id] = null;
+        } else {
+            const deadline_ns = (state >> 16) % 10_000;
+            const kind: one_rtt.TimerDeadlineKind = if ((state & 1) == 0)
+                .pto
+            else
+                .idle_timeout;
+            try timers.update(
+                @intCast(connection_id),
+                .{ .kind = kind, .deadline_ns = deadline_ns },
+            );
+            model[connection_id] = deadline_ns;
+        }
+
+        var expected_count: usize = 0;
+        var expected_earliest: ?u64 = null;
+        for (model) |deadline_ns| {
+            const deadline = deadline_ns orelse continue;
+            expected_count += 1;
+            expected_earliest = if (expected_earliest) |current|
+                @min(current, deadline)
+            else
+                deadline;
+        }
+        try std.testing.expectEqual(expected_count, timers.count());
+        if (expected_earliest) |deadline_ns| {
+            const earliest = timers.earliestDeadline().?;
+            try std.testing.expectEqual(deadline_ns, earliest.timer.deadline_ns);
+            try std.testing.expectEqual(
+                deadline_ns,
+                model[@intCast(earliest.connection_id)].?,
+            );
+        } else {
+            try std.testing.expect(timers.earliestDeadline() == null);
+        }
+
+        if (operation % 97 == 0) {
+            const now_ns = (state >> 32) % 10_000;
+            @memset(&due_seen, false);
+            const due = timers.dueConnectionIdsInto(now_ns, &due_storage);
+            var expected_due: usize = 0;
+            for (model) |deadline_ns| {
+                if (deadline_ns) |deadline| {
+                    expected_due += @intFromBool(deadline <= now_ns);
+                }
+            }
+            try std.testing.expectEqual(expected_due, due);
+            for (due_storage[0..due]) |due_connection_id| {
+                const due_index: usize = @intCast(due_connection_id);
+                try std.testing.expect(due_index < connection_count);
+                try std.testing.expect(!due_seen[due_index]);
+                try std.testing.expect(model[due_index].? <= now_ns);
+                due_seen[due_index] = true;
+            }
+            for (timers.entries.items, 0..) |entry, index| {
+                try std.testing.expectEqual(
+                    @as(?usize, index),
+                    timers.entry_index.get(entry.connection_id),
+                );
+                try std.testing.expectEqual(
+                    model[@intCast(entry.connection_id)].?,
+                    entry.timer.deadline_ns,
+                );
+                if (timers.heap_enabled and index != 0) {
+                    try std.testing.expect(!deadlineLess(
+                        entry,
+                        timers.entries.items[(index - 1) / 2],
+                    ));
+                }
+            }
+        }
+    }
+}
+
+test "QUIC endpoint timer heap prunes future due subtrees" {
+    const allocator = std.testing.allocator;
+    var timers = EndpointTimers.init(allocator);
+    defer timers.deinit();
+
+    try timers.ensureCapacity(EndpointTimers.heap_activation_count);
+    for (0..EndpointTimers.heap_activation_count) |connection_id| {
+        try timers.update(
+            @intCast(connection_id),
+            .{
+                .kind = .idle_timeout,
+                .deadline_ns = @intCast(connection_id + 1),
+            },
+        );
+    }
+    var output: [17]u64 = undefined;
+    const due = timers.dueConnectionIdsInto(10, &output);
+    try std.testing.expectEqual(@as(usize, 10), due);
+    var seen: [10]bool = @splat(false);
+    for (output[0..due]) |connection_id| {
+        try std.testing.expect(connection_id < seen.len);
+        try std.testing.expect(!seen[@intCast(connection_id)]);
+        seen[@intCast(connection_id)] = true;
+    }
+    try std.testing.expect(std.mem.allEqual(bool, &seen, true));
+
+    try std.testing.expectEqual(
+        output.len,
+        timers.dueConnectionIdsInto(std.math.maxInt(u64), &output),
+    );
 }
 
 test "QUIC endpoint timers skip service for unarmed connections" {

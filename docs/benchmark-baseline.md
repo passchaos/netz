@@ -3470,6 +3470,38 @@ not retained. These rejected results delimit when a future adaptive structure
 might become worthwhile instead of treating lower asymptotic complexity as a
 performance claim.
 
+That boundary is now implemented adaptively rather than applying a heap to
+every endpoint. Schedules remain in the lower-constant-cost unordered-array
+form below 128 armed connections. At 128 they heapify the same entry storage
+and reuse the existing handle-to-slot map as the heap reverse index; no second
+per-entry allocation or index is introduced. The heap is retained until fewer
+than 64 entries remain, preventing connection churn near the activation point
+from repeatedly rebuilding it. Its due snapshot walks only children of due
+nodes, pruning complete future subtrees while preserving the dispatcher's
+bounded, visit-once snapshot contract.
+
+Five final CPU-0, order-alternated ReleaseFast pairs against parent
+`aa83fa7f`, with two million fast-path iterations and at least 64 million
+examined baseline entries per scan-sensitive case, measured the following
+medians at 1,024 connections: earliest postponement fell from 3,109.39 to
+195.03 ns (15.9x), earliest remove-plus-rearm from 3,172.40 to 226.85 ns
+(14.0x), and one due entry among 1,024 from 409.23 to 4.64 ns (88.2x). A
+non-earliest entry becoming the new minimum rose from 10.10 to 167.36 ns, the
+expected heap-maintenance tradeoff. At 16 connections the adaptive path stays
+in array mode and every order-changing/update median remained within 2% of the
+parent. Direct tests cross both hysteresis thresholds, check the heap and
+handle-index invariants, and compare 5,000 deterministic mixed update/remove
+operations plus due snapshots against a linear model.
+
+The external persistent harness now permits up to 256 connections only for a
+netz/netz shared-server endpoint; independent-socket and cross-stack shapes
+retain the existing 16-connection cap. A ReleaseFast 128-connection smoke over
+one UDP server socket completed both directions with 8,388,608 verified bytes,
+checksum 1,069,547,520, and 128/128 completion. Client upload reached 46.263
+MiB/s with 112 server timer events; server download reached 7.505 MiB/s with
+3,829 timer events. This establishes functional operation across the adaptive
+threshold, not a stable throughput claim from a one-sample short transfer.
+
 The selected follow-up keeps the array/index design and returns immediately
 when an existing connection's timer kind and deadline are both unchanged.
 Three adjacent CPU-0 runs reduced the 1,024-connection unchanged-earliest case

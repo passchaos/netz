@@ -6,6 +6,8 @@ const alpn = "netz-raw-persistent-bench";
 const close_code: u64 = 0;
 const close_reason = "benchmark complete";
 const echo_prelude = "NZQPE1\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+const max_independent_connections: u16 = 16;
+const max_shared_connections: u16 = 256;
 
 const Mode = enum { echo, aggregate };
 const ServerTopology = enum { independent, shared };
@@ -86,8 +88,12 @@ const Config = struct {
     }
 
     fn validate(self: Config) !void {
+        const max_connections: u16 = if (self.server_topology == .shared)
+            max_shared_connections
+        else
+            max_independent_connections;
         if (!validRolePair(self.role_pair) or self.run == 0 or
-            self.connections == 0 or self.connections > 16 or
+            self.connections == 0 or self.connections > max_connections or
             self.warmup > 100_000 or self.iterations == 0 or
             self.iterations > 1_000_000 or
             (self.streams != 1 and self.streams != 4) or
@@ -2015,6 +2021,28 @@ test "persistent QUIC benchmark config rejects ambiguous shapes" {
         endpointTopology(shared),
     );
     try std.testing.expectEqual(@as(u8, 32), shared.shared_receive_batch);
+    const large_shared = try Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=128",
+        "--streams=1",              "--bytes-per-stream=65536",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared",
+    });
+    try std.testing.expectEqual(@as(u16, 128), large_shared.connections);
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",              "--role-pair=netz-client+netz-server",
+        "--sender=client",               "--connections=17",
+        "--streams=1",                   "--bytes-per-stream=65536",
+        "--warmup=0",                    "--iterations=1",
+        "--server-topology=independent",
+    }));
+    try std.testing.expectError(error.InvalidArgument, Config.parse(&.{
+        "--mode=aggregate",         "--role-pair=netz-client+netz-server",
+        "--sender=client",          "--connections=257",
+        "--streams=1",              "--bytes-per-stream=65536",
+        "--warmup=0",               "--iterations=1",
+        "--server-topology=shared",
+    }));
     const shared_download = try Config.parse(&.{
         "--mode=aggregate",         "--role-pair=netz-client+netz-server",
         "--sender=server",          "--connections=4",

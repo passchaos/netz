@@ -89,7 +89,12 @@ if [[ $server_topology == independent && $netz_only != true ]]; then
     exit 127
   fi
 fi
-if (( samples < 1 || samples % 2 == 0 || connections < 1 || connections > 16 ||
+max_connections=16
+if [[ $netz_only == true && $server_topology == shared ]]; then
+  max_connections=256
+fi
+if (( samples < 1 || samples % 2 == 0 || connections < 1 ||
+      connections > max_connections ||
       echo_warmup < 0 || echo_iterations < 1 || payload_bytes < 1 ||
       aggregate_bytes < 1 || chunk_bytes < 1 || chunk_bytes > aggregate_bytes ||
       stream_window < 1 || timeout_ms < 1 )); then
