@@ -15846,7 +15846,9 @@ pub const HandshakeClient = struct {
 
     /// Client-side counterpart to `HandshakeServerSession`'s recovery drain.
     /// It preserves response, push, and detached CONNECT routing while waiting
-    /// for all currently retained reliable sends to be acknowledged.
+    /// for application and control delivery to be acknowledged. Pure receive-
+    /// credit updates remain under QUIC's normal recovery timer, matching the
+    /// server drain without delaying a short-lived client.
     pub fn waitForRecoveryIdleWithTimeout(
         self: *HandshakeClient,
         timeout: std.Io.Duration,
@@ -15867,7 +15869,7 @@ pub const HandshakeClient = struct {
         if (self.callback_reader_active) return error.ConcurrentRead;
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
-        while (self.established.connection.pendingRecoveryCount() != 0) {
+        while (self.established.connection.pendingDeliveryRecovery()) {
             try self.pollControlWithDeadline(deadline);
         }
     }
@@ -32371,6 +32373,7 @@ test {
     _ = @import("runtime/handshake_server_serve_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
     _ = @import("runtime/informational_tests.zig");
+    _ = @import("runtime/recovery_tests.zig");
     _ = @import("runtime/response_scheduler/tests/integration.zig");
     _ = @import("runtime/response_scheduler/tests/protected.zig");
 }

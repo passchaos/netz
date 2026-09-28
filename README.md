@@ -262,10 +262,11 @@ Current protocol coverage includes:
   responses, with a shared allocation-free per-second cache, stack-first header
   views, case-insensitive explicit-field preservation, 1xx exclusion, opt-out
   controls, and no wall-clock dependency in the pure codec; final-response
-  owners can explicitly wait with a timeout/deadline for reliable QUIC recovery
-  to drain before destroying a short-lived session, while `serveConnection`
-  applies one configurable absolute budget across both GOAWAY phases and the
-  recovery drain automatically, and multi-connection
+  owners can explicitly wait with a timeout/deadline for application/control
+  QUIC recovery to drain before destroying a short-lived session, without
+  waiting for ACKs of replaceable receive-credit advertisements, while
+  `serveConnection` applies one configurable absolute budget across both
+  GOAWAY phases and the recovery drain automatically, and multi-connection
   endpoint callbacks resynchronize their send-side PTO timer after handlers;
   promoted sessions reject blocking socket-owning helpers and expose
   transactional one-attempt complete or head/DATA/trailer response paths, with
