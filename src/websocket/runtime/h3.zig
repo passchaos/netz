@@ -5370,16 +5370,25 @@ pub const PendingUpgrade = struct {
                 absolute,
             );
         }
-        try self.h3.startResponse(
-            self.request.stream_id,
-            .{
-                .status = 200,
-                .headers = response_headers,
-                .request_method = "CONNECT",
-                .extended_connect = true,
-            },
-            null,
-        );
+        const response: http3.Response = .{
+            .status = 200,
+            .headers = response_headers,
+            .request_method = "CONNECT",
+            .extended_connect = true,
+        };
+        if (self.deadline) |absolute|
+            try self.h3.startResponseWithDeadline(
+                self.request.stream_id,
+                response,
+                null,
+                absolute,
+            )
+        else
+            try self.h3.startResponse(
+                self.request.stream_id,
+                response,
+                null,
+            );
         const stream_id = self.request.stream_id;
         const options = self.options;
         const selected_protocol = self.selected_protocol;

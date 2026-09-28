@@ -1,10 +1,48 @@
 const std = @import("std");
 const http3 = @import("../../../http3/mod.zig");
+const quic = @import("../../../quic/mod.zig");
 const webtransport = @import("../../mod.zig");
 const runtime = @import("../../runtime.zig");
 const operation_timeout: std.Io.Duration = .fromSeconds(5);
 const large_header_value =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+const AdmissionDeadlineIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+    sleep_calls: usize = 0,
+
+    fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn sleep(
+        context: ?*anyopaque,
+        _: std.Io.Timeout,
+    ) std.Io.Cancelable!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.sleep_calls += 1;
+        return error.Canceled;
+    }
+
+    fn netSend(
+        context: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.send_calls += 1;
+        return self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+    }
+};
 
 fn findHeader(
     headers: []const http3.Qpack.HeaderField,
@@ -340,7 +378,7 @@ test "WebTransport server admission sends explicit rejection response" {
     if (shared.err) |err| return err;
 }
 
-test "WebTransport caller-owned H3 enforces Origin and flushes accepted response ACK" {
+test "WebTransport caller-owned H3 bounds acceptance and flushes response ACK" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -406,6 +444,55 @@ test "WebTransport caller-owned H3 enforces Origin and flushes accepted response
             );
             var allowed_owned = true;
             defer if (allowed_owned) allowed.deinit();
+            const absolute = allowed.deadline orelse
+                return error.TestUnexpectedResult;
+            const original_io = allowed.h3.established.connection.endpoint.io;
+            var fixed = AdmissionDeadlineIo{
+                .delegate = original_io,
+                .now_ns = absolute.raw.nanoseconds - 1,
+            };
+            var vtable = original_io.vtable.*;
+            vtable.now = AdmissionDeadlineIo.now;
+            vtable.sleep = AdmissionDeadlineIo.sleep;
+            vtable.netSend = AdmissionDeadlineIo.netSend;
+            allowed.h3.established.connection.endpoint.io = .{
+                .userdata = &fixed,
+                .vtable = &vtable,
+            };
+            quic.one_rtt.testing.exhaustPacingAt(
+                &allowed.h3.established.connection,
+                @intCast(fixed.now_ns),
+            );
+            const packet_number =
+                allowed.h3.established.connection.next_packet_number;
+            try std.testing.expectError(error.Timeout, allowed.accept());
+            try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
+            try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+            try std.testing.expectEqual(
+                packet_number,
+                allowed.h3.established.connection.next_packet_number,
+            );
+            try std.testing.expect(
+                allowed.h3.streaming_requests.find(
+                    allowed.session_id.value,
+                ) != null,
+            );
+            try std.testing.expect(
+                allowed.h3.outbound_bodies.find(
+                    allowed.session_id.value,
+                ) == null,
+            );
+            try std.testing.expect(
+                !allowed.h3.connect_datagrams.contains(
+                    allowed.session_id.value,
+                ),
+            );
+            allowed.h3.established.connection.endpoint.io = original_io;
+            quic.one_rtt.testing.setPacingBudgetAt(
+                &allowed.h3.established.connection,
+                allowed.h3.established.connection.congestionWindow(),
+                @intCast(std.Io.Clock.awake.now(original_io).nanoseconds),
+            );
             var accepted = try allowed.accept();
             allowed_owned = false;
             h3_owned = false;

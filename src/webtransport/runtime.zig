@@ -4639,19 +4639,17 @@ pub const PendingHandshakeSession = struct {
                 self.session_id.value,
                 connectResponseWithHeaders(prepared_headers.fields),
             );
-        } else {
-            try self.h3.prepareConnectDatagramAssociation(
-                self.session_id.value,
-            );
-            errdefer self.h3.cancelPreparedConnectDatagramAssociation(
-                self.session_id.value,
-            );
-            try self.h3.startResponse(
+        } else if (self.deadline) |absolute| {
+            try self.h3.acceptConnectResponseWithDeadline(
                 self.session_id.value,
                 connectResponseWithHeaders(prepared_headers.fields),
-                null,
+                absolute,
             );
-            try self.h3.detachRequestStream(self.session_id.value);
+        } else {
+            try self.h3.acceptConnectResponse(
+                self.session_id.value,
+                connectResponseWithHeaders(prepared_headers.fields),
+            );
         }
         const h3 = self.h3;
         const request = self.request;

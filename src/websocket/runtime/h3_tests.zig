@@ -6,6 +6,43 @@ const quic = @import("../../quic/mod.zig");
 const large_header_value =
     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+const AdmissionDeadlineIo = struct {
+    delegate: std.Io,
+    now_ns: i96,
+    send_calls: usize = 0,
+    sleep_calls: usize = 0,
+
+    fn now(context: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        return .fromNanoseconds(self.now_ns);
+    }
+
+    fn sleep(
+        context: ?*anyopaque,
+        _: std.Io.Timeout,
+    ) std.Io.Cancelable!void {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.sleep_calls += 1;
+        return error.Canceled;
+    }
+
+    fn netSend(
+        context: ?*anyopaque,
+        socket_handle: std.Io.net.Socket.Handle,
+        messages: []std.Io.net.OutgoingMessage,
+        flags: std.Io.net.SendFlags,
+    ) struct { ?std.Io.net.Socket.SendError, usize } {
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.send_calls += 1;
+        return self.delegate.vtable.netSend(
+            self.delegate.userdata,
+            socket_handle,
+            messages,
+            flags,
+        );
+    }
+};
+
 fn countHeaders(
     headers: []const http3.Qpack.HeaderField,
     name: []const u8,
@@ -17,7 +54,7 @@ fn countHeaders(
     return count;
 }
 
-test "WebSocket HTTP3 carries 80 request and response headers at 1200 MTU" {
+test "WebSocket HTTP3 bounds paced admission with 80 headers at 1200 MTU" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -95,6 +132,46 @@ test "WebSocket HTTP3 carries 80 request and response headers at 1200 MTU" {
                 "https://example.test",
                 pending.header("origin") orelse
                     return error.TestUnexpectedResult,
+            );
+            const absolute = pending.deadline orelse
+                return error.TestUnexpectedResult;
+            const original_io = pending.h3.established.connection.endpoint.io;
+            var fixed = AdmissionDeadlineIo{
+                .delegate = original_io,
+                .now_ns = absolute.raw.nanoseconds - 1,
+            };
+            var vtable = original_io.vtable.*;
+            vtable.now = AdmissionDeadlineIo.now;
+            vtable.sleep = AdmissionDeadlineIo.sleep;
+            vtable.netSend = AdmissionDeadlineIo.netSend;
+            pending.h3.established.connection.endpoint.io = .{
+                .userdata = &fixed,
+                .vtable = &vtable,
+            };
+            quic.one_rtt.testing.exhaustPacingAt(
+                &pending.h3.established.connection,
+                @intCast(fixed.now_ns),
+            );
+            const packet_number =
+                pending.h3.established.connection.next_packet_number;
+            try std.testing.expectError(
+                error.Timeout,
+                pending.acceptWithHeaders(self.response_headers),
+            );
+            try std.testing.expectEqual(@as(usize, 0), fixed.send_calls);
+            try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+            try std.testing.expectEqual(
+                packet_number,
+                pending.h3.established.connection.next_packet_number,
+            );
+            try std.testing.expect(
+                pending.h3.outbound_bodies.find(pending.streamId()) == null,
+            );
+            pending.h3.established.connection.endpoint.io = original_io;
+            quic.one_rtt.testing.setPacingBudgetAt(
+                &pending.h3.established.connection,
+                pending.h3.established.connection.congestionWindow(),
+                @intCast(std.Io.Clock.awake.now(original_io).nanoseconds),
             );
             var connection = try pending.acceptWithHeaders(
                 self.response_headers,

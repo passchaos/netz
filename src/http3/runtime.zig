@@ -6866,6 +6866,147 @@ pub const HandshakeServerSession = struct {
         return self.detachRequestStreamInternal(stream_id, true);
     }
 
+    fn requestStreamPendingDetach(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!*StreamingRequestSet.Entry {
+        const entry = self.streaming_requests.find(stream_id) orelse
+            return error.UnexpectedStream;
+        if (!entry.reader.canDetachRequest() or
+            self.outbound_bodies.find(stream_id) != null)
+        {
+            return error.UnexpectedStream;
+        }
+        return entry;
+    }
+
+    fn validateConnectAcceptance(response: http3.Response) Error!void {
+        if (response.status < 200 or response.status >= 300) {
+            return error.InvalidStatus;
+        }
+        if (!response.extended_connect or
+            response.request_method == null or
+            !std.mem.eql(u8, response.request_method.?, "CONNECT"))
+        {
+            return error.InvalidHeader;
+        }
+        if (response.body.len != 0 or response.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        // RFC 9110 section 8.6 forbids Content-Length on a successful CONNECT
+        // response, including an explicit zero. Reject it here instead of
+        // allowing response serialization to silently discard caller input.
+        for (response.headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "content-length")) {
+                return error.InvalidContentLength;
+            }
+        }
+        try response.validateBodySemantics();
+        if (response.suppressesBody()) return error.InvalidStatus;
+    }
+
+    /// Send a successful Extended CONNECT response and detach its request
+    /// reader as one ownership transaction. Receive-credit work completes
+    /// before the response becomes visible, so no fallible operation remains
+    /// after the peer can observe acceptance.
+    pub fn acceptConnectResponse(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+    ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return self.acceptConnectResponseUntil(
+            stream_id,
+            response,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn acceptConnectResponseWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.acceptConnectResponseWithDeadline(
+            stream_id,
+            response,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    /// Deadline-bounded successful Extended CONNECT admission. The caller's
+    /// one absolute budget covers receive-credit pacing, SETTINGS/QPACK, the
+    /// response head, and the final local ownership transition.
+    pub fn acceptConnectResponseWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.acceptConnectResponseUntil(
+            stream_id,
+            response,
+            deadline,
+        );
+    }
+
+    fn acceptConnectResponseUntil(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        response: http3.Response,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try validateConnectAcceptance(response);
+        const entry = try self.requestStreamPendingDetach(stream_id);
+        if (self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try self.connect_datagrams.register(stream_id);
+        errdefer self.connect_datagrams.unregister(stream_id);
+
+        const release_received = entry.reader.uncreditedConsumed();
+        if (deadline) |absolute| {
+            try self.established.connection
+                .releaseReceivedCapacityWithDeadline(
+                stream_id,
+                release_received,
+                absolute,
+            );
+        } else {
+            try self.established.connection.releaseReceivedCapacity(
+                stream_id,
+                release_received,
+            );
+        }
+        entry.reader.markCredited(release_received);
+
+        if (deadline) |absolute|
+            try self.startResponseWithDeadline(
+                stream_id,
+                response,
+                null,
+                absolute,
+            )
+        else
+            try self.startResponse(stream_id, response, null);
+
+        std.debug.assert(self.outbound_bodies.find(stream_id) != null);
+        var removed = self.streaming_requests.takeEntry(stream_id) orelse
+            unreachable;
+        removed.deinit();
+    }
+
     fn detachRequestStreamInternal(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -6910,6 +7051,7 @@ pub const HandshakeServerSession = struct {
         stream_id: u62,
         response: http3.Response,
     ) Error!void {
+        try validateConnectAcceptance(response);
         const entry = self.streaming_requests.find(stream_id) orelse
             return error.UnexpectedStream;
         if (!entry.reader.canDetachRequest() or
@@ -24795,13 +24937,66 @@ test "HTTP/3 CONNECT datagrams round trip over a detached handshake stream" {
             var head_event = try session.receiveRequestEvent();
             defer head_event.deinit(self.server.allocator);
             const stream_id = head_event.message.stream_id;
-            try session.startResponse(stream_id, .{
+            try std.testing.expectError(
+                error.InvalidStatus,
+                session.acceptConnectResponse(stream_id, .{
+                    .status = 404,
+                    .request_method = "CONNECT",
+                    .extended_connect = true,
+                }),
+            );
+            try std.testing.expectError(
+                error.InvalidStatus,
+                session.tryAcceptConnectResponse(stream_id, .{
+                    .status = 404,
+                    .request_method = "CONNECT",
+                    .extended_connect = true,
+                }),
+            );
+            try std.testing.expectError(
+                error.InvalidHeader,
+                session.acceptConnectResponse(stream_id, .{
+                    .status = 200,
+                }),
+            );
+            try std.testing.expectError(
+                error.InvalidStatus,
+                session.acceptConnectResponse(stream_id, .{
+                    .status = 204,
+                    .request_method = "CONNECT",
+                    .extended_connect = true,
+                }),
+            );
+            try std.testing.expectError(
+                error.InvalidContentLength,
+                session.acceptConnectResponse(stream_id, .{
+                    .status = 200,
+                    .body = "not a head-only admission",
+                    .request_method = "CONNECT",
+                    .extended_connect = true,
+                }),
+            );
+            try std.testing.expectError(
+                error.InvalidContentLength,
+                session.acceptConnectResponse(stream_id, .{
+                    .status = 200,
+                    .headers = &.{.{
+                        .name = "content-length",
+                        .value = "0",
+                    }},
+                    .request_method = "CONNECT",
+                    .extended_connect = true,
+                }),
+            );
+            try std.testing.expect(
+                session.maxConnectDatagramPayloadSize(stream_id) == null,
+            );
+            try session.acceptConnectResponse(stream_id, .{
                 .status = 200,
                 .request_method = "CONNECT",
                 .extended_connect = true,
-            }, null);
+            });
             self.response_sent.set(self.server.quic_server.endpoint.io);
-            try session.detachRequestStream(stream_id);
             var incoming = try session.receiveConnectDatagramWithTimeout(
                 stream_id,
                 .fromSeconds(2),

@@ -5601,6 +5601,148 @@ test "QUIC committed receive credit retries from connection timer" {
         server.nextTimerDeadline().?.kind != .receive_credit);
 }
 
+test "QUIC bounded receive credit preserves flow state across pacing timeout" {
+    const FixedClockIo = struct {
+        delegate: std.Io,
+        now_ns: i96 = 1_000_000,
+        sleep_calls: usize = 0,
+
+        fn now(
+            userdata: ?*anyopaque,
+            _: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            return .fromNanoseconds(self.now_ns);
+        }
+
+        fn sleep(
+            userdata: ?*anyopaque,
+            _: std.Io.Timeout,
+        ) std.Io.Cancelable!void {
+            const self: *@This() = @ptrCast(@alignCast(userdata));
+            self.sleep_calls += 1;
+            return error.Canceled;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver_endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xbf} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "credit-send",
+        .peer_connection_id = "credit-recv",
+        .initial_send_max_data = 8,
+        .initial_send_max_stream_data = 8,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "credit-recv",
+        .peer_connection_id = "credit-send",
+        .initial_receive_max_data = 8,
+        .receive_window = 8,
+        .max_receive_window = 8,
+        .initial_receive_max_stream_data = 8,
+        .stream_receive_window = 8,
+        .max_stream_receive_window = 8,
+        .local_endpoint = .server,
+        .pacing_max_burst_packets = 1,
+    });
+    defer receiver.deinit();
+
+    try sender.send(&.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "123456",
+    } }});
+    var packet = try receiver.receivePacket();
+    defer packet.deinit(allocator);
+
+    var fixed = FixedClockIo{ .delegate = receiver.endpoint.io };
+    var vtable = fixed.delegate.vtable.*;
+    vtable.now = FixedClockIo.now;
+    vtable.sleep = FixedClockIo.sleep;
+    receiver.endpoint.io = .{ .userdata = &fixed, .vtable = &vtable };
+    defer receiver.endpoint.io = fixed.delegate;
+    one_rtt.testing.exhaustPacingAt(&receiver, @intCast(fixed.now_ns));
+
+    const packet_number = receiver.next_packet_number;
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.releaseReceivedCapacityWithTimeout(0, 6, .zero),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        receiver.releaseReceivedCapacityWithDeadline(0, 6, .{
+            .clock = .awake,
+            .raw = .fromNanoseconds(fixed.now_ns + 1),
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), fixed.sleep_calls);
+    try std.testing.expectEqual(packet_number, receiver.next_packet_number);
+    try std.testing.expectEqual(
+        @as(u64, 0),
+        one_rtt.testing.receiveDataConsumed(&receiver),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 8),
+        one_rtt.testing.receiveStreamLimit(&receiver, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 6),
+        one_rtt.testing.receiveStreamAvailableLen(&receiver, 0),
+    );
+
+    one_rtt.testing.setPacingBudgetAt(
+        &receiver,
+        receiver.congestionWindow(),
+        @intCast(fixed.now_ns),
+    );
+    try receiver.releaseReceivedCapacityWithDeadline(0, 6, .{
+        .clock = .awake,
+        .raw = .fromNanoseconds(fixed.now_ns + std.time.ns_per_s),
+    });
+    try std.testing.expectEqual(
+        @as(u64, 6),
+        one_rtt.testing.receiveDataConsumed(&receiver),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 14),
+        one_rtt.testing.receiveStreamLimit(&receiver, 0),
+    );
+    try std.testing.expectEqual(
+        @as(?usize, 0),
+        one_rtt.testing.receiveStreamAvailableLen(&receiver, 0),
+    );
+
+    var credit = try sender.receivePacket();
+    defer credit.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), credit.frames.len);
+}
+
 test "QUIC committed receive credit batches streams fairly" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -14425,6 +14425,63 @@ pub const Connection = struct {
         return self.releaseReceivedCapacityAt(stream_id, amount, null);
     }
 
+    pub fn releaseReceivedCapacityWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.releaseReceivedCapacityWithDeadline(
+            stream_id,
+            amount,
+            .fromNow(
+                self.endpoint.io,
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    /// Return application-consumed receive credit under one absolute
+    /// awake-clock deadline. Congestion and pacing waits preserve the flow
+    /// snapshots until the MAX_DATA/MAX_STREAM_DATA packet is socket-visible.
+    pub fn releaseReceivedCapacityWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        amount: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        _ = try deadline_policy.usableAwake(self.endpoint.io, deadline);
+        while (true) {
+            self.releaseReceivedCapacityAt(
+                stream_id,
+                amount,
+                self.monotonicNowNs(),
+            ) catch |err| switch (err) {
+                error.CongestionLimited => {
+                    self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
+                        switch (progress_err) {
+                            error.CongestionLimited => continue,
+                            error.PacingLimited => {
+                                try self.waitForPacingAvailabilityWithDeadline(
+                                    deadline,
+                                );
+                                continue;
+                            },
+                            else => |other| return other,
+                        };
+                    continue;
+                },
+                error.PacingLimited => {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
+    }
+
     /// Return application-consumed receive credit without sleeping for
     /// pacing. A failed MAX_DATA/MAX_STREAM_DATA attempt leaves both flow
     /// windows and retained stream bytes unchanged for an event-loop retry.

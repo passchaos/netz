@@ -915,7 +915,11 @@ finish its reliable response drain even though a successful CONNECT stream
 remains open; a 1200-byte-MTU regression with 80 request and 80 response fields
 failed consistently before the fix and completed in three consecutive focused
 runs afterward. Server accept APIs preserve the deadline across the first QUIC
-Initial, TLS, peer SETTINGS/request processing, and the 200 response. Existing
+Initial, TLS, peer SETTINGS/request processing, and the complete 200 response
+write, including response-head pacing. An exhausted-pacer regression gives the
+server only one nanosecond, requires zero sends and zero sleeps on timeout, then
+retries the same pending decision successfully after restoring transport
+capacity. Existing
 HTTP/3 sessions expose matching bounded adapter entry points. A cross-phase
 regression completes QUIC/TLS, withholds CONNECT past the original deadline,
 and verifies that the server does not start a fresh post-handshake budget.

@@ -781,7 +781,13 @@ aggregate helpers that set QUIC FIN. Its client exposes relative-timeout and
 absolute-deadline connect/attempt variants; one unchanged deadline covers peer
 SETTINGS and the final Extended CONNECT head, including response bytes that race
 ahead of the control stream. Protected server accept and pending-admission APIs
-carry the same bounded contract through fragmented request HEADERS. The full
+carry the same bounded contract through fragmented request HEADERS and the
+successful response. Authenticated server admission completes receive-credit
+and CONNECT-association preparation before making 200 visible, then sends the
+response HEAD and detaches the request reader within the same absolute
+deadline. A deterministic exhausted-pacer regression proves an expired attempt
+sends and sleeps zero times, retains the pending request without outbound-body
+state, and succeeds when retried under a fresh budget. The full
 stateful preconfigured-key wrappers provide the same one-budget client and
 server variants, including server calls that begin from a known peer.
 `sendSessionData`, `sendSessionDataSlicesWithTimeout` /

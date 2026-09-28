@@ -391,8 +391,11 @@ Current protocol coverage includes:
   Handshake-backed clients and server sessions additionally expose
   timeout/deadline-bounded `startRequest` and `startResponse` variants whose
   single budget covers stream admission, SETTINGS/QPACK, HEADERS, pacing, and
-  flow-control progress, plus negotiated
-  TLS cipher-suite/transcript-hash metadata and QUIC key-update control/counts,
+  flow-control progress; successful Extended CONNECT server admission uses the
+  same budget for receive-credit preparation, response HEAD delivery, and
+  WebTransport request-reader detachment before ownership transfer, plus
+  negotiated TLS cipher-suite/transcript-hash metadata and QUIC key-update
+  control/counts,
   bounded `serveOne`/`serveConnection` request-response loops with automatic
   paced aggregate responses and two-phase GOAWAY completion, and expose
   `sendRequestBodyBatchPaced`/`sendResponseBodyBatchPaced`: one DATA

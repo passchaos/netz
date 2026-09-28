@@ -3649,6 +3649,18 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeServerSession,
         "prepareConnectDatagramAssociation",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "acceptConnectResponse",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "acceptConnectResponseWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "acceptConnectResponseWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "cancelRequest"));
     try std.testing.expect(@hasDecl(netz.http3.runtime.HandshakeClient, "sendPriorityUpdate"));
     try std.testing.expect(@hasDecl(
@@ -6892,6 +6904,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendWithEcn"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "sendAt"));
     try std.testing.expect(@hasDecl(netz.quic.one_rtt.Connection, "releaseReceivedCapacity"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "releaseReceivedCapacityWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "releaseReceivedCapacityWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "openStreamWithDeadline",
