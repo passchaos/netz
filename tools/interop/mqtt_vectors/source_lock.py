@@ -55,6 +55,12 @@ MOSQUITTO_SOURCE_SHA256 = {
         "42ba19c5c3c967184b3928252aacf020a4f637445f35e499525a1fd8c1ca58f7",
     "broker/02-subpub-qos1-oversize-payload.py":
         "2a2037c45f0e291042b80676f302ee9df2ce98e8b014cd3bb3d836464b8065fe",
+    "broker/02-subpub-qos1-message-expiry.py":
+        "218321f18e45ca6626ace1b621f306bdc83acaac6b050edbdf0cab796b2fd481",
+    "broker/02-subpub-qos1-message-expiry-retain.py":
+        "c59d115aa49b71c31d782845b08711a2a67358e710ad7fdd7274d2b460a42b87",
+    "broker/02-subpub-qos1-message-expiry-will.py":
+        "eb7ce8d6b0a089c2a43e48b6b0b5b3748e46bd09e4c74aa6ab7e59def06965e8",
     "broker/02-subpub-qos2-max-inflight-bytes.py":
         "59ab8100b5aa0cea3b1ae9b82a4afb44cd6027ed69b72e761533044dbc51a91c",
     "broker/02-subpub-qos2-receive-maximum-1.py":
@@ -69,6 +75,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
     "broker/03-publish-qos1-max-inflight.py":
         "4863181b3799b1dd8c7d469d30e9d838ec0f3cf444cab142ec7d7bb4dd373bdc",
+    "broker/03-publish-qos1-max-inflight-expire.py":
+        "58c05d026d86335fb322dc5dcec9dcc8c41e2bf415b6cf02eccf1765a7c83a7e",
     "broker/03-publish-qos1-no-subscribers-v5.py":
         "84dbe495e20c3142629d245daf43f8cf04f507fcf688792f790d43e3551afa5e",
     "broker/03-publish-qos1-retain-disabled.py":
@@ -87,6 +95,10 @@ MOSQUITTO_SOURCE_SHA256 = {
         "b4842048512fd9719abfec32074a6d055ca88c1979c2f0588e281c8e9c40e2e7",
     "broker/03-publish-long-topic.py":
         "f09b04182bc587a819e007f462000b1c781f8af7d464ed058e8b51439ccb353e",
+    "broker/05-clean-session-qos1.py":
+        "73b7109f7b4cc55e6734192f5d81c013bf13f4fca530bfd5f0844bd143623137",
+    "broker/05-session-expiry-v5.py":
+        "c545a17f9740ffdec8a0c432af336bd22dca6f80b61ca4881164ed3aacd5ed68",
     "broker/05-session-expiry-kick.py":
         "6177aec3d006b2c7d45a140860ffc36ffed1ad08ab2e0a4e064317038794604f",
     "broker/04-retain-check-source-persist.py":
@@ -121,6 +133,10 @@ MOSQUITTO_SOURCE_SHA256 = {
         "78e27c3406d1af3517a3a09190a2e3b95ff1c91ec503ce798e2e4184eb8db0f3",
     "broker/07-will-takeover.py":
         "294a4441eef80b1a4fe9599870fd5e7bb1b0f77e0e56a3c64a15b7806bf2c604",
+    "broker/11-persistent-subscription-no-local.py":
+        "2a77a9da197041f80129bdba981ac6a4577503b57436ea60153f78010d52b4d6",
+    "broker/11-pub-props.py":
+        "b45ab64f7ebbc978b0b4b939cd1f9ac7babeca7098d3c5a0a5ad5c41464dd724",
     "broker/11-message-expiry.py":
         "c52a9210a12b58c6a51c295c2239e38d82689a7f7ef28c83f449a1f38d00e5dc",
     "broker/11-subscription-id.py":

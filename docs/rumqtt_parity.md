@@ -1959,7 +1959,8 @@ routed before PUBREL, then checks publisher PUBREC/PUBCOMP plus the independent
 subscriber PUBLISH/PUBREC/PUBREL/PUBCOMP sequence byte-for-byte. A mixed-version
 case uses a Mosquitto-generated MQTT 3.1.1 subscriber and MQTT 5 publisher on
 the same listener, checking exact v5 PUBACK plus property-free v3 QoS 1
-PUBLISH/PUBACK translation. The sixth scenario ports the wire-observable
+PUBLISH/PUBACK translation. The sixth source-locked scenario ports the
+wire-observable
 subset of Mosquitto's
 `11-persistent-subscription-no-local.py`: reconnect reports Session Present,
 the restored No Local subscription suppresses self-delivery while PUBACK stays
@@ -2077,9 +2078,11 @@ forwarded with RETAIN cleared for one and preserved for the other.
 The twenty-third scenario replaces one retained topic including its User
 Property, then proves a later subscriber receives only the new payload/property
 once; PING immediately after replay catches stale duplicate retention.
-The twenty-fourth scenario ports Mosquitto's retained property bundle: Payload
-Format, Content Type, Response Topic, Correlation Data and User Property survive
-storage and replay byte-for-byte.
+The twenty-fourth source-locked scenario ports the in-process wire-observable
+subset of Mosquitto's retained property bundle: Payload Format, Content Type,
+Response Topic, Correlation Data and User Property survive storage and replay
+byte-for-byte. Mosquitto's separate broker-restart step is not claimed by this
+scenario.
 The twenty-fifth scenario clears a retained value with a property-bearing
 zero-length tombstone, proves neither old nor tombstone properties replay, and
 then verifies a replacement live PUBLISH contains only its new User Property.
@@ -2238,7 +2241,7 @@ that the old Will is suppressed only when both connections preserve the same
 Session. This exposed and fixed zero-delay Wills being published during a live
 durable-Session takeover; Will Delay controls publication after disconnect,
 not cancellation by a replacement that has already resumed the Session.
-The Session Expiry case ports the timing-observable core of Mosquitto's
+The source-locked Session Expiry case ports the timing-observable core of Mosquitto's
 `05-session-expiry-v5.py`: a three-second DISCONNECT override keeps a Session
 present beyond the one-second CONNECT value, the Session is absent after the
 new deadline, and a zero DISCONNECT override removes the replacement
@@ -2305,8 +2308,8 @@ and continues accepting after capacity is released. A fourth process-level
 connection proves production service does not stop after the former finite
 accept budget. The repository gate's finite test mode uses the same limits
 while retaining a separate deterministic accept budget.
-The Clean Start/offline QoS 1 case ports Mosquitto's
-`05-clean-session-qos1.py`: a persistent subscriber disconnects after
+The source-locked Clean Start/offline QoS 1 case ports the MQTT 5 branch of
+Mosquitto's `05-clean-session-qos1.py`: a persistent subscriber disconnects after
 subscribing, receives the exact queued QoS 1 PUBLISH with Session Present on
 resume, acknowledges it, and reconnects with Clean Start to delete the old
 Session. A final persistent reconnect reports no Session Present and answers
@@ -2381,14 +2384,14 @@ the downstream client acknowledges with Packet Identifier only, an explicit
 success reason, a reason plus empty Property Length, and a reason plus User
 Property. QoS 2 verifies both PUBREC/PUBREL progression and every corresponding
 PUBCOMP form; an ordered PINGRESP proves each variant released state.
-The offline Message Expiry case directly ports Mosquitto's
+The source-locked offline Message Expiry case directly ports Mosquitto's
 `02-subpub-qos1-message-expiry.py`: two QoS 1 messages with one- and ten-second
 lifetimes are queued while a persistent subscriber is disconnected. After two
 seconds, reconnect reports Session Present, omits the expired message, delivers
 only the survivor with its interval reduced to a timing-tolerant 9-6 seconds,
 and answers PING immediately after its PUBACK to rule out a stale second
 delivery.
-The companion Will Message Expiry case directly ports Mosquitto's
+The source-locked companion Will Message Expiry case directly ports Mosquitto's
 `02-subpub-qos1-message-expiry-will.py`. Two ungracefully disconnected clients
 publish QoS 1 Wills into an offline durable Session: the ten-second Will is
 delivered after reconnect with a reduced 9-6 second interval, while the
@@ -2443,7 +2446,8 @@ validates MQTT's full UTF-8 field limit rather than copying Mosquitto's private
 source-hash-locked Receive Maximum 1 and 2 cases with three messages each. It
 fills the negotiated window, proves the next PUBLISH remains withheld through
 PUBREC/PUBREL, returns one slot only at PUBCOMP, and requires each queued
-PUBLISH immediately after that release. The QoS 1 inflight-expiry case keeps
+PUBLISH immediately after that release. The source-locked QoS 1 inflight-expiry
+case ports Mosquitto's `03-publish-qos1-max-inflight-expire.py`, keeps
 an expiring delivery unacknowledged at Receive Maximum 1, then proves its
 expiry releases credit for the next queued delivery without a stale PUBACK.
 The QoS 2 inflight-byte case additionally proves that PUBREC alone does not
