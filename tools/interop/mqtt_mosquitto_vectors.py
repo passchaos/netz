@@ -4516,19 +4516,17 @@ def outgoing_topic_alias(executable: Path, mqtt_packets, mqtt5_props) -> None:
 def request_response_properties(
     executable: Path, mqtt_packets, mqtt5_props
 ) -> None:
-    # Wire-level request/response subset of Mosquitto
-    # 12-prop-response-topic-correlation-data.py. The request carries both
-    # properties through broker fanout; the responder then publishes on the
-    # advertised response topic and the requester receives the exact response.
+    # Source-locked wire ports of Mosquitto 12-prop-response-topic.py and
+    # 12-prop-response-topic-correlation-data.py. Exercise each property alone
+    # before their combination so one surviving property cannot hide loss of
+    # the other during broker fanout.
     normal_topic = "normal/topic"
     response_topic = "response/topic"
-    properties = (
-        mqtt5_props.gen_string_prop(
-            mqtt5_props.RESPONSE_TOPIC, response_topic
-        )
-        + mqtt5_props.gen_string_prop(
-            mqtt5_props.CORRELATION_DATA, "45vyvynq30q3vt4 nuy893b4v3"
-        )
+    response_property = mqtt5_props.gen_string_prop(
+        mqtt5_props.RESPONSE_TOPIC, response_topic
+    )
+    correlation_property = mqtt5_props.gen_string_prop(
+        mqtt5_props.CORRELATION_DATA, "45vyvynq30q3vt4 nuy893b4v3"
     )
     with NetzBroker(executable, connections=2) as broker:
         with broker.connect() as responder, broker.connect() as requester:
@@ -4550,15 +4548,26 @@ def request_response_properties(
                 mqtt_packets.gen_suback(1, 0, proto_ver=5),
                 "response requester SUBACK",
             )
-            request = mqtt_packets.gen_publish(
-                normal_topic,
-                qos=0,
-                payload="2",
-                proto_ver=5,
-                properties=properties,
-            )
-            requester.sendall(request)
-            expect_packet(responder, request, "request property forwarding")
+            for label, properties, payload in (
+                ("Response Topic", response_property, "1"),
+                ("Correlation Data", correlation_property, "2"),
+                (
+                    "combined request",
+                    response_property + correlation_property,
+                    "3",
+                ),
+            ):
+                request = mqtt_packets.gen_publish(
+                    normal_topic,
+                    qos=0,
+                    payload=payload,
+                    proto_ver=5,
+                    properties=properties,
+                )
+                requester.sendall(request)
+                expect_packet(
+                    responder, request, f"{label} property forwarding"
+                )
             response = mqtt_packets.gen_publish(
                 response_topic,
                 qos=0,

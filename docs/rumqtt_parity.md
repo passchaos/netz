@@ -2014,10 +2014,12 @@ listener-local defaults and complete u16 parser bounds, CONNACK advertisement,
 inbound alias resolution and out-of-range DISCONNECT 0x94, broker-to-client
 alias negotiation as the minimum of client and broker limits, and independent
 zero-disable semantics for both directions.
-The eleventh scenario ports Mosquitto's
-`12-prop-response-topic-correlation-data.py`: Response Topic and Correlation
-Data survive exact broker fanout to the responder, whose response on the
-advertised topic reaches the requester byte-for-byte.
+The eleventh scenario source-locks both Mosquitto
+`12-prop-response-topic.py` and
+`12-prop-response-topic-correlation-data.py`: Response Topic alone,
+Correlation Data alone, and both properties together survive exact broker
+fanout to the responder, whose response on the advertised topic reaches the
+requester byte-for-byte.
 The twelfth scenario ports Mosquitto's retained Message Expiry vector with a
 timing-tolerant immediate check: the forwarded interval is 2 or 1 seconds, the
 entry is absent after three seconds, and a non-expiring retained control still
