@@ -2132,6 +2132,11 @@ Three additional negative cases directly port Mosquitto's
 `12-prop-maximum-packet-size-broker.py` boundary behavior. They compare the
 advertised CONNACK properties and exact DISCONNECT `0x9b`, `0x9a`, and `0x95`
 packets after raw clients deliberately ignore those limits.
+The same source-locked gate ports
+`12-prop-maximum-packet-size-publish-qos2.py`: a 40-byte client limit drops
+the oversized released Application Message without leaving downstream QoS 2
+state, while the next fitting PUBLISH completes publisher PUBREC/PUBCOMP and
+the independent subscriber PUBLISH/PUBREC/PUBREL/PUBCOMP sequence.
 Eight additional MQTT 3.1.1/5 cases port Mosquitto's QoS 0, QoS 1, and Will
 Application Message size-limit vectors and add the corresponding QoS 2 case.
 The example broker exposes an
