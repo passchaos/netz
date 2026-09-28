@@ -1841,7 +1841,10 @@ Size advertisement and 0x95 disconnect, MQTT 3.1.1 close behavior, WebSocket
 The same real-process gate covers `retain_available false`: MQTT 5 TCP and
 WebSocket CONNACK packets advertise Retain Available 0, retained PUBLISH receives
 0x9A, retained Will CONNECT is refused with 0x9A, and MQTT 3.1.1 closes both
-unrepresentable violation paths.
+unrepresentable violation paths. The TCP QoS 1 case now reproduces and
+source-locks Mosquitto's complete `03-publish-qos1-retain-disabled.py` input,
+including its Packet Identifier, and requires DISCONNECT 0x9A rather than a
+PUBACK.
 It also ports the policy matrix from Mosquitto's
 `01-connect-zero-length-id.py` through the configuration path. Global disable
 is enforced on TCP and WebSocket with MQTT 5 reason 0x80 and MQTT 3.1.1 reason

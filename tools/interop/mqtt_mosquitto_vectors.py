@@ -2068,8 +2068,8 @@ def publish_capability_disconnects(
         (
             ("--no-retain",),
             mqtt_packets.gen_publish(
-                "test/topic", qos=0, retain=True, payload="a",
-                proto_ver=5,
+                "pub/qos1/test", qos=1, mid=1, retain=True,
+                payload="message", proto_ver=5,
             ),
             mqtt5_props.gen_byte_prop(mqtt5_props.RETAIN_AVAILABLE, 0),
             mqtt5_rc.RETAIN_NOT_SUPPORTED,
