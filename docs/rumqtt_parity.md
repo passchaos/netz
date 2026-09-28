@@ -2127,7 +2127,7 @@ topic. Each scenario verifies live delivery clears RETAIN, UNSUBSCRIBE suppresse
 routing through an exact no-match QoS 1 PUBACK plus PING barrier, resubscribe
 replays the retained message with RETAIN set, and an empty retained tombstone is
 delivered live but absent after a second resubscribe.
-Three additional negative cases directly port Mosquitto's
+Three additional source-locked negative cases directly port Mosquitto's
 `03-publish-bad-flags.py` QoS/retain capability violations and
 `12-prop-maximum-packet-size-broker.py` boundary behavior. They compare the
 advertised CONNACK properties and exact DISCONNECT `0x9b`, `0x9a`, and `0x95`
