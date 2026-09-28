@@ -189,3 +189,141 @@ test "WebTransport recovery drain retransmits a dropped session close" {
     try std.testing.expect(shared.pending_before_drain != 0);
     try std.testing.expect(shared.recovery_drained);
 }
+
+test "WebTransport rejected handshake drains a dropped final response" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const original_dcid = [_]u8{
+        0x72, 0x65, 0x6a, 0x01, 0x72, 0x65, 0x6a, 0x02,
+    };
+    const client_cid = [_]u8{ 0x72, 0x65, 0x6a, 0x03 };
+    const server_cid = [_]u8{ 0x72, 0x65, 0x6a, 0x04 };
+    var drop: DropNextDatagram = .{};
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+            .send_interceptor = .{
+                .context = &drop,
+                .should_drop = DropNextDatagram.shouldDrop,
+            },
+        } } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .initial_one_rtt_config = .{
+                .max_datagram_size = 1400,
+                .enable_pacing = false,
+            },
+            .random = [_]u8{0xa1} ** 32,
+            .x25519_secret_key = [_]u8{0xa2} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        drop: *DropNextDatagram,
+        pending_before_drain: usize = 0,
+        recovery_drained: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var pending = try self.server.receiveSessionRequestWithTimeout(
+                .fromSeconds(2),
+            );
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+
+            self.drop.armed.store(true, .release);
+            var rejected = try pending.rejectWithBody(
+                429,
+                &.{.{ .name = "retry-after", .value = "5" }},
+                "slow down",
+                &.{.{ .name = "x-final", .value = "true" }},
+            );
+            pending_owned = false;
+            defer rejected.deinit();
+            try std.testing.expectEqual(@as(u16, 429), rejected.status);
+            try std.testing.expectError(
+                error.Timeout,
+                rejected.waitForRecoveryIdleWithTimeout(.zero),
+            );
+            self.pending_before_drain = rejected.h3.established.connection
+                .pendingRecoveryCount();
+            try rejected.waitForRecoveryIdleWithDeadline(.fromNow(
+                rejected.h3.established.connection.endpoint.io,
+                .{ .raw = .fromSeconds(2), .clock = .awake },
+            ));
+            try std.testing.expect(
+                !rejected.h3.established.connection.pendingDeliveryRecovery(),
+            );
+            self.recovery_drained = true;
+        }
+    };
+    var shared = Shared{ .server = &server, .drop = &drop };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var attempt = try runtime.HandshakeClientSession.connectAttemptWithTimeout(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{
+            .authority = "localhost",
+            .path = "/rejected-recovery",
+            .h3 = .{ .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .server_name = "localhost",
+                .initial_one_rtt_config = .{
+                    .max_datagram_size = 1400,
+                    .enable_pacing = false,
+                },
+                .random = [_]u8{0xa3} ** 32,
+                .x25519_secret_key = [_]u8{0xa4} ** 32,
+            } },
+        },
+        .fromSeconds(3),
+    );
+    defer attempt.deinit();
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u16, 429), attempt.status());
+    try std.testing.expectEqualStrings("5", attempt.responseHeader(
+        "retry-after",
+    ).?);
+    try std.testing.expectEqualStrings("slow down", attempt.body());
+    try std.testing.expectEqual(@as(usize, 1), attempt.trailers().len);
+    try std.testing.expectEqualStrings(
+        "x-final",
+        attempt.trailers()[0].name,
+    );
+    try std.testing.expectEqualStrings(
+        "true",
+        attempt.trailers()[0].value,
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        drop.dropped.load(.acquire),
+    );
+    try std.testing.expect(shared.pending_before_drain != 0);
+    try std.testing.expect(shared.recovery_drained);
+}

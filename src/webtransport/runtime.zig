@@ -4773,6 +4773,23 @@ pub const RejectedHandshakeSession = struct {
     pub fn serviceTransport(self: *RejectedHandshakeSession) Error!void {
         try self.h3.established.connection.servicePacketServicingTimers();
     }
+
+    /// Drive recovery until the rejected CONNECT response is acknowledged.
+    /// Pure receive-credit advertisements do not prolong this application-
+    /// delivery boundary.
+    pub fn waitForRecoveryIdleWithTimeout(
+        self: *RejectedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.h3.waitForRecoveryIdleWithTimeout(timeout);
+    }
+
+    pub fn waitForRecoveryIdleWithDeadline(
+        self: *RejectedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.h3.waitForRecoveryIdleWithDeadline(deadline);
+    }
 };
 
 pub const AcceptedHandshakeSession = struct {

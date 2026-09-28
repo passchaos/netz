@@ -8332,6 +8332,14 @@ test "public modules are reachable" {
         "RejectedHandshakeSession",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.RejectedHandshakeSession,
+        "waitForRecoveryIdleWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.RejectedHandshakeSession,
+        "waitForRecoveryIdleWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime,
         "EndpointServer",
     ));

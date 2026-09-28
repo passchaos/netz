@@ -851,7 +851,10 @@ legacy rejection, body/trailer ownership, overflow, and a successful sibling
 request on the reused connection. Server-side `acceptSession*` and
 `receiveSessionRequestFromSession*` provide the symmetric caller-owned entry
 points: an accepted session keeps ownership, while explicit rejection returns
-the H3 session when its `RejectedHandshakeSession` is destroyed and dropping a
+the H3 session when its `RejectedHandshakeSession` is destroyed. The rejected
+value exposes bounded delivery-only recovery drains so an owning server can
+keep a final 3xx-5xx response recoverable through loss without waiting for
+replaceable receive-credit acknowledgements. Dropping a
 pending decision rejects only that CONNECT before restoring the session. A
 real handshake test exercises both outcomes and then serves a sibling request.
 
