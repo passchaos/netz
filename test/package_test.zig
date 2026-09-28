@@ -8258,6 +8258,8 @@ test "public modules are reachable" {
         "readStreamIdWithTimeout",
         "readStreamIdWithDeadline",
         "flushPendingAck",
+        "waitForRecoveryIdleWithTimeout",
+        "waitForRecoveryIdleWithDeadline",
         "serviceTransport",
         "resetStream",
         "resetStreamWithTimeout",
@@ -9281,6 +9283,22 @@ test "public modules are reachable" {
         "SendCredit",
     ));
     try std.testing.expect(@hasDecl(netz.webtransport.runtime.AcceptedHandshakeSession, "getStats"));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "waitForRecoveryIdleWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "waitForRecoveryIdleWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "waitForRecoveryIdleWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "waitForRecoveryIdleWithDeadline",
+    ));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "pto_jitter_percentage"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pto_jitter_percentage"));
     try std.testing.expect(@hasDecl(netz.quic, "ecn"));

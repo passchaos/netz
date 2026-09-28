@@ -23,6 +23,7 @@ test {
     _ = @import("runtime/endpoint_server_tests.zig");
     _ = @import("runtime/development_lifecycle_tests.zig");
     _ = @import("runtime/development_stream_tests.zig");
+    _ = @import("runtime/recovery_tests.zig");
 }
 
 pub const Error = webtransport.Error || http3.runtime.Error ||
@@ -5851,6 +5852,30 @@ pub const AcceptedHandshakeSession = struct {
         return self.h3.established.connection.flushPendingAck();
     }
 
+    /// Drive QUIC ACK/loss/PTO processing until every reliable application or
+    /// control frame submitted by this session has been acknowledged. Use
+    /// this before destroying a short-lived session after its final CLOSE/FIN.
+    pub fn waitForRecoveryIdleWithTimeout(
+        self: *AcceptedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.h3.dispatcherBound()) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForRecoveryIdleWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn waitForRecoveryIdleWithDeadline(
+        self: *AcceptedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.h3.waitForRecoveryIdleWithDeadline(deadline);
+        _ = try self.h3.established.connection
+            .flushPendingAckWithDeadline(deadline);
+    }
+
     /// Apply one packet selected by the endpoint-wide QUIC dispatcher. HTTP/3
     /// control/QPACK and unrelated requests progress while the detached
     /// WebTransport CONNECT stream and associated streams remain available to
@@ -6337,6 +6362,10 @@ pub const AcceptedHandshakeSession = struct {
                 &self.h3.established.connection,
                 &self.streams,
             );
+            // The terminal STREAM/FIN or RESET is ACK-eliciting. This is the
+            // last application event many short-lived peers consume, so do
+            // not leave its acknowledgement behind the delayed-ACK timer.
+            _ = self.h3.established.connection.tryFlushPendingAck() catch {};
         }
     }
 
@@ -6371,6 +6400,7 @@ pub const AcceptedHandshakeSession = struct {
             &self.streams,
             deadline,
         );
+        _ = self.h3.established.connection.tryFlushPendingAck() catch {};
     }
 
     fn receiveControlProgress(
@@ -9380,6 +9410,31 @@ pub const HandshakeClientSession = struct {
         return self.h3.established.connection.flushPendingAck();
     }
 
+    /// Drive QUIC ACK/loss/PTO processing until every reliable application or
+    /// control frame submitted by this session has been acknowledged. Use
+    /// this before destroying a short-lived session after its final CLOSE/FIN.
+    pub fn waitForRecoveryIdleWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.waitForRecoveryIdleWithDeadline(.fromNow(
+            self.h3.established.connection.endpoint.io,
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    pub fn waitForRecoveryIdleWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.h3.waitForRecoveryIdleWithDeadline(deadline);
+        _ = try self.h3.established.connection
+            .flushPendingAckWithDeadline(deadline);
+    }
+
     /// Drive one timer-aware QUIC receive without consuming WebTransport data.
     ///
     /// Event loops waiting on a peer-side terminal condition still need to
@@ -9912,6 +9967,10 @@ pub const HandshakeClientSession = struct {
                 &self.h3.established.connection,
                 &self.streams,
             );
+            // A caller commonly stops receiving immediately after this
+            // terminal event. Flush its cumulative ACK before returning so
+            // the peer can retire reliable CLOSE/FIN recovery state.
+            _ = self.h3.established.connection.tryFlushPendingAck() catch {};
         }
     }
 
@@ -9946,6 +10005,7 @@ pub const HandshakeClientSession = struct {
             &self.streams,
             deadline,
         );
+        _ = self.h3.established.connection.tryFlushPendingAck() catch {};
     }
 
     fn pollSessionEventOnce(
@@ -12498,6 +12558,20 @@ pub const StatefulProtectedClientSession = struct {
         self: *StatefulProtectedClientSession,
     ) Error!bool {
         return self.session.flushPendingAck();
+    }
+
+    pub fn waitForRecoveryIdleWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.waitForRecoveryIdleWithTimeout(timeout);
+    }
+
+    pub fn waitForRecoveryIdleWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.waitForRecoveryIdleWithDeadline(deadline);
     }
 
     pub fn serviceTransport(
@@ -15459,16 +15533,16 @@ test "WebTransport protected runtime CONNECT and datagrams over QUIC 1-RTT" {
         error.InvalidSessionState,
         client.sendDatagram("protected-late"),
     );
-    const peer_fin = client.receiveSessionEventWithTimeout(
-        .fromSeconds(3),
-    ) catch |err| return preferPeerError(&shared, err);
-    try std.testing.expect(peer_fin == .closed);
-    try std.testing.expectEqual(@as(u32, 0), peer_fin.closed.code);
-    try std.testing.expectEqualStrings("", peer_fin.closed.reason);
-
+    // The lightweight adapter deliberately has no retransmission owner. Wait
+    // until its server thread has submitted the final FIN before starting the
+    // client budget, so scheduler delay is not mistaken for packet loss.
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    const peer_fin = try client.receiveSessionEventWithTimeout(.fromSeconds(3));
+    try std.testing.expect(peer_fin == .closed);
+    try std.testing.expectEqual(@as(u32, 0), peer_fin.closed.code);
+    try std.testing.expectEqualStrings("", peer_fin.closed.reason);
 }
 
 fn preferPeerError(shared: anytype, fallback: anyerror) anyerror {

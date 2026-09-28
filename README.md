@@ -1123,8 +1123,9 @@ ACK/loss recovery or flow control. `StatefulProtectedServer` and
 they use the complete QUIC connection engine and therefore expose bidi/uni
 association, partial/batched writes, incremental and whole-stream reads,
 timeout/deadline-bounded RESET_STREAM and STOP_SENDING, per-stream targeted
-reads, delayed-ACK flushing, stream/session limits, connection statistics, and
-session-close cleanup. A deterministic loopback regression consumes the first
+reads, delayed-ACK flushing, bounded reliable-delivery drains for short-lived
+sessions, stream/session limits, connection statistics, and session-close
+cleanup. A deterministic loopback regression consumes the first
 client associated-stream datagram after CONNECT, permits the later uni stream
 to complete first, and requires the lost bidi prefix/payload/FIN to recover
 before the echoed response; this verifies that the preconfigured-key facade is
