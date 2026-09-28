@@ -1401,6 +1401,28 @@ pub fn build(b: *std.Build) void {
     );
     h2spec_step.dependOn(&h2spec.step);
 
+    const http_external_client_server = b.addExecutable(.{
+        .name = "netz-http-external-client-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http_external_client_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http_external_clients = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http_external_clients.py",
+    });
+    http_external_clients.addArtifactArg(http_external_client_server);
+    const http_external_clients_step = b.step(
+        "interop-http-external-clients",
+        "Run curl/nghttp2 against netz HTTP/1.1 and HTTP/2 servers",
+    );
+    http_external_clients_step.dependOn(&http_external_clients.step);
+
     const http2_hyper_client = b.addExecutable(.{
         .name = "netz-http2-hyper-client",
         .root_module = b.createModule(.{

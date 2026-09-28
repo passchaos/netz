@@ -1205,6 +1205,10 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # response at an 8-KiB stream window while a concurrent sibling completes on
 # the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
+# Exercise netz HTTP/1.1 and HTTP/2 servers with installed curl and nghttp2:
+# cleartext plus certificate-verified TLS, exact request/response assertions,
+# and two requests over one connection in every matrix arm.
+zig build interop-http-external-clients -Doptimize=ReleaseFast
 # All netz HTTP/2 interop endpoints obtain `std.Io` from the zio-backed runtime;
 # the Hyper and direct h2 peers identify their Tokio execution backend in the
 # success records, and the h2spec server schedules accepted sockets with zio.
