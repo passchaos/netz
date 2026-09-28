@@ -1038,7 +1038,10 @@ Current protocol coverage includes:
   and stateful protected runtimes that retain bounded non-2xx DATA/trailers,
   paired with complete server rejection entities and stream-local cancellation
   on overflow; authenticated blocking/dispatcher paths additionally provide
-  caller-owned client/server session restoration and sibling reuse, and
+  caller-owned client/server session restoration and sibling reuse, while
+  direct successful CONNECT promotion flushes the response-head delayed ACK
+  before ownership transfer so short-lived servers can retire recovery state,
+  and
   WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
   counters, plus an externally negotiated-key stateful runtime with the same
   recovery, congestion/flow-control, associated-stream, cancellation, and

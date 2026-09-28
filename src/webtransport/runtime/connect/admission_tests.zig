@@ -340,7 +340,7 @@ test "WebTransport server admission sends explicit rejection response" {
     if (shared.err) |err| return err;
 }
 
-test "WebTransport handshake enforces Origin before acceptance" {
+test "WebTransport caller-owned H3 enforces Origin and flushes accepted response ACK" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -393,6 +393,10 @@ test "WebTransport handshake enforces Origin before acceptance" {
             var rejected = try denied.forbidden();
             denied_owned = false;
             rejected.deinit();
+            // Remove handshake and rejection traffic from the ACK threshold.
+            // The next successful CONNECT response must be acknowledged on
+            // its own before the client returns the promoted session.
+            try h3.waitForRecoveryIdleWithTimeout(.fromSeconds(1));
 
             var allowed = try runtime.HandshakeServer
                 .receiveSessionRequestFromSessionWithTimeout(
@@ -406,6 +410,12 @@ test "WebTransport handshake enforces Origin before acceptance" {
             allowed_owned = false;
             h3_owned = false;
             defer accepted.deinit();
+            try std.testing.expect(
+                accepted.h3.established.connection.pendingRecoveryCount() != 0,
+            );
+            try accepted.waitForRecoveryIdleWithTimeout(
+                .fromMilliseconds(300),
+            );
         }
     };
     var shared = Shared{ .server = &server };
@@ -450,6 +460,9 @@ test "WebTransport handshake enforces Origin before acceptance" {
     try std.testing.expectEqual(@as(u16, 403), denied_attempt.status());
     denied_attempt.deinit();
     denied_attempt_owned = false;
+    // Start the accepted CONNECT with no older client recovery traffic able to
+    // carry or trigger the response ACK.
+    try h3_client.waitForRecoveryIdleWithTimeout(.fromSeconds(1));
 
     var accepted = try runtime.HandshakeClientSession.connectSessionWithTimeout(
         &h3_client,

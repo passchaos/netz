@@ -13006,6 +13006,19 @@ fn connectStatefulAttempt(
             limits.max_rejection_body_bytes,
         );
     errdefer response.deinit(allocator);
+    if (response.head.status >= 200 and response.head.status < 300) {
+        // A successful Extended CONNECT keeps its response stream open while
+        // ownership moves from HTTP/3 to WebTransport. Flush the response
+        // HEAD's delayed ACK before that boundary so a short-lived server can
+        // retire its response recovery state even if the application does not
+        // immediately drive another receive. Dispatcher promotion uses its
+        // non-blocking poll path instead of this synchronous helper.
+        if (deadline) |absolute|
+            _ = try h3_client.established.connection
+                .flushPendingAckWithDeadline(absolute)
+        else
+            _ = try h3_client.established.connection.flushPendingAck();
+    }
     const owned_h3 = h3_client.*;
     h3_client.* = undefined;
     return .{

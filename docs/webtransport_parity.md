@@ -842,7 +842,12 @@ Authenticated clients can also open WebTransport through a caller-owned HTTP/3
 session with `connectSession*` and `connectSessionAttempt*`. Ownership is moved
 only while the attempt is live: success transfers the H3 session into the
 WebTransport session, while a complete rejection restores the caller's session
-without an extra cancellation. Legacy helpers still return `SessionRejected`,
+without an extra cancellation. Direct successful promotion flushes the response
+HEAD's delayed QUIC ACK before ownership changes, preserving the caller's
+absolute deadline when present. A real reused-connection regression first
+drains all earlier recovery traffic, then proves a short-lived server can retire
+the accepted response without the client performing another receive. Legacy
+helpers still return `SessionRejected`,
 but only after draining the entity. The authenticated pending server API uses
 the HTTP/3 paced writer for the same complete rejection entity. A
 dispatcher pending attempt waits for the complete rejection and preserves DATA
