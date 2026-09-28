@@ -2167,13 +2167,15 @@ capabilities match byte-for-byte, and a PING on the first connection proves
 that assigning the second identifier did not accidentally take over the first
 anonymous Session. This strengthens the upstream vector's prefix-only check
 without presenting the existing in-process broker tests as external evidence.
-The Server Keep Alive case ports Mosquitto's `12-prop-server-keepalive.py`
+The source-locked Server Keep Alive case ports Mosquitto's
+`12-prop-server-keepalive.py`
 against the new example-broker `--server-keep-alive` policy switch. A client
 requests 61 seconds, the exact CONNACK advertises the configured 60-second
 replacement after netz's fixed capabilities, and a subsequent PING proves the
 negotiated connection remains usable.
-Six maximum-Keep-Alive cases port Mosquitto's
-`01-connect-max-keepalive.py` boundary for MQTT 3.1.1 and extend it to MQTT 5.
+Six maximum-Keep-Alive cases source-lock Mosquitto's
+`01-connect-max-keepalive.py`, port its MQTT 3.1.1 boundary, and extend it to
+MQTT 5.
 Requests above 100 seconds and zero (which would disable Keep Alive) receive
 legacy CONNACK return code 2 in MQTT 3.1.1, while MQTT 5 accepts them with an
 exact Server Keep Alive value of 100. Requests exactly at the limit are

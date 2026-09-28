@@ -60,6 +60,8 @@ class SourceLockTests(unittest.TestCase):
                     "c24875b36288f418f484107415da902d96708cd58e24de1fdf5dedabff15daff",
                 "broker/01-connect-max-connections.py":
                     "e45bdbc27c2966c22ae1add1d98da4256ca5f55cfa8c4601f2a2bcd28569e01a",
+                "broker/01-connect-max-keepalive.py":
+                    "73b606c619fcf4aa02c68cbebd4f50d941f22d7e523662b1ba9a3dc717e96640",
                 "broker/12-prop-assigned-client-identifier.py":
                     "8c65d0fd5cc74901f2ebe37c7ee9433db7225219c2908276335c358ac587e5fc",
                 "broker/13-websocket-bad-origin.py":
@@ -136,6 +138,8 @@ class SourceLockTests(unittest.TestCase):
                     "b6d7dd59618ae2134033bd419f95d5aff08b5d14540b2e63ffafa6ddadfcb9c1",
                 "broker/12-prop-response-topic-correlation-data.py":
                     "9f5cd36f81a1dc861e9d8cf96a03778971cb91a6860b628db65d3c7a132a257c",
+                "broker/12-prop-server-keepalive.py":
+                    "55575b50c79634efa1789d0b998bd52ffd19054217c60ec35865261c9d97b561",
                 "broker/12-prop-maximum-packet-size-broker.py":
                     "49255859d6f2562f63d73fe18faa15023f5e28bf5d4066270c427dee41919ed5",
                 "broker/12-prop-maximum-packet-size-publish-qos1.py":
