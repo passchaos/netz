@@ -83,6 +83,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "6177aec3d006b2c7d45a140860ffc36ffed1ad08ab2e0a4e064317038794604f",
     "broker/04-retain-check-source-persist.py":
         "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
+    "broker/04-retain-check-source-persist-diff-port.py":
+        "e10ea590dcb8ca5ae07cfe4ac0df788fda254680220738fea59f0d9abbfcc094",
     "broker/07-will-delay-invalid-573191.py":
         "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
     "broker/07-will-delay-reconnect.py":

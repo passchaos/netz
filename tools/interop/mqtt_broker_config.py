@@ -2339,9 +2339,10 @@ def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
 def run_retain_source_case(broker: Path, directory: Path) -> None:
     for proto_ver in (5, 4):
         for per_listener in (False, True):
-            run_retain_source_scope_case(
-                broker, directory, proto_ver, per_listener
-            )
+            for username in (None, "writer"):
+                run_retain_source_scope_case(
+                    broker, directory, proto_ver, per_listener, username
+                )
 
 
 def run_retain_source_scope_case(
@@ -2349,24 +2350,26 @@ def run_retain_source_scope_case(
     directory: Path,
     proto_ver: int,
     per_listener: bool,
+    username: str | None,
 ) -> None:
     scope = "listener" if per_listener else "global"
+    identity = "anonymous" if username is None else "named"
     source_port = free_port()
     reader_port = free_port()
     while reader_port == source_port:
         reader_port = free_port()
-    snapshot = directory / f"retain-source-{scope}-{proto_ver}.db"
-    source_acl = directory / f"retain-source-{scope}-{proto_ver}.acl"
-    reader_acl = directory / f"retain-reader-{scope}-{proto_ver}.acl"
-    config = directory / f"retain-source-{scope}-{proto_ver}.conf"
-    topic = f"retain/source/{scope}/{proto_ver}"
+    snapshot = directory / f"retain-source-{scope}-{identity}-{proto_ver}.db"
+    source_acl = directory / f"retain-source-{scope}-{identity}-{proto_ver}.acl"
+    reader_acl = directory / f"retain-reader-{scope}-{identity}-{proto_ver}.acl"
+    config = directory / f"retain-source-{scope}-{identity}-{proto_ver}.conf"
+    topic = f"retain/source/{scope}/{identity}/{proto_ver}"
     payload = b"persisted retained source"
     reader_acl.write_text(f"topic read {topic}\n")
 
     def write_acl(write_allowed: bool) -> None:
         source_acl.write_text(
-            ("" if per_listener else f"topic read {topic}\n")
-            + "user writer\n"
+            ("" if per_listener or username is None else f"topic read {topic}\n")
+            + ("" if username is None else f"user {username}\n")
             + f"topic {'readwrite' if write_allowed else 'read'} {topic}\n"
         )
 
@@ -2414,7 +2417,7 @@ def run_retain_source_scope_case(
         client.settimeout(5)
         client.sendall(
             connect_packet(
-                client_id, username="writer", proto_ver=proto_ver
+                client_id, username=username, proto_ver=proto_ver
             )
         )
         if connack_reason(read_mqtt_packet(client)) != 0:
@@ -2425,7 +2428,11 @@ def run_retain_source_scope_case(
     def connect_reader(client_id: str) -> socket.socket:
         client = websocket_connect(reader_port)
         send_websocket_binary(
-            client, connect_packet(client_id, proto_ver=proto_ver)
+            client, connect_packet(
+                client_id,
+                username=None if per_listener else username,
+                proto_ver=proto_ver,
+            )
         )
         if connack_reason(read_websocket_binary(client)) != 0:
             client.close()

@@ -329,11 +329,15 @@ deadline on every one of its finite broker processes, so all 225 curated raw
 scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
-Three retained-source scenarios persist and restart the standalone broker after
-storing a retained PUBLISH, mirroring Mosquitto's CVE-2018-12546 regression
-shape. The default `check_retain_source` path rechecks the deep-owned original
-Client ID against current write policy and suppresses replay after revocation;
-`--no-check-retain-source` demonstrates the explicit compatibility opt-out.
+The retained-source matrix persists and restarts the standalone broker after
+storing a retained PUBLISH, source-locking Mosquitto's CVE-2018-12546
+`04-retain-check-source-persist.py` and cross-listener
+`04-retain-check-source-persist-diff-port.py` regressions. MQTT 3.1.1 and MQTT
+5 each cover global and per-listener ACLs with both anonymous and named source
+identities. The default `check_retain_source` path rechecks the deep-owned
+original identity and stable source-listener ID against current write policy,
+then suppresses replay after revocation; `--no-check-retain-source`
+demonstrates the explicit compatibility opt-out.
 
 ## Server Reference redirects
 
