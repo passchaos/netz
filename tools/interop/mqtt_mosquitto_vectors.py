@@ -1311,6 +1311,50 @@ def disconnect_session_expiry(
             removed.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
+def ungraceful_session_expiry(
+    executable: Path, mqtt_packets, mqtt5_props
+) -> None:
+    # Direct wire port of Mosquitto 05-session-expiry-kick.py. Closing the
+    # Network Connection without DISCONNECT must arm the CONNECT-selected
+    # one-second Session Expiry deadline; the active broker timer must remove
+    # the Session before the same Client ID reconnects.
+    client_id = "05-session-expiry"
+    connect_packet = mqtt_packets.gen_connect(
+        client_id, clean_session=False, proto_ver=5, session_expiry=1
+    )
+    with NetzBroker(executable, connections=2) as broker:
+        first = broker.connect()
+        try:
+            first.sendall(connect_packet)
+            expect_packet(
+                first,
+                expected_connack(mqtt_packets, mqtt5_props),
+                "ungraceful Session Expiry initial CONNACK",
+            )
+        finally:
+            # Deliberately omit MQTT DISCONNECT, matching the upstream crash
+            # path rather than the graceful expiry-override coverage above.
+            first.close()
+
+        time.sleep(2)
+        with broker.connect() as replacement:
+            replacement.sendall(connect_packet)
+            expect_packet(
+                replacement,
+                expected_connack(
+                    mqtt_packets, mqtt5_props, session_present=False
+                ),
+                "expired ungraceful Session CONNACK",
+            )
+            replacement.sendall(mqtt_packets.gen_pingreq())
+            expect_packet(
+                replacement,
+                mqtt_packets.gen_pingresp(),
+                "PINGRESP after ungraceful Session Expiry",
+            )
+            replacement.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
 def reject_zero_to_nonzero_disconnect_expiry(
     executable: Path, mqtt_packets, mqtt5_props, mqtt5_rc
 ) -> None:
@@ -6285,6 +6329,7 @@ def main() -> None:
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
     disconnect_session_expiry(args.broker, mqtt_packets, mqtt5_props)
+    ungraceful_session_expiry(args.broker, mqtt_packets, mqtt5_props)
     reject_zero_to_nonzero_disconnect_expiry(
         args.broker, mqtt_packets, mqtt5_props, mqtt5_rc
     )
