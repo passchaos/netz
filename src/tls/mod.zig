@@ -7,6 +7,7 @@ pub const client_ca_dir = @import("client_ca_dir.zig");
 pub const client_crl_file = @import("client_crl_file.zig");
 pub const testing = @import("testing.zig");
 pub const trust = @import("vail").x509.trust;
+pub const ClientCertificateTrustContext = @import("vail").tls.auth.TrustContext;
 pub const trust_cache = @import("trust_cache.zig");
 
 test {

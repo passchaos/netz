@@ -930,7 +930,7 @@ pub fn build(b: *std.Build) void {
     );
     const mqtt_reloadable_security_step = b.step(
         "test-mqtt-reloadable-security",
-        "Test atomic MQTT password and ACL file reloads",
+        "Test atomic MQTT password, ACL, and CRL file reloads",
     );
     mqtt_reloadable_security_step.dependOn(
         &run_mqtt_reloadable_security_tests.step,

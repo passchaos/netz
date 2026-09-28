@@ -321,12 +321,14 @@ As in Mosquitto's current ACL-file plugin, SUBSCRIBE/UNSUBSCRIBE requests can be
 installed even when no read rule grants them; unauthorized publications remain
 undeliverable. Unknown directives/access modes and malformed patterns fail
 before listeners are bound. On Linux, `SIGHUP` atomically reloads the
-`password_file` and `acl_file` contents named by the initial configuration. All
-replacement files are parsed before one locked swap; any missing or invalid
-file keeps the complete previous policy. Existing clients immediately observe
-new ACL rules, while password changes apply to later CONNECT attempts. Listener
-topology, anonymous policy, TLS identity/trust/CRLs, limits, and persistence
-settings remain fixed until restart.
+`password_file`, `acl_file`, and `crlfile` contents named by the initial
+configuration. All replacement files are parsed before one locked swap; any
+missing, malformed, unsigned, or otherwise invalid file keeps the complete
+previous policy. Existing clients immediately observe new ACL rules, password
+changes apply to later CONNECT attempts, and CRL changes apply to later TLS
+handshakes without rebinding the listener. Listener topology, anonymous policy,
+TLS identity/CA trust, limits, and persistence settings remain fixed until
+restart.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime

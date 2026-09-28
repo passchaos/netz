@@ -2155,6 +2155,142 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_crl_reload_case(broker: Path, directory: Path) -> None:
+    server_ca, server_ca_key = create_ca(
+        directory, "reload-server-ca", "Reload Server Root"
+    )
+    server_certificate, server_key = create_signed_certificate(
+        directory,
+        "reload-mtls-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        501,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    client_ca, client_ca_key = create_ca(
+        directory, "reload-client-ca", "Reload Client Root"
+    )
+    first_client, first_key = create_signed_certificate(
+        directory,
+        "reload-first-client",
+        "reload-first-client",
+        client_ca,
+        client_ca_key,
+        601,
+        "clientAuth",
+    )
+    second_client, second_key = create_signed_certificate(
+        directory,
+        "reload-second-client",
+        "reload-second-client",
+        client_ca,
+        client_ca_key,
+        602,
+        "clientAuth",
+    )
+    active_crl = create_crl(
+        directory,
+        "reload-active",
+        client_ca,
+        client_ca_key,
+        second_client,
+    )
+    replacement_crl = create_crl(
+        directory,
+        "reload-replacement",
+        client_ca,
+        client_ca_key,
+        first_client,
+    )
+    tampered_crl = directory / "reload-tampered.crl"
+    tamper_pem_crl(replacement_crl, tampered_crl)
+
+    port = free_port()
+    config = directory / "crl-reload.conf"
+    config.write_text(
+        f"listener {port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {client_ca}\n"
+        f"crlfile {active_crl}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 8\n"
+    )
+    environment = os.environ.copy()
+    environment.pop(FINITE_TEST_ENV, None)
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners global_max_connections=8" not in ready:
+        raise RuntimeError(f"CRL reload broker failed to start: {ready}")
+    listener = process.stdout.readline().strip()
+    if not listener.startswith("mqtts "):
+        raise RuntimeError(f"CRL reload listener missing: {listener}")
+
+    def expect_client(
+        certificate: Path,
+        key: Path,
+        accepted: bool,
+        label: str,
+    ) -> None:
+        result = openssl_mqtt_client(
+            port, server_ca, certificate, key
+        )
+        received_connack = result.stdout.startswith(b"\x20")
+        if accepted:
+            assert_openssl_mqtt_success(result)
+        elif received_connack:
+            raise AssertionError(
+                f"{label}: revoked client received MQTT CONNACK; "
+                + result.stderr.decode(errors="replace")
+            )
+
+    try:
+        expect_client(first_client, first_key, True, "initial first client")
+        expect_client(second_client, second_key, False, "initial second client")
+
+        active_crl.write_bytes(replacement_crl.read_bytes())
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "successful CRL reload",
+        )
+        expect_client(first_client, first_key, False, "reloaded first client")
+        expect_client(second_client, second_key, True, "reloaded second client")
+
+        active_crl.write_bytes(tampered_crl.read_bytes())
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload failed: error=InvalidCrl",
+            "failed CRL reload",
+        )
+        expect_client(
+            first_client, first_key, False, "rollback first client"
+        )
+        expect_client(
+            second_client, second_key, True, "rollback second client"
+        )
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def run_persistence_case(broker: Path, directory: Path) -> None:
     port = free_port()
     snapshot = directory / "configured.db"
@@ -4315,6 +4451,7 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_security_reload_case(args.broker, directory)
+        run_crl_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -4345,7 +4482,7 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "atomic password/ACL SIGHUP reload with rollback, "
+        "atomic password/ACL/CRL SIGHUP reload with rollback, "
         "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )

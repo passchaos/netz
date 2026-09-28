@@ -1,8 +1,8 @@
-//! Atomic password/ACL file reload for the Mosquitto-style broker example.
+//! Atomic password/ACL/CRL file reload for the Mosquitto-style broker example.
 //!
 //! Paths and listener topology remain fixed for the process lifetime. A reload
 //! parses every configured file into a detached set before one write-locked
-//! swap. Callbacks hold the read lock through password verification or ACL
+//! swap. Callbacks hold the read lock through password, ACL, CA, or CRL
 //! evaluation, so the previous set is destroyed only after all readers leave.
 
 const std = @import("std");
@@ -13,6 +13,11 @@ const mqtt = netz.mqtt;
 pub const Paths = struct {
     password_file: []const u8 = &.{},
     acl_file: []const u8 = &.{},
+};
+
+pub const ClientAuthPaths = struct {
+    client_ca: ?*const netz.tls.client_ca_file.File = null,
+    crl_file: []const u8 = &.{},
 };
 
 const FileSet = struct {
@@ -83,6 +88,52 @@ const FileSet = struct {
     }
 };
 
+const ClientCrlSet = struct {
+    crls: []?netz.tls.client_crl_file.File,
+
+    fn load(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        dir: std.Io.Dir,
+        paths: []const ClientAuthPaths,
+    ) !ClientCrlSet {
+        const crls = try allocator.alloc(
+            ?netz.tls.client_crl_file.File,
+            paths.len,
+        );
+        errdefer allocator.free(crls);
+        @memset(crls, null);
+        var initialized: usize = 0;
+        errdefer for (crls[0..initialized]) |*maybe_crl| {
+            if (maybe_crl.*) |*crl| crl.deinit();
+        };
+
+        for (paths, 0..) |entry, index| {
+            if (entry.crl_file.len != 0) {
+                const client_ca = entry.client_ca orelse
+                    return error.CrlWithoutClientCa;
+                crls[index] = try netz.tls.client_crl_file.load(
+                    allocator,
+                    io,
+                    dir,
+                    entry.crl_file,
+                    client_ca,
+                );
+            }
+            initialized = index + 1;
+        }
+        return .{ .crls = crls };
+    }
+
+    fn deinit(self: *ClientCrlSet, allocator: std.mem.Allocator) void {
+        for (self.crls) |*maybe_crl| {
+            if (maybe_crl.*) |*crl| crl.deinit();
+        }
+        allocator.free(self.crls);
+        self.* = undefined;
+    }
+};
+
 pub const Security = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -91,6 +142,8 @@ pub const Security = struct {
     listener_ids: []const u16,
     per_listener_settings: bool,
     files: FileSet,
+    client_auth_paths: []const ClientAuthPaths = &.{},
+    client_crls: ?ClientCrlSet = null,
     lock: std.Io.RwLock = .init,
 
     pub fn init(
@@ -119,8 +172,29 @@ pub const Security = struct {
     }
 
     pub fn deinit(self: *Security) void {
+        if (self.client_crls) |*crls| crls.deinit(self.allocator);
         self.files.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Attach the immutable client-CA topology and load every configured CRL
+    /// before TLS listeners are opened. The paths and CA files must outlive
+    /// this Security value.
+    pub fn configureClientAuth(
+        self: *Security,
+        paths: []const ClientAuthPaths,
+    ) !void {
+        if (self.client_crls != null) return error.ClientAuthAlreadyConfigured;
+        if (paths.len != self.listener_ids.len) {
+            return error.InvalidClientAuthLayout;
+        }
+        self.client_crls = try ClientCrlSet.load(
+            self.allocator,
+            self.io,
+            self.dir,
+            paths,
+        );
+        self.client_auth_paths = paths;
     }
 
     pub fn reload(self: *Security) !void {
@@ -130,12 +204,27 @@ pub const Security = struct {
             self.dir,
             self.paths,
         );
+        errdefer replacement.deinit(self.allocator);
+        var replacement_crls = if (self.client_crls != null)
+            try ClientCrlSet.load(
+                self.allocator,
+                self.io,
+                self.dir,
+                self.client_auth_paths,
+            )
+        else
+            null;
+        errdefer if (replacement_crls) |*crls| crls.deinit(self.allocator);
         self.lock.lockUncancelable(self.io);
         var previous = self.files;
         self.files = replacement;
         replacement = undefined;
+        var previous_crls = self.client_crls;
+        self.client_crls = replacement_crls;
+        replacement_crls = null;
         self.lock.unlock(self.io);
         previous.deinit(self.allocator);
+        if (previous_crls) |*crls| crls.deinit(self.allocator);
     }
 
     pub fn hasReloadableFiles(self: *const Security) bool {
@@ -143,6 +232,9 @@ pub const Security = struct {
             if (entry.password_file.len != 0 or entry.acl_file.len != 0) {
                 return true;
             }
+        }
+        for (self.client_auth_paths) |entry| {
+            if (entry.crl_file.len != 0) return true;
         }
         return false;
     }
@@ -170,6 +262,18 @@ pub const Security = struct {
             .listener_index = listener_index,
             .allow_anonymous = allow_anonymous,
         };
+    }
+
+    pub fn clientAuthPolicy(
+        self: *Security,
+        listener_index: usize,
+    ) ClientAuthPolicy {
+        std.debug.assert(self.client_crls != null);
+        std.debug.assert(listener_index < self.client_auth_paths.len);
+        std.debug.assert(
+            self.client_auth_paths[listener_index].client_ca != null,
+        );
+        return .{ .security = self, .listener_index = listener_index };
     }
 
     pub fn sourceAccessControl(
@@ -273,6 +377,44 @@ pub const Security = struct {
             },
             publication.topic,
         );
+    }
+};
+
+pub const ClientAuthPolicy = struct {
+    security: *Security,
+    listener_index: usize,
+
+    pub fn clientVerifier(
+        self: *ClientAuthPolicy,
+    ) mqtt.tls_runtime.ClientCertificateVerifier {
+        return .{
+            .verify_trust = verifyTrust,
+            .context = self,
+        };
+    }
+
+    fn verifyTrust(
+        context: ?*anyopaque,
+        trust_context: netz.tls.ClientCertificateTrustContext,
+    ) anyerror!void {
+        const self: *ClientAuthPolicy = @ptrCast(@alignCast(
+            context orelse return error.MissingTrustContext,
+        ));
+        const security = self.security;
+        security.lock.lockSharedUncancelable(security.io);
+        defer security.lock.unlockShared(security.io);
+
+        const paths = security.client_auth_paths[self.listener_index];
+        const client_ca = paths.client_ca orelse return error.MissingClientCa;
+        try client_ca.verifier(
+            std.Io.Timestamp.now(security.io, .real).toSeconds(),
+        ).verify(trust_context);
+        const crls = security.client_crls orelse
+            return error.MissingClientCrlSet;
+        if (crls.crls[self.listener_index]) |crl| {
+            if (trust_context.chain.len == 0) return error.CrlNotFound;
+            try crl.verifyLeaf(trust_context.chain[0]);
+        }
     }
 };
 
