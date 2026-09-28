@@ -101,12 +101,26 @@ MOSQUITTO_SOURCE_SHA256 = {
         "c0afa378487f9d0b90ae82986ad5b51f9e15bf2817a678a4ca11d81d185084a0",
     "broker/07-will-delay-invalid-573191.py":
         "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
+    "broker/07-will-delay.py":
+        "9a3db7d13e23a21d4ef17bce8e8145e3c4ff9d2e4a0fa7ec91b2cd3c85847c53",
     "broker/07-will-delay-reconnect.py":
         "b6f3b892fb51ebb65748ece41c6773f38fb496b92f7a6008a05a1133817c7224",
     "broker/07-will-delay-recover.py":
         "94060369730e84a37b39f3414e8d976a96939fa0f31e7e8301ce173ffdefe1dc",
+    "broker/07-will-disconnect-with-will.py":
+        "4e74bd9dd6a79cec01b197cb09535062f7138af30aa94da9b99bf66297b9a8cb",
+    "broker/07-will-no-flag.py":
+        "ca5bcc14a21e944e137db45745772db39fadbb7d4eb05caf03ce76a8c1735733",
+    "broker/07-will-null.py":
+        "0287cee88b54613fdc7e37692064545ceb5c8ad65d34437bbe53167741fc4c24",
+    "broker/07-will-null-topic.py":
+        "9b82e6126dbbc86ca981c7efd584d18844b242bd2c9e5e44876d4c5cdb9a5ae9",
     "broker/07-will-oversize-payload.py":
         "20de02ef6d3b1c451af58e38514518e1e1df81288958ce2d2a8470840d9999be",
+    "broker/07-will-properties.py":
+        "78e27c3406d1af3517a3a09190a2e3b95ff1c91ec503ce798e2e4184eb8db0f3",
+    "broker/07-will-takeover.py":
+        "294a4441eef80b1a4fe9599870fd5e7bb1b0f77e0e56a3c64a15b7806bf2c604",
     "broker/11-message-expiry.py":
         "c52a9210a12b58c6a51c295c2239e38d82689a7f7ef28c83f449a1f38d00e5dc",
     "broker/11-subscription-id.py":

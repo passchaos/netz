@@ -2155,7 +2155,8 @@ DISCONNECT packets for Topic Alias, Receive Maximum, shared-subscription,
 Subscription Identifier, and wildcard-subscription violations. The latter
 three cover capability controls that rumqtt's codecs model but the audited
 Mosquitto broker does not expose as listener switches.
-Another case combines the wire-observable behavior from Mosquitto's
+Another source-locked case combines the wire-observable behavior from
+Mosquitto's
 `07-will-properties.py` and `07-will-disconnect-with-will.py`: DISCONNECT
 reason `0x04` publishes the Will, a leading zero Will Delay property is
 removed, and ordered User Property, Response Topic, Correlation Data, Payload
@@ -2203,7 +2204,8 @@ listeners never reuse an identifier. The existing simultaneous WebSocket pair
 independently checks listener-local assignment and connection takeover
 isolation; parser tests enforce the 50-byte and MQTT UTF-8 bounds before any
 listener opens.
-Four malformed-Will cases directly port Mosquitto's `07-will-no-flag.py` and
+Four source-locked malformed-Will cases directly port Mosquitto's
+`07-will-no-flag.py` and
 `07-will-null-topic.py` for MQTT 3.1.1 and MQTT 5. They remove the complete
 Will Payload field while keeping CONNECT's declared length self-consistent, or
 supply an empty Will Topic carrying binary payload bytes. Netz rejects every
@@ -2217,7 +2219,7 @@ and Will property allocations are released on this late parse failure, while
 the strengthened process case requests a persistent Session, waits past the
 declared delay, and proves the same Client ID receives Session Present false
 before completing PING on the still-healthy broker.
-Two companion cases port Mosquitto's `07-will-null.py` for MQTT 3.1.1 and
+Two source-locked companion cases port Mosquitto's `07-will-null.py` for MQTT 3.1.1 and
 MQTT 5. They distinguish the malformed missing field above from a valid
 zero-length Will Payload, then require an exact empty PUBLISH after the source
 disconnects ungracefully. A following PINGRESP proves that publication occurs
@@ -2228,7 +2230,7 @@ displaced MQTT 5 peer now receives DISCONNECT `0x8e` (Session Taken Over)
 instead of an unexplained EOF, and the replacement remains responsive to
 PING. The in-process takeover test also verifies the reason code while
 retaining its existing single-subscription-owner assertion.
-The eight-case Will takeover matrix directly ports Mosquitto's
+The source-locked eight-case Will takeover matrix directly ports Mosquitto's
 `07-will-takeover.py` across MQTT 3.1.1 and MQTT 5. It combines transient and
 durable old Sessions with clean and continuing replacement connections, checks
 Session Present and the MQTT 5 takeover DISCONNECT, and proves byte-for-byte
