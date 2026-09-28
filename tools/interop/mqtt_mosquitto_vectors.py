@@ -1767,6 +1767,26 @@ def no_matching_subscribers(executable: Path, mqtt_packets, mqtt5_rc) -> None:
                 ),
                 "retained no-match PUBACK",
             )
+            mid += 1
+            # Creating a retained topic-tree node is not the same as adding a
+            # matching subscription. Preserve the second half of Mosquitto's
+            # source scenario and require the MQTT 5 no-match reason again for
+            # every prefix after retained storage exists.
+            for topic in topics:
+                packet = mqtt_packets.gen_publish(
+                    topic, qos=1, mid=mid, payload="message", proto_ver=5
+                )
+                sock.sendall(packet)
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_puback(
+                        mid,
+                        proto_ver=5,
+                        reason_code=mqtt5_rc.NO_MATCHING_SUBSCRIBERS,
+                    ),
+                    f"post-retain no-match PUBACK {mid}",
+                )
+                mid += 1
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 

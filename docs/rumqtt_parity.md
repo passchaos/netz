@@ -1938,7 +1938,12 @@ generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
 seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
-with exact forwarded PUBLISH bytes; it also ports Mosquitto's hostile
+with exact forwarded PUBLISH bytes. The no-subscriber scenario is now locked
+to the complete upstream `03-publish-qos1-no-subscribers-v5.py` source hash and
+replays all seven publications: three absent topic prefixes, one retained
+write that creates the topic-tree node, then the same three prefixes again.
+Every PUBACK remains reason `0x10`, proving retained storage alone cannot be
+miscounted as a matching subscription. The gate also ports Mosquitto's hostile
 non-CONNECT-initial-packet shape for all packet types 2-15, using a declared
 ~250 MiB Remaining Length without sending its body. Netz closes every malformed
 connection before that allocation/read and accepts a subsequent valid MQTT 5

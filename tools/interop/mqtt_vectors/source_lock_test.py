@@ -90,6 +90,8 @@ class SourceLockTests(unittest.TestCase):
                     "042fa7fa8728632551bdecb632aa5f41b539a69780bc4d4bdf25582e2ff8fd32",
                 "broker/03-publish-qos1-max-inflight.py":
                     "4863181b3799b1dd8c7d469d30e9d838ec0f3cf444cab142ec7d7bb4dd373bdc",
+                "broker/03-publish-qos1-no-subscribers-v5.py":
+                    "84dbe495e20c3142629d245daf43f8cf04f507fcf688792f790d43e3551afa5e",
                 "broker/03-publish-qos1-queued-bytes.conf":
                     "81264cf8b5af7d7248c2e968ff373e20d07d6b414c4770cca275a38c02beea6a",
                 "broker/03-publish-qos1-queued-bytes.py":
