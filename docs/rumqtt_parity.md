@@ -2223,7 +2223,11 @@ The Session Expiry case ports the timing-observable core of Mosquitto's
 `05-session-expiry-v5.py`: a three-second DISCONNECT override keeps a Session
 present beyond the one-second CONNECT value, the Session is absent after the
 new deadline, and a zero DISCONNECT override removes the replacement
-immediately. Exact CONNACK bytes distinguish every Session Present transition.
+immediately. The source-locked `05-session-expiry-kick.py` crash path now
+separately closes TCP without MQTT DISCONNECT after selecting a one-second
+expiry, waits while the broker's active deadline driver removes the Session,
+then requires Session Present false and a working PING on the same Client ID.
+Exact CONNACK bytes distinguish every Session Present transition.
 An additional Mosquitto `property__process_disconnect` vector covers
 MQTT-3.14.2-2: when CONNECT selected Session Expiry zero, a non-zero
 DISCONNECT override receives exact Protocol Error `0x82`. Validation happens
