@@ -1511,6 +1511,99 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_auto_client_id_prefix_matrix(broker: Path, directory: Path) -> None:
+    # Complete wire-visible matrix from Mosquitto 01-connect-auto-id.py. A
+    # listener-local prefix wins over the global prefix; an absent listener
+    # prefix inherits the global value or netz's documented default.
+    cases = (
+        (None, None, None, "auto-", "auto-"),
+        (None, None, "new-", "new-", "new-"),
+        (None, "port2-", None, "auto-", "port2-"),
+        ("port1-", "port2-", None, "port1-", "port2-"),
+        ("port1-", "port2-", "global-", "port1-", "port2-"),
+        ("port1-", None, "global-", "port1-", "global-"),
+    )
+    for index, (prefix1, prefix2, global_prefix, expected1, expected2) in (
+        enumerate(cases)
+    ):
+        port1 = free_port()
+        port2 = free_port()
+        while port2 == port1:
+            port2 = free_port()
+        lines = []
+        if global_prefix is not None:
+            lines.append(f"auto_id_prefix {global_prefix}")
+        lines.extend((
+            f"listener {port1} 127.0.0.1",
+            "allow_anonymous true",
+            "max_connections 1",
+        ))
+        if prefix1 is not None:
+            lines.append(f"listener_auto_id_prefix {prefix1}")
+        lines.extend((
+            f"listener {port2} 127.0.0.1",
+            "allow_anonymous true",
+            "max_connections 1",
+        ))
+        if prefix2 is not None:
+            lines.append(f"listener_auto_id_prefix {prefix2}")
+        config_path = directory / f"auto-id-prefix-{index}.conf"
+        config_path.write_text("\n".join(lines) + "\n")
+        process = subprocess.Popen(
+            [str(broker), f"--config={config_path}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        ready = process.stdout.readline().strip()
+        if "configured 2 listeners for 2 clients" not in ready:
+            raise RuntimeError(f"auto-ID broker case {index} failed: {ready}")
+
+        clients = []
+        try:
+            assigned_ids = []
+            for port, expected_prefix in (
+                (port1, expected1),
+                (port2, expected2),
+            ):
+                client = socket.create_connection(
+                    ("127.0.0.1", port), timeout=5
+                )
+                clients.append(client)
+                client.settimeout(5)
+                client.sendall(connect_packet(""))
+                connack = read_mqtt_packet(client)
+                if connack_reason(connack) != 0:
+                    raise AssertionError(
+                        f"auto-ID case {index} CONNECT was refused"
+                    )
+                assigned = assigned_client_identifier(connack)
+                if (
+                    not assigned.startswith(expected_prefix)
+                    or len(assigned) != len(expected_prefix) + 36
+                ):
+                    raise AssertionError(
+                        f"auto-ID case {index} expected prefix "
+                        f"{expected_prefix!r}, got {assigned!r}"
+                    )
+                assigned_ids.append(assigned)
+            if assigned_ids[0] == assigned_ids[1]:
+                raise AssertionError(
+                    f"auto-ID case {index} reused an identifier"
+                )
+            for client in clients:
+                client.sendall(bytes.fromhex("e000"))
+        finally:
+            for client in clients:
+                client.close()
+        if process.wait(timeout=5) != 0:
+            raise RuntimeError(
+                f"auto-ID broker case {index} failed: "
+                + process.stdout.read()
+            )
+
+
 def run_upgrade_outgoing_qos_case(broker: Path, directory: Path) -> None:
     port = free_port()
     config = directory / "upgrade-outgoing-qos.conf"
@@ -4198,6 +4291,7 @@ def main() -> None:
         run_packet_and_message_size_case(args.broker, directory)
         run_retain_unavailable_case(args.broker, directory)
         run_zero_length_client_id_case(args.broker, directory)
+        run_auto_client_id_prefix_matrix(args.broker, directory)
         run_upgrade_outgoing_qos_case(args.broker, directory)
         run_max_inflight_messages_case(args.broker, directory)
         run_zero_maximum_keep_alive_case(args.broker, directory)
@@ -4235,7 +4329,7 @@ def main() -> None:
         "persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
-        "zero-length Client ID and outgoing QoS "
+        "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "

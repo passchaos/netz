@@ -2177,10 +2177,15 @@ production broker switch rejects clean-start anonymous MQTT 3.1.1 with return
 code 2 and MQTT 5 with reason 0x80 before creating Session or Will state; a
 named MQTT 5 client then connects and answers PING on the same listener.
 The same gate source-locks Mosquitto's Assigned Client Identifier vector and
-checks `auto_id_prefix` inheritance plus `listener_auto_id_prefix` override on
-two simultaneous MQTT 5 WebSocket clients. Both identifiers carry the selected
-prefix and remain distinct; parser tests enforce the 50-byte and MQTT UTF-8
-bounds before any listener opens.
+the complete twelve-connection matrix from `01-connect-auto-id.py`. Six real
+two-listener broker configurations prove the `auto-` default, global
+`auto_id_prefix` inheritance, listener-local override, and fallback to the
+global prefix when only the sibling listener overrides it. Every MQTT 5
+CONNACK carries a UUID-shaped identifier with the selected prefix, and the two
+listeners never reuse an identifier. The existing simultaneous WebSocket pair
+independently checks listener-local assignment and connection takeover
+isolation; parser tests enforce the 50-byte and MQTT UTF-8 bounds before any
+listener opens.
 Four malformed-Will cases directly port Mosquitto's `07-will-no-flag.py` and
 `07-will-null-topic.py` for MQTT 3.1.1 and MQTT 5. They remove the complete
 Will Payload field while keeping CONNECT's declared length self-consistent, or
