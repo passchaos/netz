@@ -80,6 +80,8 @@ class SourceLockTests(unittest.TestCase):
                     "4ec4e803697b4051d1c63a1d3c78bad40400af6794795b904423930903d863ee",
                 "broker/02-subpub-qos0-queued-bytes.py":
                     "e39f61da69cff986a2255d29739788fa6fff9cd75f0c121f945a738c25f3b126",
+                "broker/02-subpub-qos0-send-retain.py":
+                    "9127a9d4c098dd0be08c1c03d5fb1631b36824fe9ae9b0b408962f3c5dfb2d60",
                 "broker/02-subpub-qos0-oversize-payload.py":
                     "42ba19c5c3c967184b3928252aacf020a4f637445f35e499525a1fd8c1ca58f7",
                 "broker/02-subpub-qos1-oversize-payload.py":
@@ -122,6 +124,12 @@ class SourceLockTests(unittest.TestCase):
                     "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
                 "broker/04-retain-check-source-persist-diff-port.py":
                     "e10ea590dcb8ca5ae07cfe4ac0df788fda254680220738fea59f0d9abbfcc094",
+                "broker/04-retain-clear-multiple.py":
+                    "ad410dbbeedca9d9f8c3a0cb96f3c4d5d826edb1cf9709ba3b9146f4b191092c",
+                "broker/04-retain-qos0-repeated.py":
+                    "c2cb35ae716acd68b7622b557c2612af6467d3133728ecde5fc254084595c6ed",
+                "broker/04-retain-upgrade-outgoing-qos.py":
+                    "c0afa378487f9d0b90ae82986ad5b51f9e15bf2817a678a4ca11d81d185084a0",
                 "broker/07-will-delay-invalid-573191.py":
                     "f0f02675b050e023c5331696142f0d8bf0e3360f39011bd0dc7efdce3a382285",
                 "broker/07-will-delay-reconnect.py":

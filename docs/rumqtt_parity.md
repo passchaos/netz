@@ -1966,7 +1966,7 @@ the restored No Local subscription suppresses self-delivery while PUBACK stays
 successful, and re-subscribing replaces the option so the next self-publish is
 forwarded with an independent Packet Identifier. This also corrected netz's
 prior 0x10 PUBACK: No Local suppresses delivery but does not mean that no
-subscription matched. The seventh scenario directly ports Mosquitto's
+subscription matched. The seventh source-locked scenario directly ports Mosquitto's
 `02-subpub-qos0-send-retain.py`: retained messages are installed before
 SUBSCRIBE, then Retain Handling 0/1/2 are each exercised twice to prove
 always-send, new-subscription-only and never-send behavior with exact RETAIN
@@ -1997,8 +1997,7 @@ PUBLISH packets are rechecked before reconnect transmission so a policy change
 cannot leak an older message or leave it blocking the Session queue. Will
 publication has a separate source-aware write check at the due instant; a
 denied retained Will is consumed without routing or retained-store mutation.
-The ninth
-scenario ports Mosquitto's MQTT 5
+The ninth source-locked scenario ports the MQTT 5 branch of Mosquitto's
 `04-retain-qos0-repeated.py` lifecycle and its clear boundary: retained replay
 survives UNSUBSCRIBE/resubscribe, UNSUBACK bytes are exact, and a zero-length
 retained PUBLISH removes the value so a later subscription receives nothing.
@@ -2041,8 +2040,9 @@ Its QoS 2 Maximum Packet Size companion verifies that
 an oversized released message completes publisher PUBREC/PUBREL/PUBCOMP but
 creates no downstream transaction, then a fitting message completes both the
 publisher and independent subscriber QoS 2 handshakes.
-The multi-level retained clear vector runs on
-one MQTT 5 connection: three nested topics replay through `#`, middle and leaf
+The source-locked multi-level retained clear vector ports Mosquitto's
+`04-retain-clear-multiple.py` on one MQTT 5 connection: three nested topics
+replay through `#`, middle and leaf
 tombstones return no-match PUBACK 0x10, and subsequent wildcard replay proves
 ancestor/child retained trie nodes survive independent deletion.
 The five-client shared QoS 0 scenario directly ports Mosquitto's corresponding
@@ -2350,7 +2350,7 @@ the fresh connection's receive accounting not recognizing an idempotent
 completed transaction; it is now reconciled without depending on the obsolete
 MQTT 3.1 PUBREL DUP bit. Both supported versions require the `0x2` PUBREL fixed
 flags from MQTT-3.6.1-1.
-Four MQTT 3.1.1/5 scenarios cover Mosquitto's non-standard
+Four MQTT 3.1.1/5 source-locked scenarios cover Mosquitto's non-standard
 `upgrade_outgoing_qos` switch. A retained and an ordinary live QoS 0
 Application Message are each delivered at the subscriber's granted QoS 1 when
 the opt-in is enabled, with the full PUBLISH/PUBACK exchange checked. The
