@@ -58,6 +58,26 @@ pub const ReceivedPacketTracker = struct {
         return fresh;
     }
 
+    /// Commit a packet number already accepted by `wouldRecordFresh` while the
+    /// tracker remained unchanged. Ordered traffic extends the newest range
+    /// directly; reordered insertion retains the full bounded-range checks.
+    pub fn recordPrevalidatedWithEcn(
+        self: *ReceivedPacketTracker,
+        packet_number: u64,
+        ecn: EcnCodepoint,
+    ) Error!bool {
+        if (self.ranges.items.len != 0) {
+            const newest = &self.ranges.items[0];
+            if (isImmediatelyBefore(newest.end, packet_number)) {
+                newest.end = packet_number;
+                self.retained_packet_count += 1;
+                if (ecn != .not_ect) self.recordEcn(ecn);
+                return true;
+            }
+        }
+        return self.recordWithEcn(packet_number, ecn);
+    }
+
     pub fn wouldRecordFresh(self: ReceivedPacketTracker, packet_number: u64) Error!bool {
         if (packet_number > quic.varint.max_value) return error.InvalidPacketNumber;
         if (self.max_ranges == 0) return false;
@@ -2661,6 +2681,34 @@ test "QUIC packet space extends newest ACK range before scanning" {
     try std.testing.expectEqual(@as(usize, 3), received.ranges.items.len);
     try std.testing.expectEqual(@as(u64, 13), received.ranges.items[0].start);
     try std.testing.expectEqual(@as(u64, 13), received.ranges.items[0].end);
+}
+
+test "QUIC packet space commits prevalidated ordered packets with ECN" {
+    const allocator = std.testing.allocator;
+    var received = ReceivedPacketTracker.init(allocator, 4);
+    defer received.deinit();
+
+    try std.testing.expect(try received.recordFresh(10));
+    try std.testing.expect(try received.recordPrevalidatedWithEcn(11, .ect0));
+    try std.testing.expect(try received.recordPrevalidatedWithEcn(13, .ce));
+    try std.testing.expect(try received.recordPrevalidatedWithEcn(12, .ect1));
+
+    try std.testing.expectEqual(@as(usize, 1), received.ranges.items.len);
+    try std.testing.expectEqual(@as(u64, 10), received.ranges.items[0].start);
+    try std.testing.expectEqual(@as(u64, 13), received.ranges.items[0].end);
+    try std.testing.expectEqual(@as(u64, 4), received.retained_packet_count);
+    try std.testing.expectEqual(
+        quic.EcnCounts{
+            .ect0_count = 1,
+            .ect1_count = 1,
+            .ecn_ce_count = 1,
+        },
+        received.latestEcnCounts().?,
+    );
+    try std.testing.expect(!(try received.recordPrevalidatedWithEcn(
+        12,
+        .ect0,
+    )));
 }
 
 test "QUIC packet space rejects oldest ACK range duplicates before scanning" {

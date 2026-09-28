@@ -11802,7 +11802,9 @@ pub const Connection = struct {
                 // Duplicate packet numbers are ordinary QUIC network input.
                 // Visitor APIs wait for new application progress, so discard
                 // them before applying frame effects or invoking the caller.
-                if (!try self.received.wouldRecordFresh(packet.packet_number)) {
+                if (!try self.prevalidateReceivedPacketNumber(
+                    packet.packet_number,
+                )) {
                     return false;
                 }
                 try self.processOpenedBytesInPlaceVisitingAt(
@@ -11944,7 +11946,7 @@ pub const Connection = struct {
             };
             switch (current) {
                 .opened => |packet| {
-                    if (!try self.received.wouldRecordFresh(
+                    if (!try self.prevalidateReceivedPacketNumber(
                         packet.packet_number,
                     )) continue;
                     try self.processOpenedBytesInPlaceVisitingAt(
@@ -12034,6 +12036,7 @@ pub const Connection = struct {
             from,
             received_on,
             packet.payload,
+            true,
         );
         self.commitReceiveEndpoint(received_on, frames);
         const spin_connection_id_changed = !std.mem.eql(
@@ -12070,6 +12073,18 @@ pub const Connection = struct {
             .packet_number = packet.packet_number,
             .frames = frames,
         });
+    }
+
+    fn prevalidateReceivedPacketNumber(
+        self: *const Connection,
+        packet_number: u64,
+    ) quic.packet_space.Error!bool {
+        if (self.config.max_ack_ranges != 0 and
+            packet_number >= self.expected_packet_number)
+        {
+            return true;
+        }
+        return self.received.wouldRecordFresh(packet_number);
     }
 
     fn parseServicePacketFramesOrClose(self: *Connection, payload: []const u8, now_ns: ?u64) Error![]quic.Frame {
@@ -12187,6 +12202,7 @@ pub const Connection = struct {
             from,
             received_on,
             packet.packet.payload,
+            false,
         );
         self.commitReceiveEndpoint(received_on, packet.frames);
         const spin_connection_id_changed = !std.mem.eql(
@@ -12454,6 +12470,7 @@ pub const Connection = struct {
             routed.datagram.from,
             received_on,
             packet.packet.payload,
+            false,
         );
         self.commitReceiveEndpoint(received_on, packet.frames);
         const spin_connection_id_changed = !std.mem.eql(
@@ -12669,6 +12686,7 @@ pub const Connection = struct {
             null,
             null,
             &triggering_frame_index,
+            false,
         );
     }
 
@@ -12682,6 +12700,7 @@ pub const Connection = struct {
         path_response_peer: ?net.IpAddress,
         path_response_endpoint: ?*quic.runtime.Endpoint,
         packet_payload: ?[]const u8,
+        comptime packet_number_prevalidated: bool,
     ) Error!void {
         var triggering_frame_index: ?usize = null;
         self.applyReceivedFramesForDestination(
@@ -12693,6 +12712,7 @@ pub const Connection = struct {
             path_response_peer,
             path_response_endpoint,
             &triggering_frame_index,
+            packet_number_prevalidated,
         ) catch |err| {
             const triggering_frame = if (triggering_frame_index) |index|
                 frames[index]
@@ -12726,14 +12746,26 @@ pub const Connection = struct {
         path_response_peer: ?net.IpAddress,
         path_response_endpoint: ?*quic.runtime.Endpoint,
         triggering_frame_index: *?usize,
+        comptime packet_number_prevalidated: bool,
     ) Error!void {
-        if (!try self.received.wouldRecordFresh(packet_number)) return error.DuplicatePacket;
+        if (!packet_number_prevalidated and
+            !try self.received.wouldRecordFresh(packet_number))
+        {
+            return error.DuplicatePacket;
+        }
         const validated_ack = try self.validateReceivedFramePreconditions(
             frames,
             packet_destination_connection_id,
             triggering_frame_index,
         );
-        if (!try self.received.recordWithEcn(packet_number, ecn)) return error.DuplicatePacket;
+        if (packet_number_prevalidated) {
+            if (!try self.received.recordPrevalidatedWithEcn(
+                packet_number,
+                ecn,
+            )) return error.DuplicatePacket;
+        } else if (!try self.received.recordWithEcn(packet_number, ecn)) {
+            return error.DuplicatePacket;
+        }
         if (packet_number >= self.expected_packet_number) {
             self.expected_packet_number = packet_number + 1;
         }
