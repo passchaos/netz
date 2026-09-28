@@ -941,6 +941,14 @@ Close timeout and verifies one exact code/reason after continuation.
 Calling `closeWith*` again while that frame is pending must supply the same
 code/reason; a mismatch returns `WriteInProgress` before another QUIC packet or
 HTTP/3 DATA contribution is emitted.
+RFC 9220 connections also expose `waitForRecoveryIdleWithTimeout` and
+`waitForRecoveryIdleWithDeadline` for short-lived owners. A terminal peer Close
+flushes its cumulative ACK before delivery, while the explicit connection-wide
+drain drives ACK/loss/PTO processing until reliable HTTP/3 DATA is acknowledged
+and then flushes any final ACK under the same absolute budget. A deterministic loopback
+test drops the first client Close datagram and requires PTO retransmission, the
+exact echoed code/reason, and empty client/server recovery queues before either
+connection is destroyed.
 RFC 9220 binary scatter/gather sends now expose matching
 `sendBinarySlicesWithTimeout` and `sendBinarySlicesWithDeadline` entry points.
 They retain one frame header and client mask, track the exact socket-visible

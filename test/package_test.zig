@@ -1689,6 +1689,8 @@ test "public modules are reachable" {
         "sendBinaryInPlaceWithDeadline",
         "sendBinarySlicesWithTimeout",
         "sendBinarySlicesWithDeadline",
+        "waitForRecoveryIdleWithTimeout",
+        "waitForRecoveryIdleWithDeadline",
     }) |decl| {
         try std.testing.expect(@hasDecl(
             netz.websocket.runtime.h3.ClientConnection,

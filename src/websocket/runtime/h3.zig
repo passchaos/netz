@@ -623,6 +623,32 @@ pub fn Connection(comptime role: common.Role) type {
             return self.h3.keyUpdateAwaitingAck();
         }
 
+        /// Drive QUIC ACK/loss/PTO processing until all reliable data on this
+        /// connection has been acknowledged. Short-lived owners should call
+        /// this after the Close handshake and before destroying the connection.
+        pub fn waitForRecoveryIdleWithTimeout(
+            self: *Self,
+            timeout: std.Io.Duration,
+        ) Error!void {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.waitForRecoveryIdleWithDeadline(.fromNow(
+                self.io(),
+                .{ .raw = timeout, .clock = .awake },
+            ));
+        }
+
+        pub fn waitForRecoveryIdleWithDeadline(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+        ) Error!void {
+            try self.h3.waitForRecoveryIdleWithDeadline(deadline);
+            // The last peer Close/FIN may have arrived while draining our own
+            // reliable bytes. Flush that cumulative ACK within the same
+            // caller budget before a short-lived owner releases the socket.
+            _ = try self.h3.established.connection
+                .flushPendingAckWithDeadline(deadline);
+        }
+
         pub fn sendText(self: *Self, text: []const u8) Error!void {
             if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
                 return error.ConnectionClosed;
@@ -2291,6 +2317,7 @@ pub fn Connection(comptime role: common.Role) type {
                                 (try self.resumeAutomaticControl(deadline)) == null,
                             );
                         }
+                        self.flushTerminalReceiveAck();
                         return error.ConnectionClosed;
                     },
                     else => {
@@ -2484,6 +2511,7 @@ pub fn Connection(comptime role: common.Role) type {
                                 (try self.resumeAutomaticControl(deadline)) == null,
                             );
                         }
+                        self.flushTerminalReceiveAck();
                         return error.ConnectionClosed;
                     },
                     .text, .binary => {
@@ -2929,10 +2957,11 @@ pub fn Connection(comptime role: common.Role) type {
                     },
                     .close => {
                         defer frame.deinit(self.allocator);
-                        return .{ .closed = try websocket.parseClosePayloadOwned(
+                        const close = try websocket.parseClosePayloadOwned(
                             self.allocator,
                             frame.payload,
-                        ) };
+                        );
+                        return .{ .closed = close };
                     },
                     .text, .binary, .continuation => {
                         return .{ .application = frame };
@@ -2961,10 +2990,11 @@ pub fn Connection(comptime role: common.Role) type {
                     },
                     .close => {
                         defer frame.deinit(self.allocator);
-                        return .{ .closed = try websocket.parseClosePayloadOwned(
+                        const close = try websocket.parseClosePayloadOwned(
                             self.allocator,
                             frame.payload,
-                        ) };
+                        );
+                        return .{ .closed = close };
                     },
                     .text, .binary, .continuation => {
                         return .{ .application = frame };
@@ -3095,7 +3125,10 @@ pub fn Connection(comptime role: common.Role) type {
                 },
                 .close => {
                     self.close_received.store(true, .release);
-                    if (self.closeSent()) return frame;
+                    if (self.closeSent()) {
+                        self.flushTerminalReceiveAck();
+                        return frame;
+                    }
                     self.beginAutomaticControl(
                         .close,
                         frame.payload,
@@ -3105,8 +3138,10 @@ pub fn Connection(comptime role: common.Role) type {
                         frame.deinit(self.allocator);
                         return @errorCast(err);
                     };
-                    return (try self.resumeAutomaticControl(deadline)) orelse
+                    const delivered = (try self.resumeAutomaticControl(deadline)) orelse
                         unreachable;
+                    self.flushTerminalReceiveAck();
+                    return delivered;
                 },
                 else => {},
             }
@@ -3134,6 +3169,13 @@ pub fn Connection(comptime role: common.Role) type {
             // Do not invent a Close frame after the peer ended this direction.
             if (!self.failReceive()) return;
             self.finishAbruptReceiveEnd();
+        }
+
+        fn flushTerminalReceiveAck(self: *Self) void {
+            // Returning a peer Close is often the application's final receive.
+            // Keep it from stranding the peer's reliable-send recovery when no
+            // later WebSocket read occurs.
+            _ = self.h3.established.connection.tryFlushPendingAck() catch {};
         }
 
         fn abortStreamAfterReceiveFailureLocked(self: *Self) void {

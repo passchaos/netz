@@ -865,7 +865,9 @@ Current protocol coverage includes:
   fully drained rejected stream), pending admission before the HTTP/3 200
   response that restores caller-owned server sessions after rejection or
   abandonment, and HTTP/3 rejection helpers that send DATA/trailers with
-  automatic Content-Length while preserving sibling-stream reuse,
+  automatic Content-Length while preserving sibling-stream reuse; RFC 9220
+  connections expose bounded recovery-idle drains and flush terminal Close
+  acknowledgements before applications stop driving their receive loops,
   negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel

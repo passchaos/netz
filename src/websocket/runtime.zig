@@ -16006,6 +16006,7 @@ test {
     _ = @import("runtime/handshake/h1_attempt_tests.zig");
     _ = @import("runtime/handshake/h2_admission_tests.zig");
     _ = @import("runtime/h3_tests.zig");
+    _ = @import("runtime/h3_recovery_tests.zig");
     _ = @import("runtime/unix_tests.zig");
     _ = @import("runtime/error_close_tests.zig");
     _ = @import("runtime/close_timeout_tests.zig");
