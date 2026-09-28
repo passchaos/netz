@@ -1402,8 +1402,8 @@ zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --warmup=2 --iterations=5
 zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --netz-only --streams=1 --warmup=0 --iterations=1 --bytes-per-stream=262144
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --mode=both --samples=5 --connections=4 --warmup=200 --iterations=5000 --payload-bytes=1024 --bytes-per-stream=1048576
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=3 --connections=4 --streams=1 --bytes-per-stream=1048576 --server-topology=independent
-# Exercise the adaptive endpoint timer scheduler with 128 connections sharing
-# one server UDP socket. Shared netz/netz mode accepts up to 256 connections;
+# Exercise shared-endpoint scheduling with 128 connections on one server UDP
+# socket. Shared netz/netz mode accepts up to 256 connections;
 # independent/cross-stack comparisons retain their 16-connection bound.
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=1 --connections=128 --streams=1 --bytes-per-stream=65536 --payload-bytes=1024 --server-topology=shared --timeout-ms=120000
 zig build bench-quic-handshake-external -Doptimize=ReleaseFast -- --netz-only

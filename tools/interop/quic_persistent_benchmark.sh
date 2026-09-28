@@ -177,11 +177,18 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 EOF
 
 wait_for_ports() {
-  local pid=$1 log=$2 prefix=$3
-  local value=
+  local pid=$1 log=$2 prefix=$3 expected=$4
+  local value= field_count= trailing_byte=
   for _ in $(seq 1 600); do
     value=$(sed -n "s/^${prefix}=//p" "$log" | head -1)
-    if [[ -n $value ]]; then printf '%s\n' "$value"; return 0; fi
+    if [[ -n $value ]]; then
+      field_count=$(awk -F, '{ print NF }' <<<"$value")
+      trailing_byte=$(tail -c 1 "$log" | od -An -tu1 | tr -d ' ')
+      if (( field_count == expected )) && [[ $trailing_byte == 10 ]]; then
+        printf '%s\n' "$value"
+        return 0
+      fi
+    fi
     if ! kill -0 "$pid" 2>/dev/null; then return 1; fi
     sleep 0.05
   done
@@ -233,7 +240,7 @@ run_pair() {
     timeout 300s taskset -c "$server_cpu" "$netz_bench" server \
       "${common[@]}" >"$pair_dir/server.log" 2>&1 &
     server_pid=$!
-    ports=$(wait_for_ports "$server_pid" "$pair_dir/server.log" NETZ_QUIC_PERSISTENT_PORTS)
+    ports=$(wait_for_ports "$server_pid" "$pair_dir/server.log" NETZ_QUIC_PERSISTENT_PORTS "$mode_connections")
     ca=$work/netz-ca.pem
   else
     QUIC_GO_DISABLE_GSO=true timeout 300s taskset -c "$server_cpu" \
@@ -241,7 +248,7 @@ run_pair() {
       -role=server -addr=127.0.0.1:0 -ca-out="$pair_dir/ca.pem" \
       "${go_common[@]}" >"$pair_dir/server.log" 2>&1 &
     server_pid=$!
-    ports=$(wait_for_ports "$server_pid" "$pair_dir/server.log" QUIC_GO_PERSISTENT_PORTS)
+    ports=$(wait_for_ports "$server_pid" "$pair_dir/server.log" QUIC_GO_PERSISTENT_PORTS "$mode_connections")
     ca=$pair_dir/ca.pem
   fi
 
