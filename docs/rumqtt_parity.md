@@ -2140,8 +2140,9 @@ subsequent PING; the next fitting PUBLISH is delivered and acknowledged. From
 Application Message is dropped without leaving downstream QoS 2 state, while
 the next fitting PUBLISH completes publisher PUBREC/PUBCOMP and the independent
 subscriber PUBLISH/PUBREC/PUBREL/PUBCOMP sequence.
-Eight additional MQTT 3.1.1/5 cases port Mosquitto's QoS 0, QoS 1, and Will
-Application Message size-limit vectors and add the corresponding QoS 2 case.
+Eight additional source-locked MQTT 3.1.1/5 cases port Mosquitto's QoS 0,
+QoS 1, and Will Application Message size-limit vectors and add the corresponding
+QoS 2 case.
 The example broker exposes an
 independent `--max-payload-size`; a payload exactly at the boundary is routed,
 oversized QoS 0 is discarded while both connections stay usable, and oversized

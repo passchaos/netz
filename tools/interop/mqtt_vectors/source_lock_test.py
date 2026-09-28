@@ -78,6 +78,10 @@ class SourceLockTests(unittest.TestCase):
                     "4ec4e803697b4051d1c63a1d3c78bad40400af6794795b904423930903d863ee",
                 "broker/02-subpub-qos0-queued-bytes.py":
                     "e39f61da69cff986a2255d29739788fa6fff9cd75f0c121f945a738c25f3b126",
+                "broker/02-subpub-qos0-oversize-payload.py":
+                    "42ba19c5c3c967184b3928252aacf020a4f637445f35e499525a1fd8c1ca58f7",
+                "broker/02-subpub-qos1-oversize-payload.py":
+                    "2a2037c45f0e291042b80676f302ee9df2ce98e8b014cd3bb3d836464b8065fe",
                 "broker/02-subpub-qos2-max-inflight-bytes.py":
                     "59ab8100b5aa0cea3b1ae9b82a4afb44cd6027ed69b72e761533044dbc51a91c",
                 "broker/02-subpub-qos2-receive-maximum-1.py":
@@ -122,6 +126,8 @@ class SourceLockTests(unittest.TestCase):
                     "b6f3b892fb51ebb65748ece41c6773f38fb496b92f7a6008a05a1133817c7224",
                 "broker/07-will-delay-recover.py":
                     "94060369730e84a37b39f3414e8d976a96939fa0f31e7e8301ce173ffdefe1dc",
+                "broker/07-will-oversize-payload.py":
+                    "20de02ef6d3b1c451af58e38514518e1e1df81288958ce2d2a8470840d9999be",
                 "broker/11-message-expiry.py":
                     "c52a9210a12b58c6a51c295c2239e38d82689a7f7ef28c83f449a1f38d00e5dc",
                 "broker/11-subscription-id.py":
