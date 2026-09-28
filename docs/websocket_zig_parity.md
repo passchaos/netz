@@ -149,7 +149,14 @@ transfers it into the WebSocket connection.
 `rejectWithBody` adds ordinary HTTP/3 DATA and final trailers, with automatic
 Content-Length when a body is present and framing fields kept under the
 adapter's control. Short-lived rejection drains reliable QUIC recovery before
-session teardown on a best-effort bounded budget. Existing `accept*` methods
+session teardown on a best-effort bounded budget. Applications that require a
+confirmed policy boundary can instead use `rejectRetained` or
+`rejectWithBodyRetained`: the returned `RejectedUpgrade` keeps the HTTP/3
+recovery state alive, exposes timer-aware transport servicing, and supports
+explicit timeout/deadline delivery-only drains before teardown or restoration
+of a caller-owned session. A real QUIC/TLS regression drops the first final
+rejection datagram and requires PTO retransmission, exact status/header/body/
+trailers, and an empty delivery-recovery queue. Existing `accept*` methods
 remain immediate wrappers.
 `Client.connect*Attempt*` retains the complete non-2xx response body and
 trailers under `Limits.max_rejection_body_bytes`, rejects an oversized declared

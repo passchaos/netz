@@ -5263,15 +5263,15 @@ pub const PendingUpgrade = struct {
 
     pub fn deinit(self: *PendingUpgrade) void {
         self.h3.rejectRequest(self.request.stream_id) catch {};
-        self.finish(false);
+        self.finish();
     }
 
     fn restoreSession(self: *PendingUpgrade) void {
         std.debug.assert(self.restore_to != null);
-        self.finish(false);
+        self.finish();
     }
 
-    fn finish(self: *PendingUpgrade, drain_before_close: bool) void {
+    fn finish(self: *PendingUpgrade) void {
         const allocator = self.allocator;
         self.request.head.deinit(allocator);
         if (self.selected_protocol) |protocol| allocator.free(protocol);
@@ -5279,15 +5279,6 @@ pub const PendingUpgrade = struct {
         if (self.restore_to) |destination| {
             destination.* = self.h3;
         } else {
-            if (drain_before_close) {
-                if (self.deadline) |absolute| {
-                    self.h3.waitForRecoveryIdleWithDeadline(absolute) catch {};
-                } else {
-                    self.h3.waitForRecoveryIdleWithTimeout(
-                        rejection_drain_timeout,
-                    ) catch {};
-                }
-            }
             self.h3.deinit();
         }
         self.* = undefined;
@@ -5423,6 +5414,22 @@ pub const PendingUpgrade = struct {
         );
     }
 
+    /// Send a header-only rejection while returning ownership of the HTTP/3
+    /// recovery state to the application. The caller must keep the returned
+    /// value alive until its delivery policy is satisfied, then call `deinit`.
+    pub fn rejectRetained(
+        self: *PendingUpgrade,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedUpgrade {
+        return self.rejectWithBodyRetained(
+            status,
+            response_headers,
+            &.{},
+            &.{},
+        );
+    }
+
     /// Reject this CONNECT stream with an HTTP/3 response entity. Client-side
     /// retention is governed by `Limits.max_rejection_body_bytes`.
     pub fn rejectWithBody(
@@ -5432,6 +5439,35 @@ pub const PendingUpgrade = struct {
         body: []const u8,
         trailers: []const http3.Qpack.HeaderField,
     ) Error!void {
+        const deadline = self.deadline;
+        var rejected = try self.rejectWithBodyRetained(
+            status,
+            response_headers,
+            body,
+            trailers,
+        );
+        defer rejected.deinit();
+        if (rejected.restore_to == null) {
+            if (deadline) |absolute| {
+                rejected.waitForRecoveryIdleWithDeadline(absolute) catch {};
+            } else {
+                rejected.waitForRecoveryIdleWithTimeout(
+                    rejection_drain_timeout,
+                ) catch {};
+            }
+        }
+    }
+
+    /// Send a complete rejection entity while retaining the connection until
+    /// the caller explicitly finishes ACK/loss/PTO processing. This is useful
+    /// when reliable delivery is part of the application's admission policy.
+    pub fn rejectWithBodyRetained(
+        self: *PendingUpgrade,
+        status: u16,
+        response_headers: []const http3.Qpack.HeaderField,
+        body: []const u8,
+        trailers: []const http3.Qpack.HeaderField,
+    ) Error!RejectedUpgrade {
         if (status < 300 or status > 599) return error.InvalidStatus;
         try validateServerExtraHeaders(response_headers);
         try validateServerExtraHeaders(trailers);
@@ -5456,7 +5492,17 @@ pub const PendingUpgrade = struct {
             );
         }
         try self.h3.finishRejectedRequest(self.request.stream_id);
-        self.finish(true);
+        const rejected = RejectedUpgrade{
+            .allocator = self.allocator,
+            .h3 = self.h3,
+            .restore_to = self.restore_to,
+            .request = self.request,
+            .selected_protocol = self.selected_protocol,
+            .selected_extension = self.selected_extension,
+            .status = status,
+        };
+        self.* = undefined;
+        return rejected;
     }
 
     pub fn forbidden(self: *PendingUpgrade) Error!void {
@@ -5469,6 +5515,52 @@ pub const PendingUpgrade = struct {
 
     pub fn tooManyRequests(self: *PendingUpgrade) Error!void {
         return self.reject(429, &.{});
+    }
+};
+
+/// Owns an RFC 9220 rejection after its final response was submitted. Keeping
+/// this value alive preserves QUIC recovery state so applications that require
+/// confirmed delivery can drive ACK/loss/PTO processing before teardown.
+pub const RejectedUpgrade = struct {
+    allocator: std.mem.Allocator,
+    h3: http3.runtime.HandshakeServerSession,
+    restore_to: ?*http3.runtime.HandshakeServerSession = null,
+    request: RequestHead,
+    selected_protocol: ?[]u8,
+    selected_extension: ?[]u8,
+    status: u16,
+
+    pub fn deinit(self: *RejectedUpgrade) void {
+        self.request.head.deinit(self.allocator);
+        if (self.selected_protocol) |protocol| self.allocator.free(protocol);
+        if (self.selected_extension) |extension| self.allocator.free(extension);
+        if (self.restore_to) |destination| {
+            destination.* = self.h3;
+        } else {
+            self.h3.deinit();
+        }
+        self.* = undefined;
+    }
+
+    /// Process one timer-aware QUIC receive while the rejection remains owned.
+    pub fn serviceTransport(self: *RejectedUpgrade) Error!void {
+        try self.h3.established.connection.servicePacketServicingTimers();
+    }
+
+    /// Wait until the rejected CONNECT response is acknowledged. Pure receive-
+    /// credit advertisements do not prolong this application boundary.
+    pub fn waitForRecoveryIdleWithTimeout(
+        self: *RejectedUpgrade,
+        timeout: std.Io.Duration,
+    ) Error!void {
+        return self.h3.waitForRecoveryIdleWithTimeout(timeout);
+    }
+
+    pub fn waitForRecoveryIdleWithDeadline(
+        self: *RejectedUpgrade,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return self.h3.waitForRecoveryIdleWithDeadline(deadline);
     }
 };
 

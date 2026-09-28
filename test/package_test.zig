@@ -1638,6 +1638,30 @@ test "public modules are reachable" {
         netz.websocket.runtime.h3.PendingUpgrade,
         "rejectWithBody",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.PendingUpgrade,
+        "rejectRetained",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.PendingUpgrade,
+        "rejectWithBodyRetained",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "RejectedUpgrade",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.RejectedUpgrade,
+        "serviceTransport",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.RejectedUpgrade,
+        "waitForRecoveryIdleWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3.RejectedUpgrade,
+        "waitForRecoveryIdleWithDeadline",
+    ));
     try std.testing.expect(@hasField(
         netz.websocket.runtime.h3.AcceptOptions,
         "require_subprotocol",

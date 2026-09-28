@@ -1254,12 +1254,17 @@ test "WebSocket HTTP3 caller server session restores after rejection" {
                 "/rejected",
                 rejected.target(),
             );
-            try rejected.rejectWithBody(
+            var rejected_response = try rejected.rejectWithBodyRetained(
                 403,
                 &.{.{ .name = "x-admission", .value = "denied" }},
                 "not allowed",
                 &.{.{ .name = "x-final", .value = "true" }},
             );
+            try std.testing.expectEqual(
+                @as(u16, 403),
+                rejected_response.status,
+            );
+            rejected_response.deinit();
 
             var dropped = try h3.Server.receiveSessionUpgradeRequestWithTimeout(
                 allocator,
