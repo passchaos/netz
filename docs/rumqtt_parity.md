@@ -330,8 +330,9 @@ scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
 The retained-source matrix persists and restarts the standalone broker after
-storing a retained PUBLISH, source-locking Mosquitto's CVE-2018-12546
-`04-retain-check-source-persist.py` and cross-listener
+storing a retained PUBLISH, source-locking the ACL-reload wire boundary in
+Mosquitto's `04-retain-check-source.py`, its CVE-2018-12546
+`04-retain-check-source-persist.py`, and the cross-listener
 `04-retain-check-source-persist-diff-port.py` regressions. MQTT 3.1.1 and MQTT
 5 each cover global and per-listener ACLs with both anonymous and named source
 identities. The default `check_retain_source` path rechecks the deep-owned
@@ -1941,7 +1942,8 @@ any listener binds.
 
 `zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 225
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
-generators: two PROXY protocol cases consume Mosquitto's v1 TCP4 and v2 IPv4
+generators: two source-locked PROXY protocol cases consume Mosquitto's v1 TCP4
+and v2 IPv4
 prefaces before completing MQTT 5 CONNECT and PING on the same stream; the
 seven/no-topic-tree QoS 1 no-matching-subscriber PUBACK sequence
 (including retained-tree creation) and subscription-identifier replacement
@@ -1950,11 +1952,14 @@ to the complete upstream `03-publish-qos1-no-subscribers-v5.py` source hash and
 replays all seven publications: three absent topic prefixes, one retained
 write that creates the topic-tree node, then the same three prefixes again.
 Every PUBACK remains reason `0x10`, proving retained storage alone cannot be
-miscounted as a matching subscription. The gate also ports Mosquitto's hostile
+miscounted as a matching subscription. The gate also source-locks and ports
+Mosquitto's hostile
 non-CONNECT-initial-packet shape for all packet types 2-15, using a declared
 ~250 MiB Remaining Length without sending its body. Netz closes every malformed
 connection before that allocation/read and accepts a subsequent valid MQTT 5
-CONNECT. A QoS 2 vector additionally proves the Application Message is not
+CONNECT. This locks the adversarial input shape and early-rejection behavior,
+not Mosquitto's separate process-VMS sampling assertion. A QoS 2 vector
+additionally proves the Application Message is not
 routed before PUBREL, then checks publisher PUBREC/PUBCOMP plus the independent
 subscriber PUBLISH/PUBREC/PUBREL/PUBCOMP sequence byte-for-byte. A mixed-version
 case uses a Mosquitto-generated MQTT 3.1.1 subscriber and MQTT 5 publisher on
@@ -1976,12 +1981,14 @@ bits. The eighth scenario directly ports Mosquitto's
 it with an empty Topic Name; the subscriber receives the resolved full Topic
 Name with the connection-scoped alias removed. The gate builds a finite netz
 broker. Eight additional credential cases port Mosquitto's anonymous,
-username-without-password, and wrong-password refusals for MQTT 3.1.1 and 5,
+username-without-password, and wrong-password refusals for MQTT 3.1.1 and 5;
+the latter two upstream vectors are source-locked,
 then prove valid username/password connections remain usable in both versions. The broker
 evaluates this policy before Session/Will/router registration and the finite
 example exposes `--username` plus `--password` for static credentials. The
-same gate ports Mosquitto's denied-subscription and denied-publish plugin
-behavior for MQTT 3.1.1 and 5: denied filters return SUBACK 0x80/0x87, denied
+same gate source-locks the wire-observable subset of Mosquitto's
+denied-subscription and denied-publish plugin behavior for MQTT 3.1.1 and 5:
+denied filters return SUBACK 0x80/0x87, denied
 QoS 1/2 publications return the version-appropriate PUBACK/PUBREC without
 retained or routing mutation, and PING plus a later allowed publish prove the
 connection remains usable. The QoS 2 case immediately reuses the denied
@@ -2046,12 +2053,13 @@ The source-locked multi-level retained clear vector ports Mosquitto's
 replay through `#`, middle and leaf
 tombstones return no-match PUBACK 0x10, and subsequent wildcard replay proves
 ancestor/child retained trie nodes survive independent deletion.
-The five-client shared QoS 0 scenario directly ports Mosquitto's corresponding
-vector: an ordinary subscription receives all three messages, while two shared
+The source-locked five-client shared QoS 0 scenario directly ports Mosquitto's
+`02-shared-qos0-v5.py`: an ordinary subscription receives all three messages,
+while two shared
 groups independently select exactly one member and rotate through the upstream
 receiver sequence without duplicate group delivery.
-The following scenario isolates the core retransmission semantics from
-Mosquitto's client-to-broker QoS 2 reconnect vector: original and DUP PUBLISH
+The following scenario isolates the source-locked core retransmission semantics
+from Mosquitto's `03-publish-c2b-disconnect-qos2.py`: original and DUP PUBLISH
 with one Packet Identifier receive PUBREC without early routing, and one PUBREL
 creates exactly one independent downstream QoS 2 transaction.
 The nineteenth scenario verifies Mosquitto's PUBREL idempotence boundary:
@@ -2227,7 +2235,7 @@ MQTT 5. They distinguish the malformed missing field above from a valid
 zero-length Will Payload, then require an exact empty PUBLISH after the source
 disconnects ungracefully. A following PINGRESP proves that publication occurs
 once and leaves the subscriber connection usable.
-The duplicate Client ID case directly ports Mosquitto's
+The source-locked duplicate Client ID case directly ports Mosquitto's
 `01-connect-take-over.py`: the replacement receives a successful CONNACK, the
 displaced MQTT 5 peer now receives DISCONNECT `0x8e` (Session Taken Over)
 instead of an unexplained EOF, and the replacement remains responsive to
@@ -2332,7 +2340,7 @@ one-byte durable queued-payload limit while a seven-byte QoS 0 Application
 Message is routed to an online transient subscriber. Exact CONNACK, SUBACK,
 PUBLISH and PINGRESP bytes prove the offline Session budget neither drops nor
 duplicates live fanout.
-Two more scenarios port Mosquitto's
+Two source-locked scenarios port Mosquitto's
 `03-publish-b2c-disconnect-qos2.py` for MQTT 3.1.1 and MQTT 5. The first
 reconnect observes the unacknowledged QoS 2 PUBLISH with its original Packet
 Identifier and DUP=1. After PUBREC and a second abrupt disconnect, the next

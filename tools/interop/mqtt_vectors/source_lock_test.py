@@ -48,6 +48,8 @@ class SourceLockTests(unittest.TestCase):
         self.assertEqual(
             source_lock.MOSQUITTO_SOURCE_SHA256,
             {
+                "broker/01-bad-initial-packets.py":
+                    "e64f4db3735c90c22dc9995ff52838ab9136b82b5da2739e529999e12f56813a",
                 "broker/01-connect-accept-protocol.py":
                     "6fa62519cbb04bcad3e79244773d0354dfbab206b4b18f4234a96faf2ef3db11",
                 "broker/01-connect-auto-id.py":
@@ -62,12 +64,20 @@ class SourceLockTests(unittest.TestCase):
                     "e45bdbc27c2966c22ae1add1d98da4256ca5f55cfa8c4601f2a2bcd28569e01a",
                 "broker/01-connect-max-keepalive.py":
                     "73b606c619fcf4aa02c68cbebd4f50d941f22d7e523662b1ba9a3dc717e96640",
+                "broker/01-connect-take-over.py":
+                    "855c3c37229955b0eb2ef28d916032aceed5f3ca6d20d36fe6e95447b115f174",
+                "broker/01-connect-uname-no-password-denied.py":
+                    "54ee22a53e5ebffb6245be9f76dfee4f7edb36d7cb0c3b934650de094aa22061",
+                "broker/01-connect-uname-password-denied.py":
+                    "35515d3abfb1eb1092552240bb57d972dc9059c6e7911c1929759bf737b32564",
                 "broker/12-prop-assigned-client-identifier.py":
                     "8c65d0fd5cc74901f2ebe37c7ee9433db7225219c2908276335c358ac587e5fc",
                 "broker/13-websocket-bad-origin.py":
                     "edf2d87205dc2c67ccf147447039d9bc2ca0d4042e13b0ab1e226d77c6ef532d",
                 "broker/02-subpub-b2c-topic-alias.py":
                     "bd0035dfa6b66a9942749c004db129232275ebc12bbd2a8eda6e21152768a890",
+                "broker/02-shared-qos0-v5.py":
+                    "5f7b90d9190866a2879afc92d35398914f0cad07604b0b41fb040d9980c12497",
                 "broker/02-subpub-qos0-topic-alias.py":
                     "141ac402bfe2af0205307a4dbe64f6a6ce21a3be89a90fd8d3321188c2675df9",
                 "broker/02-subpub-qos0-long-topic.py":
@@ -122,8 +132,12 @@ class SourceLockTests(unittest.TestCase):
                     "37d431fc2c663fd3d35b083c829a3b73125322a356f2122e17ad851c94705256",
                 "broker/03-publish-b2c-disconnect-qos1.py":
                     "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
+                "broker/03-publish-b2c-disconnect-qos2.py":
+                    "4762f349ba73e77a20473a7930e39d9fcad80d316c4643d4793c46ded9020c3e",
                 "broker/03-publish-c2b-disconnect-qos2.py":
                     "b4842048512fd9719abfec32074a6d055ca88c1979c2f0588e281c8e9c40e2e7",
+                "broker/03-publish-bad-flags.py":
+                    "0718770fe09c7df65a9553e6b4697b7a28050cb65ac7470f2494a57d157ce7d3",
                 "broker/03-publish-long-topic.py":
                     "f09b04182bc587a819e007f462000b1c781f8af7d464ed058e8b51439ccb353e",
                 "broker/05-clean-session-qos1.py":
@@ -136,6 +150,8 @@ class SourceLockTests(unittest.TestCase):
                     "9accde1f896d26b7c798ce3c5ca0a75b28bdad89f3e5e557b5cff0957ba0579c",
                 "broker/04-retain-check-source-persist-diff-port.py":
                     "e10ea590dcb8ca5ae07cfe4ac0df788fda254680220738fea59f0d9abbfcc094",
+                "broker/04-retain-check-source.py":
+                    "6752e84581f172cd59463fdde950f4b928025d8bda050169edd65fd3b45f5ab0",
                 "broker/04-retain-clear-multiple.py":
                     "ad410dbbeedca9d9f8c3a0cb96f3c4d5d826edb1cf9709ba3b9146f4b191092c",
                 "broker/04-retain-qos0-repeated.py":
@@ -164,6 +180,10 @@ class SourceLockTests(unittest.TestCase):
                     "78e27c3406d1af3517a3a09190a2e3b95ff1c91ec503ce798e2e4184eb8db0f3",
                 "broker/07-will-takeover.py":
                     "294a4441eef80b1a4fe9599870fd5e7bb1b0f77e0e56a3c64a15b7806bf2c604",
+                "broker/09-plugin-auth-acl-pub-prop.py":
+                    "885df1d4f1556efd585b701c95279ea6c3e36a189498b2a58a41a98d5aba0cec",
+                "broker/09-plugin-auth-acl-sub-denied.py":
+                    "93c2af138cfb7be3b25f98d97658b60df07d6c43b3eebd04ff651e1c4e1fe1d7",
                 "broker/11-persistent-subscription-no-local.py":
                     "2a77a9da197041f80129bdba981ac6a4577503b57436ea60153f78010d52b4d6",
                 "broker/11-pub-props.py":
@@ -196,6 +216,8 @@ class SourceLockTests(unittest.TestCase):
                     "e554db32fe8a7ee87dd54d6959913365202b4a32c893fbdeaa32ee2f7b273ae7",
                 "broker/21-proxy-v1-success.py":
                     "07c5c8f9b94dc49239190b680e1c3f858ed987734d5c879a88531590e1583d53",
+                "broker/21-proxy-v2-ipv4.py":
+                    "daf117e685ac994b45cce89c0c43269f3a799d2b0dd3ea2f358fb1fe2faab0c8",
                 "broker/21-proxy-v2-websockets.py":
                     "de1ea836095867cec17fe21afbbcd29c7b9d9f05bf734d995914227119764c3f",
                 "broker/21-proxy-bad-version.py":

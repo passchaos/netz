@@ -5697,8 +5697,9 @@ def shared_subscription_rotation(executable: Path, mqtt_packets) -> None:
 
 
 def qos2_duplicate_publish(executable: Path, mqtt_packets) -> None:
-    # Core wire semantics from Mosquitto 03-c2b-qos2-disconnect.py without the
-    # process-specific reconnect harness: a DUP PUBLISH with the same Packet
+    # Core wire semantics from Mosquitto
+    # 03-publish-c2b-disconnect-qos2.py without the process-specific reconnect
+    # harness: a DUP PUBLISH with the same Packet
     # Identifier receives the same PUBREC, does not replace/route early, and
     # one PUBREL releases exactly one downstream QoS 2 transaction.
     topic = "03/c2b/qos2/duplicate/test"
