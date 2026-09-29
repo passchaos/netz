@@ -5,6 +5,8 @@ use rumqttc::v5;
 use rumqttc::v5::mqttbytes::v5::PublishProperties;
 use rumqttc::{Client, Connection, Event, Incoming, MqttOptions, QoS};
 
+mod crash;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn next_v4(connection: &mut Connection) -> Result<Event, Box<dyn Error>> {
@@ -455,11 +457,27 @@ fn run_v5(port: u16) -> Result<(), Box<dyn Error>> {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let port: u16 = std::env::args().nth(1).ok_or("missing port")?.parse()?;
-    run_v4(port)?;
-    run_v5(port)?;
-    println!(
-        "rumqttc client interop passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=0,1,2 retained=true single-delivery=true automatic-ack=true response-topic=true correlation-data=true user-property=true session-resume=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io"
-    );
+    let mut args = std::env::args().skip(1);
+    let first = args.next().ok_or("missing mode or port")?;
+    if first == "prepare-crash" {
+        let port: u16 = args.next().ok_or("missing port")?.parse()?;
+        crash::prepare(port)?;
+        println!(
+            "rumqttc crash preparation passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 persistent-subscription=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io"
+        );
+    } else if first == "recover-crash" {
+        let port: u16 = args.next().ok_or("missing port")?.parse()?;
+        crash::recover(port)?;
+        println!(
+            "rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true offline-qos1=true single-delivery=true automatic-ack=true client_io=rumqttc-tokio server_io=zio-std-io"
+        );
+    } else {
+        let port: u16 = first.parse()?;
+        run_v4(port)?;
+        run_v5(port)?;
+        println!(
+            "rumqttc client interop passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=0,1,2 retained=true single-delivery=true automatic-ack=true response-topic=true correlation-data=true user-property=true session-resume=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io"
+        );
+    }
     Ok(())
 }

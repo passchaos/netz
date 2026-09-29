@@ -1241,6 +1241,16 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_rumqttc_step.dependOn(&mqtt_rumqttc.step);
 
+    const mqtt_rumqttc_crash = b.addSystemCommand(&.{
+        "tools/interop/mqtt_rumqttc_crash.sh",
+    });
+    mqtt_rumqttc_crash.addArtifactArg(mqtt_vectors_broker);
+    const mqtt_rumqttc_crash_step = b.step(
+        "interop-mqtt-rumqttc-crash",
+        "Verify rumqttc Sessions survive netz broker SIGKILL and restart",
+    );
+    mqtt_rumqttc_crash_step.dependOn(&mqtt_rumqttc_crash.step);
+
     const mqtt_outbound_bridge = b.addExecutable(.{
         .name = "netz-mqtt-outbound-bridge",
         .root_module = b.createModule(.{

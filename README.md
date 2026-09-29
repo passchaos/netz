@@ -1306,6 +1306,10 @@ zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast
 # MQTT 3.1.1/5 QoS completion/single-delivery, retained, persistent Session
 # recovery with offline QoS 1 delivery, and MQTT 5 property boundaries.
 zig build interop-mqtt-rumqttc -Doptimize=ReleaseFast
+# Use new rumqttc processes on both sides of a broker SIGKILL/restart and
+# require MQTT 3.1.1/5 persistent Sessions plus queued QoS 1 to recover from
+# the broker's fsynced commit log without another SUBSCRIBE.
+zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
 # policy, global/per-listener Mosquitto password hashes, authentication
 # rejection, isolated ACL read/write/deny/pattern behavior, OpenSSL-verified
