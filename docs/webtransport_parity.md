@@ -120,13 +120,21 @@ both the page and server boundaries. The runner requires the rejected-Origin
 and accepted-Session processes to report the same version and process-image
 hash. It then covers
 certificate-hash authentication, CONNECT, DATAGRAM, bidirectional and
-unidirectional streams, a second bidirectional stream on the same Session,
-DRAIN framing, and exact close code 77/reason `netz done`. Firefox exposes the
-WebTransport API only after its HTTP/3/WebTransport preferences are enabled.
-Its current stream `abort()` and reader `cancel()` behavior is not counted
-here: a repeated forced probe on Firefox 156.0.1 did not emit the expected
-RESET_STREAM before a following DATAGRAM, so mapped Firefox
-RESET_STREAM/STOP_SENDING remains an explicit browser-specific gap.
+unidirectional streams, an exact mapped RESET_STREAM code 71 from
+`WritableStreamDefaultWriter.abort()`, a second bidirectional stream on the
+same Session after that reset, DRAIN framing, and exact close code 77/reason
+`netz done`. Firefox exposes the WebTransport API only after its
+HTTP/3/WebTransport preferences are enabled. Firefox may defer the reset
+stream's preceding write until `abort()`, so the gate does not deadlock on a
+server acknowledgement before aborting: it aborts first, writes an independent
+DATAGRAM as an outbound scheduling barrier, and counts success only after the
+netz server observes the remote unidirectional RESET_STREAM with code 71. The
+server accepts any valid payload prefix that won the race with reset, but still
+rejects a wrong stream direction, initiator, code, FIN, or payload. Firefox
+156.0.1's `ReadableStreamDefaultReader.cancel()` still did not produce a
+server-visible STOP_SENDING code 72 with either a consumed or unread payload,
+including after an outbound DATAGRAM barrier, so that half remains an explicit
+browser-specific gap.
 The 2026-09-29 artifact run used Chrome 153.0.8010.12 with process-image
 SHA-256 `839efe5fd8b6a773dd81b2e10afdc15f3c0a17316fb82b5908c0533306c4ed9e`
 and Firefox 156.0.1 with process-image SHA-256
@@ -948,12 +956,12 @@ handle routing, both-session progress and payload isolation.
    separate Firefox 156.0.1 gate now binds its output to Puppeteer's actual
    launched-browser version, launcher/process-image SHA-256, and page/server
    User-Agent before covering
-   Origin policy, CONNECT, DATAGRAM, both stream directions, same-Session
-   reuse, DRAIN framing and exact close metadata. Firefox stream cancellation
-   remains open because its current
-   `abort()`/`cancel()` path did not emit the expected RESET_STREAM or
-   STOP_SENDING before a following DATAGRAM. Safari automation remains a
-   separate gap.
+   Origin policy, CONNECT, DATAGRAM, both stream directions, exact mapped
+   RESET_STREAM code 71, same-Session reuse after reset, DRAIN framing and
+   exact close metadata. Firefox STOP_SENDING remains open because its current
+   reader `cancel()` path did not emit code 72 for either a consumed or unread
+   payload, even after a following outbound DATAGRAM. Safari automation
+   remains a separate gap.
 3. Extend the bounded stream-churn gate to larger long-run distributions;
    concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake

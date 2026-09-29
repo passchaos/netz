@@ -949,6 +949,19 @@ pub fn build(b: *std.Build) void {
     const run_webtransport_wtransport_bench_tests = b.addRunArtifact(
         webtransport_wtransport_bench_tests,
     );
+    const webtransport_browser_reset_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/webtransport_browser_reset.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_webtransport_browser_reset_tests = b.addRunArtifact(
+        webtransport_browser_reset_tests,
+    );
     const webtransport_churn_protocol_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -1129,6 +1142,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_websocket_send_shape_tests.step);
     test_step.dependOn(&run_mqtt_reloadable_security_tests.step);
     test_step.dependOn(&run_webtransport_wtransport_bench_tests.step);
+    test_step.dependOn(&run_webtransport_browser_reset_tests.step);
     test_step.dependOn(&run_webtransport_churn_protocol_tests.step);
     test_step.dependOn(&websocket_slices_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_autobahn_report_checker_tests.step);
@@ -2352,7 +2366,7 @@ pub fn build(b: *std.Build) void {
     );
     const webtransport_firefox_step = b.step(
         "interop-webtransport-firefox",
-        "Exercise WebTransport Origin, datagrams, streams, reuse, and close with Firefox",
+        "Exercise WebTransport Origin, datagrams, streams, cancellation, reuse, and close with Firefox",
     );
     webtransport_firefox_step.dependOn(&webtransport_firefox.step);
     const example_specs = [_]struct {

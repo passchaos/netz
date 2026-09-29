@@ -234,7 +234,7 @@ if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
 fi
 grep -Fq \
   "$(if [[ $browser_product == firefox ]]; then
-      printf '%s' 'bidi uni reuse=true drain-before-close=true close=77/netz-done'
+      printf '%s' 'bidi uni reset=71 reuse-after-reset=true drain-before-close=true close=77/netz-done'
     else
       printf '%s' 'bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done'
     fi)" \
@@ -244,7 +244,7 @@ grep -Fq \
   "$work/server.log"
 grep -Fq \
   "$(if [[ $browser_product == firefox ]]; then
-      printf '%s' 'oversized_rejected=true bidi uni reuse=true drain-before-close=true close'
+      printf '%s' 'oversized_rejected=true bidi uni reset=71 reuse-after-reset=true drain-before-close=true close'
     else
       printf '%s' 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close'
     fi)" \

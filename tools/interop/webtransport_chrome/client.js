@@ -27,7 +27,7 @@ async function sha256File(path) {
 }
 
 async function runBrowserProbe({
-  port, certificateHash, browserName, testStreamCancellation, originOnly,
+  port, certificateHash, browserName, streamCancellation, originOnly,
   rejectOnly, browserVersion, browserLauncherSha256, browserProcessSha256,
 }) {
   const timeoutMs = 10_000;
@@ -134,7 +134,20 @@ async function runBrowserProbe({
   )).value;
   await readExact(incomingUni.getReader(), 'netz uni', 'unidirectional response');
 
-  if (!testStreamCancellation) {
+  const reset = await withTimeout(
+    transport.createUnidirectionalStream(),
+    'reset stream open',
+  );
+  const resetWriter = reset.getWriter();
+  await resetWriter.write(textEncoder.encode('wtransport reset'));
+  await resetWriter.abort(new WebTransportError({streamErrorCode: 71}));
+  // Firefox can resolve abort before Necko schedules RESET_STREAM. This
+  // independent write drives outbound progress; the server's reply is sent
+  // only after it validates the exact reset event.
+  await datagramWriter.write(textEncoder.encode('reset flush'));
+  await readDatagram(datagramReader, 'reset ready', 'reset-ready DATAGRAM');
+
+  if (streamCancellation === 'reset-only') {
     const reuse = await withTimeout(
       transport.createBidirectionalStream(),
       'reuse stream open',
@@ -151,17 +164,8 @@ async function runBrowserProbe({
         `reason=${JSON.stringify(closeInfo.reason)}`,
       );
     }
-    return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reuse=true drain-before-close=true close=77/netz-done ${browserIdentity}`;
+    return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 reuse-after-reset=true drain-before-close=true close=77/netz-done ${browserIdentity}`;
   }
-
-  const reset = await withTimeout(
-    transport.createUnidirectionalStream(),
-    'reset stream open',
-  );
-  const resetWriter = reset.getWriter();
-  await resetWriter.write(textEncoder.encode('wtransport reset'));
-  await readDatagram(datagramReader, 'reset ready', 'reset-ready DATAGRAM');
-  await resetWriter.abort(new WebTransportError({streamErrorCode: 71}));
 
   const stopStream = (await withTimeout(
     incomingUniReader.read(),
@@ -177,6 +181,9 @@ async function runBrowserProbe({
   await reuseWriter.write(textEncoder.encode('after cancel'));
   await reuseWriter.close();
   await stopReader.cancel(new WebTransportError({streamErrorCode: 72}));
+  // Keep the full Chrome path symmetric with the reset barrier. This does not
+  // substitute for the server-side STOP_SENDING assertion.
+  await datagramWriter.write(textEncoder.encode('stop flush'));
   await readDatagram(datagramReader, 'cancel done', 'cancel-done DATAGRAM');
   await readExact(reuse.readable.getReader(), 'session reused', 'reuse response');
 
@@ -247,7 +254,7 @@ async function runBrowserProbe({
       browserVersion,
       browserLauncherSha256,
       browserProcessSha256,
-      testStreamCancellation: !firefox,
+      streamCancellation: firefox ? 'reset-only' : 'full',
       originOnly: process.env.WEBTRANSPORT_ORIGIN_ONLY === '1',
       rejectOnly: process.env.WEBTRANSPORT_REJECT_ONLY === '1',
     }));

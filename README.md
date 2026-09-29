@@ -1191,7 +1191,9 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 # Run the browser-facing protocol against real Chromium and Firefox network
 # stacks. Each gate verifies the launched browser version, launcher and process
 # image SHA-256 across both phases, and page User-Agent; Firefox also verifies
-# its CONNECT User-Agent. Override CHROME/FIREFOX when it is not on PATH.
+# its CONNECT User-Agent plus exact RESET_STREAM code 71 and post-reset Session
+# reuse. Firefox STOP_SENDING remains a separately documented browser gap.
+# Override CHROME/FIREFOX when it is not on PATH.
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate

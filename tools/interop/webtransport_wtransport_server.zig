@@ -1,6 +1,7 @@
 const std = @import("std");
 const netz = @import("netz");
 const benchmark = @import("webtransport_wtransport_bench.zig");
+const browser_reset = @import("webtransport_browser_reset.zig");
 const churn = @import("webtransport_wtransport_churn_server.zig");
 const CountingAllocator = @import("benchmark_counting_allocator")
     .CountingAllocator;
@@ -16,6 +17,8 @@ const server_stop = "netz stop";
 const reuse_request = "after cancel";
 const reuse_response = "session reused";
 const reset_ready = "reset ready";
+const reset_flush = "reset flush";
+const stop_flush = "stop flush";
 const cancel_done = "cancel done";
 const close_ready = "close ready";
 
@@ -62,6 +65,44 @@ fn receiveExpectedStream(
                 }
             },
             .reset, .stopped => return error.UnexpectedStream,
+        }
+    }
+}
+
+fn receiveExpectedResetStream(
+    session: anytype,
+    buffer: []u8,
+    expected: []const u8,
+    application_code: u32,
+    association_prefix_len: usize,
+) !u62 {
+    var validator = browser_reset.Validator{
+        .expected = expected,
+        .application_code = application_code,
+        .association_prefix_len = association_prefix_len,
+    };
+    while (true) {
+        const event = try session.readStream(buffer);
+        switch (event) {
+            .data => |data| {
+                try validator.observeData(
+                    data.stream_id,
+                    data.direction,
+                    data.locally_initiated,
+                    data.fin,
+                    buffer[0..data.bytes],
+                );
+            },
+            .reset => |reset| {
+                return validator.observeReset(
+                    reset.stream_id,
+                    reset.direction,
+                    reset.locally_initiated,
+                    reset.error_info.application_code,
+                    reset.final_size,
+                );
+            },
+            .stopped => return error.UnexpectedResetStream,
         }
     }
 }
@@ -304,6 +345,59 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("netz WebTransport interop received uni\n", .{});
     const response_uni = try session.openUnidirectionalStream();
     try session.sendStream(response_uni, server_uni, true);
+    if (allowed_origins.len != 0) {
+        // Browser WritableStreams do not promise that a completed write was
+        // placed on the wire before a following abort. Accept any validated
+        // prefix, but require the reset's absolute QUIC final size to include
+        // the complete association header and application write.
+        var reset_header: std.ArrayList(u8) = .empty;
+        defer reset_header.deinit(allocator);
+        try netz.webtransport.UnidirectionalStreamHeader.writeWebTransport(
+            &reset_header,
+            allocator,
+            session.sessionId(),
+        );
+        var reset_barrier = try session.receiveDatagram();
+        defer reset_barrier.deinit(allocator);
+        if (!std.mem.eql(u8, reset_barrier.datagram.payload, reset_flush)) {
+            return error.UnexpectedResetBarrier;
+        }
+        _ = try receiveExpectedResetStream(
+            &session,
+            &read_buffer,
+            client_reset,
+            71,
+            reset_header.items.len,
+        );
+        try session.sendDatagram(reset_ready);
+    } else {
+        const reset_stream_id = try receiveExpectedStream(
+            &session,
+            &read_buffer,
+            null,
+            .unidirectional,
+            false,
+            client_reset,
+            false,
+        );
+        try session.sendDatagram(reset_ready);
+        while (true) {
+            const event = try session.readStream(&read_buffer);
+            switch (event) {
+                .reset => |reset| {
+                    if (reset.stream_id != reset_stream_id or
+                        reset.direction != .unidirectional or
+                        reset.locally_initiated or
+                        reset.error_info.application_code != 71)
+                    {
+                        return error.UnexpectedResetStream;
+                    }
+                    break;
+                },
+                .data, .stopped => return error.UnexpectedResetStream,
+            }
+        }
+    }
     if (std.mem.eql(u8, client_io, "firefox-necko")) {
         const reuse_stream_id = try receiveExpectedStream(
             &session,
@@ -324,40 +418,20 @@ pub fn main(init: std.process.Init) !void {
         try session.close(77, "netz done");
         try std.Io.sleep(io, .fromMilliseconds(100), .awake);
         std.debug.print(
-            "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reuse=true drain-before-close=true close client_io={s} server_io=zio-std-io\n",
+            "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reset=71 reuse-after-reset=true drain-before-close=true close client_io={s} server_io=zio-std-io\n",
             .{ max_datagram_size, client_io },
         );
         return;
     }
-
-    const reset_stream_id = try receiveExpectedStream(
-        &session,
-        &read_buffer,
-        null,
-        .unidirectional,
-        false,
-        client_reset,
-        false,
-    );
-    try session.sendDatagram(reset_ready);
-    while (true) {
-        const event = try session.readStream(&read_buffer);
-        switch (event) {
-            .reset => |reset| {
-                if (reset.stream_id != reset_stream_id or
-                    reset.direction != .unidirectional or
-                    reset.locally_initiated or
-                    reset.error_info.application_code != 71)
-                {
-                    return error.UnexpectedResetStream;
-                }
-                break;
-            },
-            .data, .stopped => return error.UnexpectedResetStream,
-        }
-    }
     const stop_stream = try session.openUnidirectionalStream();
     try session.sendStream(stop_stream, server_stop, false);
+    if (allowed_origins.len != 0) {
+        var stop_barrier = try session.receiveDatagram();
+        defer stop_barrier.deinit(allocator);
+        if (!std.mem.eql(u8, stop_barrier.datagram.payload, stop_flush)) {
+            return error.UnexpectedStopBarrier;
+        }
+    }
     var sibling_stream_id: ?u62 = null;
     var sibling_received: usize = 0;
     var sibling_finished = false;
