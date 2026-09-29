@@ -63,7 +63,7 @@ timeout 30s "$client" prepare-crash "$source_port" \
     exit 1
   }
 grep -Fq \
-  'rumqttc crash preparation passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 persistent-subscription=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io' \
+  'rumqttc crash preparation passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 persistent-subscription=true offline-qos=1,2 client_io=rumqttc-tokio server_io=zio-std-io' \
   "$work/prepare.log"
 [[ -s "$journal" ]]
 kill -KILL "$server_pid"
@@ -80,12 +80,16 @@ timeout 30s "$client" deliver-unacked "$delivery_port" "$packet_ids" \
     exit 1
   }
 grep -Fq \
-  'rumqttc unacknowledged delivery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 session-present=true no-resubscribe=true offline-qos1=true manual-ack=true dup=false client_io=rumqttc-tokio server_io=zio-std-io' \
+  'rumqttc unacknowledged delivery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 offline-qos=1,2 session-present=true no-resubscribe=true manual-ack=true dup=false client_io=rumqttc-tokio server_io=zio-std-io' \
   "$work/delivery.log"
-v4_packet_id=$(sed -n 's/^v4_pkid=//p' "$packet_ids")
-v5_packet_id=$(sed -n 's/^v5_pkid=//p' "$packet_ids")
-[[ "$v4_packet_id" =~ ^[1-9][0-9]*$ ]]
-[[ "$v5_packet_id" =~ ^[1-9][0-9]*$ ]]
+v4_qos1_packet_id=$(sed -n 's/^v4_qos1_pkid=//p' "$packet_ids")
+v4_qos2_packet_id=$(sed -n 's/^v4_qos2_pkid=//p' "$packet_ids")
+v5_qos1_packet_id=$(sed -n 's/^v5_qos1_pkid=//p' "$packet_ids")
+v5_qos2_packet_id=$(sed -n 's/^v5_qos2_pkid=//p' "$packet_ids")
+[[ "$v4_qos1_packet_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$v4_qos2_packet_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$v5_qos1_packet_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$v5_qos2_packet_id" =~ ^[1-9][0-9]*$ ]]
 kill -KILL "$server_pid"
 wait "$server_pid" 2>/dev/null || true
 server_pid=
@@ -93,13 +97,15 @@ server_pid=
 retry_port=$(free_port)
 start_broker "$retry_port" 3 "$work/retry-server.log"
 timeout 30s "$client" retry-ack "$retry_port" \
-  "$v4_packet_id" "$v5_packet_id" >"$work/retry.log" 2>&1 || {
+  "$v4_qos1_packet_id" "$v4_qos2_packet_id" \
+  "$v5_qos1_packet_id" "$v5_qos2_packet_id" \
+  >"$work/retry.log" 2>&1 || {
     cat "$work/retry.log" >&2
     cat "$work/retry-server.log" >&2
     exit 1
   }
 grep -Fq \
-  'rumqttc inflight retry passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true dup=true stable-packet-id=true manual-puback=true client_io=rumqttc-tokio server_io=zio-std-io' \
+  'rumqttc inflight retry passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=1,2 sigkill=true commit-log=true session-present=true no-resubscribe=true dup=true stable-packet-id=true manual-puback=true manual-pubrec=true pubrel=true pubcomp=true client_io=rumqttc-tokio server_io=zio-std-io' \
   "$work/retry.log"
 kill -KILL "$server_pid"
 wait "$server_pid" 2>/dev/null || true
@@ -117,7 +123,7 @@ wait "$server_pid"
 server_pid=
 cat "$work/final.log"
 grep -Fq \
-  'rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true offline-qos1=true dup-retry=true stable-packet-id=true acknowledged-not-replayed=true client_io=rumqttc-tokio server_io=zio-std-io' \
+  'rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 offline-qos=1,2 sigkill=true commit-log=true session-present=true no-resubscribe=true dup-retry=true stable-packet-id=true acknowledged-not-replayed=true client_io=rumqttc-tokio server_io=zio-std-io' \
   "$work/final.log"
 grep -Fq 'server_io=zio-std-io' "$work/source-server.log"
 grep -Fq 'server_io=zio-std-io' "$work/delivery-server.log"

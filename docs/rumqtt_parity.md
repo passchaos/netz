@@ -2059,21 +2059,22 @@ broker fanout as typed rumqttc values. This keeps libmosquitto and rumqttc
 evidence independent.
 `zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast` extends that
 independent-client boundary across process failure. A first rumqttc process
-creates MQTT 3.1.1 and MQTT 5 persistent subscriptions, disconnects them, and
-uses distinct publisher connections to queue QoS 1 while both subscribers are
-offline. After each publisher receives PUBACK, the runner sends SIGKILL to the
+creates MQTT 3.1.1 and MQTT 5 persistent QoS 1/2 subscriptions, disconnects
+them, and uses distinct publisher connections to queue one message at each QoS
+while both subscribers are offline. After each publisher completes PUBACK or
+PUBREC/PUBREL/PUBCOMP, the runner sends SIGKILL to the
 still-listening broker. A new broker process restores the same fsynced commit
 log on a different port, and a new rumqttc process reconnects both Client IDs.
 It requires Session Present and receives each queued message without
-SUBSCRIBE. Manual acknowledgement then holds both deliveries at the exact
-post-PUBLISH/pre-PUBACK boundary before a second SIGKILL. The next process must
-receive `DUP=1` with each original Packet Identifier, sends explicit PUBACKs,
-and uses unrelated QoS 1 publishes as protocol barriers. After a third
-SIGKILL/restart, final fresh clients require that neither acknowledged delivery
-reappears. The MQTT 5 path exercises the Session Expiry property throughout.
-This is external client evidence for single-node queued and outgoing-inflight
-crash recovery, distinct from the raw-packet commit-log fixtures and from
-orderly same-process reconnect.
+SUBSCRIBE. Manual acknowledgement then holds all four deliveries at the exact
+post-PUBLISH/pre-PUBACK-or-PUBREC boundary before a second SIGKILL. The next
+process must receive `DUP=1` with every original Packet Identifier, send
+explicit PUBACK/PUBREC, observe each PUBREL/PUBCOMP completion, and pass
+unrelated QoS 1 protocol barriers. After a third SIGKILL/restart, final fresh
+clients require that none of the acknowledged deliveries reappear. The MQTT 5
+path exercises the Session Expiry property throughout. This is external client
+evidence for single-node queued and outgoing-inflight crash recovery, distinct
+from the raw-packet commit-log fixtures and from orderly same-process reconnect.
 The twelfth scenario ports Mosquitto's retained Message Expiry vector with a
 timing-tolerant immediate check: the forwarded interval is 2 or 1 seconds, the
 entry is absent after three seconds, and a non-expiring retained control still

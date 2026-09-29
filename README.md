@@ -1307,9 +1307,9 @@ zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast
 # recovery with offline QoS 1 delivery, and MQTT 5 property boundaries.
 zig build interop-mqtt-rumqttc -Doptimize=ReleaseFast
 # Use new rumqttc processes on both sides of a broker SIGKILL/restart and
-# require MQTT 3.1.1/5 queued and unacknowledged QoS 1 to recover from the
+# require MQTT 3.1.1/5 queued and unacknowledged QoS 1/2 to recover from the
 # broker's fsynced commit log without another SUBSCRIBE, including stable
-# Packet Identifiers, DUP retransmission, and durable acknowledgement removal.
+# Packet Identifiers, DUP retransmission, and durable ACK handshake removal.
 zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
 # policy, global/per-listener Mosquitto password hashes, authentication
