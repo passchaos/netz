@@ -2687,9 +2687,20 @@ proxy evidence for the entire suite.
    five short runs, but the small workload is retained as memory evidence, not
    a throughput claim. The `MQTT_STATS=true` mode of
    `zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast` now emits
-   validated broker-process RSS records; a current 64-connection run measured
-   netz at 6,360 KiB versus Mosquitto at 3,896 KiB, narrowing but not closing
-   the independent-peer memory gap.
+   validated broker-process RSS records. Finite broker admission now keeps
+   the parsed pending client on the heap, isolates certificate, refusal,
+   accepted-client and Session setup frames from the parked read loop, and
+   allocates the live delivery queue only before a restored or new
+   subscription becomes routable; the configured queue bound and
+   allocation-free route mutation remain unchanged. Seven `c3fe1516`
+   parent/current 64-connection runs measured netz at
+   5,868-7,844 / 5,884-5,948 KiB
+   (6,188 / 5,932 KiB medians, a 4.1% reduction) and Mosquitto at
+   3,820-3,916 / 3,800-3,904 KiB (3,904 / 3,808 KiB medians). The parent's
+   roughly 7.8-MiB netz outlier is retained in the range. The median
+   netz-minus-Mosquitto gap fell from 2,284 to 2,124 KiB (7.0%). Every arm
+   retained 6,400 deliveries and checksum 356,160. The independent-peer
+   memory gap therefore remains.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

@@ -5227,9 +5227,20 @@ completing 6,400 deliveries and checksum 356,160. This short shape is memory
 evidence rather than a throughput result.
 The maintained Mosquitto comparison can now set `MQTT_STATS=true` to sample
 both broker processes from `/proc/PID/status` every 2 ms and emit verifier-
-checked memory records. One current run reported 6,360 KiB for netz and 3,896
-KiB for Mosquitto, so the improvement closes most of the prior fixed-state cost
-without claiming memory superiority over Mosquitto.
+checked memory records. The broker now moves the 3-KiB parsed pending client
+out of each finite connection coroutine and isolates large certificate,
+refusal, accepted-client, and Session admission frames from the steady-state
+read loop, and reserves the full live-delivery queue only before a restored or
+new subscription becomes routable. The configured 1,024-delivery capacity and
+allocation-free route mutation are unchanged. Seven `c3fe1516` parent/current
+runs of the same fixed-binary 64-connection shape measured netz at
+5,868-7,844 / 5,884-5,948 KiB, with medians falling from 6,188 to 5,932 KiB
+(4.1%). Mosquitto measured 3,820-3,916 / 3,800-3,904 KiB, with medians 3,904
+and 3,808 KiB. The parent's roughly 7.8-MiB netz outlier is retained in the
+range. The median netz-minus-Mosquitto gap fell from 2,284 to 2,124 KiB
+(7.0%). All 14 arms completed 6,400 deliveries with checksum 356,160. This
+narrows but does not close the independent-peer memory gap and remains memory
+evidence rather than a throughput claim.
 
 ## MQTT shared-subscription router
 

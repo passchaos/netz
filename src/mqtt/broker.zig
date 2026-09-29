@@ -519,6 +519,15 @@ const ClientSlot = struct {
     // every delivery in the plan before any queue is mutated.
     route_reservations: usize = 0,
 
+    fn ensureDeliveryCapacity(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+        capacity: usize,
+    ) Error!void {
+        if (self.queue.capacity >= capacity) return;
+        try self.queue.ensureTotalCapacityPrecise(allocator, capacity);
+    }
+
     fn clearQueue(self: *ClientSlot) void {
         for (self.queue.items[self.queue_head..]) |*delivery| {
             delivery.deinit();
@@ -2697,6 +2706,147 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
     }
 
+    // Certificate parsing has a much larger stack frame than ordinary TCP
+    // admission. Keep it off the long-lived per-client coroutine stack when
+    // listener identity mapping is disabled.
+    noinline fn applyListenerCertificateIdentity(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        authorization: ListenerAuthorization,
+        pending_owned: *bool,
+    ) Error!bool {
+        var owned_username: ?[]u8 = null;
+        defer if (owned_username) |username| {
+            self.allocator.free(username);
+        };
+        const username: []const u8 = identity: {
+            if (pending.connection.peerCertificates()) |chain| {
+                if (chain.len == 0) {
+                    try self.refuseUnauthorizedConnect(
+                        pending,
+                        pending_owned,
+                    );
+                    return false;
+                }
+                owned_username = (if (authorization.use_identity_as_username)
+                    vail.x509.identity.commonNameAlloc(
+                        self.allocator,
+                        chain[0],
+                    )
+                else
+                    vail.x509.identity.subjectNameAlloc(
+                        self.allocator,
+                        chain[0],
+                    )) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => {
+                        try self.refuseUnauthorizedConnect(
+                            pending,
+                            pending_owned,
+                        );
+                        return false;
+                    },
+                };
+                break :identity owned_username.?;
+            }
+            if (authorization.use_identity_as_username) {
+                if (pending.connection.authenticatedProxyCommonName()) |name| {
+                    break :identity name;
+                }
+            }
+            try self.refuseUnauthorizedConnect(pending, pending_owned);
+            return false;
+        };
+        pending.connect.replaceUsername(
+            self.allocator,
+            username,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                try self.refuseUnauthorizedConnect(
+                    pending,
+                    pending_owned,
+                );
+                return false;
+            },
+        };
+        return true;
+    }
+
+    // Materializing an AcceptedClient is also comparatively large. Keeping
+    // refusal-only storage in this cold helper lowers the successful
+    // connection coroutine's retained stack high-water mark.
+    noinline fn refuseResolvedConnect(
+        self: *Broker,
+        pending: *runtime.PendingAcceptedClient,
+        options: runtime.AcceptOptions,
+        pending_owned: *bool,
+    ) Error!void {
+        var refused = try pending.finish(options);
+        pending_owned.* = false;
+        refused.deinit(self.allocator);
+    }
+
+    noinline fn finishRegistration(
+        self: *Broker,
+        index: usize,
+        pending: *runtime.PendingAcceptedClient,
+        accept_options: runtime.AcceptOptions,
+        registration: Registration,
+        registration_progress: RegistrationProgress,
+        pending_owned: *bool,
+        result: *?anyerror,
+    ) Error!ClientTask {
+        var accepted = pending.finish(accept_options) catch |err| {
+            self.abortRegistration(
+                index,
+                registration.subscriber_id,
+                registration_progress.rollback_changed,
+            );
+            // The provisional record was synced before CONNACK. Append the
+            // rollback even when it restores the original in-memory state.
+            self.finalizePersistentChange(
+                true,
+                registration_progress.rollback_changed,
+            ) catch {};
+            return err;
+        };
+        pending_owned.* = false;
+        if (registration.replaced_owner_id) |owner_id| {
+            self.disconnectReplacedSessionOwner(owner_id);
+        }
+        var accepted_owns_connection = true;
+        errdefer if (accepted_owns_connection) {
+            accepted.deinit(self.allocator);
+        };
+        self.attachConnection(
+            index,
+            registration.subscriber_id,
+            &accepted.connection,
+            registration.persistent_changed,
+        );
+        // A threshold reached during the provisional CONNECT window was left
+        // pending by SnapshotBusy. Attachment is the first safe retry point.
+        self.autosavePersistentChangesIfNeeded();
+        accepted_owns_connection = false;
+        errdefer accepted.connect.deinit(self.allocator);
+        errdefer self.unregister(
+            index,
+            registration.subscriber_id,
+        ) catch {};
+        try self.flushSlot(index, &self.slots[index]);
+        const task = ClientTask{
+            .broker = self,
+            .slot_index = index,
+            .subscriber_id = registration.subscriber_id,
+            .connect = accepted.connect,
+            .result = result,
+        };
+        accepted.connect = undefined;
+        accepted.connection = undefined;
+        return task;
+    }
+
     fn preparePending(
         self: *Broker,
         index: usize,
@@ -2731,84 +2881,40 @@ pub const Broker = struct {
 
         var accept_options = try pending.resolvedOptions(listener_accept);
         if (accept_options.reason_code != 0) {
-            var refused = try pending.finish(accept_options);
-            pending_owned = false;
-            refused.deinit(self.allocator);
+            try self.refuseResolvedConnect(
+                pending,
+                accept_options,
+                &pending_owned,
+            );
             return null;
         }
         if (pending.connect.connect.will) |will| {
             if (self.payloadTooLarge(will.payload)) {
-                var refused = try pending.finish(.{
+                try self.refuseResolvedConnect(pending, .{
                     .reason_code = switch (pending.connect.connect.protocol) {
                         .v5 => 0x95,
                         .v3_1_1 => 0x05,
                     },
-                });
-                pending_owned = false;
-                refused.deinit(self.allocator);
+                }, &pending_owned);
                 return null;
             }
         }
         if (listener_authorization.use_identity_as_username or
             listener_authorization.use_subject_as_username)
         {
-            var owned_certificate_username: ?[]u8 = null;
-            defer if (owned_certificate_username) |username| {
-                self.allocator.free(username);
-            };
-            const certificate_username: []const u8 = identity: {
-                if (pending.connection.peerCertificates()) |chain| {
-                    if (chain.len == 0) {
-                        try self.refuseUnauthorizedConnect(
-                            pending,
-                            &pending_owned,
-                        );
-                        return null;
-                    }
-                    owned_certificate_username = (if (listener_authorization.use_identity_as_username) vail.x509.identity.commonNameAlloc(
-                        self.allocator,
-                        chain[0],
-                    ) else vail.x509.identity.subjectNameAlloc(
-                        self.allocator,
-                        chain[0],
-                    )) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        else => {
-                            try self.refuseUnauthorizedConnect(
-                                pending,
-                                &pending_owned,
-                            );
-                            return null;
-                        },
-                    };
-                    break :identity owned_certificate_username.?;
-                }
-                if (listener_authorization.use_identity_as_username) {
-                    if (pending.connection.authenticatedProxyCommonName()) |common_name| {
-                        break :identity common_name;
-                    }
-                }
-                {
-                    try self.refuseUnauthorizedConnect(pending, &pending_owned);
-                    return null;
-                }
-            };
-            pending.connect.replaceUsername(
-                self.allocator,
-                certificate_username,
-            ) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => {
-                    try self.refuseUnauthorizedConnect(pending, &pending_owned);
-                    return null;
-                },
-            };
+            if (!try self.applyListenerCertificateIdentity(
+                pending,
+                listener_authorization,
+                &pending_owned,
+            )) return null;
         }
         if (pending.connection.authentication.phase == .authenticating) {
             const handler = self.options.authentication orelse {
-                var refused = try pending.finish(.{ .reason_code = 0x8c });
-                pending_owned = false;
-                refused.deinit(self.allocator);
+                try self.refuseResolvedConnect(
+                    pending,
+                    .{ .reason_code = 0x8c },
+                    &pending_owned,
+                );
                 return null;
             };
             try handler.start(handler.context, pending);
@@ -2899,11 +3005,11 @@ pub const Broker = struct {
             );
             if (err == error.SessionLimitExceeded) {
                 if (pending.connect.connect.protocol == .v5) {
-                    var refused = try pending.finish(.{
-                        .reason_code = 0x89,
-                    });
-                    pending_owned = false;
-                    refused.deinit(self.allocator);
+                    try self.refuseResolvedConnect(
+                        pending,
+                        .{ .reason_code = 0x89 },
+                        &pending_owned,
+                    );
                 }
                 return null;
             }
@@ -2942,51 +3048,15 @@ pub const Broker = struct {
             ) catch {};
             return err;
         };
-        var accepted = pending.finish(accept_options) catch |err| {
-            self.abortRegistration(
-                index,
-                subscriber_id,
-                registration_progress.rollback_changed,
-            );
-            // The provisional record was synced before CONNACK. Append the
-            // rollback even when it restores the original in-memory state.
-            self.finalizePersistentChange(
-                true,
-                registration_progress.rollback_changed,
-            ) catch {};
-            return err;
-        };
-        pending_owned = false;
-        if (registration.replaced_owner_id) |owner_id| {
-            self.disconnectReplacedSessionOwner(owner_id);
-        }
-        var accepted_owns_connection = true;
-        errdefer if (accepted_owns_connection) {
-            accepted.deinit(self.allocator);
-        };
-        self.attachConnection(
+        return @as(?ClientTask, try self.finishRegistration(
             index,
-            subscriber_id,
-            &accepted.connection,
-            registration.persistent_changed,
-        );
-        // A threshold reached during the provisional CONNECT window was left
-        // pending by SnapshotBusy. Attachment is the first safe retry point.
-        self.autosavePersistentChangesIfNeeded();
-        accepted_owns_connection = false;
-        errdefer accepted.connect.deinit(self.allocator);
-        errdefer self.unregister(index, subscriber_id) catch {};
-        try self.flushSlot(index, &self.slots[index]);
-        const task = ClientTask{
-            .broker = self,
-            .slot_index = index,
-            .subscriber_id = subscriber_id,
-            .connect = accepted.connect,
-            .result = result,
-        };
-        accepted.connect = undefined;
-        accepted.connection = undefined;
-        return task;
+            pending,
+            accept_options,
+            registration,
+            registration_progress,
+            &pending_owned,
+            result,
+        ));
     }
 
     fn refuseUnauthorizedConnect(
@@ -3004,7 +3074,10 @@ pub const Broker = struct {
         refused.deinit(self.allocator);
     }
 
-    fn register(
+    // Session and Will registration has sizeable temporary state. Do not
+    // inline it into the coroutine that remains parked for the full Network
+    // Connection lifetime.
+    noinline fn register(
         self: *Broker,
         slot_index: usize,
         connect: mqtt.Connect,
@@ -3037,14 +3110,6 @@ pub const Broker = struct {
         // authenticated wire identity used by listener read ACLs.
         slot.username = connect.username;
         errdefer slot.username = null;
-        // The configured queue count is also the memory bound. Reserve it once
-        // during setup so routing performs no destination queue allocation
-        // while holding the global router lock.
-        try slot.queue.ensureTotalCapacity(
-            self.allocator,
-            self.options.limits
-                .max_queued_deliveries_per_connection,
-        );
         const id = subscriberId(slot_index, slot.generation);
         const now = std.Io.Clock.awake.now(self.io);
         // `find` removes an expired Session without exposing its route ID.
@@ -3072,6 +3137,21 @@ pub const Broker = struct {
                 break :blk false;
             break :blk session_stats.expiry_interval != 0;
         } else false;
+        // A connection that has never subscribed cannot receive live fanout,
+        // so reserving its complete bounded delivery queue would charge pure
+        // publishers for memory they cannot use. Resumed subscriptions are
+        // about to become visible to the router and therefore reserve here;
+        // a first SUBSCRIBE reserves at its own visibility boundary below.
+        if (!connect.clean_start) if (previous_session_handle) |handle| {
+            const session_stats = try self.sessions.stats(handle);
+            if (session_stats.subscription_count != 0) {
+                try slot.ensureDeliveryCapacity(
+                    self.allocator,
+                    self.options.limits
+                        .max_queued_deliveries_per_connection,
+                );
+            }
+        };
         // Clean Start may remove the previous Session before allocating its
         // replacement, so carry that durable deletion through any later error.
         persistent_changed = persistent_changed or previous_session_persistent;
@@ -3770,6 +3850,18 @@ pub const Broker = struct {
         // emitted before either retained replay or those live deliveries.
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
+        // Reserve before publishing any new route. This preserves the
+        // allocation-free route/queue mutation invariant while avoiding a
+        // full queue allocation for connections that only publish.
+        for (reasons) |reason| {
+            if (reason != 0xff) continue;
+            try slot.ensureDeliveryCapacity(
+                self.allocator,
+                self.options.limits
+                    .max_queued_deliveries_per_connection,
+            );
+            break;
+        }
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
         var persistent_changed = false;
@@ -5896,6 +5988,86 @@ test "MQTT Will route failure consumes a partially committed publication" {
     try std.testing.expect(broker.wills.pollOneDue(now) == null);
 }
 
+test "MQTT delivery queue storage is reserved only for subscribers" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const queue_capacity = 1_024;
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = queue_capacity,
+        },
+        .session = .{ .max_sessions = 2 },
+    });
+    defer broker.deinit();
+
+    const publisher_slot = try broker.claimSlot();
+    var publisher_progress: RegistrationProgress = .{};
+    _ = try broker.register(
+        publisher_slot,
+        .{
+            .protocol = .v5,
+            .clean_start = true,
+            .keep_alive_seconds = 30,
+            .client_id = "publisher-only",
+        },
+        null,
+        null,
+        broker.options.auto_client_id_prefix,
+        &publisher_progress,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        broker.slots[publisher_slot].queue.capacity,
+    );
+    broker.abortRegistration(
+        publisher_slot,
+        0,
+        publisher_progress.rollback_changed,
+    );
+    broker.releaseClaimedSlot(publisher_slot);
+
+    const now = std.Io.Clock.awake.now(io);
+    const stored = try broker.sessions.open(
+        "returning-subscriber",
+        false,
+        60,
+        now,
+    );
+    _ = try broker.sessions.setSubscription(
+        stored.handle,
+        .{ .topic_filter = "queue/#", .qos = .at_least_once },
+        null,
+    );
+    try broker.sessions.disconnect(stored.handle, null, now);
+
+    const subscriber_slot = try broker.claimSlot();
+    var subscriber_progress: RegistrationProgress = .{};
+    var resume_properties = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .session_expiry_interval,
+        .value = 60,
+    } }};
+    _ = try broker.register(
+        subscriber_slot,
+        .{
+            .protocol = .v5,
+            .clean_start = false,
+            .keep_alive_seconds = 30,
+            .client_id = "returning-subscriber",
+            .properties = &resume_properties,
+        },
+        null,
+        null,
+        broker.options.auto_client_id_prefix,
+        &subscriber_progress,
+    );
+    try std.testing.expect(
+        broker.slots[subscriber_slot].queue.capacity >= queue_capacity,
+    );
+}
+
 test "MQTT failed Clean Start journals the durable deletion" {
     const backing = std.testing.allocator;
     var threaded = std.Io.Threaded.init(backing, .{});
@@ -6427,58 +6599,79 @@ const ListenerAcceptTask = struct {
     result: *?anyerror,
 
     fn run(task: ListenerAcceptTask) std.Io.Cancelable!void {
-        var pending = task.listener.source.acceptPending(
-            task.listener.accept orelse task.broker.options.accept,
-        ) catch |err| {
+        const client_task = task.acceptClient() catch |err| {
             task.result.* = err;
             return;
+        } orelse return;
+        ClientTask.run(client_task) catch |err| {
+            task.result.* = err;
+        };
+    }
+
+    // Admission owns parsed CONNECT and policy temporaries that are much
+    // larger than the steady-state broker read loop. Return the compact
+    // ClientTask before parking on that loop so its long-lived stack does not
+    // touch the full admission high-water mark.
+    noinline fn acceptClient(task: ListenerAcceptTask) anyerror!?ClientTask {
+        const pending = try task.acceptPendingOwned();
+        var pending_owned = true;
+        defer if (pending_owned) {
+            pending.deinit(task.broker.allocator);
+            task.broker.allocator.destroy(pending);
         };
         if (!task.capacity.claim(task.broker.io)) {
-            pending.deinit(task.broker.allocator);
-            return;
+            return null;
         }
         var capacity_claimed = true;
         defer if (capacity_claimed) {
             task.capacity.release(task.broker.io);
         };
         const slot_index = task.broker.claimSlot() catch |err| {
-            pending.deinit(task.broker.allocator);
             // Capacity rejection is local to this newly accepted peer. Other
             // finite listener tasks may still complete after a live client
             // releases its slot.
-            if (err == error.BrokerFull) return;
-            task.result.* = err;
-            return;
+            if (err == error.BrokerFull) return null;
+            return err;
         };
         var slot_claimed = true;
         defer if (slot_claimed) {
             task.broker.releaseClaimedSlot(slot_index);
         };
-        var client_task = task.broker.preparePending(
+        // `preparePending` consumes or deinitializes the pointed-to value on
+        // every path; this frame retains ownership only of its allocation.
+        pending_owned = false;
+        defer task.broker.allocator.destroy(pending);
+        var client_task = try task.broker.preparePending(
             slot_index,
-            &pending,
+            pending,
             task.listener.namespace,
             task.listener.accept orelse task.broker.options.accept,
             task.listener.authorization,
             task.listener.auto_client_id_prefix orelse
                 task.broker.options.auto_client_id_prefix,
             task.result,
-        ) catch |err| {
-            // `preparePending` owns and closes the pending connection on every
-            // error path. Only the slot reservation remains ours to release.
-            task.result.* = err;
-            return;
-        } orelse {
+        ) orelse {
             slot_claimed = false;
             task.broker.releaseClaimedSlot(slot_index);
-            return;
+            return null;
         };
         slot_claimed = false;
         client_task.listener_capacity = task.capacity;
         capacity_claimed = false;
-        ClientTask.run(client_task) catch |err| {
-            task.result.* = err;
-        };
+        return client_task;
+    }
+
+    noinline fn acceptPendingOwned(
+        task: ListenerAcceptTask,
+    ) anyerror!*runtime.PendingAcceptedClient {
+        const pending = try task.broker.allocator.create(
+            runtime.PendingAcceptedClient,
+        );
+        errdefer task.broker.allocator.destroy(pending);
+        pending.* = try task.listener.source.acceptPending(
+            task.listener.accept orelse task.broker.options.accept,
+        );
+        return pending;
     }
 };
 
