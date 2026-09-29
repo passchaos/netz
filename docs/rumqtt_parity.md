@@ -2044,13 +2044,19 @@ client-process interoperability evidence, distinct from the source-derived raw
 packet fixtures below.
 `zig build interop-mqtt-rumqttc -Doptimize=ReleaseFast` adds a second
 independent client implementation. Its committed Cargo lock pins rumqttc
-0.25.1 and the runner builds with `--offline --locked`. One persistent client
-per protocol drives ConnAck, exact QoS 2 SubAck, QoS 0/1/2 publish completion
-and single self-delivery, retained publication/replay with no duplicate
-PUBLISH before disconnect, automatic incoming acknowledgement, and graceful
-DISCONNECT. The MQTT 5 path additionally requires Response Topic,
-binary Correlation Data, and User Property to survive broker fanout as typed
-rumqttc values. This keeps libmosquitto and rumqttc evidence independent.
+0.25.1 and the runner builds with `--offline --locked`. Each protocol drives
+ConnAck, exact QoS 2 SubAck, QoS 0/1/2 publish completion and single
+self-delivery, retained publication/replay with no duplicate PUBLISH before
+disconnect, automatic incoming acknowledgement, and graceful DISCONNECT. It
+also creates a persistent subscription, disconnects, publishes QoS 1 through
+an independent connection while the subscriber is offline, and reconnects
+with the same Client ID. The reconnect must report Session Present and deliver
+the queued message exactly once without another SUBSCRIBE; rumqttc's outgoing
+PUBACK is observed. MQTT 3.1.1 uses Clean Session false, while MQTT 5 uses
+Clean Start false and a nonzero Session Expiry Interval. The MQTT 5 path also
+requires Response Topic, binary Correlation Data, and User Property to survive
+broker fanout as typed rumqttc values. This keeps libmosquitto and rumqttc
+evidence independent.
 The twelfth scenario ports Mosquitto's retained Message Expiry vector with a
 timing-tolerant immediate check: the forwarded interval is 2 or 1 seconds, the
 entry is absent after three seconds, and a non-expiring retained control still

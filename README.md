@@ -1303,8 +1303,8 @@ zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
 # Response Topic plus Correlation Data through libmosquitto's decoder.
 zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast
 # Build locked rumqttc 0.25.1 offline and independently exercise the same
-# MQTT 3.1.1/5 QoS completion/single-delivery, retained, and MQTT 5 property
-# boundaries.
+# MQTT 3.1.1/5 QoS completion/single-delivery, retained, persistent Session
+# recovery with offline QoS 1 delivery, and MQTT 5 property boundaries.
 zig build interop-mqtt-rumqttc -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
 # policy, global/per-listener Mosquitto password hashes, authentication

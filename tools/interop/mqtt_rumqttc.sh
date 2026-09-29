@@ -26,7 +26,7 @@ PY
 )
 "$server" \
   "--bind=127.0.0.1:$port" \
-  --connections=2 \
+  --connections=6 \
   --max-queued-deliveries=32 \
   --max-outgoing-inflight=16 \
   --max-packet-size=4096 \
@@ -51,6 +51,6 @@ wait "$server_pid"
 server_pid=
 cat "$work/client.log"
 grep -Fq \
-  'rumqttc client interop passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=0,1,2 retained=true single-delivery=true automatic-ack=true response-topic=true correlation-data=true user-property=true client_io=rumqttc-tokio server_io=zio-std-io' \
+  'rumqttc client interop passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 qos=0,1,2 retained=true single-delivery=true automatic-ack=true response-topic=true correlation-data=true user-property=true session-resume=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io' \
   "$work/client.log"
 grep -Fq 'server_io=zio-std-io' "$work/server.log"
