@@ -1298,6 +1298,10 @@ zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
 # zio-std-io runtime identity.
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
+# Build pinned Mosquitto 5cd25465 CLI clients and run both MQTT 3.1.1 and
+# MQTT 5 against netz, checking QoS 0/1/2 fanout, retained replay, and MQTT 5
+# Response Topic plus Correlation Data through libmosquitto's decoder.
+zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast
 # Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
 # policy, global/per-listener Mosquitto password hashes, authentication
 # rejection, isolated ACL read/write/deny/pattern behavior, OpenSSL-verified

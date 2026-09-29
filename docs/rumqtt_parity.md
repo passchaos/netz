@@ -2032,6 +2032,16 @@ The eleventh scenario source-locks both Mosquitto
 Correlation Data alone, and both properties together survive exact broker
 fanout to the responder, whose response on the advertised topic reaches the
 requester byte-for-byte.
+`zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast` adds a
+separate independent-client boundary. It builds `mosquitto_pub` and
+`mosquitto_sub` from pinned Mosquitto commit `5cd25465`, then connects those
+real libmosquitto clients to the netz broker over MQTT 3.1.1 and MQTT 5. Each
+version verifies exact topic, payload, delivered QoS, and retain flag for QoS
+0/1/2 fanout plus retained replay. A final MQTT 5 pair publishes Response
+Topic and binary Correlation Data through the CLI property API and requires
+libmosquitto's formatted decoder to reproduce both values exactly. This is
+client-process interoperability evidence, distinct from the source-derived raw
+packet fixtures below.
 The twelfth scenario ports Mosquitto's retained Message Expiry vector with a
 timing-tolerant immediate check: the forwarded interval is 2 or 1 seconds, the
 entry is absent after three seconds, and a non-expiring retained control still

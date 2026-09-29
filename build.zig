@@ -1221,6 +1221,16 @@ pub fn build(b: *std.Build) void {
     );
     mqtt_broker_compare_step.dependOn(&mqtt_broker_compare.step);
 
+    const mqtt_mosquitto_clients = b.addSystemCommand(&.{
+        "tools/interop/mqtt_mosquitto_clients.sh",
+    });
+    mqtt_mosquitto_clients.addArtifactArg(mqtt_vectors_broker);
+    const mqtt_mosquitto_clients_step = b.step(
+        "interop-mqtt-mosquitto-clients",
+        "Run real Mosquitto CLI clients against the netz MQTT broker",
+    );
+    mqtt_mosquitto_clients_step.dependOn(&mqtt_mosquitto_clients.step);
+
     const mqtt_outbound_bridge = b.addExecutable(.{
         .name = "netz-mqtt-outbound-bridge",
         .root_module = b.createModule(.{
