@@ -81,7 +81,10 @@ shared authenticated QUIC connection rather than per-session guesses.
 The Chrome gate drives the browser's real `WebTransport` API through
 Puppeteer, not a native QUIC substitute. It generates a fresh P-256 localhost
 identity because the browser's `serverCertificateHashes` exception requires a
-certificate validity period of at most two weeks. The server receives the
+certificate validity period of at most two weeks. The driver requires
+Puppeteer's launched-browser version to identify Chrome and records both the
+requested launcher and live `/proc/<pid>/exe` SHA-256 values in every client
+success record, alongside the page's Chrome User-Agent. The server receives the
 same zio-backed netz server binary and its success records identify the browser
 side as `chromium-network-service`, avoiding a false wtransport runtime label.
 The server receives the
@@ -110,14 +113,27 @@ It additionally requires Chrome's real
 limit, while the netz peer performs its own one-byte-over-limit rejection.
 The sibling Firefox gate runs the same origin-rejection and accepted-session
 paths through Firefox 156.0.1's native WebTransport/Necko implementation. It
-verifies the browser User-Agent at the server boundary, certificate-hash
-authentication, CONNECT, DATAGRAM, bidirectional and unidirectional streams, a
-second bidirectional stream on the same Session, DRAIN framing, and exact close
-code 77/reason `netz done`. Firefox exposes the WebTransport API only after its
-HTTP/3/WebTransport preferences are enabled. Its current stream `abort()` and
-reader `cancel()` behavior is not counted here: the tested build did not emit
-the expected RESET_STREAM before a following DATAGRAM, so mapped Firefox
+requires Puppeteer's launched-browser version to begin with `firefox/`, records
+that version plus the SHA-256 of the requested launcher and running process
+image in both client success records, and verifies the Firefox User-Agent at
+both the page and server boundaries. The runner requires the rejected-Origin
+and accepted-Session processes to report the same version and process-image
+hash. It then covers
+certificate-hash authentication, CONNECT, DATAGRAM, bidirectional and
+unidirectional streams, a second bidirectional stream on the same Session,
+DRAIN framing, and exact close code 77/reason `netz done`. Firefox exposes the
+WebTransport API only after its HTTP/3/WebTransport preferences are enabled.
+Its current stream `abort()` and reader `cancel()` behavior is not counted
+here: a repeated forced probe on Firefox 156.0.1 did not emit the expected
+RESET_STREAM before a following DATAGRAM, so mapped Firefox
 RESET_STREAM/STOP_SENDING remains an explicit browser-specific gap.
+The 2026-09-29 artifact run used Chrome 153.0.8010.12 with process-image
+SHA-256 `839efe5fd8b6a773dd81b2e10afdc15f3c0a17316fb82b5908c0533306c4ed9e`
+and Firefox 156.0.1 with process-image SHA-256
+`fc2340fc1c149f351b60033c79fd133a94e1b02741e04ff52e012eca970193c9`;
+both rejected the denied Origin and completed their supported accepted-Session
+matrix. These identify the tested artifacts rather than imposing fixed browser
+versions on future gate runs.
 
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:
@@ -929,9 +945,12 @@ handle routing, both-session progress and payload isolation.
    immediately following detailed session-close capsule, while its
    wtransport-server half
    checks netz's peer QUIC application-close code and reason handling. A
-   separate Firefox 156.0.1 gate now covers Origin policy, CONNECT, DATAGRAM,
-   both stream directions, same-Session reuse, DRAIN framing and exact close
-   metadata. Firefox stream cancellation remains open because its current
+   separate Firefox 156.0.1 gate now binds its output to Puppeteer's actual
+   launched-browser version, launcher/process-image SHA-256, and page/server
+   User-Agent before covering
+   Origin policy, CONNECT, DATAGRAM, both stream directions, same-Session
+   reuse, DRAIN framing and exact close metadata. Firefox stream cancellation
+   remains open because its current
    `abort()`/`cancel()` path did not emit the expected RESET_STREAM or
    STOP_SENDING before a following DATAGRAM. Safari automation remains a
    separate gap.

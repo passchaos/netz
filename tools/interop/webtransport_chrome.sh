@@ -9,8 +9,14 @@ browser_product=${BROWSER_PRODUCT:-chrome}
 browser_executable=${BROWSER_EXECUTABLE:-${CHROME:-google-chrome}}
 browser_client_io=${BROWSER_CLIENT_IO:-chromium-network-service}
 case "$browser_product:$browser_name:$browser_client_io" in
-  chrome:Chrome:chromium-network-service) browser_ua=Chrome/ ;;
-  firefox:Firefox:firefox-necko) browser_ua=Firefox/ ;;
+  chrome:Chrome:chromium-network-service)
+    browser_ua=Chrome/
+    browser_version=Chrome/
+    ;;
+  firefox:Firefox:firefox-necko)
+    browser_ua=Firefox/
+    browser_version=firefox/
+    ;;
   *)
     echo 'unsupported or inconsistent browser identity' >&2
     exit 2
@@ -47,8 +53,15 @@ command -v "$browser_executable" >/dev/null || {
   echo "$browser_name is required (override with BROWSER_EXECUTABLE=/path/to/browser)" >&2
   exit 1
 }
+browser_executable=$(realpath "$(command -v "$browser_executable")")
 "$browser_executable" --version >/dev/null 2>&1 || {
   echo "$browser_name executable is not runnable: $browser_executable" >&2
+  exit 1
+}
+browser_launcher_sha256=$(sha256sum "$browser_executable" |
+  awk '{print $1}')
+[[ $browser_launcher_sha256 =~ ^[0-9a-f]{64}$ ]] || {
+  echo "failed to hash $browser_name executable: $browser_executable" >&2
   exit 1
 }
 [[ -d "$client_dir/node_modules/puppeteer-core" ]] ||
@@ -129,8 +142,22 @@ cat "$work/rejected-client.log"
 cat "$work/rejected-server.log"
 grep -Fq "$browser_name WebTransport Origin policy passed: rejected=true" \
   "$work/rejected-client.log"
-grep -Fq "browser_ua=" "$work/rejected-client.log"
-grep -Fq "$browser_ua" "$work/rejected-client.log"
+grep -Eq "browser_ua=.*$browser_ua" "$work/rejected-client.log"
+grep -Fq "browser_version=$browser_version" "$work/rejected-client.log"
+grep -Fq "browser_launcher_sha256=$browser_launcher_sha256" \
+  "$work/rejected-client.log"
+grep -Eq 'browser_process_sha256=[0-9a-f]{64}' \
+  "$work/rejected-client.log"
+rejected_browser_version=$(sed -n \
+  's/.*browser_version=\([^ ]*\).*/\1/p' "$work/rejected-client.log")
+rejected_browser_process_sha256=$(sed -n \
+  's/.*browser_process_sha256=\([0-9a-f]*\).*/\1/p' \
+  "$work/rejected-client.log")
+[[ -n $rejected_browser_version &&
+  $rejected_browser_process_sha256 =~ ^[0-9a-f]{64}$ ]] || {
+  echo "invalid rejected-session $browser_name identity record" >&2
+  exit 1
+}
 grep -Fq 'netz WebTransport Origin policy passed: rejected=403' \
   "$work/rejected-server.log"
 grep -Fq "client_io=$browser_client_io server_io=zio-std-io" \
@@ -182,8 +209,21 @@ grep -Fq \
       printf '%s' "$browser_name WebTransport interop passed: CONNECT DATAGRAM max_datagram_size="
     fi)" \
   "$work/client.log"
-grep -Fq "browser_ua=" "$work/client.log"
-grep -Fq "$browser_ua" "$work/client.log"
+grep -Eq "browser_ua=.*$browser_ua" "$work/client.log"
+grep -Fq "browser_version=$browser_version" "$work/client.log"
+grep -Fq "browser_launcher_sha256=$browser_launcher_sha256" \
+  "$work/client.log"
+grep -Eq 'browser_process_sha256=[0-9a-f]{64}' "$work/client.log"
+accepted_browser_version=$(sed -n \
+  's/.*browser_version=\([^ ]*\).*/\1/p' "$work/client.log")
+accepted_browser_process_sha256=$(sed -n \
+  's/.*browser_process_sha256=\([0-9a-f]*\).*/\1/p' \
+  "$work/client.log")
+if [[ $accepted_browser_version != "$rejected_browser_version" ]] ||
+  [[ $accepted_browser_process_sha256 != "$rejected_browser_process_sha256" ]]; then
+  echo "$browser_name artifact changed between browser phases" >&2
+  exit 1
+fi
 if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
   grep -Fq \
     'netz WebTransport Origin policy passed: exact-origin=true' \

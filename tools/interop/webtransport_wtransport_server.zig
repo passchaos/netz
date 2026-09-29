@@ -193,6 +193,8 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, pending.path(), "/interop")) {
         return error.UnexpectedPath;
     }
+    // Firefox sends User-Agent on its Extended CONNECT. Chromium currently
+    // does not, so its artifact identity is verified by the Puppeteer driver.
     if (std.mem.eql(u8, client_io, "firefox-necko")) {
         const user_agent = pending.userAgent() orelse
             return error.UnexpectedHeader;

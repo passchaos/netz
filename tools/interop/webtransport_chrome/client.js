@@ -1,6 +1,8 @@
 'use strict';
 
 const puppeteer = require('puppeteer-core');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
 
 const [portText, certificateHash] = process.argv.slice(2);
 const port = Number(portText);
@@ -13,12 +15,28 @@ if (!Number.isInteger(port) || port < 1 || port > 65535 ||
   throw new Error('usage: client.js PORT CERTIFICATE_SHA256_HEX');
 }
 
+async function sha256File(path) {
+  const hash = crypto.createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const input = fs.createReadStream(path);
+    input.on('data', chunk => hash.update(chunk));
+    input.on('error', reject);
+    input.on('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
 async function runBrowserProbe({
   port, certificateHash, browserName, testStreamCancellation, originOnly,
-  rejectOnly,
+  rejectOnly, browserVersion, browserLauncherSha256, browserProcessSha256,
 }) {
   const timeoutMs = 10_000;
   const browserUa = navigator.userAgent;
+  const browserIdentity =
+      `browser_version=${browserVersion} ` +
+      `browser_launcher_sha256=${browserLauncherSha256} ` +
+      `browser_process_sha256=${browserProcessSha256} ` +
+      `browser_ua=${browserUa}`;
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
   async function withTimeout(promise, label) {
@@ -73,12 +91,12 @@ async function runBrowserProbe({
       transport.close();
       throw new Error('disallowed Origin unexpectedly accepted');
     }
-    return `${browserName} WebTransport Origin policy passed: rejected=true browser_ua=${browserUa}`;
+    return `${browserName} WebTransport Origin policy passed: rejected=true ${browserIdentity}`;
   }
   await withTimeout(transport.ready, 'WebTransport ready');
   if (originOnly) {
     transport.close({closeCode: 0, reason: 'origin verified'});
-    return `${browserName} WebTransport Origin policy passed: exact-origin=true browser_ua=${browserUa}`;
+    return `${browserName} WebTransport Origin policy passed: exact-origin=true ${browserIdentity}`;
   }
   const maxDatagramSize = transport.datagrams.maxDatagramSize;
   if (!Number.isInteger(maxDatagramSize) || maxDatagramSize <= 0) {
@@ -133,7 +151,7 @@ async function runBrowserProbe({
         `reason=${JSON.stringify(closeInfo.reason)}`,
       );
     }
-    return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reuse=true drain-before-close=true close=77/netz-done browser_ua=${browserUa}`;
+    return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reuse=true drain-before-close=true close=77/netz-done ${browserIdentity}`;
   }
 
   const reset = await withTimeout(
@@ -173,7 +191,7 @@ async function runBrowserProbe({
       `reason=${JSON.stringify(closeInfo.reason)}`,
     );
   }
-  return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done browser_ua=${browserUa}`;
+  return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done ${browserIdentity}`;
 }
 
 (async () => {
@@ -197,6 +215,27 @@ async function runBrowserProbe({
     } : undefined,
   });
   try {
+    const browserProcess = browser.process();
+    if (browserProcess === null) {
+      throw new Error('Puppeteer did not expose the launched browser process');
+    }
+    const requestedExecutable = fs.realpathSync(browserExecutable);
+    const launchedExecutable = fs.realpathSync(browserProcess.spawnfile);
+    if (launchedExecutable !== requestedExecutable) {
+      throw new Error(
+        `unexpected launched browser executable: ${JSON.stringify(launchedExecutable)}`,
+      );
+    }
+    const browserLauncherSha256 = await sha256File(launchedExecutable);
+    const processImage = fs.realpathSync(`/proc/${browserProcess.pid}/exe`);
+    const browserProcessSha256 = await sha256File(processImage);
+    const browserVersion = await browser.version();
+    const expectedVersionPrefix = firefox ? 'firefox/' : 'Chrome/';
+    if (!browserVersion.startsWith(expectedVersionPrefix)) {
+      throw new Error(
+        `unexpected browser version identity: ${JSON.stringify(browserVersion)}`,
+      );
+    }
     const page = await browser.newPage();
     await page.goto('http://localhost:' + process.env.ORIGIN_PORT + '/', {
       waitUntil: 'load',
@@ -205,6 +244,9 @@ async function runBrowserProbe({
       port,
       certificateHash,
       browserName,
+      browserVersion,
+      browserLauncherSha256,
+      browserProcessSha256,
       testStreamCancellation: !firefox,
       originOnly: process.env.WEBTRANSPORT_ORIGIN_ONLY === '1',
       rejectOnly: process.env.WEBTRANSPORT_REJECT_ONLY === '1',
