@@ -1396,6 +1396,10 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --netz-only --mode=uploa
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-echo -Doptimize=ReleaseFast
+# Compare pre-close allocator retention with 128 established WebSocket
+# connections while only eight perform the 4 KiB workload. The runner pins
+# websocket.zig's audited revision and validates the complete matched records.
+zig build bench-websocket-mostly-idle -Doptimize=ReleaseFast
 zig build bench-websocket-h2-echo -Doptimize=ReleaseFast
 zig build bench-websocket-h3-echo -Doptimize=ReleaseFast -- --warmup=20 --iterations=200
 zig build bench-websocket-hyper-h2 -Doptimize=ReleaseFast -- --warmup=20 --iterations=1000 --payload-bytes=4096

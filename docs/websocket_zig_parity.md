@@ -1119,8 +1119,9 @@ applying TCP-only socket options.
    counts. The maximum 256-connection setting also completes with matching
    accounting and a 1.31x median aggregate advantage; use longer runs when
    investigating scaling beyond these short saturation samples.
-2. Compare buffer-pool behavior and peak memory under many mostly-idle
-   connections; the reference exposes explicit small/large buffer pools. The
+2. **Completed for 128 mostly-idle cleartext connections:** compare buffer-pool
+   behavior and peak memory while all connections remain established. The
+   reference exposes explicit small/large buffer pools. The
    netz echo benchmark now accepts `--stats` and reports thread-safe allocation
    counts, cumulative bytes, peak live bytes and size buckets. Four cleartext
    connections used 54 allocations and 52,784 peak live bytes in the captured
@@ -1158,6 +1159,25 @@ applying TCP-only socket options.
    1,150,464 final live bytes versus websocket.zig's 2,528,794 peak and
    1,286,588 final bytes, reductions of 9.4% and 10.6% at the maximum supported
    benchmark concurrency.
+   `zig build bench-websocket-mostly-idle -Doptimize=ReleaseFast` now makes the
+   distinct mostly-idle question reproducible. It pins clean websocket.zig
+   revision `efa87973`, alternates execution order, hashes both binaries, and
+   rejects mismatched topology, activity, workload, checksum, runtime identity,
+   allocator scope, or snapshot phase. In each arm all 128 HTTP/1 WebSocket
+   connections complete the Upgrade and a one-byte classification echo; only
+   eight then perform two warmups and twenty measured 4-KiB round trips. The
+   allocator snapshot is taken while every connection remains live and before
+   any Close or transport teardown. Two independent three-sample runs were
+   byte-stable: netz retained 340,480 bytes at both the live snapshot and peak,
+   while websocket.zig retained 1,317,836 bytes (3.871x netz) at both points.
+   These counters cover same-process client-plus-server explicit allocations.
+   Separate BusyBox `time` MaxRSS medians were 38,912-39,936 KiB for netz
+   and 160,256-160,768 KiB for websocket.zig (4.013-4.132x); that whole-process
+   result includes runtime and thread-stack cost but still excludes kernel
+   socket memory. The reference's blocking server uses one OS thread and a
+   4,128-byte receive buffer per connection, while netz uses zio tasks and grows
+   retained receive storage on demand. The two memory scopes remain separately
+   labeled rather than being combined into one ratio.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    digest-locked Autobahn Testsuite 25.10.1 fuzzing client against the dedicated

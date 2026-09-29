@@ -5741,6 +5741,31 @@ A CPU-0 fixed-binary 4-KiB echo check after the extraction produced
 too wide for a performance verdict, so it is retained only as a functional
 benchmark pass and does not replace the isolated ranges above.
 
+The dedicated mostly-idle HTTP/1 WebSocket memory gate is reproducible with:
+
+```sh
+zig build bench-websocket-mostly-idle -Doptimize=ReleaseFast
+```
+
+It fixes websocket.zig at `efa879736bd438bea8b86a91f220ba408de57273`,
+hashes both compiled binaries, and alternates three samples. All 128 connections
+complete their real Upgrade and a classification echo; eight active connections
+then complete two warmups and twenty measured 4-KiB round trips while the other
+120 stay established. Both harnesses snapshot the same counting allocator
+before any connection closes. Two independent three-sample runs were
+byte-identical: netz used 340,480 live/peak bytes and websocket.zig used
+1,317,836 live/peak bytes, making the reference 3.871x larger at this
+explicit-allocation boundary. BusyBox `time` independently measured
+whole-process MaxRSS medians of 38,912-39,936 KiB for netz and
+160,256-160,768 KiB for websocket.zig, a 4.013-4.132x ratio that includes the
+reference blocking server's one OS thread per connection. The strict
+checker independently validates topology, workload, checksum, runtime identity,
+snapshot phase, allocation arithmetic, sample cardinality, alternating order,
+reference revision, binary hashes, and RSS source. Explicit allocator results
+exclude runtime stacks, allocator internals, and kernel socket buffers; MaxRSS
+includes the first two but not kernel socket memory. The two scopes are reported
+separately.
+
 The current-key borrowed visitor receive path now prevalidates each packet
 number once and carries that fact into ACK-range commit. Ordered traffic can
 extend the newest range directly; reordered packets retain the complete

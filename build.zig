@@ -1004,6 +1004,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/websocket_h2_benchmark_check_test.py",
     });
+    const websocket_mostly_idle_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/websocket_mostly_idle_benchmark_check_test.py",
+    });
     const http1_hyper_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/http1_hyper_benchmark_check_test.py",
@@ -1121,6 +1125,7 @@ pub fn build(b: *std.Build) void {
     );
     test_step.dependOn(&http3_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_h2_benchmark_checker_tests.step);
+    test_step.dependOn(&websocket_mostly_idle_benchmark_checker_tests.step);
     test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_config_tests.step);
@@ -2762,4 +2767,16 @@ pub fn build(b: *std.Build) void {
         "Compare caller-joined and direct-slice WebSocket sends over H1/H2/H3",
     );
     websocket_slices_ab_step.dependOn(&websocket_slices_ab.step);
+
+    const websocket_mostly_idle = b.addSystemCommand(&.{
+        "tools/interop/websocket_mostly_idle_benchmark.sh",
+    });
+    websocket_mostly_idle.addArtifactArg(websocket_slices_h1);
+    websocket_mostly_idle.addArg(@tagName(optimize));
+    if (b.args) |args| websocket_mostly_idle.addArgs(args);
+    const websocket_mostly_idle_step = b.step(
+        "bench-websocket-mostly-idle",
+        "Compare mostly-idle WebSocket memory with pinned websocket.zig",
+    );
+    websocket_mostly_idle_step.dependOn(&websocket_mostly_idle.step);
 }

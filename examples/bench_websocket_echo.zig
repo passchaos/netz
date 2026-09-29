@@ -29,6 +29,8 @@ pub fn main(init: std.process.Init) !void {
     else
         std.heap.smp_allocator;
     const connections = options.connections;
+    const active_connections = options.active_connections orelse connections;
+    const mostly_idle = active_connections != connections;
     var backend = try netz.runtime.Backend.init(std.heap.smp_allocator);
     defer backend.deinit();
     const io = backend.io();
@@ -55,6 +57,7 @@ pub fn main(init: std.process.Init) !void {
         mixed: bool,
         shape: send_shape.Shape,
         parts: usize,
+        mostly_idle: bool,
 
         fn run(shared: *@This()) void {
             shared.result = shared.server.serveConcurrent(
@@ -75,6 +78,44 @@ pub fn main(init: std.process.Init) !void {
         ) netz.websocket.runtime.Error!void {
             var storage: [max_message_bytes]u8 align(64) = undefined;
             var joined: [max_message_bytes]u8 align(64) = undefined;
+            if (shared.mostly_idle) {
+                const classification = try connection.receiveMessageInto(&storage);
+                if (classification.opcode != .binary or
+                    classification.payload.len != 1 or
+                    (classification.payload[0] != 0 and
+                        classification.payload[0] != 1))
+                {
+                    return error.InvalidFrame;
+                }
+                try connection.sendBinary(classification.payload);
+                const active = classification.payload[0] == 1;
+                for (0..if (active) shared.expected_exchanges else 0) |iteration| {
+                    const message = try connection.receiveMessageInto(&storage);
+                    if (message.opcode != .binary or
+                        message.payload.len != payloadLength(shared.mixed, iteration))
+                    {
+                        return error.InvalidFrame;
+                    }
+                    send_shape.sendBinary(
+                        connection,
+                        message.payload,
+                        shared.shape,
+                        shared.parts,
+                        &joined,
+                    ) catch |err| switch (err) {
+                        error.InvalidArgument => return error.InvalidFrame,
+                        else => |other| return other,
+                    };
+                }
+                const finish = try connection.receiveMessageInto(&storage);
+                if (finish.opcode != .binary or
+                    !std.mem.eql(u8, finish.payload, &.{2}))
+                {
+                    return error.InvalidFrame;
+                }
+                try connection.sendBinary(finish.payload);
+                return;
+            }
             for (0..shared.expected_exchanges) |iteration| {
                 const message = try connection.receiveMessageInto(&storage);
                 if (message.opcode != .binary or
@@ -98,6 +139,9 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     };
+    var finish: std.Io.Event = .unset;
+    var workload_done: std.Io.Event = .unset;
+    var finished_workloads = std.atomic.Value(usize).init(0);
     var shared = Shared{
         .server = &server,
         .expected_exchanges = options.warmup_iterations + options.iterations,
@@ -106,6 +150,7 @@ pub fn main(init: std.process.Init) !void {
         .mixed = options.mixed,
         .shape = options.send_shape,
         .parts = options.parts,
+        .mostly_idle = mostly_idle,
     };
     var server_task = io.async(Shared.run, .{&shared});
     defer server_task.cancel(io);
@@ -150,12 +195,12 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(checksums);
     @memset(checksums, 0);
     const latency_samples = if (options.latency)
-        try allocator.alloc(u64, options.iterations * connections)
+        try allocator.alloc(u64, options.iterations * active_connections)
     else
         null;
     defer if (latency_samples) |samples| allocator.free(samples);
     const latency_scratch = if (options.latency)
-        try allocator.alloc(u64, options.iterations * connections)
+        try allocator.alloc(u64, options.iterations * active_connections)
     else
         null;
     defer if (latency_scratch) |samples| allocator.free(samples);
@@ -180,6 +225,11 @@ pub fn main(init: std.process.Init) !void {
         warmup_iterations: usize,
         iterations: usize,
         connections: usize,
+        active: bool,
+        mostly_idle: bool,
+        finished_workloads: *std.atomic.Value(usize),
+        workload_done: *std.Io.Event,
+        finish: *std.Io.Event,
 
         fn run(worker: *@This()) void {
             runFallible(worker) catch |err| {
@@ -187,6 +237,8 @@ pub fn main(init: std.process.Init) !void {
                 worker.failed.store(true, .release);
                 worker.all_ready.set(worker.io);
                 worker.start.set(worker.io);
+                worker.workload_done.set(worker.io);
+                worker.finish.set(worker.io);
             };
         }
 
@@ -197,7 +249,24 @@ pub fn main(init: std.process.Init) !void {
             for (&payload, 0..) |*byte, index| {
                 byte.* = worker.seed +% @as(u8, @truncate(index));
             }
-            for (0..worker.warmup_iterations) |iteration| {
+            if (worker.mostly_idle) {
+                payload[0] = @intFromBool(worker.active);
+                const classification = try exchange(
+                    worker.client,
+                    &payload,
+                    &response,
+                    false,
+                    .contiguous,
+                    1,
+                    &joined,
+                    1,
+                );
+                if (classification != @as(u64, @intFromBool(worker.active)) * 3) {
+                    return error.InvalidFrame;
+                }
+                payload[0] = worker.seed;
+            }
+            for (0..if (worker.active) worker.warmup_iterations else 0) |iteration| {
                 _ = try exchange(
                     worker.client,
                     &payload,
@@ -215,7 +284,7 @@ pub fn main(init: std.process.Init) !void {
             }
             worker.start.waitUncancelable(worker.io);
             var checksum: u64 = 0;
-            for (0..worker.iterations) |iteration| {
+            for (0..if (worker.active) worker.iterations else 0) |iteration| {
                 const started = if (worker.latency_samples != null)
                     nowNs(worker.io)
                 else
@@ -239,6 +308,24 @@ pub fn main(init: std.process.Init) !void {
             }
             worker.checksum.* = checksum;
             worker.finished_ns.* = nowNs(worker.io);
+            if (worker.mostly_idle) {
+                const previous = worker.finished_workloads.fetchAdd(1, .acq_rel);
+                if (previous + 1 == worker.connections)
+                    worker.workload_done.set(worker.io);
+                worker.finish.waitUncancelable(worker.io);
+                payload[0] = 2;
+                const finished = try exchange(
+                    worker.client,
+                    &payload,
+                    &response,
+                    false,
+                    .contiguous,
+                    1,
+                    &joined,
+                    1,
+                );
+                if (finished != 6) return error.InvalidFrame;
+            }
         }
     };
     const worker_contexts = try allocator.alloc(Worker, connections);
@@ -255,7 +342,10 @@ pub fn main(init: std.process.Init) !void {
             .finished_ns = &finished_ns[index],
             .checksum = &checksums[index],
             .latency_samples = if (latency_samples) |samples|
-                samples[index * options.iterations ..][0..options.iterations]
+                if (index < active_connections)
+                    samples[index * options.iterations ..][0..options.iterations]
+                else
+                    null
             else
                 null,
             .seed = @truncate(index * 17),
@@ -266,12 +356,23 @@ pub fn main(init: std.process.Init) !void {
             .warmup_iterations = options.warmup_iterations,
             .iterations = options.iterations,
             .connections = connections,
+            .active = index < active_connections,
+            .mostly_idle = mostly_idle,
+            .finished_workloads = &finished_workloads,
+            .workload_done = &workload_done,
+            .finish = &finish,
         };
         workers.async(io, Worker.run, .{&worker_contexts[index]});
     }
     all_ready.waitUncancelable(io);
     const started = nowNs(io);
     start.set(io);
+    if (mostly_idle) workload_done.waitUncancelable(io);
+    const live_snapshot = if (options.stats and mostly_idle)
+        counting.snapshot()
+    else
+        null;
+    if (mostly_idle) finish.set(io);
     try workers.await(io);
     for (worker_errors) |maybe_err| {
         if (maybe_err) |err| return err;
@@ -295,19 +396,19 @@ pub fn main(init: std.process.Init) !void {
         return err;
     }
     serve_result.deinit();
-    const measured_roundtrips = options.iterations * connections;
+    const measured_roundtrips = options.iterations * active_connections;
     const logical_payload_bytes =
         measuredPayloadBytes(
             options.mixed,
             options.warmup_iterations,
             options.iterations,
-        ) * connections;
+        ) * active_connections;
     const uncompressed_wire_bytes =
         measuredWireBytes(
             options.mixed,
             options.warmup_iterations,
             options.iterations,
-        ) * connections;
+        ) * active_connections;
     const roundtrips_per_second: u128 = if (elapsed == 0)
         0
     else
@@ -317,6 +418,7 @@ pub fn main(init: std.process.Init) !void {
         \\WebSocket persistent echo benchmark
         \\  io backend: zio-std-io
         \\  connections: {d}
+        \\  active connections: {d}
         \\  warmup iterations: {d}
         \\  measured iterations: {d}
         \\  payload schedule: {s}
@@ -334,6 +436,7 @@ pub fn main(init: std.process.Init) !void {
         \\
     , .{
         connections,
+        active_connections,
         options.warmup_iterations,
         options.iterations,
         if (options.mixed) "1,7,125,126,1024,4096" else "4096",
@@ -361,16 +464,21 @@ pub fn main(init: std.process.Init) !void {
             "transport=tcp mode=binary-echo role_pair=netz-self " ++
             "client_io=zio-std-io server_io=zio-std-io " ++
             "connection_scope=persistent benchmark_scope={s} " ++
-            "connections={d} warmup={d} iterations={d} payload_bytes={d} " ++
+            "connections={d} active_connections={d} idle_connections={d} " ++
+            "warmup={d} iterations={d} payload_bytes={d} " ++
             "payload_schedule={s} send_shape={s} parts={d} compression={} " ++
-            "logical_bytes={d} elapsed_ns={d} " ++
+            "tcp_nodelay=true logical_bytes={d} elapsed_ns={d} " ++
             "checksum={d} complete=true\n",
         .{
-            if (options.parts == 1)
+            if (mostly_idle)
+                "mostly-idle-buffer-retention"
+            else if (options.parts == 1)
                 "single-buffer-echo"
             else
                 "caller-copy-vs-direct-slices",
             connections,
+            active_connections,
+            connections - active_connections,
             options.warmup_iterations,
             options.iterations,
             fixed_payload_bytes,
@@ -393,13 +501,49 @@ pub fn main(init: std.process.Init) !void {
         );
     }
     if (options.stats) {
-        const snapshot = counting.snapshot();
+        const snapshot = live_snapshot orelse counting.snapshot();
         snapshot.print();
+        if (mostly_idle) {
+            std.debug.print(
+                "record=memory implementation=netz protocol=websocket-h1 " ++
+                    "transport=tcp role_pair=netz-self process_scope=client+server " ++
+                    "client_io=zio-std-io server_io=zio-std-io " ++
+                    "benchmark_scope=mostly-idle-buffer-retention " ++
+                    "memory_stage=connections-live-after-workload " ++
+                    "connections={d} active_connections={d} idle_connections={d} " ++
+                    "warmup={d} iterations={d} payload_bytes={d} payload_schedule={s} " ++
+                    "send_shape=contiguous parts=1 compression={} tcp_nodelay=true " ++
+                    "allocator_scope=explicit-library-and-harness " ++
+                    "alloc_count={d} free_count={d} resize_count={d} remap_count={d} " ++
+                    "total_allocated_bytes={d} total_freed_bytes={d} live_bytes={d} " ++
+                    "peak_live_bytes={d} checksum={d} complete=true\n",
+                .{
+                    connections,
+                    active_connections,
+                    connections - active_connections,
+                    options.warmup_iterations,
+                    options.iterations,
+                    fixed_payload_bytes,
+                    if (options.mixed) "mixed" else "fixed",
+                    options.compression,
+                    snapshot.alloc_count,
+                    snapshot.free_count,
+                    snapshot.resize_count,
+                    snapshot.remap_count,
+                    snapshot.total_allocated,
+                    snapshot.total_freed,
+                    snapshot.current_bytes,
+                    snapshot.peak_bytes,
+                    checksum,
+                },
+            );
+        }
     }
 }
 
 const Options = struct {
     connections: usize = default_connections,
+    active_connections: ?usize = null,
     compression: bool = false,
     stats: bool = false,
     fragmented: bool = false,
@@ -424,6 +568,12 @@ fn parseOptions(init: std.process.Init) !Options {
             options.connections = try std.fmt.parseInt(
                 usize,
                 arg["--connections=".len..],
+                10,
+            );
+        } else if (std.mem.startsWith(u8, arg, "--active-connections=")) {
+            options.active_connections = try std.fmt.parseInt(
+                usize,
+                arg["--active-connections=".len..],
                 10,
             );
         } else if (std.mem.eql(u8, arg, "--compression")) {
@@ -464,6 +614,9 @@ fn parseOptions(init: std.process.Init) !Options {
     }
     if (options.connections == 0 or options.connections > max_connections) {
         return error.InvalidArgument;
+    }
+    if (options.active_connections) |active| {
+        if (active == 0 or active > options.connections) return error.InvalidArgument;
     }
     if (options.fragmented and !options.compression) {
         return error.InvalidArgument;
