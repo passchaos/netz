@@ -613,6 +613,33 @@ sample made 293 allocations and peaked at 1,287,988 live bytes. This closes the
 previous priority-aware cancellation timing gap; there is no equal Hyper/h2
 RFC 9218 scheduler workload, so it remains internal evidence.
 
+The cross-client cancellation benchmark fixes the server to Hyper and is
+reproducible with:
+
+```sh
+zig build bench-http2-cancel-hyper -Doptimize=ReleaseFast
+```
+
+Each measured batch starts a 128-KiB flow-blocked response and a concurrent
+16-KiB sibling on one persistent connection. Both clients consume exactly the
+8-KiB stream window and cancel the target; the Hyper server gates the sibling
+on its incomplete response body being dropped after stream cancellation, and a
+final request proves connection reuse. The existing reverse-direction
+interoperability gate separately decodes and requires `RST_STREAM(CANCEL)`.
+Five samples alternate netz and Hyper client order across dedicated CPUs, with
+twenty warmups and 1,000 measured batches per process. Repeated long runs gave
+netz median times of 132.2-153.6 us/batch and Hyper medians of
+143.3-200.2 us/batch, a 1.044-1.433x advantage for netz. Short 100-batch
+exploratory medians varied from a 0.939x regression to a 1.229x advantage and
+are not used for the performance claim. All long runs reported the expected
+24,576,000-byte checksum and all 1,020 cancellation/sibling pairs at the
+server. The netz explicit allocator peak was 203,352-203,385 bytes; Hyper's
+global Rust requested-byte peak was 144,750 bytes. These scopes differ, so no
+allocator ratio is claimed. BusyBox `time` reported 11,264-12,288 KiB for netz
+and 11,264 KiB for Hyper at the client-process median. A strict
+checker verifies the workload, timing arithmetic, server observations, memory
+arithmetic, RSS source, binary hashes, pinned Cargo lock and Hyper revision.
+
 ### HTTP/3 QPACK dynamic encode
 
 ```text

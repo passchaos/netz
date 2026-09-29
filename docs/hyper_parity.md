@@ -1536,8 +1536,32 @@ sibling reuse, and connection-error precedence.
    only at RST_STREAM, where both directions are terminal. Five CPU-0 runs took 230.4-241.2 us from request
    submission through server observation of the reset batch. One `--stats` run
    used 293 allocations and 1,287,988 peak live bytes. Hyper/h2 has no RFC 9218
-   scheduler, so this is internal timing evidence rather than a cross-stack
-   ratio.
+   scheduler, so that priority benchmark remains internal timing evidence.
+   `zig build bench-http2-cancel-hyper -Doptimize=ReleaseFast` adds a distinct
+   cross-client comparison against one fixed, pinned Hyper server. Each of five
+   alternating samples uses one persistent h2c connection for twenty warmups
+   and 1,000 measured batches. A batch opens a 128-KiB response and a concurrent
+   sibling, consumes exactly the 8-KiB stream window, cancels the first body,
+   and completes the 16-KiB sibling only after Hyper has dropped its incomplete
+   response body upon observing stream cancellation; a final request proves
+   connection reuse. The existing reverse-direction interoperability gate
+   separately decodes and requires the exact `RST_STREAM(CANCEL)` error code.
+   Repeated long five-sample runs measured netz at 132.2-153.6
+   us/batch by median and Hyper at 143.3-200.2 us/batch, a 1.044-1.433x
+   advantage for netz in this
+   shape. Short 100-batch exploratory medians ranged from a 0.939x regression
+   to a 1.229x advantage and are treated as scheduler noise rather than folded
+   into the claim. The netz explicit allocator peak was 203,352-203,385 bytes
+   versus Hyper's process-wide Rust requested-byte peak of 144,750 bytes; those
+   allocator scopes differ and are reported without a ratio. Client process
+   MaxRSS medians were 11,264-12,288 KiB for netz and 11,264 KiB for Hyper under
+   BusyBox `time`, so no RSS advantage is claimed. The strict checker verifies
+   every client result, all 1,020 server-observed cancellations and sibling
+   completions per sample,
+   timing arithmetic, reuse, allocation arithmetic, RSS source, binary hashes,
+   CPU assignment, Cargo lock, and Hyper revision `084473f7`. This is a focused
+   same-server cancellation/recovery result, not a general HTTP/2 throughput
+   claim.
 2. Run the new `bench-http2-flow --stats` allocator telemetry on the full
    netz/Hyper comparison matrix. **Completed for the primary constrained-window
    shape:** both harnesses now report allocation calls, realloc/remap calls,

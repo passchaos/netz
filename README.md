@@ -1385,6 +1385,10 @@ taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
 zig build bench-http1-hyper -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
+# Compare netz and Hyper clients against one fixed Hyper server while each
+# batch cancels a flow-blocked response, waits for server-observed cancellation,
+# completes its concurrent sibling, and proves connection reuse.
+zig build bench-http2-cancel-hyper -Doptimize=ReleaseFast
 zig build bench-http3-dev -Doptimize=ReleaseFast -- --iterations=1000
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=upload --streams=1
 zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=1 --body-bytes=16777216 --mode=download --streams=1

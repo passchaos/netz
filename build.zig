@@ -1008,6 +1008,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/websocket_mostly_idle_benchmark_check_test.py",
     });
+    const http2_cancel_benchmark_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http2_cancel_benchmark_check_test.py",
+    });
     const http1_hyper_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/http1_hyper_benchmark_check_test.py",
@@ -1126,6 +1130,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&http3_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_h2_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_mostly_idle_benchmark_checker_tests.step);
+    test_step.dependOn(&http2_cancel_benchmark_checker_tests.step);
     test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_config_tests.step);
@@ -2708,6 +2713,35 @@ pub fn build(b: *std.Build) void {
         "Compare zio-backed HTTP/1 pipeline and body workloads with Hyper",
     );
     http1_hyper_bench_step.dependOn(&http1_hyper_bench.step);
+
+    const http2_cancel_bench_client = b.addExecutable(.{
+        .name = "netz-http2-cancel-bench-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_cancel_bench_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{
+                    .name = "benchmark_counting_allocator",
+                    .module = benchmark_counting_allocator_mod,
+                },
+            },
+        }),
+    });
+    const http2_cancel_bench = b.addSystemCommand(&.{
+        "tools/interop/http2_cancel_benchmark.sh",
+    });
+    http2_cancel_bench.addArtifactArg(http2_cancel_bench_client);
+    http2_cancel_bench.addArg(@tagName(optimize));
+    if (b.args) |args| http2_cancel_bench.addArgs(args);
+    const http2_cancel_bench_step = b.step(
+        "bench-http2-cancel-hyper",
+        "Compare HTTP/2 cancellation recovery against Hyper",
+    );
+    http2_cancel_bench_step.dependOn(&http2_cancel_bench.step);
 
     const http3_public_fetch = b.addExecutable(.{
         .name = "netz-http3-public-fetch",

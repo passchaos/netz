@@ -27,6 +27,14 @@ path = "src/bin/websocket_server.rs"
 name = "netz-hyper-http2-websocket-bench"
 path = "src/bin/websocket_bench_peer.rs"
 
+[[bin]]
+name = "netz-hyper-http2-cancel-server"
+path = "src/bin/cancel_server.rs"
+
+[[bin]]
+name = "netz-hyper-http2-cancel-client"
+path = "src/bin/cancel_client.rs"
+
 [dependencies]
 bytes = "1.2"
 futures-util = "0.3"
