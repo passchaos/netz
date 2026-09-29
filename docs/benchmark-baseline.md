@@ -632,13 +632,16 @@ netz median times of 132.2-153.6 us/batch and Hyper medians of
 143.3-200.2 us/batch, a 1.044-1.433x advantage for netz. Short 100-batch
 exploratory medians varied from a 0.939x regression to a 1.229x advantage and
 are not used for the performance claim. All long runs reported the expected
-24,576,000-byte checksum and all 1,020 cancellation/sibling pairs at the
-server. The netz explicit allocator peak was 203,352-203,385 bytes; Hyper's
-global Rust requested-byte peak was 144,750 bytes. These scopes differ, so no
-allocator ratio is claimed. BusyBox `time` reported 11,264-12,288 KiB for netz
-and 11,264 KiB for Hyper at the client-process median. A strict
-checker verifies the workload, timing arithmetic, server observations, memory
-arithmetic, RSS source, binary hashes, pinned Cargo lock and Hyper revision.
+24,576,000-byte checksum, 1,020 server-observed cancellations, and 1,020
+sibling completions per sample. The netz explicit allocator peak was
+203,352-203,385 bytes; Hyper's process-wide Rust requested-byte peak was
+144,750 bytes. These scopes differ, so no allocator ratio is claimed. BusyBox
+`time` reported client-process MaxRSS medians of 11,264-12,288 KiB for netz and
+11,264 KiB for Hyper, so no RSS advantage is claimed. A strict checker verifies
+the workload, timing arithmetic, server observations, memory arithmetic, RSS
+source, binary hashes, pinned Cargo lock and Hyper revision. This is a focused
+same-server cancellation/recovery result, not a general HTTP/2 throughput
+claim.
 
 ### HTTP/3 QPACK dynamic encode
 
