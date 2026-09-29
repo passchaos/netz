@@ -1,0 +1,8 @@
+[package]
+name = "netz-mqtt-rumqttc-interop"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rumqttc = { version = "=0.25.1", default-features = false }
