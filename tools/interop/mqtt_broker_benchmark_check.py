@@ -71,6 +71,10 @@ def validate(
         "role_pair": f"netz-client+{server}-server",
         "client_io": "zio-std-io",
         "server_io": server_io,
+        "benchmark_scope": "same-client-workload",
+        "timing_usable": "true",
+        "client_tcp_nodelay": "true",
+        "server_tcp_nodelay": "true",
         "connection_scope": "persistent",
         "publishers": str(publishers),
         "subscribers": str(subscribers),
@@ -99,6 +103,11 @@ def validate(
     p999 = positive(record, "p999_ns")
     if not p50 <= p99 <= p999:
         raise ValueError(f"invalid latency ordering: {record}")
+    alloc_count = positive(record, "client_alloc_count")
+    total_allocated = positive(record, "client_total_allocated_bytes")
+    peak_live = positive(record, "client_peak_live_bytes")
+    if alloc_count > total_allocated or peak_live > total_allocated:
+        raise ValueError(f"invalid client allocation telemetry: {record}")
     positive(record, "checksum")
 
 
@@ -147,6 +156,8 @@ def verify(
             raise ValueError(f"unsupported RSS source {rss_source!r}")
         common = (
             "protocol=mqtt5 transport=tcp mode=qos1-fanout "
+            "benchmark_scope=same-client-workload timing_usable=true "
+            "client_tcp_nodelay=true server_tcp_nodelay=true "
             f"publishers={publishers} subscribers={subscribers} "
             f"warmup={warmup} publishes={messages} "
             f"deliveries={messages * subscribers} "
@@ -173,6 +184,8 @@ def verify(
         ))
     records.append(
         "record=verified protocol=mqtt5 transport=tcp mode=qos1-fanout "
+        "benchmark_scope=same-client-workload timing_usable=true "
+        "client_tcp_nodelay=true server_tcp_nodelay=true "
         f"publishers={publishers} subscribers={subscribers} warmup={warmup} "
         f"publishes={messages} deliveries={messages * subscribers} "
         f"payload_bytes={payload_bytes} publisher_window={window} "

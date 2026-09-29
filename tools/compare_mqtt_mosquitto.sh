@@ -3,13 +3,67 @@ set -euo pipefail
 
 netz_broker=${1:?netz broker executable path}
 driver=${2:?netz MQTT benchmark driver path}
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=${NETZ_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+repo_root=$(realpath "$repo_root")
+interop_root=${NETZ_INTEROP_ROOT:-"$repo_root/tools/interop"}
+interop_root=$(realpath "$interop_root")
 publishers=${PUBLISHERS:-2}
 subscribers=${SUBSCRIBERS:-2}
 warmup_messages=${WARMUP_MESSAGES:-100}
 messages=${MESSAGES:-2000}
 payload_bytes=${PAYLOAD_BYTES:-256}
 publisher_window=${PUBLISHER_WINDOW:-16}
+broker_order=${MQTT_BROKER_ORDER:-netz-first}
+client_cpu=${MQTT_CLIENT_CPU:-}
+server_cpu=${MQTT_SERVER_CPU:-}
+sampler_cpu=${MQTT_SAMPLER_CPU:-}
+stats=${MQTT_STATS:-false}
+max_artifact_bytes=33554432
+if [[ "$broker_order" != netz-first && "$broker_order" != mosquitto-first ]]; then
+  echo 'MQTT_BROKER_ORDER must be netz-first or mosquitto-first' >&2
+  exit 2
+fi
+if [[ -n "$client_cpu" || -n "$server_cpu" ]]; then
+  if [[ ! "$client_cpu" =~ ^[0-9]+$ ||
+        ! "$server_cpu" =~ ^[0-9]+$ ||
+        "$client_cpu" == "$server_cpu" ]]; then
+    echo 'MQTT_CLIENT_CPU and MQTT_SERVER_CPU must be distinct CPU numbers' >&2
+    exit 2
+  fi
+  command -v taskset >/dev/null || {
+    echo 'CPU-pinned MQTT comparison requires taskset' >&2
+    exit 127
+  }
+  python3 - "$client_cpu" "$server_cpu" <<'PY'
+import os
+import sys
+requested = {int(sys.argv[1]), int(sys.argv[2])}
+if not requested <= os.sched_getaffinity(0):
+    raise SystemExit("requested MQTT benchmark CPU is unavailable")
+PY
+fi
+if [[ -n "$sampler_cpu" ]]; then
+  if [[ "$stats" != true ]]; then
+    echo 'MQTT_SAMPLER_CPU requires MQTT_STATS=true' >&2
+    exit 2
+  fi
+  if [[ -z "$client_cpu" || -z "$server_cpu" ]]; then
+    echo 'MQTT_SAMPLER_CPU requires pinned client and server CPUs' >&2
+    exit 2
+  fi
+  if [[ ! "$sampler_cpu" =~ ^[0-9]+$ ||
+        "$sampler_cpu" == "$client_cpu" ||
+        "$sampler_cpu" == "$server_cpu" ]]; then
+    echo 'MQTT_SAMPLER_CPU must be distinct from client and server CPUs' >&2
+    exit 2
+  fi
+  python3 - "$sampler_cpu" <<'PY'
+import os
+import sys
+if int(sys.argv[1]) not in os.sched_getaffinity(0):
+    raise SystemExit("requested MQTT sampler CPU is unavailable")
+PY
+fi
 queue_args=(
   --warmup "$warmup_messages"
   --messages "$messages"
@@ -18,13 +72,23 @@ if [[ -n "${MQTT_MAX_QUEUED_MESSAGES:-}" ]]; then
   queue_args+=(--capacity "$MQTT_MAX_QUEUED_MESSAGES")
 fi
 max_queued_messages=$(python3 \
-  "$repo_root/tools/interop/mqtt_broker_benchmark_config.py" \
+  "$interop_root/mqtt_broker_benchmark_config.py" \
   "${queue_args[@]}")
-work=$(mktemp -d)
-. "$repo_root/tools/interop/mosquitto_build.sh"
+preserve_work=false
+if [[ -n "${MQTT_ARTIFACT_DIR:-}" ]]; then
+  if [[ -e "$MQTT_ARTIFACT_DIR" ]]; then
+    echo "MQTT_ARTIFACT_DIR already exists: $MQTT_ARTIFACT_DIR" >&2
+    exit 2
+  fi
+  mkdir -p "$MQTT_ARTIFACT_DIR"
+  work=$(realpath "$MQTT_ARTIFACT_DIR")
+  preserve_work=true
+else
+  work=$(mktemp -d)
+fi
+. "$interop_root/mosquitto_build.sh"
 server_pid=
 sampler_pid=
-stats=${MQTT_STATS:-false}
 if [[ "$stats" != false && "$stats" != true ]]; then
   echo 'MQTT_STATS must be true or false' >&2
   exit 2
@@ -43,7 +107,9 @@ cleanup() {
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
-  rm -rf "$work"
+  if [[ "$preserve_work" != true ]]; then
+    rm -rf "$work"
+  fi
 }
 on_exit() {
   local status=$?
@@ -64,6 +130,9 @@ start_rss_sampler() {
   local pid=$1
   local output=$2
   (
+    if [[ -n "$sampler_cpu" ]]; then
+      taskset -pc "$sampler_cpu" "$BASHPID" >/dev/null
+    fi
     local peak=0
     local value
     while kill -0 "$pid" 2>/dev/null; do
@@ -121,7 +190,7 @@ run_driver() {
   local output=$2
   local server_implementation=$3
   local server_io=$4
-  timeout 60s "$driver" \
+  local command=(timeout 60s "$driver" \
     "--address=127.0.0.1:$port" \
     "--publishers=$publishers" \
     "--subscribers=$subscribers" \
@@ -132,7 +201,12 @@ run_driver() {
     "--server-queue-capacity=$max_queued_messages" \
     "--server-implementation=$server_implementation" \
     "--server-io=$server_io" \
-    >"$output" 2>&1
+    --server-tcp-nodelay=true)
+  if [[ -n "$client_cpu" ]]; then
+    taskset -c "$client_cpu" "${command[@]}" >"$output" 2>&1
+  else
+    "${command[@]}" >"$output" 2>&1
+  fi
   grep -Fq 'MQTT 5 TCP broker fanout workload' "$output"
   grep -Fq 'client io backend: zio-std-io' "$output"
   grep -Fq \
@@ -145,49 +219,83 @@ run_driver() {
 
 mosquitto_binary=$(resolve_mosquitto)
 
-netz_port=$(free_tcp_port)
-"$netz_broker" \
-  "--bind=127.0.0.1:$netz_port" \
-  "--connections=$((publishers + subscribers))" \
-  "--max-queued-deliveries=$max_queued_messages" \
-  --max-outgoing-inflight=64 \
-  >"$work/netz-server.log" 2>&1 &
-server_pid=$!
-wait_for_log "$work/netz-server.log" \
-  'netz MQTT 3.1.1/5 broker listening.*server_io=zio-std-io'
-if [[ "$stats" == true ]]; then
-  start_rss_sampler "$server_pid" "$work/netz-server.rss"
-fi
-run_driver "$netz_port" "$work/netz-result.txt" netz zio-std-io
-wait "$server_pid"
-server_pid=
-finish_rss_sampler
+run_netz() {
+  local netz_port
+  netz_port=$(free_tcp_port)
+  local command=("$netz_broker" \
+    "--bind=127.0.0.1:$netz_port" \
+    "--connections=$((publishers + subscribers))" \
+    "--max-queued-deliveries=$max_queued_messages" \
+    --max-outgoing-inflight=64)
+  if [[ -n "$server_cpu" ]]; then
+    taskset -c "$server_cpu" "${command[@]}" \
+      >"$work/netz-server.log" 2>&1 &
+  else
+    "${command[@]}" >"$work/netz-server.log" 2>&1 &
+  fi
+  server_pid=$!
+  wait_for_log "$work/netz-server.log" \
+    'netz MQTT 3.1.1/5 broker listening.*server_io=zio-std-io'
+  if [[ "$stats" == true ]]; then
+    start_rss_sampler "$server_pid" "$work/netz-server.rss"
+  fi
+  run_driver "$netz_port" "$work/netz-result.txt" netz zio-std-io
+  wait "$server_pid"
+  server_pid=
+  finish_rss_sampler
+}
 
-mosquitto_port=$(free_tcp_port)
-cat >"$work/mosquitto.conf" <<EOF
+run_mosquitto() {
+  local mosquitto_port
+  mosquitto_port=$(free_tcp_port)
+  cat >"$work/mosquitto.conf" <<EOF
 listener $mosquitto_port 127.0.0.1
 allow_anonymous true
 persistence false
 max_inflight_messages 64
 max_queued_messages $max_queued_messages
+set_tcp_nodelay true
 log_dest stdout
 EOF
-"$mosquitto_binary" -c "$work/mosquitto.conf" -v \
-  >"$work/mosquitto-server.log" 2>&1 &
-server_pid=$!
-wait_for_log "$work/mosquitto-server.log" 'mosquitto version.*running'
-if [[ "$stats" == true ]]; then
-  start_rss_sampler "$server_pid" "$work/mosquitto-server.rss"
+  local command=("$mosquitto_binary" -c "$work/mosquitto.conf")
+  if [[ -n "$server_cpu" ]]; then
+    taskset -c "$server_cpu" "${command[@]}" \
+      >"$work/mosquitto-server.log" 2>&1 &
+  else
+    "${command[@]}" >"$work/mosquitto-server.log" 2>&1 &
+  fi
+  server_pid=$!
+  wait_for_log "$work/mosquitto-server.log" 'mosquitto version.*running'
+  if [[ "$stats" == true ]]; then
+    start_rss_sampler "$server_pid" "$work/mosquitto-server.rss"
+  fi
+  run_driver "$mosquitto_port" "$work/mosquitto-result.txt" \
+    mosquitto mosquitto-event-loop
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  server_pid=
+  finish_rss_sampler
+}
+
+printf 'record=run-order protocol=mqtt5 transport=tcp mode=qos1-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true broker_order=%s client_cpu=%s server_cpu=%s sampler_cpu=%s complete=true\n' \
+  "$broker_order" "${client_cpu:-unbound}" "${server_cpu:-unbound}" \
+  "${sampler_cpu:-unbound}"
+if [[ "$broker_order" == netz-first ]]; then
+  run_netz
+  run_mosquitto
+else
+  run_mosquitto
+  run_netz
 fi
-run_driver "$mosquitto_port" "$work/mosquitto-result.txt" \
-  mosquitto mosquitto-event-loop
-kill "$server_pid" 2>/dev/null || true
-wait "$server_pid" 2>/dev/null || true
-server_pid=
-finish_rss_sampler
+while IFS= read -r artifact; do
+  if [[ $(wc -c <"$artifact") -gt $max_artifact_bytes ]]; then
+    echo "MQTT comparison artifact exceeds 32 MiB: $artifact" >&2
+    exit 1
+  fi
+done < <(find "$work" -maxdepth 1 -type f)
 
 check_args=(python3 \
-  "$repo_root/tools/interop/mqtt_broker_benchmark_check.py" \
+  "$interop_root/mqtt_broker_benchmark_check.py" \
   --netz-log "$work/netz-result.txt" \
   --mosquitto-log "$work/mosquitto-result.txt" \
   --publishers "$publishers" \
@@ -210,4 +318,4 @@ echo '--- netz ---'
 cat "$work/netz-result.txt"
 echo '--- Mosquitto ---'
 cat "$work/mosquitto-result.txt"
-echo "equal-wire MQTT comparison passed (Mosquitto $(git -C "$mosquitto_root" rev-parse --short HEAD)) client_io=zio-std-io server_io=zio-std-io+mosquitto-event-loop"
+echo "same-client MQTT comparison passed (Mosquitto $(git -C "$mosquitto_root" rev-parse --short HEAD)) client_io=zio-std-io server_io=zio-std-io+mosquitto-event-loop"

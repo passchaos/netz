@@ -24,6 +24,7 @@ const Config = struct {
     session_expiry_seconds: u32 = 0,
     server_implementation: []const u8 = "external",
     server_io: []const u8 = "external-unspecified",
+    server_tcp_nodelay: []const u8 = "unspecified",
 };
 
 const Worker = struct {
@@ -350,16 +351,21 @@ pub fn main(init: std.process.Init) !void {
         "record=result implementation=netz protocol=mqtt5 transport=tcp " ++
             "mode=qos1-fanout role_pair=netz-client+{s}-server " ++
             "client_io=zio-std-io server_io={s} " ++
+            "benchmark_scope=same-client-workload timing_usable=true " ++
+            "client_tcp_nodelay=true server_tcp_nodelay={s} " ++
             "connection_scope=persistent publishers={d} subscribers={d} " ++
             "overlapping_subscriptions={d} publisher_window={d} " ++
             "server_queue_capacity={d} " ++
             "session_expiry_seconds={d} warmup={d} publishes={d} " ++
             "deliveries={d} payload_bytes={d} elapsed_ns={d} " ++
             "publishes_per_s={d} deliveries_per_s={d} p50_ns={d} " ++
-            "p99_ns={d} p999_ns={d} checksum={d} complete=true\n",
+            "p99_ns={d} p999_ns={d} client_alloc_count={d} " ++
+            "client_total_allocated_bytes={d} client_peak_live_bytes={d} " ++
+            "checksum={d} complete=true\n",
         .{
             config.server_implementation,
             config.server_io,
+            config.server_tcp_nodelay,
             config.publishers,
             config.subscribers,
             config.overlapping_subscriptions,
@@ -376,6 +382,9 @@ pub fn main(init: std.process.Init) !void {
             latency_p50,
             latency_p99,
             latency_p999,
+            stats_allocator.snapshot().alloc_count,
+            stats_allocator.snapshot().total_allocated,
+            stats_allocator.snapshot().peak_bytes,
             checksum,
         },
     );
@@ -400,6 +409,7 @@ fn connect(
         .{
             .protocol = .v5,
             .client_id = client_id,
+            .limits = .{ .tcp_nodelay = true },
             .max_outgoing_inflight = @intCast(max_outgoing_inflight),
             .properties = if (session_expiry_seconds == 0)
                 &.{}
@@ -520,6 +530,19 @@ fn parseArgs(
                 arg["--server-implementation=".len..];
         } else if (std.mem.startsWith(u8, arg, "--server-io=")) {
             config.server_io = arg["--server-io=".len..];
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--server-tcp-nodelay=",
+        )) {
+            config.server_tcp_nodelay =
+                arg["--server-tcp-nodelay=".len..];
+            if (!std.mem.eql(u8, config.server_tcp_nodelay, "true") and
+                !std.mem.eql(u8, config.server_tcp_nodelay, "false") and
+                !std.mem.eql(u8, config.server_tcp_nodelay, "unspecified"))
+            {
+                return error.InvalidArgument;
+            }
         } else {
             return error.InvalidArgument;
         }

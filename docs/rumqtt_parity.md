@@ -5,7 +5,7 @@ The source references are `~/Work/rumqtt` at `e886a78` and
 `~/Work/mosquitto` at `5cd25465`. Rumqtt contains both a production broker
 (`rumqttd`) and clients (`rumqttc`); Mosquitto supplies a mature broker,
 persistence format, and conformance suite. Feature, internal microbenchmark,
-and equal-wire broker results are kept separate.
+and same-client broker results are kept separate.
 
 ## Current feature comparison
 
@@ -564,7 +564,7 @@ persisted, preventing duplicate delivery on a later deadline pass. Focused
 tests cover journal-failure autosave fallback, graceful Session removal
 recovery, failed Clean Start cleanup, and post-mutation Will failure handling.
 
-## Equal-wire live broker comparison
+## Same-client live broker comparison
 
 `examples/bench_mqtt_broker.zig` is one external MQTT 5 TCP client workload,
 not a broker-specific adapter. It connects subscribers first, verifies every
@@ -578,7 +578,9 @@ an `std.Io.Group`; event barriers delimit connection readiness, drained warmup,
 and the measured interval without polling an OS-thread counter. Its structured
 result records always identify `client_io=zio-std-io` and accept only the
 explicit `netz/zio-std-io`, `mosquitto/mosquitto-event-loop`, or standalone
-external server identity pair.
+external server identity pair. This is not an equal-wire claim: the gate does
+not capture or equalize TCP segmentation, acknowledgements, kernel buffering,
+or broker-specific control traffic.
 The maintained comparison requires every expected fanout delivery, so its
 runner gives both brokers the same queue capacity: at least the historical
 1,024-message bound and large enough for the longer of the warmup and measured
@@ -641,6 +643,7 @@ and independently calculated checksum, then tears down every child:
 ```sh
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
+zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
 ```
 
 `MOSQUITTO_BIN` may select an existing executable, while `MOSQUITTO_ROOT`
@@ -654,6 +657,50 @@ headers; the gate reports that requirement rather than silently using an
 unrelated system broker. `MQTT_STATS=true` additionally samples each broker's
 resident memory from Linux `/proc/PID/status` every 2 ms and emits validated
 machine-readable memory records without changing the client workload.
+
+The matrix command is deliberately stricter than the configurable one-shape
+runner. It fixes five complementary shapes, requires three available CPUs, and
+pins the common netz driver, active broker, and RSS sampler separately. Each
+shape runs four paired samples in `netz, Mosquitto, Mosquitto, netz` ABBA
+order. The matrix refuses an injected `MOSQUITTO_BIN`, requires the audited
+checkout to be clean, and builds revision
+`5cd2546511596a269dbf53f85858c623b09ebdd6` for that run. Artifacts under
+`zig-out/mqtt-broker-matrix/run.*` retain the actual binaries, source-state and
+build logs, runners/checkers/config helper, per-run broker/result/RSS logs, and
+CPU/order metadata. SHA-256 binds every executable and tool. The checker
+requires the exact directory structure, recomputes all hashes, reruns the
+single-shape workload/checksum/rate validation for every pair, verifies the
+ABBA schedule, and caps each artifact at 32 MiB and the matrix at 128 MiB.
+Both brokers use `TCP_NODELAY`; Mosquitto's per-packet verbose logging is
+disabled so logging and delayed ACKs cannot manufacture a comparison result.
+
+The 2026-09-29 aarch64 Linux capture used CPUs 0/1/2 for
+client/server/sampler, Zig 0.16.0, four ABBA samples per shape, one exact
+subscription per subscriber, MQTT 5 QoS 1, and 2-ms broker RSS sampling. All
+40 broker runs completed their expected deliveries and independently
+recomputed checksums. Rates and p99 are medians; brackets show every sample.
+
+| shape (publishers × subscribers, payload, window) | netz publish/s [range] | Mosquitto publish/s [range] | netz/Mosquitto | p99 ms netz / Mosquitto | broker RSS MiB netz / Mosquitto |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| serial (1×1, 256 B, 1) | 17,236 [13,918–18,254] | 34,440 [28,061–35,427] | 0.500× | 0.060 / 0.037 | 3.51 / 2.96 |
+| publishers-32 (32×1, 64 B, 4) | 25,319 [23,428–25,427] | 45,840 [45,453–46,983] | 0.552× | 1.191 / 1.657 | 5.33 / 3.17 |
+| fanout-32 (1×32, 64 B, 4) | 2,376 [2,287–2,432] | 3,920 [3,892–3,962] | 0.606× | 1.708 / 0.805 | 4.69 / 3.13 |
+| balanced-32x32 (32×32, 64 B, 4) | 2,270 [2,083–2,363] | 3,854 [3,828–3,881] | 0.589× | 28.136 / 24.291 | 10.69 / 3.74 |
+| large-payload (4×4, 4096 B, 16) | 14,861 [14,121–15,103] | 19,220 [19,074–19,381] | 0.773× | 1.906 / 1.864 | 9.59 / 5.13 |
+
+The matrix exposes rather than hides the current deficit. Netz reaches
+0.500–0.773× Mosquitto's median throughput across all five shapes. Its p99 is
+also higher in every shape; the 4-KiB result, 1.906 versus 1.864 ms, is
+effectively tied at this sample count. Median broker RSS is higher in every
+shape, from 3.51 versus 2.96 MiB at 1×1 to 10.69 versus 3.74 MiB at 32×32.
+Client allocation counts are identical because both arms run the same fixed
+netz client binary; they bind harness cost and catch shape drift rather than
+measuring broker-internal allocations. An earlier diagnostic run had left
+Mosquitto's per-packet verbose logging enabled and misleadingly favored netz
+in high-fanout/windowed shapes; those values are intentionally discarded. The
+accepted matrix explicitly aligns `TCP_NODELAY=true` on both brokers and omits
+verbose packet logging. These results identify broker scheduling, serial
+latency, and per-connection memory as the next optimization targets.
 
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
@@ -785,7 +832,7 @@ subscriptions: the first visit drains the slot queue and later matches are
 constant-work empty checks, keeping the pass O(matches). The external workload
 accepts `--overlapping-subscriptions=1..3` for exact/+/# stress shapes.
 
-The same equal-wire driver accepts `--publisher-window=N`: each publisher
+The same-client driver accepts `--publisher-window=N`: each publisher
 submits up to N QoS 1 PUBLISH packets before reading the corresponding PUBACKs.
 It reports publish-completion p50/p99/p99.9 plus client-side allocation calls,
 cumulative allocated bytes and peak live bytes. The window mode exposed both an
@@ -2710,9 +2757,12 @@ proxy evidence for the entire suite.
    metadata and an opt-in offline QoS 0 delivery intact. The append journal
    closes the interval between checkpoints for protocol-visible durable
    mutations. Cross-node replication/consensus remains separate work.
-2. Extend the production-scale publisher-window, latency, allocation and RSS
-   comparison above to additional concurrency/fanout shapes; current results
-   cover netz against rumqttd and Mosquitto at bounded QoS 1 shapes.
+2. Reduce the production broker deficits exposed by the five-shape
+   publisher-window, latency, allocation and RSS matrix above. Netz currently
+   trails Mosquitto in serial, publisher-heavy and balanced 32×32 throughput,
+   while broker RSS remains higher in all five tested shapes. Add QoS 2 and
+   durable-Session matrix variants only with the same artifact, CPU, order,
+   completion and queue-capacity controls.
    The connection-local Packet Identifier tracker now replaces five embedded
    65,536-bit tables (40 KiB in every connection, even before QoS traffic)
    with independent incoming/outgoing sparse stage maps. Each direction

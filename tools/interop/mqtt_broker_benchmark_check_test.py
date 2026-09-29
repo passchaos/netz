@@ -19,12 +19,16 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             "record=result implementation=netz protocol=mqtt5 transport=tcp "
             f"mode=qos1-fanout role_pair=netz-client+{server}-server "
             f"client_io=zio-std-io server_io={server_io} "
+            "benchmark_scope=same-client-workload timing_usable=true "
+            "client_tcp_nodelay=true server_tcp_nodelay=true "
             "connection_scope=persistent publishers=2 subscribers=2 "
             "overlapping_subscriptions=1 publisher_window=8 "
             "server_queue_capacity=1024 "
             "session_expiry_seconds=0 warmup=10 publishes=100 deliveries=200 "
             f"payload_bytes=256 elapsed_ns={elapsed} publishes_per_s=100000 "
             "deliveries_per_s=200000 p50_ns=10 p99_ns=20 p999_ns=30 "
+            "client_alloc_count=100 client_total_allocated_bytes=10000 "
+            "client_peak_live_bytes=5000 "
             "checksum=53900 complete=true\n"
         )
 
@@ -129,6 +133,35 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "server_io"):
                 self.verify(netz, mosquitto)
 
+    def test_rejects_unusable_timing_scope(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(
+                self.record("netz", "zio-std-io").replace(
+                    "timing_usable=true", "timing_usable=false"
+                )
+            )
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            with self.assertRaisesRegex(ValueError, "timing_usable"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_mismatched_tcp_nodelay(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io"))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop").replace(
+                    "server_tcp_nodelay=true",
+                    "server_tcp_nodelay=false",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "server_tcp_nodelay"):
+                self.verify(netz, mosquitto)
+
     def test_rejects_wrong_delivery_count(self) -> None:
         with TemporaryDirectory() as directory:
             netz = Path(directory, "netz.log")
@@ -169,6 +202,22 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
                 self.record("mosquitto", "mosquitto-event-loop")
             )
             with self.assertRaisesRegex(ValueError, "publishes_per_s"):
+                self.verify(netz, mosquitto)
+
+    def test_rejects_invalid_allocation_telemetry(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(
+                self.record("netz", "zio-std-io").replace(
+                    "client_peak_live_bytes=5000",
+                    "client_peak_live_bytes=10001",
+                )
+            )
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop")
+            )
+            with self.assertRaisesRegex(ValueError, "allocation telemetry"):
                 self.verify(netz, mosquitto)
 
     def test_rejects_checksum_mismatch(self) -> None:

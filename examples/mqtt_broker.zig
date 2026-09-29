@@ -240,6 +240,7 @@ pub fn main(init: std.process.Init) !void {
                 .max_payload_size = config.max_payload_size,
                 .runtime = .{
                     .max_packet_size = config.max_packet_size,
+                    .tcp_nodelay = true,
                     .proxy_protocol = config.proxy_protocol,
                     .proxy_v2_require_tls = config.proxy_v2_require_tls,
                     .proxy_v2_require_client_certificate = config.proxy_v2_require_client_certificate,

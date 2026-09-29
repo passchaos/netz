@@ -1049,6 +1049,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/mqtt_broker_benchmark_config_test.py",
     });
+    const mqtt_broker_matrix_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_matrix_check_test.py",
+    });
     const mqtt_packet_sequence_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/mqtt_mosquitto_packet_sequences_test.py",
@@ -1163,6 +1167,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&http1_hyper_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_checker_tests.step);
     test_step.dependOn(&mqtt_broker_benchmark_config_tests.step);
+    test_step.dependOn(&mqtt_broker_matrix_checker_tests.step);
     test_step.dependOn(&mqtt_packet_sequence_tests.step);
     test_step.dependOn(&mqtt_vector_source_lock_tests.step);
     test_step.dependOn(&mqtt_commit_log_support_tests.step);
@@ -1256,9 +1261,19 @@ pub fn build(b: *std.Build) void {
     mqtt_broker_compare.addArtifactArg(mqtt_broker_bench);
     const mqtt_broker_compare_step = b.step(
         "compare-mqtt-mosquitto",
-        "Run an equal-wire MQTT QoS1 comparison against local Mosquitto",
+        "Run a same-client MQTT QoS1 comparison against local Mosquitto",
     );
     mqtt_broker_compare_step.dependOn(&mqtt_broker_compare.step);
+    const mqtt_broker_matrix = b.addSystemCommand(&.{
+        "tools/interop/mqtt_broker_matrix.sh",
+    });
+    mqtt_broker_matrix.addArtifactArg(mqtt_vectors_broker);
+    mqtt_broker_matrix.addArtifactArg(mqtt_broker_bench);
+    const mqtt_broker_matrix_step = b.step(
+        "compare-mqtt-mosquitto-matrix",
+        "Capture a fixed-shape MQTT QoS1 latency, throughput, allocation, and RSS matrix",
+    );
+    mqtt_broker_matrix_step.dependOn(&mqtt_broker_matrix.step);
 
     const mqtt_mosquitto_clients = b.addSystemCommand(&.{
         "tools/interop/mqtt_mosquitto_clients.sh",
