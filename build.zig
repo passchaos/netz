@@ -2289,7 +2289,17 @@ pub fn build(b: *std.Build) void {
         "Exercise WebTransport CONNECT, datagrams, streams, cancellation, and close with Chrome",
     );
     webtransport_chrome_step.dependOn(&webtransport_chrome.step);
-
+    const webtransport_firefox = b.addSystemCommand(&.{
+        "tools/interop/webtransport_firefox.sh",
+    });
+    webtransport_firefox.addArtifactArg(
+        webtransport_wtransport_server,
+    );
+    const webtransport_firefox_step = b.step(
+        "interop-webtransport-firefox",
+        "Exercise WebTransport Origin, datagrams, streams, reuse, and close with Firefox",
+    );
+    webtransport_firefox_step.dependOn(&webtransport_firefox.step);
     const example_specs = [_]struct {
         exe_name: []const u8,
         path: []const u8,

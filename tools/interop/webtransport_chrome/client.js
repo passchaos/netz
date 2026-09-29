@@ -4,13 +4,21 @@ const puppeteer = require('puppeteer-core');
 
 const [portText, certificateHash] = process.argv.slice(2);
 const port = Number(portText);
+const browserName = process.env.BROWSER_NAME || 'Chrome';
+const browserProduct = process.env.BROWSER_PRODUCT || 'chrome';
+const browserExecutable = process.env.BROWSER_EXECUTABLE ||
+    process.env.CHROME || '/usr/bin/google-chrome';
 if (!Number.isInteger(port) || port < 1 || port > 65535 ||
     !/^[0-9a-f]{64}$/i.test(certificateHash || '')) {
   throw new Error('usage: client.js PORT CERTIFICATE_SHA256_HEX');
 }
 
-async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) {
+async function runBrowserProbe({
+  port, certificateHash, browserName, testStreamCancellation, originOnly,
+  rejectOnly,
+}) {
   const timeoutMs = 10_000;
+  const browserUa = navigator.userAgent;
   const textEncoder = new TextEncoder();
   const textDecoder = new TextDecoder();
   async function withTimeout(promise, label) {
@@ -65,12 +73,12 @@ async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) 
       transport.close();
       throw new Error('disallowed Origin unexpectedly accepted');
     }
-    return 'Chrome WebTransport Origin policy passed: rejected=true';
+    return `${browserName} WebTransport Origin policy passed: rejected=true browser_ua=${browserUa}`;
   }
   await withTimeout(transport.ready, 'WebTransport ready');
   if (originOnly) {
     transport.close({closeCode: 0, reason: 'origin verified'});
-    return 'Chrome WebTransport Origin policy passed: exact-origin=true';
+    return `${browserName} WebTransport Origin policy passed: exact-origin=true browser_ua=${browserUa}`;
   }
   const maxDatagramSize = transport.datagrams.maxDatagramSize;
   if (!Number.isInteger(maxDatagramSize) || maxDatagramSize <= 0) {
@@ -108,6 +116,26 @@ async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) 
   )).value;
   await readExact(incomingUni.getReader(), 'netz uni', 'unidirectional response');
 
+  if (!testStreamCancellation) {
+    const reuse = await withTimeout(
+      transport.createBidirectionalStream(),
+      'reuse stream open',
+    );
+    const reuseWriter = reuse.writable.getWriter();
+    await reuseWriter.write(textEncoder.encode('after cancel'));
+    await reuseWriter.close();
+    await readExact(reuse.readable.getReader(), 'session reused', 'reuse response');
+    await datagramWriter.write(textEncoder.encode('close ready'));
+    const closeInfo = await withTimeout(transport.closed, 'session close');
+    if (closeInfo.closeCode !== 77 || closeInfo.reason !== 'netz done') {
+      throw new Error(
+        `unexpected session close: code=${closeInfo.closeCode} ` +
+        `reason=${JSON.stringify(closeInfo.reason)}`,
+      );
+    }
+    return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reuse=true drain-before-close=true close=77/netz-done browser_ua=${browserUa}`;
+  }
+
   const reset = await withTimeout(
     transport.createUnidirectionalStream(),
     'reset stream open',
@@ -137,7 +165,7 @@ async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) 
   await datagramWriter.write(textEncoder.encode('close ready'));
   // The netz fixture sends WT_DRAIN_SESSION immediately before CLOSE. The
   // browser has no drain event, so the exact following close metadata proves
-  // Chromium consumed the advisory capsule without losing stream framing.
+  // The browser consumed the advisory capsule without losing stream framing.
   const closeInfo = await withTimeout(transport.closed, 'session close');
   if (closeInfo.closeCode !== 77 || closeInfo.reason !== 'netz done') {
     throw new Error(
@@ -145,14 +173,16 @@ async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) 
       `reason=${JSON.stringify(closeInfo.reason)}`,
     );
   }
-  return `Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done`;
+  return `${browserName} WebTransport interop passed: CONNECT DATAGRAM max_datagram_size=${maxDatagramSize} bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done browser_ua=${browserUa}`;
 }
 
 (async () => {
+  const firefox = browserProduct === 'firefox';
   const browser = await puppeteer.launch({
-    executablePath: process.env.CHROME || '/usr/bin/google-chrome',
+    browser: browserProduct,
+    executablePath: browserExecutable,
     headless: true,
-    args: [
+    args: firefox ? ['--no-remote'] : [
       '--no-sandbox',
       '--disable-background-networking',
       '--disable-component-update',
@@ -161,6 +191,10 @@ async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) 
       '--metrics-recording-only',
       '--no-first-run',
     ],
+    extraPrefsFirefox: firefox ? {
+      'network.http.http3.enable': true,
+      'network.http.http3.webtransport.enabled': true,
+    } : undefined,
   });
   try {
     const page = await browser.newPage();
@@ -170,6 +204,8 @@ async function runBrowserProbe({port, certificateHash, originOnly, rejectOnly}) 
     console.log(await page.evaluate(runBrowserProbe, {
       port,
       certificateHash,
+      browserName,
+      testStreamCancellation: !firefox,
       originOnly: process.env.WEBTRANSPORT_ORIGIN_ONLY === '1',
       rejectOnly: process.env.WEBTRANSPORT_REJECT_ONLY === '1',
     }));

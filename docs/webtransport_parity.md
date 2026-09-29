@@ -21,6 +21,7 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-wtransport-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 WEBTRANSPORT_ORIGIN_ONLY=1 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
+FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 ```
 
 The external interoperability gate builds the audited `~/Work/wtransport`
@@ -107,6 +108,16 @@ evidence for CLOSE_WEBTRANSPORT_SESSION metadata propagation.
 It additionally requires Chrome's real
 `WebTransportDatagramDuplexStream.maxDatagramSize` to be a positive negotiated
 limit, while the netz peer performs its own one-byte-over-limit rejection.
+The sibling Firefox gate runs the same origin-rejection and accepted-session
+paths through Firefox 156.0.1's native WebTransport/Necko implementation. It
+verifies the browser User-Agent at the server boundary, certificate-hash
+authentication, CONNECT, DATAGRAM, bidirectional and unidirectional streams, a
+second bidirectional stream on the same Session, DRAIN framing, and exact close
+code 77/reason `netz done`. Firefox exposes the WebTransport API only after its
+HTTP/3/WebTransport preferences are enabled. Its current stream `abort()` and
+reader `cancel()` behavior is not counted here: the tested build did not emit
+the expected RESET_STREAM before a following DATAGRAM, so mapped Firefox
+RESET_STREAM/STOP_SENDING remains an explicit browser-specific gap.
 
 `run-webtransport-handshake-stream` now covers one real QUIC/TLS handshake,
 HTTP/3 SETTINGS and extended CONNECT negotiation, then:
@@ -917,8 +928,13 @@ handle routing, both-session progress and payload isolation.
    wtransport-client half also skips a netz WT_DRAIN_SESSION and checks the
    immediately following detailed session-close capsule, while its
    wtransport-server half
-   checks netz's peer QUIC application-close code and reason handling. Firefox
-   and Safari browser automation remain separate gaps.
+   checks netz's peer QUIC application-close code and reason handling. A
+   separate Firefox 156.0.1 gate now covers Origin policy, CONNECT, DATAGRAM,
+   both stream directions, same-Session reuse, DRAIN framing and exact close
+   metadata. Firefox stream cancellation remains open because its current
+   `abort()`/`cancel()` path did not emit the expected RESET_STREAM or
+   STOP_SENDING before a following DATAGRAM. Safari automation remains a
+   separate gap.
 3. Extend the bounded stream-churn gate to larger long-run distributions;
    concurrent packet-batched
    stream throughput and cancellation-under-loss now have real-handshake

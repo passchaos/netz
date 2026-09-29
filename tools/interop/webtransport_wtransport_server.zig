@@ -75,9 +75,11 @@ pub fn main(init: std.process.Init) !void {
         return runBenchmark(init, args[2..]);
     }
     // Browser certificate hashes impose a <=14-day validity window, so the
-    // Chrome gate supplies a freshly generated DER leaf and raw P-256 scalar.
+    // browser gates supply a freshly generated DER leaf and raw P-256 scalar.
     // Native wtransport interop keeps using the stable built-in test identity.
-    if (args.len != 2 and args.len != 4 and args.len != 5 and args.len != 6) {
+    if (args.len != 2 and args.len != 4 and args.len != 5 and
+        args.len != 6 and args.len != 7)
+    {
         return error.InvalidArgument;
     }
     const port = try std.fmt.parseInt(u16, args[1], 10);
@@ -127,15 +129,25 @@ pub fn main(init: std.process.Init) !void {
         args[4..5]
     else
         &.{};
-    const origin_only = args.len == 6 and
-        std.mem.eql(u8, args[5], "origin-only");
-    const reject_origin = args.len == 6 and
-        std.mem.eql(u8, args[5], "reject-origin");
-    const client_io = if (args.len >= 4)
+    const browser_mode = if (args.len >= 6) args[5] else "";
+    const origin_only = std.mem.eql(u8, browser_mode, "origin-only");
+    const reject_origin = std.mem.eql(u8, browser_mode, "reject-origin");
+    const client_io = if (args.len == 7)
+        args[6]
+    else if (args.len >= 4)
         "chromium-network-service"
     else
         "wtransport-quinn-tokio";
-    if (args.len == 6 and !origin_only and !reject_origin) {
+    if (args.len >= 6 and !origin_only and !reject_origin and
+        !std.mem.eql(u8, browser_mode, "full"))
+    {
+        return error.InvalidArgument;
+    }
+    if (args.len == 7 and args[6].len == 0) return error.InvalidArgument;
+    if (args.len == 7 and
+        !std.mem.eql(u8, client_io, "chromium-network-service") and
+        !std.mem.eql(u8, client_io, "firefox-necko"))
+    {
         return error.InvalidArgument;
     }
     var server = try netz.webtransport.runtime.HandshakeServer.bind(
@@ -180,6 +192,13 @@ pub fn main(init: std.process.Init) !void {
     defer if (pending_owned) pending.deinit();
     if (!std.mem.eql(u8, pending.path(), "/interop")) {
         return error.UnexpectedPath;
+    }
+    if (std.mem.eql(u8, client_io, "firefox-necko")) {
+        const user_agent = pending.userAgent() orelse
+            return error.UnexpectedHeader;
+        if (std.mem.indexOf(u8, user_agent, "Firefox/") == null) {
+            return error.UnexpectedHeader;
+        }
     }
     if (allowed_origins.len != 0) {
         const origin = pending.origin() orelse return error.UnexpectedHeader;
@@ -283,6 +302,31 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("netz WebTransport interop received uni\n", .{});
     const response_uni = try session.openUnidirectionalStream();
     try session.sendStream(response_uni, server_uni, true);
+    if (std.mem.eql(u8, client_io, "firefox-necko")) {
+        const reuse_stream_id = try receiveExpectedStream(
+            &session,
+            &read_buffer,
+            null,
+            .bidirectional,
+            false,
+            reuse_request,
+            true,
+        );
+        try session.sendStream(reuse_stream_id, reuse_response, true);
+        var ready = try session.receiveDatagram();
+        defer ready.deinit(allocator);
+        if (!std.mem.eql(u8, ready.datagram.payload, close_ready)) {
+            return error.UnexpectedCloseReady;
+        }
+        try session.drain();
+        try session.close(77, "netz done");
+        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+        std.debug.print(
+            "netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size={d} oversized_rejected=true bidi uni reuse=true drain-before-close=true close client_io={s} server_io=zio-std-io\n",
+            .{ max_datagram_size, client_io },
+        );
+        return;
+    }
 
     const reset_stream_id = try receiveExpectedStream(
         &session,
@@ -310,7 +354,6 @@ pub fn main(init: std.process.Init) !void {
             .data, .stopped => return error.UnexpectedResetStream,
         }
     }
-
     const stop_stream = try session.openUnidirectionalStream();
     try session.sendStream(stop_stream, server_stop, false);
     var sibling_stream_id: ?u62 = null;

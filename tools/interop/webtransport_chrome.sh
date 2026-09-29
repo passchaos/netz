@@ -4,6 +4,18 @@ set -euo pipefail
 netz_server=${1:?netz server executable path}
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 client_dir="$repo_root/tools/interop/webtransport_chrome"
+browser_name=${BROWSER_NAME:-Chrome}
+browser_product=${BROWSER_PRODUCT:-chrome}
+browser_executable=${BROWSER_EXECUTABLE:-${CHROME:-google-chrome}}
+browser_client_io=${BROWSER_CLIENT_IO:-chromium-network-service}
+case "$browser_product:$browser_name:$browser_client_io" in
+  chrome:Chrome:chromium-network-service) browser_ua=Chrome/ ;;
+  firefox:Firefox:firefox-necko) browser_ua=Firefox/ ;;
+  *)
+    echo 'unsupported or inconsistent browser identity' >&2
+    exit 2
+    ;;
+esac
 work=$(mktemp -d)
 server_pid=
 origin_pid=
@@ -31,8 +43,12 @@ on_exit() {
 }
 trap on_exit EXIT
 
-command -v "${CHROME:-google-chrome}" >/dev/null || {
-  echo 'Google Chrome is required (override with CHROME=/path/to/chrome)' >&2
+command -v "$browser_executable" >/dev/null || {
+  echo "$browser_name is required (override with BROWSER_EXECUTABLE=/path/to/browser)" >&2
+  exit 1
+}
+"$browser_executable" --version >/dev/null 2>&1 || {
+  echo "$browser_name executable is not runnable: $browser_executable" >&2
   exit 1
 }
 [[ -d "$client_dir/node_modules/puppeteer-core" ]] ||
@@ -83,6 +99,7 @@ origin_pid=$!
 # allowlist and that the server returns a normal HTTP 403 rejection.
 "$netz_server" "$rejected_port" "$work/cert.der" \
   "$work/private-scalar.bin" "https://denied.example" reject-origin \
+  "$browser_client_io" \
   >"$work/rejected-server.log" 2>&1 &
 server_pid=$!
 for _ in $(seq 1 200); do
@@ -101,18 +118,22 @@ grep -q 'WebTransport interop server listening' \
   echo 'timed out waiting for rejecting netz WebTransport server' >&2
   exit 1
 }
-WEBTRANSPORT_REJECT_ONLY=1 ORIGIN_PORT="$origin_port" \
+BROWSER_NAME="$browser_name" BROWSER_PRODUCT="$browser_product" \
+  BROWSER_EXECUTABLE="$browser_executable" \
+  WEBTRANSPORT_REJECT_ONLY=1 ORIGIN_PORT="$origin_port" \
   timeout 30s node "$client_dir/client.js" \
   "$rejected_port" "$certificate_hash" >"$work/rejected-client.log" 2>&1
 wait "$server_pid"
 server_pid=
 cat "$work/rejected-client.log"
 cat "$work/rejected-server.log"
-grep -Fq 'Chrome WebTransport Origin policy passed: rejected=true' \
+grep -Fq "$browser_name WebTransport Origin policy passed: rejected=true" \
   "$work/rejected-client.log"
+grep -Fq "browser_ua=" "$work/rejected-client.log"
+grep -Fq "$browser_ua" "$work/rejected-client.log"
 grep -Fq 'netz WebTransport Origin policy passed: rejected=403' \
   "$work/rejected-server.log"
-grep -Fq 'client_io=chromium-network-service server_io=zio-std-io' \
+grep -Fq "client_io=$browser_client_io server_io=zio-std-io" \
   "$work/rejected-server.log"
 
 server_args=(
@@ -121,7 +142,10 @@ server_args=(
 )
 if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
   server_args+=(origin-only)
+else
+  server_args+=(full)
 fi
+server_args+=("$browser_client_io")
 "${server_args[@]}" \
   >"$work/server.log" 2>&1 &
 server_pid=$!
@@ -140,7 +164,9 @@ grep -q 'WebTransport interop server listening' "$work/server.log" || {
   exit 1
 }
 
-if ! ORIGIN_PORT="$origin_port" timeout 30s node "$client_dir/client.js" \
+if ! BROWSER_NAME="$browser_name" BROWSER_PRODUCT="$browser_product" \
+  BROWSER_EXECUTABLE="$browser_executable" ORIGIN_PORT="$origin_port" \
+  timeout 30s node "$client_dir/client.js" \
   "$port" "$certificate_hash" >"$work/client.log" 2>&1; then
   sleep 0.2
   exit 1
@@ -151,27 +177,37 @@ cat "$work/client.log"
 cat "$work/server.log"
 grep -Fq \
   "$(if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
-      printf '%s' 'Chrome WebTransport Origin policy passed: exact-origin=true'
+      printf '%s' "$browser_name WebTransport Origin policy passed: exact-origin=true"
     else
-      printf '%s' 'Chrome WebTransport interop passed: CONNECT DATAGRAM max_datagram_size='
+      printf '%s' "$browser_name WebTransport interop passed: CONNECT DATAGRAM max_datagram_size="
     fi)" \
   "$work/client.log"
+grep -Fq "browser_ua=" "$work/client.log"
+grep -Fq "$browser_ua" "$work/client.log"
 if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
   grep -Fq \
     'netz WebTransport Origin policy passed: exact-origin=true' \
     "$work/server.log"
-  grep -Fq 'client_io=chromium-network-service server_io=zio-std-io' \
+  grep -Fq "client_io=$browser_client_io server_io=zio-std-io" \
     "$work/server.log"
   exit 0
 fi
 grep -Fq \
-  'bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done' \
+  "$(if [[ $browser_product == firefox ]]; then
+      printf '%s' 'bidi uni reuse=true drain-before-close=true close=77/netz-done'
+    else
+      printf '%s' 'bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done'
+    fi)" \
   "$work/client.log"
 grep -Fq \
   'netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
   "$work/server.log"
 grep -Fq \
-  'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close' \
+  "$(if [[ $browser_product == firefox ]]; then
+      printf '%s' 'oversized_rejected=true bidi uni reuse=true drain-before-close=true close'
+    else
+      printf '%s' 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close'
+    fi)" \
   "$work/server.log"
-grep -Fq 'client_io=chromium-network-service server_io=zio-std-io' \
+grep -Fq "client_io=$browser_client_io server_io=zio-std-io" \
   "$work/server.log"

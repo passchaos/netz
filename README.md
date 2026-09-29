@@ -1188,6 +1188,10 @@ zig build bench-webtransport-stream-batch -Doptimize=ReleaseFast
 # bidi/uni streams, mapped RESET_STREAM/STOP_SENDING codes, post-cancellation
 # reuse, Session drain, and connection-level close.
 zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
+# Run the same browser-facing protocol against real Chromium and Firefox
+# network stacks. Override CHROME/FIREFOX when they are not on PATH.
+zig build interop-webtransport-chrome -Doptimize=ReleaseFast
+FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
 # always enables strict mode and rejects empty, skipped, or failed test runs.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
