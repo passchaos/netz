@@ -77,3 +77,19 @@ func TestRoundTrackerBarrierAndUniqueness(t *testing.T) {
 		}
 	}
 }
+
+func TestCaptureRequiresDisabledGSO(t *testing.T) {
+	c := multiStreamTestConfig()
+	c.capture = true
+	t.Setenv("QUIC_GO_DISABLE_GSO", "")
+	if c.validateInstrumentation(false) == nil {
+		t.Fatal("capture accepted without disabling GSO")
+	}
+	t.Setenv("QUIC_GO_DISABLE_GSO", "true")
+	if err := c.validateInstrumentation(false); err != nil {
+		t.Fatal(err)
+	}
+	if c.validateInstrumentation(true) == nil {
+		t.Fatal("capture accepted with allocation statistics")
+	}
+}

@@ -310,6 +310,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         return error.InvalidArgument;
     }
     const config = try benchmark.Config.parse(config_args.items);
+    if (stats and config.capture) return error.InvalidArgument;
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
     defer if (stats) benchmark.printNetzMemory(

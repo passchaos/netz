@@ -19,6 +19,7 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
             "protocol=http3 mode=download role_pair=quic-go-client+netz-server "
             "sender_role=server client_io=quic-go-netpoll server_io=zio-std-io "
             "connection_scope=fresh-per-sample body_deadline_scope=sample "
+            "timing_usable=true "
             "sample=1 streams=4 body_bytes=1024 "
             f"checksum={value} status=200 streams_finished=4 "
             "per_stream_verified=true quic_version=2 complete=true"
@@ -30,7 +31,8 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
             "role_pair=quic-go-client+netz-server sender_role=server "
             "client_io=quic-go-netpoll server_io=zio-std-io "
             "connection_scope=fresh-per-sample "
-            "benchmark_scope=same-application-shape body_deadline_scope=sample "
+            "benchmark_scope=same-application-shape timing_usable=true "
+            "body_deadline_scope=sample "
             "warmup=1 iterations=1 streams=4 body_bytes=1024 "
             "application_chunk_requested=512 application_chunk_effective=512 "
             "stream_window=1048576 connection_window=8388608 timeout_ms=30000 "
@@ -167,6 +169,43 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
             client.write_text(client.read_text().replace("streams=4", "streams=4 streams=4"))
             with self.assertRaisesRegex(ValueError, "duplicate"):
                 CHECK.records(client, "result", "quic-go-client+netz-server")
+
+    def test_capture_requires_quic_go_gso_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            with self.assertRaisesRegex(ValueError, "gso"):
+                CHECK.verify(
+                    role_pair="quic-go-client+netz-server", mode="download",
+                    iterations=1, streams=4, body_bytes=1024, quic_version=2,
+                    warmup=1, chunk_bytes=512, stream_window=1048576,
+                    timeout_ms=30000, client_log=client, server_log=server,
+                    capture=True,
+                )
+            client.write_text(
+                client.read_text().replace(
+                    "gso=implementation-default", "gso=false",
+                ).replace(
+                    "benchmark_scope=same-application-shape",
+                    "benchmark_scope=capture-backed-same-application-shape",
+                ).replace(
+                    "timing_usable=true", "timing_usable=false",
+                )
+            )
+            server.write_text(
+                server.read_text().replace(
+                    "benchmark_scope=same-application-shape",
+                    "benchmark_scope=capture-backed-same-application-shape",
+                ).replace(
+                    "timing_usable=true", "timing_usable=false",
+                )
+            )
+            CHECK.verify(
+                role_pair="quic-go-client+netz-server", mode="download",
+                iterations=1, streams=4, body_bytes=1024, quic_version=2,
+                warmup=1, chunk_bytes=512, stream_window=1048576,
+                timeout_ms=30000, client_log=client, server_log=server,
+                capture=True,
+            )
 
 
 if __name__ == "__main__":

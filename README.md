@@ -1399,6 +1399,9 @@ zig build bench-http3-handshake-transfer -Doptimize=ReleaseFast -- --iterations=
 zig build bench-http3-capsule -Doptimize=ReleaseFast
 zig build bench-http3-qpack -Doptimize=ReleaseFast
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --netz-only --mode=upload --warmup=1 --iterations=1 --streams=4 --body-bytes=65536
+# On Linux with CAP_NET_RAW, retain bounded PCAP evidence for both mixed role
+# pairs. Run separately from timing or allocator measurements.
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --capture --mode=upload --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-echo -Doptimize=ReleaseFast
@@ -1687,6 +1690,16 @@ both v1 and v2 by default. Results are labeled `same-application-shape`
 because quic-go's GSO/GRO and ACK/packetization policy are not all externally
 controllable. Add `--stats` for whole-process peak RSS plus separately scoped
 netz explicit-allocator and Go runtime-heap telemetry.
+An independent `--capture` run uses a Linux `AF_PACKET` socket on `lo` to
+capture both mixed role pairs by their unique server ports. It requires
+`CAP_NET_RAW` and a third CPU, disables quic-go GSO, retains a bounded 128-byte
+prefix of each outgoing IPv4 packet in `zig-out/http3-captures`, and
+independently recomputes directional UDP datagrams, UDP payload bytes, IP
+bytes, and packet-size-sequence hashes. The runner rejects packet-socket drops,
+PCAP/log/hash/workload mismatches, or a changed quic-go binary across role
+pairs.
+Capture-run timing is explicitly unusable for performance comparison, and
+matching totals or size sequences alone are not called equal-wire.
 `bench-websocket-hyper-h2` and
 `bench-websocket-h3-quic-go` use the same two-CPU, dual-role layout for
 persistent RFC 8441/RFC 9220 binary echo, with handshake and warmup outside the

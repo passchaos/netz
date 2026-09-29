@@ -30,6 +30,7 @@ pub const Config = struct {
     chunk_bytes: u32 = 16 * 1024,
     stream_window: u64 = 1024 * 1024,
     timeout_ms: u32 = 30_000,
+    capture: bool = false,
 
     pub fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -42,6 +43,7 @@ pub const Config = struct {
         config.chunk_bytes = 16 * 1024;
         config.stream_window = 1024 * 1024;
         config.timeout_ms = 30_000;
+        config.capture = false;
         for (args) |arg| {
             if (option(arg, "--mode=")) |value| {
                 mode = try Mode.parse(value);
@@ -62,6 +64,10 @@ pub const Config = struct {
                 config.stream_window = try parsePositive(u64, value);
             } else if (option(arg, "--timeout-ms=")) |value| {
                 config.timeout_ms = try parsePositive(u32, value);
+            } else if (std.mem.eql(u8, arg, "--capture") and
+                !config.capture)
+            {
+                config.capture = true;
             } else {
                 return error.InvalidArgument;
             }
@@ -334,7 +340,7 @@ pub fn printConfig(
         "record=config implementation={s} protocol=http3 mode={s} role_pair={s} " ++
             "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample " ++
-            "benchmark_scope=same-application-shape body_deadline_scope=sample warmup={d} " ++
+            "benchmark_scope={s} timing_usable={} body_deadline_scope=sample warmup={d} " ++
             "iterations={d} streams={d} body_bytes={d} " ++
             "application_chunk_requested={d} application_chunk_effective={d} " ++
             "stream_window={d} connection_window={d} timeout_ms={d} " ++
@@ -349,6 +355,8 @@ pub fn printConfig(
             senderRole(config),
             clientIo(role_pair),
             serverIo(role_pair),
+            benchmarkScope(config),
+            !config.capture,
             config.warmup,
             config.iterations,
             config.streams,
@@ -381,11 +389,11 @@ pub fn printSample(
             "result_owner=client endpoint_role={s} sender_role={s} " ++
             "client_io={s} server_io={s} " ++
             "connection_scope=fresh-per-sample " ++
-            "benchmark_scope=same-application-shape body_deadline_scope=sample sample={d} streams={d} " ++
+            "benchmark_scope={s} timing_usable={} body_deadline_scope=sample sample={d} streams={d} " ++
             "body_bytes={d} elapsed_ns={d} logical_MiB_s={d:.3} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
             "per_stream_verified=true quic_version={d} complete=true\n",
-        .{ implementation, config.mode.name(), role_pair, endpoint_role, senderRole(config), clientIo(role_pair), serverIo(role_pair), sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
+        .{ implementation, config.mode.name(), role_pair, endpoint_role, senderRole(config), clientIo(role_pair), serverIo(role_pair), benchmarkScope(config), !config.capture, sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
     );
 }
 
@@ -403,15 +411,15 @@ pub fn printServerComplete(
         "record=server-complete implementation={s} protocol=http3 mode={s} " ++
             "role_pair={s} endpoint_role=server connection_scope=fresh-per-sample " ++
             "sender_role={s} client_io={s} server_io={s} " ++
-            "benchmark_scope=same-application-shape body_deadline_scope=sample " ++
+            "benchmark_scope={s} timing_usable={} body_deadline_scope=sample " ++
             "sample={d} streams={d} body_bytes={d} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
             "per_stream_verified=true quic_version={d} complete=true\n",
         .{
-            implementation,      config.mode.name(),                                  role_pair,      senderRole(config),
-            clientIo(role_pair), serverIo(role_pair),                                 sample,         config.streams,
-            config.body_bytes,   sent_bytes,                                          received_bytes, checksum,
-            config.streams,      if (config.version == .version_2) @as(u8, 2) else 1,
+            implementation,      config.mode.name(),  role_pair,              senderRole(config),
+            clientIo(role_pair), serverIo(role_pair), benchmarkScope(config), !config.capture,
+            sample,              config.streams,      config.body_bytes,      sent_bytes,
+            received_bytes,      checksum,            config.streams,         if (config.version == .version_2) @as(u8, 2) else 1,
         },
     );
 }
@@ -434,6 +442,7 @@ test "HTTP/3 external benchmark multi-stream checksum is index-aware" {
 
 test "HTTP/3 external benchmark version selects peer compatibility" {
     const v1 = try Config.parse(&.{ "--mode=upload", "--streams=4" });
+    try std.testing.expect(!v1.capture);
     try std.testing.expectEqual(netz.quic.Version.version_1, v1.version);
     try std.testing.expectEqual(
         netz.quic.protection.KeyPhaseState.UpdateProfile.rfc,
@@ -453,6 +462,19 @@ test "HTTP/3 external benchmark version selects peer compatibility" {
     try std.testing.expectError(
         error.InvalidArgument,
         Config.parse(&.{ "--mode=upload", "--version=2", "--version=2" }),
+    );
+}
+
+test "HTTP/3 external benchmark capture changes evidence scope" {
+    const config = try Config.parse(&.{ "--mode=upload", "--capture" });
+    try std.testing.expect(config.capture);
+    try std.testing.expectEqualStrings(
+        "capture-backed-same-application-shape",
+        benchmarkScope(config),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{ "--mode=upload", "--capture", "--capture" }),
     );
 }
 
@@ -511,6 +533,13 @@ pub fn printNetzMemory(
 
 fn senderRole(config: Config) []const u8 {
     return if (config.mode == .upload) "client" else "server";
+}
+
+fn benchmarkScope(config: Config) []const u8 {
+    return if (config.capture)
+        "capture-backed-same-application-shape"
+    else
+        "same-application-shape";
 }
 
 pub fn clientIo(role_pair: []const u8) []const u8 {

@@ -30,6 +30,7 @@ const mtu = 1280
 type benchConfig struct {
 	mode         string
 	version      uint
+	capture      bool
 	streams      uint
 	warmup       uint
 	iterations   uint
@@ -74,9 +75,10 @@ func main() {
 	streamWindow := flag.Uint64("stream-window", 1024*1024, "fixed QUIC stream receive window")
 	timeoutMS := flag.Uint("timeout-ms", 30000, "per-operation timeout milliseconds")
 	stats := flag.Bool("stats", false, "report Go runtime heap telemetry")
+	capture := flag.Bool("capture", false, "require capture-safe UDP packetization")
 	flag.Parse()
 	config := benchConfig{
-		mode: *mode, version: 1, streams: *streams, warmup: *warmup, iterations: *iterations,
+		mode: *mode, version: 1, capture: *capture, streams: *streams, warmup: *warmup, iterations: *iterations,
 		bodyBytes: *bodyBytes, chunkBytes: *chunkBytes,
 		streamWindow: *streamWindow, timeout: time.Duration(*timeoutMS) * time.Millisecond,
 	}
@@ -84,6 +86,9 @@ func main() {
 		config.version = 2
 	}
 	if err := config.validate(); err != nil {
+		log.Fatal(err)
+	}
+	if err := config.validateInstrumentation(*stats); err != nil {
 		log.Fatal(err)
 	}
 	var before memorySnapshot
@@ -127,6 +132,20 @@ func (config benchConfig) validate() error {
 	if config.totalBytes()/uint64(config.streams) != config.bodyBytes ||
 		config.connectionWindow()/max(uint64(config.streams), 8) != config.streamWindow {
 		return errors.New("benchmark aggregate size overflow")
+	}
+	return nil
+}
+
+func (config benchConfig) validateInstrumentation(stats bool) error {
+	if !config.capture {
+		return nil
+	}
+	if stats {
+		return errors.New("-stats and -capture must run separately")
+	}
+	disabled, err := strconv.ParseBool(os.Getenv("QUIC_GO_DISABLE_GSO"))
+	if err != nil || !disabled {
+		return errors.New("-capture requires QUIC_GO_DISABLE_GSO=true")
 	}
 	return nil
 }
@@ -286,6 +305,12 @@ func runServer(address, caOut string, config benchConfig) {
 		Addr:       address,
 		TLSConfig:  &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13},
 		QUICConfig: config.quicConfig(),
+		ConnContext: func(ctx context.Context, conn *quic.Conn) context.Context {
+			if config.capture && conn.ConnectionState().GSO {
+				report(errors.New("quic-go server GSO unexpectedly enabled"))
+			}
+			return ctx
+		},
 		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			if request.URL.Path == "/benchmark/ready" {
 				if request.Method != http.MethodGet || request.ProtoMajor != 3 ||
@@ -455,6 +480,19 @@ func runClient(address, caPath string, config benchConfig) {
 		transport := &http3.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS13},
 			QUICConfig:      config.quicConfig(),
+		}
+		if config.capture {
+			transport.Dial = func(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+				conn, err := quic.DialAddrEarly(ctx, addr, tlsConfig, quicConfig)
+				if err != nil {
+					return nil, err
+				}
+				if conn.ConnectionState().GSO {
+					_ = conn.CloseWithError(0, "capture requires GSO disabled")
+					return nil, errors.New("quic-go client GSO unexpectedly enabled")
+				}
+				return conn, nil
+			}
 		}
 		client := &http.Client{Transport: transport}
 		readyContext, cancelReady := context.WithTimeout(context.Background(), config.timeout)
@@ -814,11 +852,15 @@ func verifyPayload(payload []byte, index, offset uint64, checksum *uint64) error
 }
 
 func printConfig(implementation, rolePair, endpointRole string, config benchConfig) {
-	fmt.Printf("record=config implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d timeout_ms=%d steady_state_mtu=1280 quic_version=%d cipher=negotiated-unexposed cert_verify=true gso=implementation-default gro=implementation-default pacing=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, config.chunkBytes, config.effectiveChunk(), config.streamWindow, config.connectionWindow(), config.timeout/time.Millisecond, config.version)
+	gso := "implementation-default"
+	if config.capture {
+		gso = "false"
+	}
+	fmt.Printf("record=config implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=%s timing_usable=%t body_deadline_scope=sample warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d timeout_ms=%d steady_state_mtu=1280 quic_version=%d cipher=negotiated-unexposed cert_verify=true gso=%s gro=implementation-default pacing=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), benchmarkScope(config), !config.capture, config.warmup, config.iterations, config.streams, config.bodyBytes, config.chunkBytes, config.effectiveChunk(), config.streamWindow, config.connectionWindow(), config.timeout/time.Millisecond, config.version, gso)
 }
 func printSample(implementation, rolePair, endpointRole string, config benchConfig, sample uint, elapsed time.Duration, checksum uint64) {
 	mib := float64(config.totalBytes()) * 1e9 / float64(elapsed.Nanoseconds()) / (1024 * 1024)
-	fmt.Printf("record=result implementation=%s protocol=http3 mode=%s role_pair=%s result_owner=client endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample sample=%d streams=%d body_bytes=%d elapsed_ns=%d logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), sample, config.streams, config.bodyBytes, elapsed.Nanoseconds(), mib, config.totalBytes(), config.totalBytes(), checksum, config.streams, config.version)
+	fmt.Printf("record=result implementation=%s protocol=http3 mode=%s role_pair=%s result_owner=client endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=%s timing_usable=%t body_deadline_scope=sample sample=%d streams=%d body_bytes=%d elapsed_ns=%d logical_MiB_s=%.3f sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), benchmarkScope(config), !config.capture, sample, config.streams, config.bodyBytes, elapsed.Nanoseconds(), mib, config.totalBytes(), config.totalBytes(), checksum, config.streams, config.version)
 }
 
 func printServerComplete(implementation, rolePair string, config benchConfig, sample uint, checksum uint64) {
@@ -828,7 +870,14 @@ func printServerComplete(implementation, rolePair string, config benchConfig, sa
 	} else {
 		sent = config.totalBytes()
 	}
-	fmt.Printf("record=server-complete implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=server sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape body_deadline_scope=sample sample=%d streams=%d body_bytes=%d sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, senderRole(config), clientIO(rolePair), serverIO(rolePair), sample, config.streams, config.bodyBytes, sent, received, checksum, config.streams, config.version)
+	fmt.Printf("record=server-complete implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=server sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=%s timing_usable=%t body_deadline_scope=sample sample=%d streams=%d body_bytes=%d sent_bytes=%d received_bytes=%d checksum=%d status=200 streams_finished=%d per_stream_verified=true quic_version=%d complete=true\n", implementation, config.mode, rolePair, senderRole(config), clientIO(rolePair), serverIO(rolePair), benchmarkScope(config), !config.capture, sample, config.streams, config.bodyBytes, sent, received, checksum, config.streams, config.version)
+}
+
+func benchmarkScope(config benchConfig) string {
+	if config.capture {
+		return "capture-backed-same-application-shape"
+	}
+	return "same-application-shape"
 }
 
 func printMemory(rolePair, endpointRole string, config benchConfig, before, after memorySnapshot) {

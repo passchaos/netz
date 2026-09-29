@@ -1921,6 +1921,9 @@ internal result with the same 16 MiB transfer size as the quicz reference
 benchmark family. The cross-process quic-go comparison below covers the former
 single-stream full-stack gap and now includes an externally verified 4/16-stream
 shape. Capture-backed equal-wire comparison remains open.
+An opt-in, strictly verified capture pipeline now exists for the quic-go
+comparison below; the remaining gap is a real artifact from a host permitted
+to open the packet socket, followed by ACK/frame/cipher equivalence analysis.
 
 ### HTTP/3 versus quic-go, same application shape
 
@@ -1951,6 +1954,14 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --mode=download --warmup=2 --iterations=5 --body-bytes=4194304 \
   --chunk-bytes=16384 --stream-window=1048576 --timeout-ms=30000
 
+# Run separately from timing and allocation measurements. Requires Linux
+# CAP_NET_RAW and three available CPUs; artifacts are written under
+# zig-out/http3-captures/.
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --capture --mode=upload --warmup=2 --iterations=5 --streams=4 \
+  --body-bytes=4194304 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=30000
+
 NETZ_HTTP3_INTEROP_VERSION=2 \
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --mode=upload --warmup=2 --iterations=5 --streams=4 \
@@ -1963,6 +1974,39 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --streams=4 --body-bytes=65536 --chunk-bytes=16384 \
   --stream-window=1048576 --timeout-ms=30000
 ```
+
+The opt-in capture mode starts a dedicated Linux `AF_PACKET`/`SOCK_DGRAM`
+packet socket on a third pinned CPU before each server. It filters the loopback
+egress (`PACKET_OUTGOING`) copy by the pair's unique UDP server port, avoiding
+the duplicate host copy. Both netz endpoints already disable GSO; the runner
+sets `QUIC_GO_DISABLE_GSO=true`, and the Go fixture independently rejects a
+connection whose `ConnectionState().GSO` remains enabled. Each classic-PCAP
+artifact uses DLT_RAW, retains at most 128 bytes per packet, and is capped at
+512 MiB. Its original IP
+length and captured IPv4/UDP headers are sufficient to recompute directional
+datagram counts, UDP payload bytes, IP bytes, and ordered packet-size hashes
+without retaining complete encrypted application payloads. The strict checker
+first validates the ordinary client result and server completion, then
+reparses the PCAP and requires zero packet-socket drops, matching port/shape,
+binary and capture-tool hashes, header arithmetic, and enough sender bytes to
+cover every warmup and measured body. A cross-role checker requires the same
+workload, tool, CPUs, and quic-go binary before reporting totals and
+directional size-sequence equality. Capture artifacts cover complete process
+pairs, including handshakes, ready/close requests, ACKs, and teardown, and the
+artifact directory retains the exact capture script alongside the PCAPs and
+endpoint logs, plus the pinned quic-go `go.mod` and `go.sum`. Their
+timings are labeled `timing_usable=false`; equal aggregate counts or packet
+sizes do not by themselves establish equal QUIC frames, ACK policy, cipher, or
+application scheduling. `--capture`, `--stats`, and `--netz-only` are therefore
+kept as separate evidence modes.
+
+This host has no effective `CAP_NET_RAW`: the capability probe fails with
+`AF_PACKET was denied` before starting either benchmark process. Parser, PCAP
+round-trip, per-pair verifier, comparison, GSO-contract, and fail-closed
+permission tests are reproducible here, but no capture numbers are recorded as
+if they had been observed. A privileged capture host is still required to run
+the command above and decide whether the captured shapes are sufficiently
+matched for any stronger timing claim.
 
 A 2026-09-15 migration gate exercised QUIC v1 with one stream and QUIC v2
 with four streams in both upload/download directions and both mixed role pairs.
@@ -1985,9 +2029,10 @@ Every sample verified status 200, exactly 4,194,304 logical bytes, and checksum
 single ratio. These measurements used the former `std.Io.Threaded` harness and
 must not be cited as zio performance. This is `same-application-shape` evidence,
 not equal-wire and not
-a whole-library superiority claim: capture-level UDP datagram counts/bytes,
-GSO/GRO behavior, ACK policy, and cipher confirmation are still required before
-claiming identical wire work. The important result is that a reproducible
+a whole-library superiority claim. The new opt-in capture path can now measure
+kernel-visible UDP datagram counts/bytes and size sequences with GSO disabled,
+but a privileged-host artifact plus ACK/frame/cipher analysis is still required
+before claiming identical wire work. The important result is that a reproducible
 full-stack comparison now exists and fails closed on any header, byte, EOF, or
 checksum mismatch.
 

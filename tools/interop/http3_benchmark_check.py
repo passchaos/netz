@@ -58,6 +58,7 @@ def verify(
     timeout_ms: int,
     client_log: Path,
     server_log: Path,
+    capture: bool = False,
 ) -> None:
     endpoints = {
         "netz-client+quic-go-server": {"client": "netz", "server": "quic-go"},
@@ -96,6 +97,12 @@ def verify(
         "server": records(server_log, "config", role_pair),
     }
     sender = "client" if mode == "upload" else "server"
+    benchmark_scope = (
+        "capture-backed-same-application-shape"
+        if capture
+        else "same-application-shape"
+    )
+    timing_usable = "false" if capture else "true"
     for role, rows in config_records.items():
         if len(rows) != 1:
             raise ValueError(f"expected one {role} config record, found {len(rows)}")
@@ -109,7 +116,8 @@ def verify(
             "client_io": endpoint_io["client"],
             "server_io": endpoint_io["server"],
             "connection_scope": "fresh-per-sample",
-            "benchmark_scope": "same-application-shape",
+            "benchmark_scope": benchmark_scope,
+            "timing_usable": timing_usable,
             "body_deadline_scope": "sample",
             "warmup": str(warmup),
             "iterations": str(iterations),
@@ -125,7 +133,11 @@ def verify(
             "cipher": "negotiated-unexposed",
             "cert_verify": "true",
             "pacing": "true",
-            "gso": "false" if endpoints[role] == "netz" else "implementation-default",
+            "gso": (
+                "false"
+                if endpoints[role] == "netz" or capture
+                else "implementation-default"
+            ),
             "gro": "false" if endpoints[role] == "netz" else "implementation-default",
         }
         for key, value in expected_config.items():
@@ -157,7 +169,8 @@ def verify(
                 "streams": str(streams),
                 "body_bytes": str(body_bytes),
                 "connection_scope": "fresh-per-sample",
-                "benchmark_scope": "same-application-shape",
+                "benchmark_scope": benchmark_scope,
+                "timing_usable": timing_usable,
                 "body_deadline_scope": "sample",
                 "sent_bytes": str(
                     total_bytes if source == "client" or mode == "download" else 0
@@ -222,6 +235,7 @@ def main() -> None:
     parser.add_argument("--timeout-ms", type=int, required=True)
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
+    parser.add_argument("--capture", action="store_true")
     args = parser.parse_args()
     verify(
         role_pair=args.role_pair, mode=args.mode, iterations=args.iterations,
@@ -230,6 +244,7 @@ def main() -> None:
         warmup=args.warmup, chunk_bytes=args.chunk_bytes,
         stream_window=args.stream_window, timeout_ms=args.timeout_ms,
         client_log=args.client_log, server_log=args.server_log,
+        capture=args.capture,
     )
 
 

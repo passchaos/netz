@@ -996,6 +996,18 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/http3_benchmark_check_test.py",
     });
+    const http3_packet_capture_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http3_packet_capture_test.py",
+    });
+    const http3_packet_capture_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http3_packet_capture_check_test.py",
+    });
+    const http3_packet_capture_compare_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http3_packet_capture_compare_test.py",
+    });
     const websocket_h3_benchmark_checker_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/websocket_h3_benchmark_check_test.py",
@@ -1128,6 +1140,9 @@ pub fn build(b: *std.Build) void {
         &quic_quinn_handshake_benchmark_checker_tests.step,
     );
     test_step.dependOn(&http3_benchmark_checker_tests.step);
+    test_step.dependOn(&http3_packet_capture_tests.step);
+    test_step.dependOn(&http3_packet_capture_checker_tests.step);
+    test_step.dependOn(&http3_packet_capture_compare_tests.step);
     test_step.dependOn(&websocket_h2_benchmark_checker_tests.step);
     test_step.dependOn(&websocket_mostly_idle_benchmark_checker_tests.step);
     test_step.dependOn(&http2_cancel_benchmark_checker_tests.step);
@@ -1773,7 +1788,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| http3_quic_go_bench.addArgs(args);
     const http3_quic_go_bench_step = b.step(
         "bench-http3-quic-go",
-        "Compare verified HTTP/3 upload and download against quic-go",
+        "Compare verified HTTP/3 upload/download against quic-go, with optional kernel capture",
     );
     http3_quic_go_bench_step.dependOn(&http3_quic_go_bench.step);
     const http3_quic_go_multistream = b.addSystemCommand(
