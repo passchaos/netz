@@ -465,11 +465,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!(
             "rumqttc crash preparation passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 persistent-subscription=true offline-qos1=true client_io=rumqttc-tokio server_io=zio-std-io"
         );
-    } else if first == "recover-crash" {
+    } else if first == "deliver-unacked" {
         let port: u16 = args.next().ok_or("missing port")?.parse()?;
-        crash::recover(port)?;
+        let packet_ids_path = args.next().ok_or("missing packet IDs path")?;
+        crash::deliver_unacked(port, std::path::Path::new(&packet_ids_path))?;
         println!(
-            "rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true offline-qos1=true single-delivery=true automatic-ack=true client_io=rumqttc-tokio server_io=zio-std-io"
+            "rumqttc unacknowledged delivery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 session-present=true no-resubscribe=true offline-qos1=true manual-ack=true dup=false client_io=rumqttc-tokio server_io=zio-std-io"
+        );
+    } else if first == "retry-ack" {
+        let port: u16 = args.next().ok_or("missing port")?.parse()?;
+        let v4_packet_id: u16 = args.next().ok_or("missing v4 packet ID")?.parse()?;
+        let v5_packet_id: u16 = args.next().ok_or("missing v5 packet ID")?.parse()?;
+        crash::retry_and_ack(port, v4_packet_id, v5_packet_id)?;
+        println!(
+            "rumqttc inflight retry passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true dup=true stable-packet-id=true manual-puback=true client_io=rumqttc-tokio server_io=zio-std-io"
+        );
+    } else if first == "verify-cleared" {
+        let port: u16 = args.next().ok_or("missing port")?.parse()?;
+        crash::verify_cleared(port)?;
+        println!(
+            "rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true offline-qos1=true dup-retry=true stable-packet-id=true acknowledged-not-replayed=true client_io=rumqttc-tokio server_io=zio-std-io"
         );
     } else {
         let port: u16 = first.parse()?;

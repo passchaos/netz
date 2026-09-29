@@ -70,19 +70,56 @@ kill -KILL "$server_pid"
 wait "$server_pid" 2>/dev/null || true
 server_pid=
 
-restored_port=$(free_port)
-start_broker "$restored_port" 2 "$work/restored-server.log"
-timeout 30s "$client" recover-crash "$restored_port" \
-  >"$work/recover.log" 2>&1 || {
-    cat "$work/recover.log" >&2
-    cat "$work/restored-server.log" >&2
+delivery_port=$(free_port)
+start_broker "$delivery_port" 3 "$work/delivery-server.log"
+packet_ids="$work/packet-ids"
+timeout 30s "$client" deliver-unacked "$delivery_port" "$packet_ids" \
+  >"$work/delivery.log" 2>&1 || {
+    cat "$work/delivery.log" >&2
+    cat "$work/delivery-server.log" >&2
+    exit 1
+  }
+grep -Fq \
+  'rumqttc unacknowledged delivery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 session-present=true no-resubscribe=true offline-qos1=true manual-ack=true dup=false client_io=rumqttc-tokio server_io=zio-std-io' \
+  "$work/delivery.log"
+v4_packet_id=$(sed -n 's/^v4_pkid=//p' "$packet_ids")
+v5_packet_id=$(sed -n 's/^v5_pkid=//p' "$packet_ids")
+[[ "$v4_packet_id" =~ ^[1-9][0-9]*$ ]]
+[[ "$v5_packet_id" =~ ^[1-9][0-9]*$ ]]
+kill -KILL "$server_pid"
+wait "$server_pid" 2>/dev/null || true
+server_pid=
+
+retry_port=$(free_port)
+start_broker "$retry_port" 3 "$work/retry-server.log"
+timeout 30s "$client" retry-ack "$retry_port" \
+  "$v4_packet_id" "$v5_packet_id" >"$work/retry.log" 2>&1 || {
+    cat "$work/retry.log" >&2
+    cat "$work/retry-server.log" >&2
+    exit 1
+  }
+grep -Fq \
+  'rumqttc inflight retry passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true dup=true stable-packet-id=true manual-puback=true client_io=rumqttc-tokio server_io=zio-std-io' \
+  "$work/retry.log"
+kill -KILL "$server_pid"
+wait "$server_pid" 2>/dev/null || true
+server_pid=
+
+final_port=$(free_port)
+start_broker "$final_port" 2 "$work/final-server.log"
+timeout 30s "$client" verify-cleared "$final_port" \
+  >"$work/final.log" 2>&1 || {
+    cat "$work/final.log" >&2
+    cat "$work/final-server.log" >&2
     exit 1
   }
 wait "$server_pid"
 server_pid=
-cat "$work/recover.log"
+cat "$work/final.log"
 grep -Fq \
-  'rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true offline-qos1=true single-delivery=true automatic-ack=true client_io=rumqttc-tokio server_io=zio-std-io' \
-  "$work/recover.log"
+  'rumqttc crash recovery passed: rumqttc=0.25.1 protocols=mqtt311,mqtt5 sigkill=true commit-log=true session-present=true no-resubscribe=true offline-qos1=true dup-retry=true stable-packet-id=true acknowledged-not-replayed=true client_io=rumqttc-tokio server_io=zio-std-io' \
+  "$work/final.log"
 grep -Fq 'server_io=zio-std-io' "$work/source-server.log"
-grep -Fq 'server_io=zio-std-io' "$work/restored-server.log"
+grep -Fq 'server_io=zio-std-io' "$work/delivery-server.log"
+grep -Fq 'server_io=zio-std-io' "$work/retry-server.log"
+grep -Fq 'server_io=zio-std-io' "$work/final-server.log"

@@ -2064,11 +2064,16 @@ uses distinct publisher connections to queue QoS 1 while both subscribers are
 offline. After each publisher receives PUBACK, the runner sends SIGKILL to the
 still-listening broker. A new broker process restores the same fsynced commit
 log on a different port, and a new rumqttc process reconnects both Client IDs.
-It requires Session Present, receives each queued message without SUBSCRIBE,
-observes rumqttc's automatic PUBACK, rejects duplicate delivery before
-DISCONNECT, and exercises the MQTT 5 Session Expiry property. This is external
-client evidence for single-node crash recovery, distinct from the raw-packet
-commit-log fixtures and from orderly same-process reconnect.
+It requires Session Present and receives each queued message without
+SUBSCRIBE. Manual acknowledgement then holds both deliveries at the exact
+post-PUBLISH/pre-PUBACK boundary before a second SIGKILL. The next process must
+receive `DUP=1` with each original Packet Identifier, sends explicit PUBACKs,
+and uses unrelated QoS 1 publishes as protocol barriers. After a third
+SIGKILL/restart, final fresh clients require that neither acknowledged delivery
+reappears. The MQTT 5 path exercises the Session Expiry property throughout.
+This is external client evidence for single-node queued and outgoing-inflight
+crash recovery, distinct from the raw-packet commit-log fixtures and from
+orderly same-process reconnect.
 The twelfth scenario ports Mosquitto's retained Message Expiry vector with a
 timing-tolerant immediate check: the forwarded interval is 2 or 1 seconds, the
 entry is absent after three seconds, and a non-expiring retained control still
