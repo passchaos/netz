@@ -35,7 +35,7 @@ and same-client broker results are kept separate.
 | MQTT 5 information preferences | Configurable Response Information is emitted only when CONNECT explicitly requests it; Request Problem Information defaults to enabled and an explicit zero removes Reason String/User Property from server ACK/AUTH packets while retaining functional authentication properties and the reason code | Both references parse/model the CONNECT fields, but the audited Mosquitto documentation labels them supported but unused and rumqttd does not apply them in its router |
 | MQTT 5 Server Reference | CONNACK/DISCONNECT property access, redirect-reason validation, URI and host:port parsing, bounded loop-detecting opt-in redirect chains, authorization callback, and automatic TCP/TLS/WS/WSS CONNACK redirect helpers; TLS/WSS derive certificate identity from every new authority | The audited rumqtt codecs expose the property/reasons but no automatic client redirection; Mosquitto documents Server Reference as supported but unused |
 | Broker persistence | Atomic versioned snapshots plus opt-in interval- or durable-change-count-driven live checkpoints, with both the replacement file and its parent directory synced on supported POSIX targets; and a separate opt-in fsynced append journal with the same directory-durable initialization/compaction, for retained messages, scheduled Wills, durable Sessions, opt-in queued QoS 0, outgoing QoS 1/2 and inbound QoS 2 transactions | rumqttd datalog/segments; Mosquitto persisted sessions, subscriptions, bidirectional client-message state and retained/Will base messages; Mosquitto can interpret its autosave threshold as elapsed seconds or persistence changes |
-| Observability | `Broker.stats()` takes one allocation-free, state-locked snapshot of uptime, admitted CONNECT count, live connections, the process high-water connection count, cumulative expired Sessions, complete MQTT Control Packet/message and MQTT-byte counters, inbound/outbound/dropped PUBLISH counters and payload-byte counters, connected/offline Sessions, ordinary/shared subscriptions, retained state, live queues, durable queues/inflight, inbound QoS 2 and scheduled Wills, including owned byte gauges. State-backed gauges form one coherent instant; lock-free wire counters include each complete transport operation after its caller returns, so callers that need an exact asynchronous boundary use a same-connection acknowledgement or PING barrier and observe the counter afterward. `publishSystemStats()` and `system_stats_interval` publish the snapshot as retained QoS 0 `$SYS` messages through normal routing and ACL checks; production config exposes Mosquitto-compatible global `sys_interval` with a 10-second default and zero-disable behavior. Metrics include `$SYS/broker/uptime`, cumulative message/byte/client/PUBLISH topics, and 1/5/15-minute EWMA connection, message, PUBLISH, drop, and byte rates. Wire counters are shared atomics below the broker state lock, span TCP/TLS/WS/WSS, count CONNECT before admission and successful CONNACK/control writes, and exclude lower-transport framing. Drops count per destination rejected by a live or durable queue bound or negotiated Maximum Packet Size; ordinary no-match, ACL denial, and expiry are distinct outcomes. Like Mosquitto, `$SYS` updates actually written to subscribers contribute to the following sent-PUBLISH and total-message/byte snapshots | Mosquitto periodically publishes a broad counter/gauge and rolling-load set through `$SYS`; rumqttd exposes metrics through its server architecture |
+| Observability | `Broker.stats()` takes one allocation-free, state-locked snapshot of uptime, admitted CONNECT count, live connections, the process high-water connection count, cumulative expired Sessions, complete MQTT Control Packet/message and MQTT-byte counters, inbound/outbound/dropped PUBLISH counters and payload-byte counters, connected/offline Sessions, ordinary/shared subscriptions, retained state, live queues, durable queues/inflight, inbound QoS 2 and scheduled Wills, including owned byte gauges. State-backed gauges form one coherent instant; wire and PUBLISH counters are independently sampled lock-free atomics and include each complete operation, so callers that need an exact asynchronous boundary use a same-connection acknowledgement or PING barrier and observe the counter afterward. `publishSystemStats()` and `system_stats_interval` publish the snapshot as retained QoS 0 `$SYS` messages through normal routing and ACL checks; production config exposes Mosquitto-compatible global `sys_interval` with a 10-second default and zero-disable behavior. Metrics include `$SYS/broker/uptime`, cumulative message/byte/client/PUBLISH topics, and 1/5/15-minute EWMA connection, message, PUBLISH, drop, and byte rates. Wire counters span TCP/TLS/WS/WSS, count CONNECT before admission and successful CONNACK/control writes, and exclude lower-transport framing. PUBLISH counters saturate instead of wrapping. Drops count per destination rejected by a live or durable queue bound or negotiated Maximum Packet Size; ordinary no-match, ACL denial, and expiry are distinct outcomes. Like Mosquitto, `$SYS` updates actually written to subscribers contribute to the following sent-PUBLISH and total-message/byte snapshots | Mosquitto periodically publishes a broad counter/gauge and rolling-load set through `$SYS`; rumqttd exposes metrics through its server architecture |
 
 ## One-way inbound broker bridge
 
@@ -964,6 +964,30 @@ from 2.312 to 2.308 ms. The ranges overlap and the candidate won one of three
 throughput pairs, so this is recorded as no clear timing regression rather
 than a speedup claim; the exact allocation and byte reductions above are the
 supported result.
+
+Broker PUBLISH counters now use a dedicated group of saturating atomics.
+Receive, successful-send, payload-byte and drop accounting no longer acquires
+the global routing/Session mutex for every network event; state-backed gauges
+remain protected and coherent under that mutex, while cumulative wire and
+PUBLISH counters are documented as independently sampled. Unit tests cover
+ordinary values, concurrent updates, and saturation at `maxInt(usize)`. The
+allocator matrix at `zig-out/mqtt-publish-counters-final` (22,284,193 bytes;
+summary SHA-256
+`a79638a694006f201df5d572a85ed7104a096f05633ae9ce56ba1cb0fefb1b2b`)
+reproduced the prior allocation counts and cumulative requested bytes in every
+shape with zero live bytes. A five-pair fixed-binary, alternating-order
+balanced-32x32 A/B at
+`zig-out/mqtt-publish-counters-ab/run.20260930` (36,967,124 bytes; aggregate
+file-hash digest
+`2e198741c690d3ed6ec419edac738e645d18a5dc6fcb921b9df2f8eee1f98330`)
+used 1,000 warmups and 10,000 measured publishes per arm. Every arm completed
+320,000 deliveries with checksum 18,656,000. Raw medians moved from 2,891 to
+3,374 publishes/s (+16.7%), p50 from 16.335 to 13.642 ms (-16.5%), and p99
+from 38.655 to 32.154 ms (-16.8%). The paired-ratio medians were +19.0%,
+-15.7%, and -16.3% respectively; candidate p99 won all five pairs. Throughput
+won three of five pairs and the host-load ranges overlap, so these remain
+workload-specific supporting measurements rather than a general superiority
+claim.
 
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical

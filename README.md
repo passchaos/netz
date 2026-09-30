@@ -913,9 +913,10 @@ Current protocol coverage includes:
   fsynced append journal with
   CRC/sequence/footer validation,
   torn-tail recovery, directory-synced atomic compaction, and protocol-visible
-  durability boundaries, plus coherent allocation-free broker statistics for
-  connection, Session, subscription, retained, queue, inflight, QoS 2 and Will
-  state and retained `$SYS` gauge publication through the normal routing/ACL
+  durability boundaries, plus coherent allocation-free state gauges and
+  lock-free cumulative wire/PUBLISH counters for connection, Session,
+  subscription, retained, queue, inflight, QoS 2 and Will state, with retained
+  `$SYS` gauge publication through the normal routing/ACL
   path, integrated into one live
   TCP and Unix-domain broker listeners that auto-detect MQTT 3.1.1/5 per connection, exposes
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
@@ -1470,6 +1471,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # shapes from 2.590/2.187 to 1.340/1.125 allocations per publish; the 4-KiB
 # shape's cumulative requested bytes fall 36.5%, with paired throughput medians
 # remaining within 0.8%.
+# Broker PUBLISH counters use saturating atomics instead of taking the global
+# routing/Session mutex after every successful fanout write. A five-pair
+# balanced-32x32 A/B raised the median from 2,891 to 3,374 publishes/s and
+# reduced median p99 from 38.66 to 32.15 ms; host-load ranges still overlap.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

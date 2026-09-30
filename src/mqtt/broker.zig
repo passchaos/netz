@@ -14,6 +14,7 @@ const runtime = @import("runtime.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
 const load_metrics = @import("broker/load_metrics.zig");
+const publish_counters = @import("broker/publish_counters.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
 const vail = @import("vail");
@@ -686,8 +687,8 @@ const ClientSlot = struct {
 
 /// Point-in-time broker gauges. State-backed fields are collected under the
 /// same lock as routing and Session transitions, so their cross-field
-/// invariants describe one coherent instant. Wire counters are lock-free and
-/// include each complete transport read/write after that operation returns.
+/// invariants describe one coherent instant. Wire and PUBLISH counters are
+/// lock-free, independently sampled, and include each complete operation.
 pub const Stats = struct {
     uptime_seconds: u64,
     /// Successfully parsed CONNECT packets admitted to the broker core.
@@ -1024,18 +1025,14 @@ pub const Broker = struct {
     /// its caller's broker mutation is already committed; returning the I/O
     /// error would falsely invite the caller to retry that mutation.
     persistent_change_autosave_error: ?anyerror = null,
-    /// Cumulative lifecycle counters protected by `state_mutex`. They are
-    /// intentionally process-local like Mosquitto's `$SYS` counters and are
-    /// not restored from protocol-state snapshots.
+    /// Cumulative lifecycle counters protected by `state_mutex`. The traffic
+    /// and PUBLISH counters below are lock-free. All are process-local like
+    /// Mosquitto's `$SYS` counters and are not restored from snapshots.
     maximum_active_connections: usize = 0,
     connections_received: u64 = 0,
     expired_sessions: usize = 0,
     traffic: runtime.TrafficCounters = .{},
-    publish_messages_received: usize = 0,
-    publish_payload_bytes_received: usize = 0,
-    publish_messages_dropped: usize = 0,
-    publish_messages_sent: usize = 0,
-    publish_payload_bytes_sent: usize = 0,
+    publish_counters: publish_counters.Counters = .{},
     started_at_ns: i96,
     load_tracker: load_metrics.Tracker = .{},
     next_retained_expiry_ns: ?i96 = null,
@@ -1375,8 +1372,7 @@ pub const Broker = struct {
             return err;
         };
         defer plan.deinit(self.allocator);
-        self.publish_messages_received +|= 1;
-        self.publish_payload_bytes_received +|= publish.payload.len;
+        self.publish_counters.recordReceived(publish.payload.len);
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         state_locked = false;
@@ -1528,8 +1524,7 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             return error.InvalidReleaseState;
         }
-        self.publish_messages_received +|= 1;
-        self.publish_payload_bytes_received +|= released_payload_len;
+        self.publish_counters.recordReceived(released_payload_len);
         self.recordPersistentChangeLocked(true);
         self.state_mutex.unlock(self.io);
         try self.finalizePersistentChangeLocked(true, true);
@@ -1649,6 +1644,7 @@ pub const Broker = struct {
         }
         const sessions = self.sessions.aggregateStats();
         const traffic = self.traffic.stats();
+        const publish = self.publish_counters.snapshot();
         return .{
             .uptime_seconds = uptimeSeconds(
                 self.started_at_ns,
@@ -1662,11 +1658,11 @@ pub const Broker = struct {
             .messages_sent = traffic.messages_sent,
             .bytes_received = traffic.bytes_received,
             .bytes_sent = traffic.bytes_sent,
-            .publish_messages_received = self.publish_messages_received,
-            .publish_payload_bytes_received = self.publish_payload_bytes_received,
-            .publish_messages_dropped = self.publish_messages_dropped,
-            .publish_messages_sent = self.publish_messages_sent,
-            .publish_payload_bytes_sent = self.publish_payload_bytes_sent,
+            .publish_messages_received = publish.messages_received,
+            .publish_payload_bytes_received = publish.payload_bytes_received,
+            .publish_messages_dropped = publish.messages_dropped,
+            .publish_messages_sent = publish.messages_sent,
+            .publish_payload_bytes_sent = publish.payload_bytes_sent,
             .sessions = sessions.session_count,
             .connected_sessions = sessions.connected_count,
             .disconnected_sessions = sessions.disconnected_count,
@@ -4065,7 +4061,7 @@ pub const Broker = struct {
                 // policy as live fanout. A successful SUBSCRIBE is not turned
                 // into a connection failure merely because this client is
                 // already saturated.
-                self.publish_messages_dropped +|= 1;
+                self.publish_counters.recordDropped();
                 continue;
             }
             const publication = try Publication.createFromRetained(
@@ -4277,23 +4273,15 @@ pub const Broker = struct {
     }
 
     fn recordPublishReceived(self: *Broker, payload_len: usize) void {
-        self.state_mutex.lockUncancelable(self.io);
-        defer self.state_mutex.unlock(self.io);
-        self.publish_messages_received +|= 1;
-        self.publish_payload_bytes_received +|= payload_len;
+        self.publish_counters.recordReceived(payload_len);
     }
 
     fn recordPublishSent(self: *Broker, payload_len: usize) void {
-        self.state_mutex.lockUncancelable(self.io);
-        defer self.state_mutex.unlock(self.io);
-        self.publish_messages_sent +|= 1;
-        self.publish_payload_bytes_sent +|= payload_len;
+        self.publish_counters.recordSent(payload_len);
     }
 
     fn recordPublishDropped(self: *Broker) void {
-        self.state_mutex.lockUncancelable(self.io);
-        defer self.state_mutex.unlock(self.io);
-        self.publish_messages_dropped +|= 1;
+        self.publish_counters.recordDropped();
     }
 
     fn rejectPublish(
@@ -4849,7 +4837,7 @@ pub const Broker = struct {
                 // subscriber drops this delivery, but it was still a matching
                 // subscription and therefore does not turn the publisher's
                 // PUBACK into "No matching subscribers".
-                self.publish_messages_dropped +|= 1;
+                self.publish_counters.recordDropped();
                 continue;
             }
             destination.route_reservations += 1;
@@ -5133,7 +5121,7 @@ pub const Broker = struct {
             &snapshot_changed,
         ) catch |err| switch (err) {
             error.QueueFull => {
-                self.publish_messages_dropped +|= 1;
+                self.publish_counters.recordDropped();
                 persistent_changed.* = persistent_changed.* or
                     (snapshot_changed and
                         self.sessionIsPersistentLocked(handle));
