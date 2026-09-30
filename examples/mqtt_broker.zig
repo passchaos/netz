@@ -1,6 +1,8 @@
 const std = @import("std");
 const netz = @import("netz");
 const broker_config_runner = @import("mqtt_broker_config.zig");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const Config = struct {
     bind: std.Io.net.IpAddress = .{ .ip4 = .loopback(1883) },
@@ -52,6 +54,7 @@ const Config = struct {
     autosave_change_count: ?usize = null,
     restore: bool = true,
     ignore_connection_errors: bool = false,
+    allocator_stats: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -60,13 +63,13 @@ pub fn main(init: std.process.Init) !void {
     // retain a separate working set for every connection task; libc's shared
     // arenas keep the same workload throughput while materially reducing RSS.
     // Library users still choose the allocator passed to Broker.listen.
-    const allocator = std.heap.c_allocator;
+    const base_allocator = std.heap.c_allocator;
     const config_path = try parseConfigPath(init);
-    var backend = try netz.runtime.Backend.init(allocator);
+    var backend = try netz.runtime.Backend.init(base_allocator);
     defer backend.deinit();
     const io = backend.io();
     if (config_path) |path| {
-        return broker_config_runner.run(allocator, io, path, .{
+        return broker_config_runner.run(base_allocator, io, path, .{
             .finite_test = if (init.environ_map.get(
                 "NETZ_MQTT_CONFIG_FINITE_TEST",
             )) |value|
@@ -76,6 +79,11 @@ pub fn main(init: std.process.Init) !void {
         });
     }
     const config = try parseArgs(init);
+    var counting = CountingAllocator.init(base_allocator);
+    const allocator = if (config.allocator_stats)
+        counting.allocator()
+    else
+        base_allocator;
 
     const Credentials = struct {
         username: []const u8,
@@ -292,7 +300,7 @@ pub fn main(init: std.process.Init) !void {
             },
         },
     );
-    defer broker.deinit();
+    errdefer broker.deinit();
     if (config.commit_log_path) |path| {
         broker.restoreCommitLog(std.Io.Dir.cwd(), path, .{}) catch |err|
             switch (err) {
@@ -383,6 +391,43 @@ pub fn main(init: std.process.Init) !void {
         // process is configured exclusively for incremental recovery.
     } else if (config.persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
+    }
+    broker.deinit();
+    if (config.allocator_stats) {
+        const snapshot = counting.snapshot();
+        if (snapshot.current_bytes != 0) return error.MemoryLeak;
+        std.debug.print(
+            "record=allocator implementation=netz endpoint_role=server " ++
+                "protocol=mqtt5 transport=tcp mode=qos1-fanout " ++
+                "timing_usable=false allocator_scope=broker-explicit " ++
+                "connection_scope=persistent client_tcp_nodelay=true " ++
+                "server_tcp_nodelay=true " ++
+                "configured_connections={d} alloc_count={d} " ++
+                "free_count={d} resize_count={d} remap_count={d} " ++
+                "total_allocated_bytes={d} total_freed_bytes={d} " ++
+                "live_bytes={d} peak_live_bytes={d} " ++
+                "alloc_le_64={d} alloc_le_256={d} alloc_le_1024={d} " ++
+                "alloc_le_4096={d} alloc_le_16384={d} " ++
+                "alloc_le_65536={d} alloc_gt_65536={d} complete=true\n",
+            .{
+                config.connections,
+                snapshot.alloc_count,
+                snapshot.free_count,
+                snapshot.resize_count,
+                snapshot.remap_count,
+                snapshot.total_allocated,
+                snapshot.total_freed,
+                snapshot.current_bytes,
+                snapshot.peak_bytes,
+                snapshot.alloc_buckets[0],
+                snapshot.alloc_buckets[1],
+                snapshot.alloc_buckets[2],
+                snapshot.alloc_buckets[3],
+                snapshot.alloc_buckets[4],
+                snapshot.alloc_buckets[5],
+                snapshot.alloc_buckets[6],
+            },
+        );
     }
 }
 
@@ -838,6 +883,8 @@ fn parseArgs(
             );
         } else if (std.mem.eql(u8, arg, "--ignore-connection-errors")) {
             config.ignore_connection_errors = true;
+        } else if (std.mem.eql(u8, arg, "--allocator-stats")) {
+            config.allocator_stats = true;
         } else {
             return error.InvalidArgument;
         }

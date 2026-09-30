@@ -708,6 +708,49 @@ accepted matrix explicitly aligns `TCP_NODELAY=true` on both brokers and omits
 verbose packet logging. These results identify broker scheduling, serial
 latency, and per-connection memory as the next optimization targets.
 
+Broker-owned allocations now have a separate diagnostic matrix rather than
+being inferred from the common client's counters. Run it with:
+
+```sh
+zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
+```
+
+The broker's explicit allocator is wrapped only when its opt-in
+`--allocator-stats` flag is present. The ordinary production and performance
+matrix paths continue to use `c_allocator`; every allocator record is marked
+`timing_usable=false` because thread-safe counting changes the hot path. The
+five-shape runner pins client and server separately, gives both processes a
+60-second bound, retains the exact broker, driver, runner and checker, binds each with
+SHA-256, and repeats every shape four times. Both endpoints use
+`TCP_NODELAY=true`. Its checker validates the workload result, exact artifact
+tree,
+identity hashes, allocation-size bucket sum, allocated/freed-byte equality and
+zero live bytes after complete broker teardown, then independently regenerates
+the summary.
+
+The first complete capture is
+`zig-out/mqtt-broker-allocator-matrix/run.20260930T-final3` (22,253,198
+bytes); summary SHA-256 is
+`6d5696584282e90ebf0c6554134b77f75aab17a466149a3f5c0b1d910a15cfe9`.
+All 20 runs returned `live_bytes=0`. Counts include broker startup, warmup,
+measured traffic and teardown, so the per-message values below are diagnostic
+normalizations rather than steady-state timing claims.
+
+| shape | median allocs | allocs/publish | allocs/delivery | median allocated bytes | ≤64 B / 65–256 B allocs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| serial | 5,235 | 10.225 | 10.225 | 6,643,666 | 1,941 / 2,005 |
+| publishers-32 | 39,460 | 9.634 | 9.634 | 9,624,238 | 13,200 / 26,213 |
+| fanout-32 | 159,619 | 77.939 | 2.436 | 24,358,273 | 76,393 / 80,844 |
+| balanced-32x32 | 421,950 | 131.859 | 4.121 | 60,112,229 | 114,533 / 303,850 |
+| large-payload | 28,423 | 13.878 | 3.470 | 26,237,225 | 10,946 / 13,104 |
+
+The dominant balanced cost is therefore not its one route-array allocation per
+PUBLISH: 418,383 of the median 421,950 allocations are at most 256 bytes.
+Future broker work should first isolate and amortize per-delivery property,
+packet and queue ownership in those two buckets, then use the unchanged
+performance matrix to prove that lower allocation pressure also improves
+throughput and tail latency.
+
 The per-connection reduction comes from keeping the WebSocket-specific
 transport state out of line. `PacketTransport` previously embedded the full
 WebSocket connection as its largest union member, so every plain TCP MQTT
