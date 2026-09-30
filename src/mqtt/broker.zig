@@ -5629,12 +5629,18 @@ pub const Broker = struct {
             defer if (identifiers.ptr != identifiers_stack[0..].ptr) {
                 self.allocator.free(identifiers);
             };
+            // The timestamp is unobserved without Message Expiry; avoid a
+            // runtime clock query for every subscriber in ordinary fanout.
+            const delivery_now = if (delivery.publication.expiry_interval != null)
+                std.Io.Clock.awake.now(self.io)
+            else
+                std.Io.Timestamp.fromNanoseconds(0);
             if (!try delivery.publication.appendDeliveryPropertiesMany(
                 properties,
                 self.allocator,
                 connection.protocol,
                 delivery.identifiersInto(identifiers),
-                std.Io.Clock.awake.now(self.io),
+                delivery_now,
             )) {
                 delivery.deinit();
                 continue;

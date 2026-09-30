@@ -1483,6 +1483,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # tail instead of scanning its full backlog. Two fixed-binary five-pair
 # balanced-32x32 runs produced 7/10 throughput wins with a +2.2% paired median,
 # while paired p50/p99 medians fell 6.3%/6.4%; allocator counts are unchanged.
+# Property-free live fanout now skips the per-delivery monotonic-clock read;
+# Message Expiry publications still sample immediately before encoding. Two
+# more fixed-binary five-pair runs produced 9/10 throughput wins with a +5.3%
+# paired median and reduced the paired p99 median by 13.4%.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

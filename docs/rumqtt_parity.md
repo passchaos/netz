@@ -1035,6 +1035,30 @@ throughput medians moved from 3,555 to 3,698 publishes/s. The samples include
 wide host-load outliers, so this remains workload-specific supporting evidence
 for the bounded-complexity improvement rather than a general throughput claim.
 
+The property-free live-delivery path now avoids asking the runtime for a
+monotonic timestamp for every subscriber write. `Publication.remainingExpiry`
+returns immediately when no Message Expiry Interval exists, so that common
+path supplies a constant timestamp that cannot affect the result; publications
+with expiry retain the prior just-before-encode clock sample and decrement or
+discard behavior. The three-sample allocator matrix at
+`zig-out/mqtt-expiry-clock-final` (22,283,277 bytes; summary SHA-256
+`271453b8d69fbcbee595f7187c4e6a8c3ebba0785d0f9dfea748b4642b042489`)
+completed all fifteen runs with zero live bytes. Four shapes exactly reproduced
+their prior allocation counts and cumulative requested bytes. The timing-
+sensitive 4-KiB stream-read shape ranged from 2,303 to 2,307 allocations with
+a 2,307 median, a four-allocation/608-byte difference from the preceding
+median and no ownership change in this patch. Two independent five-pair
+fixed-binary balanced-32x32 A/B sets at `zig-out/mqtt-expiry-clock-ab`
+(36,637,782 bytes; aggregate file-hash digest
+`9e620b6a5686dc451b56b7d4ece51ec19a504f6766c1788ff1d849344267386c`)
+completed 320,000 deliveries per arm with checksum 18,656,000. The candidate
+won nine of ten throughput pairs, seven p50 pairs, and eight p99 pairs;
+paired-ratio medians were +5.3%, -23.1%, and -13.4% respectively. Raw medians
+moved from 3,913 to 4,102 publishes/s, 14.556 to 9.084 ms p50, and 29.805 to
+27.268 ms p99. Latency samples remain visibly bimodal, so the result is
+workload-specific evidence for removing the redundant clock query rather than
+a general latency claim.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:
