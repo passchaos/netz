@@ -178,25 +178,52 @@ pub fn responseBodySendCapacity(
     chunk_limit: usize,
 ) usize {
     if (remaining == 0) return 0;
-    const transport_credit = @min(
-        connection,
-        stream,
-        congestion,
-        datagram_size,
-    );
-    // QUIC credit counts the HTTP/3 DATA prefix and QUIC STREAM-frame
-    // metadata too. Requiring this conservative margin prevents a candidate
-    // with only header-sized credit from winning urgency selection and then
-    // blocking a lower-urgency response that could make useful progress. The
-    // chunk limit returned by `pacedBodyChunkLimit` already excludes this
-    // margin, so apply it only to raw transport credit before taking the
-    // final minimum.
-    if (transport_credit <= paced_body_frame_overhead_margin) return 0;
-    return @min(
+    // Congestion credit counts encoded QUIC frames, and the datagram budget
+    // additionally counts packet protection. Keep the conservative packet
+    // margin on those limits. The paced chunk limit has already reserved the
+    // same margin from its frame/datagram budget, so do not subtract it twice.
+    const packet_credit = @min(congestion, datagram_size);
+    if (packet_credit <= paced_body_frame_overhead_margin) return 0;
+    const body_limit = @min(
         remaining,
         chunk_limit,
-        transport_credit - paced_body_frame_overhead_margin,
+        packet_credit - paced_body_frame_overhead_margin,
     );
+    // QUIC connection and stream flow control count only STREAM data. For an
+    // HTTP/3 body that is the DATA frame header plus application bytes, not
+    // the enclosing QUIC STREAM/packet overhead. Deducting the packet margin
+    // here would classify usable small window updates as blocked and could
+    // wait forever for credit that a peer grants only after consuming those
+    // bytes.
+    return dataFrameBodyCapacity(body_limit, @min(connection, stream));
+}
+
+fn dataFrameBodyCapacity(body_limit: usize, flow_credit: usize) usize {
+    if (body_limit == 0) return 0;
+    const type_len = quic.varint.length(http3.FrameType.data) catch
+        unreachable;
+    var best: usize = 0;
+    const length_sizes = [_]u8{ 1, 2, 4, 8 };
+    const maximum_values = [_]u64{
+        63,
+        16_383,
+        1_073_741_823,
+        quic.varint.max_value,
+    };
+    for (length_sizes, maximum_values) |length_len, maximum_value| {
+        const overhead = @as(usize, type_len) + length_len;
+        if (flow_credit <= overhead) continue;
+        const width_limit = std.math.cast(usize, maximum_value) orelse
+            std.math.maxInt(usize);
+        const candidate = @min(
+            body_limit,
+            flow_credit - overhead,
+            width_limit,
+        );
+        const actual_len = quic.varint.length(candidate) catch continue;
+        if (actual_len == length_len) best = @max(best, candidate);
+    }
+    return best;
 }
 
 pub fn pacedProtectedBodyChunkLimit(config: anytype) usize {

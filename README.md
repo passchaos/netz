@@ -401,7 +401,11 @@ Current protocol coverage includes:
   `sendRequestBodyBatchPaced`/`sendResponseBodyBatchPaced`: one DATA
   contribution per stream is packet-size checked, protected through the
   stateful QUIC batch path, and committed only for the socket-visible prefix,
-  with isolated DATA-prefix storage for recovery-safe borrowed payloads.
+  with isolated DATA-prefix storage for recovery-safe borrowed payloads. The
+  scheduler accounts for HTTP/3 DATA framing exactly against QUIC stream and
+  connection flow credit while retaining a separate conservative packet
+  margin for congestion and datagram limits, so even three-byte window updates
+  can make forward progress without overfilling the transport.
   Streaming
   messages can instead finish with dynamic QPACK trailer HEADERS through
   indexed streaming body state for

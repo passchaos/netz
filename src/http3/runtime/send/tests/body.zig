@@ -18,14 +18,26 @@ const ProtectedOptions = struct {
     max_stream_frame_data: usize = 1200,
 };
 
-test "HTTP/3 response capacity bypasses header-only send credit" {
+test "HTTP/3 response capacity accounts separately for flow and packet overhead" {
     try std.testing.expectEqual(
         @as(usize, 0),
+        body_sender.responseBodySendCapacity(256, 2, 256, 256, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        body_sender.responseBodySendCapacity(256, 3, 256, 256, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 62),
         body_sender.responseBodySendCapacity(256, 64, 256, 256, 1200, 1024),
     );
     try std.testing.expectEqual(
-        @as(usize, 192),
+        @as(usize, 253),
         body_sender.responseBodySendCapacity(256, 512, 256, 512, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 192),
+        body_sender.responseBodySendCapacity(256, 512, 512, 256, 1200, 1024),
     );
     try std.testing.expectEqual(
         @as(usize, 100),
@@ -34,6 +46,42 @@ test "HTTP/3 response capacity bypasses header-only send credit" {
     try std.testing.expectEqual(
         @as(usize, 1024),
         body_sender.responseBodySendCapacity(2048, 4096, 4096, 4096, 1200, 1024),
+    );
+    // Crossing QUIC varint's one-byte payload-length boundary needs one more
+    // flow-control byte for the DATA frame header.
+    try std.testing.expectEqual(
+        @as(usize, 63),
+        body_sender.responseBodySendCapacity(256, 65, 256, 4096, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 63),
+        body_sender.responseBodySendCapacity(256, 66, 256, 4096, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 64),
+        body_sender.responseBodySendCapacity(256, 67, 256, 4096, 1200, 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16_383),
+        body_sender.responseBodySendCapacity(
+            20_000,
+            16_386,
+            20_000,
+            20_064,
+            20_064,
+            20_000,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16_384),
+        body_sender.responseBodySendCapacity(
+            20_000,
+            16_389,
+            20_000,
+            20_064,
+            20_064,
+            20_000,
+        ),
     );
 }
 

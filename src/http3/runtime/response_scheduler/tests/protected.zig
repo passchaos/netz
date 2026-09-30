@@ -213,7 +213,13 @@ test "HTTP/3 protected response scheduler honors request priority" {
         server.outbound_bodies.find(high_id).?.written,
     );
 
-    server.quic_server.endpoint.io = timed.delegate;
+    // A three-byte stream window fits the two-byte HTTP/3 DATA prefix and one
+    // body byte. Packet-level overhead must not make the scheduler treat this
+    // usable flow-control update as blocked.
+    const small_flow_chunk: usize = 1;
+    const high_entry = server.outbound_bodies.find(high_id).?;
+    high_entry.flow_limit = high_entry.send.next_offset +
+        2 + small_flow_chunk;
     const suffixes = [_]runtime.ResponseBody{
         responses[0],
         .{
@@ -221,15 +227,51 @@ test "HTTP/3 protected response scheduler honors request priority" {
             .data = responses[1].data[first_chunk..],
         },
     };
+    timed.send_calls = 0;
+    try std.testing.expectError(
+        error.Timeout,
+        server.sendResponseBodiesPacedWithDeadline(
+            first.from,
+            &suffixes,
+            &committed,
+            .{
+                .clock = .awake,
+                .raw = .fromNanoseconds(timed.now_ns + 1),
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
+    try std.testing.expectEqualSlices(
+        usize,
+        &.{ 0, small_flow_chunk },
+        &committed,
+    );
+    try std.testing.expectEqual(
+        first_chunk + small_flow_chunk,
+        server.outbound_bodies.find(high_id).?.written,
+    );
+
+    server.outbound_bodies.find(high_id).?.flow_limit = null;
+    server.quic_server.endpoint.io = timed.delegate;
+    const final_suffixes = [_]runtime.ResponseBody{
+        responses[0],
+        .{
+            .stream_id = high_id,
+            .data = responses[1].data[first_chunk + small_flow_chunk ..],
+        },
+    };
     try server.sendResponseBodiesPacedWithTimeout(
         first.from,
-        &suffixes,
+        &final_suffixes,
         &committed,
         .fromSeconds(1),
     );
     try std.testing.expectEqualSlices(
         usize,
-        &.{ low_body.len, high_body.len - first_chunk },
+        &.{
+            low_body.len,
+            high_body.len - first_chunk - small_flow_chunk,
+        },
         &committed,
     );
 
