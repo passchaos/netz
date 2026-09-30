@@ -769,33 +769,37 @@ thread-safe counting allocator marks timing as unusable.
 
 Inbound QoS 2 `Pending` transactions now place the Topic Name, payload, source
 Client ID, and optional username in one allocation while retaining separate
-deep ownership for nested MQTT properties. The slices preserve their existing
-API and snapshot representation; destruction reconstructs and frees the one
-complete allocation. A fail-after-one test proves the property-free boundary
-and physical layout, and exhaustive allocation-failure coverage exercises
-nested User Property cleanup. The three-sample matrix at
-`zig-out/mqtt-qos2-coalloc-final` (22,359,565 bytes; summary SHA-256
-`00f6c45977e184865b17971dac8087d6e69c358939471f13aa140b88559bd3a9`)
-completed all fifteen runs with zero live bytes. Allocation counts fell by
-24.6-32.6% across the five QoS 2 shapes: serial 2,606 to 1,966,
-publishers-32 13,356 to 9,004, fanout-32 7,491 to 5,187,
-balanced-32x32 11,197 to 7,741, and large-payload 8,837 to a 6,663 median.
-Balanced allocation density fell from 0.109 to 0.076 per delivery without
-changing cumulative requested bytes.
+deep ownership for nested MQTT properties. Completed or disconnected
+transactions return that allocation to an intrusive power-of-two size-class
+cache owned by the Store. The cache has no per-block metadata allocation and is
+hard-bounded by both the configured pending-transaction limit and 1 MiB;
+blocks above 64 KiB are freed immediately. The slices preserve their existing
+API and snapshot representation. Tests prove the one-allocation layout,
+bounded reuse, and exhaustive failure cleanup with nested User Properties.
 
-Two five-pair fixed-binary balanced-32x32 A/B sets at
-`zig-out/mqtt-qos2-coalloc-ab` (36,718,144 bytes; aggregate file-hash digest
-`a9f33ea6bf8a82752e46515ee5f7f61aea2fbb43bb23305387e3c7906a97ae04`)
-moved the paired throughput median by +0.5%, p50 by -0.9%, and p99 by -0.9%,
-with six of ten wins for each metric. A separate 50,000-publish,
+The corrected three-sample matrix at `zig-out/mqtt-qos2-cache-final`
+(22,363,733 bytes; summary SHA-256
+`0c3d9a510fb882059fcf8fa132bb1f7645f61936145a2e7d8e6c28079f24b11a`)
+completed all fifteen runs with zero live bytes. Relative to the pre-change
+QoS 2 baseline, allocation counts fell 48.5-64.2% across all five shapes:
+serial 2,606 to 1,327, publishers-32 13,356 to 4,780, fanout-32 7,491 to
+2,887, balanced-32x32 11,197 to 4,413, and large-payload 8,837 to a 4,550
+median. Balanced allocation density fell from 0.109 to 0.043 per delivery;
+cumulative requested bytes fell 2.8%, while the 1-MiB cache bound makes the
+retention tradeoff explicit.
+
+A five-pair fixed-binary balanced-32x32 A/B at
+`zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest
+`bd7b0a350ed4e607a87120f007689ec428c9060a387f1ee83f9ef958fe0e33cc`)
+moved raw median throughput from 1,551 to 1,559 publishes/s; paired medians
+were -0.4% throughput, -0.5% p50, and -0.1% p99. A separate 50,000-publish,
 32-publisher/one-subscriber five-pair run at
-`zig-out/mqtt-qos2-coalloc-publishers-ab/run.20260930` (15,467 bytes;
+`zig-out/mqtt-qos2-cache-publishers-ab/run.20260930` (15,461 bytes;
 aggregate file-hash digest
-`f78d99db3f718770b3dea97d99730c6cfaf72e8b514890f13cc73d901aa9e925`)
-produced four of five throughput wins and a +1.0% paired median. Its p50/p99
-paired medians improved 1.9%/2.1%, with three wins each. These overlapping
-ranges support no timing-regression conclusion; the exact allocation-count
-reduction is the primary result.
+`8ebee9d1afb5b395be318d0a57df5d4db9f508bf4738b9fb4ec0057ca4513d5c`)
+had paired medians of -0.2% throughput, +0.2% p50, and +0.4% p99. Both timing
+sets are neutral with overlapping ranges; the exact allocator reduction is the
+supported result.
 
 The first complete capture is
 `zig-out/mqtt-broker-allocator-matrix/run.20260930T-final3` (22,253,198

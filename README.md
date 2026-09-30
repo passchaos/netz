@@ -1492,9 +1492,9 @@ MQTT_QOS=2 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # more fixed-binary five-pair runs produced 9/10 throughput wins with a +5.3%
 # paired median and reduced the paired p99 median by 13.4%.
 # Pending inbound QoS 2 transactions coallocate Topic Name, payload, source
-# Client ID, and optional username. The QoS 2 allocator matrix drops broker
-# allocation counts 24.6-32.6% across all five shapes; balanced-32x32 falls
-# from 0.109 to 0.076 allocations per delivery with neutral timing evidence.
+# identity, and use a bounded size-class cache after PUBREL. The QoS 2 matrix
+# cuts broker allocations 48.5-64.2%; balanced-32x32 falls from 0.109 to 0.043
+# allocations per delivery with neutral fixed-binary timing evidence.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

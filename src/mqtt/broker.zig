@@ -4479,7 +4479,8 @@ pub const Broker = struct {
         };
         var persistent_changed = persistent_publisher;
         self.state_mutex.unlock(self.io);
-        defer pending.deinit();
+        var pending_owned = true;
+        defer if (pending_owned) pending.deinit();
 
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
@@ -4516,6 +4517,8 @@ pub const Broker = struct {
             };
         }
         self.state_mutex.lockUncancelable(self.io);
+        self.pending_qos2.recycle(&pending);
+        pending_owned = false;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         // `routeReleasedPublish` journals the routed state before returning.
