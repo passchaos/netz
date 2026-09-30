@@ -932,6 +932,44 @@ checksum 10,780,000. The candidate won throughput in all ten pairs. Paired
 throughput/p50/p99 medians improved 6.1%/5.7%/5.7% for balanced-32x32 and
 4.1%/1.2%/4.1% for large-payload.
 
+A fresh full comparison after the Session wire-cache and detached-transmission
+changes is retained at
+`zig-out/mqtt-broker-durable-qos2-matrix-post-optimization` (23,144,586
+bytes; summary SHA-256
+`80fcf8c52a8eae177aa21cebe90b237ebfcaa979ab8f8610444088361f1fdc45`;
+aggregate file-hash digest
+`a7ffb1515db834ae6047964b25f520141eeb6d5454be14746bfe2b45da55303c`).
+All 40 broker runs completed with the required delivery count and checksum.
+Rates and p99 are medians:
+
+| current durable QoS 2 shape | netz publish/s [range] | Mosquitto publish/s [range] | netz/Mosquitto | p99 ms netz / Mosquitto | broker RSS MiB netz / Mosquitto |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| serial | 13,021 [12,687–13,100] | 22,025 [20,538–22,639] | 0.591× | 0.081 / 0.055 | 4.59 / 2.96 |
+| publishers-32 | 21,631 [21,337–22,817] | 31,259 [30,767–31,484] | 0.692× | 5.587 / 3.501 | 5.50 / 3.37 |
+| fanout-32 | 1,502 [1,446–1,548] | 2,270 [2,258–2,292] | 0.662× | 2.785 / 1.465 | 5.64 / 3.14 |
+| balanced-32x32 | 1,547 [1,404–1,569] | 2,578 [2,559–2,610] | 0.600× | 81.520 / 44.495 | 6.46 / 3.54 |
+| large-payload | 10,410 [10,236–11,107] | 14,415 [14,395–14,720] | 0.722× | 5.757 / 4.796 | 5.63 / 3.40 |
+
+Absolute movement from the earlier full matrix is not treated as causal
+because both brokers shifted with host load; the fixed-binary comparisons above
+remain the optimization evidence. The new matrix still exposes a cross-shape
+broker deficit. A separate `strace -f -c` diagnostic at
+`zig-out/mqtt-durable-current-strace` (4,370 bytes; aggregate file-hash digest
+`dbb090fb73303f8253cd463b5ab079c5ed99bb26efb18f198ec7120d77becfca`)
+observed 327,160 `io_uring_enter` calls while completing 320,000 balanced
+deliveries. Instrumented timing is not used as a benchmark result; the syscall
+count identifies cross-connection write scheduling as the next architectural
+target.
+
+Two bounded parallel-flush prototypes were removed rather than committed.
+Lazy group scheduling was neutral for balanced and regressed fanout; forced
+concurrency improved balanced throughput about 4% but regressed fanout
+throughput and p50. Smaller default-path experiments that skipped unused
+delivery-ACL or repeated Session validation work were likewise inconsistent
+across fanout and balanced. A future design needs persistent per-connection
+writers or equivalent event-loop batching instead of per-publication task
+creation or shape-specific branches.
+
 A five-pair fixed-binary balanced-32x32 A/B at
 `zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest
 `bd7b0a350ed4e607a87120f007689ec428c9060a387f1ee83f9ef958fe0e33cc`)
