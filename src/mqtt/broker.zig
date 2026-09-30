@@ -4645,12 +4645,14 @@ pub const Broker = struct {
                 publish.topic,
             );
         }
-        var session_plan = try session_delivery.Plan.init(
+        var session_plan_scratch: session_delivery.Scratch = .{};
+        var session_plan = try session_delivery.Plan.initWithScratch(
             self.allocator,
             matches,
             publish.qos,
             publish.retain,
             self.options.upgrade_outgoing_qos,
+            &session_plan_scratch,
         );
         defer session_plan.deinit();
         var ignored_persistent_change = false;

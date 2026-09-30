@@ -679,21 +679,21 @@ client/server/sampler, Zig 0.16.0, four ABBA samples per shape, one exact
 subscription per subscriber, MQTT 5 QoS 1, and 2-ms broker RSS sampling. All
 40 broker runs completed their expected deliveries and independently
 recomputed checksums. Its complete artifact is
-`zig-out/mqtt-broker-matrix/run.20260930T021832Z.2836730` (22,948,486 bytes);
+`zig-out/mqtt-broker-matrix/run.20260930T025703Z.2954702` (22,952,263 bytes);
 the stored summary SHA-256 is
-`0e592cb41dfcf98d0677743b6480b6b9fb0dd39650294d1a1f5ad5d504a0c3dc`.
+`c95f9c19cee3c37383883c93f7d6ecafa7e84779d11d1fb23bd5e295a2032eba`.
 Rates and p99 are medians; brackets show every sample.
 
 | shape (publishers × subscribers, payload, window) | netz publish/s [range] | Mosquitto publish/s [range] | netz/Mosquitto | p99 ms netz / Mosquitto | broker RSS MiB netz / Mosquitto |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| serial (1×1, 256 B, 1) | 28,173 [22,333–29,266] | 40,618 [34,159–42,874] | 0.694× | 0.033 / 0.030 | 3.42 / 2.96 |
-| publishers-32 (32×1, 64 B, 4) | 42,903 [42,764–44,857] | 62,771 [62,101–63,620] | 0.683× | 1.211 / 1.231 | 5.05 / 4.35 |
-| fanout-32 (1×32, 64 B, 4) | 2,668 [2,657–2,765] | 4,401 [4,359–4,434] | 0.606× | 1.479 / 0.538 | 4.40 / 3.13 |
-| balanced-32x32 (32×32, 64 B, 4) | 3,608 [3,385–3,854] | 4,223 [4,070–4,637] | 0.854× | 28.790 / 17.327 | 6.90 / 13.53 |
-| large-payload (4×4, 4096 B, 16) | 19,426 [19,271–19,554] | 23,663 [23,444–24,099] | 0.821× | 2.380 / 4.387 | 3.62 / 4.04 |
+| serial (1×1, 256 B, 1) | 27,833 [25,422–29,525] | 41,603 [39,912–43,296] | 0.669× | 0.041 / 0.025 | 3.44 / 2.96 |
+| publishers-32 (32×1, 64 B, 4) | 47,102 [46,469–47,301] | 66,585 [64,074–67,438] | 0.707× | 0.912 / 1.342 | 5.04 / 4.18 |
+| fanout-32 (1×32, 64 B, 4) | 2,767 [2,744–2,774] | 4,373 [4,366–4,380] | 0.633× | 1.404 / 0.586 | 4.41 / 3.13 |
+| balanced-32x32 (32×32, 64 B, 4) | 3,695 [3,405–3,870] | 4,109 [4,028–4,193] | 0.899× | 30.387 / 16.638 | 5.20 / 13.74 |
+| large-payload (4×4, 4096 B, 16) | 19,409 [19,107–19,684] | 24,492 [23,303–25,159] | 0.792× | 2.434 / 4.032 | 3.63 / 4.37 |
 
 The matrix exposes rather than hides the current deficit. Netz reaches
-0.540–0.854× Mosquitto's median throughput across all five shapes. Its p99 is
+0.633–0.899× Mosquitto's median throughput across all five shapes. Its p99 is
 lower in the publisher-heavy and 4-KiB shapes and higher in the other three.
 Median broker RSS is higher in three shapes and lower in balanced 32×32 and
 4-KiB. The balanced RSS range is wide because the faster common client can
@@ -745,6 +745,19 @@ bounded artifacts are `zig-out/mqtt-readahead-final-strace/run.20260930` and
 all 40 broker runs, but its common client also contains read-ahead, so the
 table is a fair current same-client comparison rather than server-only causal
 evidence.
+
+The Session-route aggregation plan now accepts caller-owned storage for up to
+32 raw Session matches. This removes its route-array, identifier-array, and
+hash-index allocations from the common fanout path while retaining the prior
+indexed heap fallback above that threshold. A failing-allocator test exercises
+all 32 scratch entries with overlapping identifiers and validates the merged
+QoS/retain result; a 33-route test covers the fallback. A six-pair fixed-binary
+ABBA with driver `0d3875ff`, baseline broker `0f5eaa7a`, and candidate broker
+`31a38344` found serial throughput neutral (paired median ratio 1.001) and
+fanout-32 throughput 1.027, with median p50 and p99 ratios 0.950 and 0.970.
+RSS was effectively unchanged. The artifact is
+`zig-out/mqtt-session-plan-ab/run.20260930`; the full matrix completed all 40
+runs, while the fixed-binary result remains the causal evidence.
 
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
