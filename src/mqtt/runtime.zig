@@ -3167,6 +3167,7 @@ pub const Connection = struct {
         return self.finishReadConnect(.{
             .bytes = packet.bytes,
             .fixed = packet.fixed,
+            .owns_bytes = packet.owns_bytes,
         });
     }
 
@@ -3208,6 +3209,7 @@ pub const Connection = struct {
         return self.finishReadConnect(.{
             .bytes = packet.bytes,
             .fixed = packet.fixed,
+            .owns_bytes = packet.owns_bytes,
         });
     }
 
@@ -4838,6 +4840,17 @@ pub const Connection = struct {
         return self.readBrokerEventInternal(null);
     }
 
+    /// Read one broker-facing event while allowing a complete short TCP
+    /// packet to borrow `storage` until the returned event is deinitialized.
+    /// TLS and WebSocket transports retain their ordinary owned behavior.
+    /// Callers must not reuse `storage` before `BrokerEvent.deinit`.
+    pub fn readBrokerEventInto(
+        self: *Connection,
+        storage: []u8,
+    ) Error!BrokerEvent {
+        return self.readBrokerEventInternalInto(null, storage);
+    }
+
     /// Read one broker-facing event within a relative application budget.
     /// The resulting absolute deadline covers the complete MQTT packet and is
     /// not renewed when the peer trickles a fixed header or payload.
@@ -4990,6 +5003,17 @@ pub const Connection = struct {
         );
     }
 
+    /// Keep-Alive-bounded counterpart to `readBrokerEventInto`.
+    pub fn readBrokerEventWithKeepAliveInto(
+        self: *Connection,
+        storage: []u8,
+    ) Error!BrokerEvent {
+        return self.readBrokerEventInternalInto(
+            keepAliveTimeout(self.keep_alive_seconds),
+            storage,
+        );
+    }
+
     fn readBrokerEventInternal(
         self: *Connection,
         inactivity_timeout: ?std.Io.Clock.Duration,
@@ -4998,6 +5022,19 @@ pub const Connection = struct {
             try self.readPacketWithInactivityTimeout(timeout)
         else
             try self.readPacket();
+        errdefer packet.deinit(self.allocator);
+        return self.finishBrokerEvent(packet);
+    }
+
+    fn readBrokerEventInternalInto(
+        self: *Connection,
+        inactivity_timeout: ?std.Io.Clock.Duration,
+        storage: []u8,
+    ) Error!BrokerEvent {
+        var packet = if (inactivity_timeout) |timeout|
+            try self.readPacketWithInactivityTimeoutInto(timeout, storage)
+        else
+            try self.readPacketInto(storage);
         errdefer packet.deinit(self.allocator);
         return self.finishBrokerEvent(packet);
     }
@@ -5472,6 +5509,21 @@ pub const Connection = struct {
         return self.readTransportPacket();
     }
 
+    fn readPacketInto(
+        self: *Connection,
+        storage: []u8,
+    ) Error!OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        if (self.popPendingPingPacket()) |packet| return packet;
+        const packet = try self.transport.readPacketInto(
+            self.allocator,
+            self.limits.max_packet_size,
+            storage,
+        );
+        self.recordPacketReceived(packet.bytes.len);
+        return self.finishReadPacket(packet);
+    }
+
     fn readTransportPacket(self: *Connection) Error!OwnedPacket {
         const packet = try self.readUnvalidatedTransportPacket();
         return self.finishReadPacket(packet);
@@ -5499,6 +5551,24 @@ pub const Connection = struct {
             self.allocator,
             self.limits.max_packet_size,
             timeout,
+        );
+        self.recordPacketReceived(packet.bytes.len);
+        return self.finishReadPacket(packet);
+    }
+
+    fn readPacketWithInactivityTimeoutInto(
+        self: *Connection,
+        timeout: std.Io.Clock.Duration,
+        storage: []u8,
+    ) Error!OwnedPacket {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        if (self.popPendingPingPacket()) |packet| return packet;
+        const packet = try self.transport
+            .readPacketWithInactivityTimeoutInto(
+            self.allocator,
+            self.limits.max_packet_size,
+            timeout,
+            storage,
         );
         self.recordPacketReceived(packet.bytes.len);
         return self.finishReadPacket(packet);
@@ -5619,9 +5689,10 @@ pub const Connection = struct {
 
     fn finishReadPacket(
         self: *Connection,
-        packet: packet_transport.OwnedPacket,
+        packet_value: packet_transport.OwnedPacket,
     ) Error!OwnedPacket {
-        errdefer self.allocator.free(packet.bytes);
+        var packet = packet_value;
+        errdefer packet.deinit(self.allocator);
         // Validate wire syntax before semantic direction/state so a packet
         // that is wrong in both ways is still classified as Malformed Packet.
         try mqtt.validatePacketFlags(self.protocol, packet.fixed);
@@ -5637,6 +5708,7 @@ pub const Connection = struct {
         return .{
             .bytes = packet.bytes,
             .fixed = packet.fixed,
+            .owns_bytes = packet.owns_bytes,
         };
     }
 
@@ -5807,9 +5879,12 @@ pub const AcknowledgeOptions = struct {
 pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
+    /// False only for explicit caller-buffer broker reads. The bytes then
+    /// remain valid until this packet/event is deinitialized.
+    owns_bytes: bool = true,
 
     pub fn deinit(self: *OwnedPacket, allocator: std.mem.Allocator) void {
-        allocator.free(self.bytes);
+        if (self.owns_bytes) allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -6039,6 +6114,8 @@ pub const BrokerEvent = union(enum) {
     pingreq: OwnedPacket,
     disconnect: OwnedDisconnect,
 
+    /// Release all event-owned state. Events returned by an `Into` reader may
+    /// borrow that caller's packet buffer; this method leaves it untouched.
     pub fn deinit(
         self: *BrokerEvent,
         allocator: std.mem.Allocator,
@@ -9413,6 +9490,50 @@ test "MQTT async std.Io server handles concurrent clients" {
     const result = shared.result.?;
     if (result.firstError()) |err| return err;
     try std.testing.expectEqual(@as(usize, 2), result.successCount());
+}
+
+test "MQTT broker event borrows caller storage for a complete TCP acknowledgement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var peer = PacketTransport.initTcp(io, try listener.accept(io));
+    defer peer.close(allocator);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .endpoint_role = .server,
+        .keep_alive_seconds = 1,
+    };
+    defer connection.close();
+
+    var encoded = [_]u8{ 0x40, 0x02, 0x00, 0x07 };
+    try peer.writePacket(&encoded);
+    var storage: [16]u8 = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = failing.allocator();
+    defer connection.allocator = allocator;
+    var event = try connection.readBrokerEventWithKeepAliveInto(&storage);
+    defer event.deinit(failing.allocator());
+
+    try std.testing.expect(event == .puback);
+    try std.testing.expect(!event.puback.packet.owns_bytes);
+    try std.testing.expectEqual(storage[0..].ptr, event.puback.packet.bytes.ptr);
+    try std.testing.expectEqual(@as(u16, 7), event.puback.ack.packet_id);
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {

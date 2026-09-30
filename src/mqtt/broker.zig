@@ -6215,8 +6215,14 @@ const ClientTask = struct {
         connection: *runtime.Connection,
         connect: mqtt.Connect,
     ) !void {
+        // Common ACK/PING/DISCONNECT packets fit here and can borrow this
+        // storage for one event-loop turn. Larger or fragmented packets retain
+        // the runtime's owned-allocation path.
+        var packet_storage: [16]u8 = undefined;
         while (true) {
-            var event = connection.readBrokerEventWithKeepAlive() catch |err| {
+            var event = connection.readBrokerEventWithKeepAliveInto(
+                &packet_storage,
+            ) catch |err| {
                 if (try task.disconnectForProtocolViolation(
                     slot,
                     connection,

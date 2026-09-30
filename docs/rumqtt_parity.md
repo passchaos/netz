@@ -820,6 +820,27 @@ peak live bytes remained effectively unchanged. Because the counting
 allocator changes the hot path and labels timing unusable, these results are
 allocation evidence rather than a throughput claim.
 
+The broker's single-reader TCP event loop now passes a 16-byte caller buffer
+to the packet transport. A complete read-ahead PUBACK, PUBREC, PUBREL, PUBCOMP,
+PINGREQ, or short DISCONNECT is copied there and marked borrowed until that
+event is deinitialized; it no longer needs a heap object merely to preserve the
+public owned-packet API. Once its length is known, a packet not yet complete in
+read-ahead retains the existing heap-backed state so timeout/cancellation
+resumption is unchanged; packets larger than the caller buffer fall back to
+exact allocation, and TLS/WS/WSS keep their existing owned paths. Focused tests
+run a borrowed PUBACK under a fail-first allocator,
+verify that event destruction does not free caller memory, and prove that an
+undersized buffer fails over without consuming read-ahead bytes. The final
+three-sample matrix at `zig-out/mqtt-borrowed-ack-final` (22,238,099 bytes;
+summary SHA-256
+`06b1c639c75b415ff2a291d669dee8515378cbbd54edaa308fd5758600c42dfe`)
+completed all fifteen broker runs with zero live bytes. Relative to the
+property-scratch matrix, allocation counts fell another 16.5%, 16.6%, 85.9%,
+85.9%, and 44.2% in table order. Balanced 32x32 fell from 128,765 to 18,109
+allocations, or 1.257 to 0.177 per measured delivery; cumulative requested
+bytes moved from 17,893,589 to 17,451,093 and peak live bytes remained stable.
+As above, allocator instrumentation deliberately excludes timing claims.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:

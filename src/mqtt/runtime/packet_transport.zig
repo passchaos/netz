@@ -476,6 +476,29 @@ pub const Transport = union(enum) {
         };
     }
 
+    /// Read a packet while allowing a complete TCP read-ahead packet to use
+    /// caller-owned storage. Other transports, TCP packets not complete in
+    /// read-ahead once their length is known, and packets larger than `storage`
+    /// retain the ordinary owned-allocation behavior.
+    pub fn readPacketInto(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        storage: []u8,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |*tcp| readTcpPacketWithPolicy(
+                allocator,
+                tcp,
+                max_packet_size,
+                null,
+                null,
+                storage,
+            ),
+            else => self.readPacket(allocator, max_packet_size),
+        };
+    }
+
     /// Read one packet within the peer's MQTT Keep Alive budget.
     ///
     /// One deadline covers a complete ordinary Control Packet, preventing a
@@ -518,6 +541,31 @@ pub const Transport = union(enum) {
             .websocket => |ws| readWebSocketPacketWithInactivityTimeout(
                 allocator,
                 ws,
+                max_packet_size,
+                timeout,
+            ),
+        };
+    }
+
+    /// Keep-Alive-bounded counterpart to `readPacketInto`.
+    pub fn readPacketWithInactivityTimeoutInto(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        timeout: std.Io.Clock.Duration,
+        storage: []u8,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |*tcp| readTcpPacketWithPolicy(
+                allocator,
+                tcp,
+                max_packet_size,
+                timeout,
+                null,
+                storage,
+            ),
+            else => self.readPacketWithInactivityTimeout(
+                allocator,
                 max_packet_size,
                 timeout,
             ),
@@ -714,12 +762,13 @@ fn readStreamExactWithDeadline(
 pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
+    owns_bytes: bool = true,
 
     pub fn deinit(
         self: *OwnedPacket,
         allocator: std.mem.Allocator,
     ) void {
-        allocator.free(self.bytes);
+        if (self.owns_bytes) allocator.free(self.bytes);
         self.* = undefined;
     }
 };
@@ -787,6 +836,7 @@ fn readTcpPacket(
         max_packet_size,
         null,
         null,
+        null,
     );
 }
 
@@ -803,6 +853,7 @@ fn readTcpPacketWithInactivityTimeout(
         max_packet_size,
         timeout,
         null,
+        null,
     );
 }
 
@@ -818,6 +869,7 @@ fn readTcpPacketWithDeadline(
         max_packet_size,
         null,
         deadline,
+        null,
     );
 }
 
@@ -827,6 +879,7 @@ fn readTcpPacketWithPolicy(
     max_packet_size: usize,
     inactivity_timeout: ?std.Io.Clock.Duration,
     absolute_deadline: ?std.Io.Clock.Timestamp,
+    caller_storage: ?[]u8,
 ) Error!OwnedPacket {
     var deadline = if (inactivity_timeout) |timeout|
         std.Io.Clock.Timestamp.fromNow(tcp.io, timeout)
@@ -847,6 +900,18 @@ fn readTcpPacketWithPolicy(
             continue;
         };
         if (packet_len > max_packet_size) return error.PacketTooLarge;
+        if (caller_storage) |storage| {
+            if (packet_len <= buffered.len and packet_len <= storage.len) {
+                const bytes = storage[0..packet_len];
+                @memcpy(bytes, buffered[0..packet_len]);
+                tcp.discardBuffered(packet_len);
+                return .{
+                    .bytes = bytes,
+                    .fixed = try mqtt.FixedHeader.parse(bytes),
+                    .owns_bytes = false,
+                };
+            }
+        }
         const packet = try allocator.alloc(u8, packet_len);
         const copy_len = @min(packet_len, buffered.len);
         @memcpy(packet[0..copy_len], buffered[0..copy_len]);
@@ -1433,34 +1498,73 @@ test "TCP packet receive retains a coalesced following packet" {
     try std.testing.expectEqual(@as(usize, 0), tcp.buffered().len);
 }
 
-test "TCP packet allocation failure retains read-ahead bytes" {
+test "TCP packet receive borrows caller storage for complete read-ahead packets" {
     const allocator = std.testing.allocator;
-    var tcp = TcpTransport{
+    var transport = Transport{ .tcp = .{
         .io = undefined,
         .stream = undefined,
-    };
-    const encoded = [2]u8{ 0xc0, 0x00 };
-    @memcpy(tcp.input[0..encoded.len], &encoded);
-    tcp.input_end = 2;
+    } };
+    const encoded = [4]u8{ 0x40, 0x02, 0x00, 0x07 };
+    @memcpy(transport.tcp.input[0..encoded.len], &encoded);
+    transport.tcp.input_end = encoded.len;
+    var storage: [4]u8 = undefined;
     var failing = std.testing.FailingAllocator.init(
         allocator,
         .{ .fail_index = 0 },
     );
 
+    var packet = try transport.readPacketInto(
+        failing.allocator(),
+        storage.len,
+        &storage,
+    );
+    try std.testing.expect(!packet.owns_bytes);
+    try std.testing.expectEqual(storage[0..].ptr, packet.bytes.ptr);
+    try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
+    try std.testing.expectEqual(@as(usize, 0), transport.tcp.buffered().len);
+    packet.deinit(failing.allocator());
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "TCP packet allocation failure retains read-ahead bytes" {
+    const allocator = std.testing.allocator;
+    var transport = Transport{ .tcp = .{
+        .io = undefined,
+        .stream = undefined,
+    } };
+    const encoded = [2]u8{ 0xc0, 0x00 };
+    @memcpy(transport.tcp.input[0..encoded.len], &encoded);
+    transport.tcp.input_end = 2;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    var insufficient_storage: [1]u8 = undefined;
+
     try std.testing.expectError(
         error.OutOfMemory,
-        readTcpPacket(failing.allocator(), &tcp, mqtt.ping_packet_len),
+        transport.readPacketInto(
+            failing.allocator(),
+            mqtt.ping_packet_len,
+            &insufficient_storage,
+        ),
     );
-    try std.testing.expectEqualSlices(u8, &.{ 0xc0, 0x00 }, tcp.buffered());
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xc0, 0x00 },
+        transport.tcp.buffered(),
+    );
 
-    var packet = try readTcpPacket(
+    var packet = try transport.readPacket(
         allocator,
-        &tcp,
         mqtt.ping_packet_len,
     );
     defer packet.deinit(allocator);
     try std.testing.expectEqualSlices(u8, &.{ 0xc0, 0x00 }, packet.bytes);
-    try std.testing.expectEqual(@as(usize, 0), tcp.buffered().len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        transport.tcp.buffered().len,
+    );
 }
 
 test "TCP packet receive rejects oversize before allocating" {
