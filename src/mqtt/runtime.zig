@@ -3168,6 +3168,7 @@ pub const Connection = struct {
             .bytes = packet.bytes,
             .fixed = packet.fixed,
             .owns_bytes = packet.owns_bytes,
+            .prefix_len = packet.prefix_len,
         });
     }
 
@@ -3210,6 +3211,7 @@ pub const Connection = struct {
             .bytes = packet.bytes,
             .fixed = packet.fixed,
             .owns_bytes = packet.owns_bytes,
+            .prefix_len = packet.prefix_len,
         });
     }
 
@@ -5014,6 +5016,37 @@ pub const Connection = struct {
         );
     }
 
+    /// Broker hot-path variant that reserves an aligned prefix when a TCP
+    /// packet is too large for `storage`. The returned event keeps ownership
+    /// unless a longer-lived broker object explicitly adopts that allocation.
+    pub fn readBrokerEventWithKeepAliveIntoPrefixed(
+        self: *Connection,
+        storage: []u8,
+        prefix_len: usize,
+    ) Error!BrokerEvent {
+        const timeout = keepAliveTimeout(self.keep_alive_seconds);
+        const packet = if (timeout) |value|
+            try self.transport
+                .readPacketWithInactivityTimeoutIntoWithPrefix(
+                self.allocator,
+                self.limits.max_packet_size,
+                value,
+                storage,
+                prefix_len,
+            )
+        else
+            try self.transport.readPacketIntoWithPrefix(
+                self.allocator,
+                self.limits.max_packet_size,
+                storage,
+                prefix_len,
+            );
+        self.recordPacketReceived(packet.bytes.len);
+        var validated = try self.finishReadPacket(packet);
+        errdefer validated.deinit(self.allocator);
+        return self.finishBrokerEvent(validated);
+    }
+
     fn readBrokerEventInternal(
         self: *Connection,
         inactivity_timeout: ?std.Io.Clock.Duration,
@@ -5709,6 +5742,7 @@ pub const Connection = struct {
             .bytes = packet.bytes,
             .fixed = packet.fixed,
             .owns_bytes = packet.owns_bytes,
+            .prefix_len = packet.prefix_len,
         };
     }
 
@@ -5879,12 +5913,41 @@ pub const AcknowledgeOptions = struct {
 pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
-    /// False only for explicit caller-buffer broker reads. The bytes then
-    /// remain valid until this packet/event is deinitialized.
+    /// False for explicit caller-buffer broker reads and after internal
+    /// ownership transfer. Otherwise the packet frees its bytes on deinit.
     owns_bytes: bool = true,
+    /// Non-zero only for broker-oriented TCP reads that reserve aligned
+    /// storage before the wire packet for allocation ownership transfer.
+    prefix_len: u16 = 0,
+
+    pub fn contains(self: OwnedPacket, bytes: []const u8) bool {
+        const packet_start = @intFromPtr(self.bytes.ptr);
+        const bytes_start = @intFromPtr(bytes.ptr);
+        if (bytes_start < packet_start) return false;
+        const offset = bytes_start - packet_start;
+        return offset <= self.bytes.len and
+            bytes.len <= self.bytes.len - offset;
+    }
+
+    pub fn prefixedAllocation(
+        self: OwnedPacket,
+    ) ?packet_transport.PrefixedPacketAllocation {
+        if (!self.owns_bytes or self.prefix_len == 0) return null;
+        const allocation_len = self.bytes.len + @as(usize, self.prefix_len);
+        const allocation_ptr: [*]u8 = @ptrFromInt(
+            @intFromPtr(self.bytes.ptr) - @as(usize, self.prefix_len),
+        );
+        return @alignCast(allocation_ptr[0..allocation_len]);
+    }
 
     pub fn deinit(self: *OwnedPacket, allocator: std.mem.Allocator) void {
-        if (self.owns_bytes) allocator.free(self.bytes);
+        if (self.owns_bytes) {
+            if (self.prefixedAllocation()) |allocation| {
+                allocator.free(allocation);
+            } else {
+                allocator.free(self.bytes);
+            }
+        }
         self.* = undefined;
     }
 };

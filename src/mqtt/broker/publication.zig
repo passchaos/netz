@@ -14,11 +14,15 @@ pub const Error = mqtt.Error || error{
     PublicationLimitExceeded,
 };
 
+pub const allocation_alignment = 16;
+pub const Allocation = []align(allocation_alignment) u8;
+
 pub const Publication = struct {
     allocator: std.mem.Allocator,
     references: std.atomic.Value(usize),
     bytes: []u8,
-    topic_len: usize,
+    allocation_len: u32,
+    topic_len: u32,
     properties: []mqtt.Property,
     stored_at_ns: i96,
     expiry_interval: ?u32,
@@ -77,16 +81,89 @@ pub const Publication = struct {
             @sizeOf(Publication),
             bytes_len,
         ) catch return error.PublicationLimitExceeded;
+        if (allocation_len > std.math.maxInt(u32)) {
+            return error.PublicationLimitExceeded;
+        }
         const allocation = try allocator.alignedAlloc(
             u8,
-            .of(Publication),
+            .@"16",
             allocation_len,
         );
         errdefer allocator.free(allocation);
-        const publication: *Publication = @ptrCast(allocation.ptr);
-        const bytes = allocation[@sizeOf(Publication)..];
-        @memcpy(bytes[0..topic_bytes.len], topic_bytes);
-        @memcpy(bytes[topic_bytes.len..], payload_bytes);
+        return initialize(
+            allocator,
+            allocation,
+            topic_bytes,
+            payload_bytes,
+            properties,
+            reference_count,
+            now,
+            expiry_interval,
+        );
+    }
+
+    /// Adopt an owned wire packet whose allocation reserved exactly one
+    /// `Publication`-sized prefix. Property values are cloned before the wire
+    /// bytes are compacted in place, after which the packet must relinquish
+    /// ownership to the returned publication.
+    pub fn createFromPrefixedPublish(
+        allocator: std.mem.Allocator,
+        publish: mqtt.Publish,
+        reference_count: usize,
+        now: std.Io.Timestamp,
+        allocation: Allocation,
+        packet_bytes: []u8,
+    ) Error!*Publication {
+        std.debug.assert(reference_count != 0);
+        std.debug.assert(@alignOf(Publication) <= allocation_alignment);
+        std.debug.assert(
+            @intFromPtr(packet_bytes.ptr) ==
+                @intFromPtr(allocation.ptr) + @sizeOf(Publication),
+        );
+        std.debug.assert(
+            allocation.len == @sizeOf(Publication) + packet_bytes.len,
+        );
+        std.debug.assert(sliceWithin(packet_bytes, publish.topic));
+        std.debug.assert(sliceWithin(packet_bytes, publish.payload));
+
+        return initialize(
+            allocator,
+            allocation,
+            publish.topic,
+            publish.payload,
+            publish.properties,
+            reference_count,
+            now,
+            mqtt.messageExpiryInterval(publish.properties),
+        );
+    }
+
+    fn initialize(
+        allocator: std.mem.Allocator,
+        allocation: Allocation,
+        topic_bytes: []const u8,
+        payload_bytes: []const u8,
+        properties: []const mqtt.Property,
+        reference_count: usize,
+        now: std.Io.Timestamp,
+        expiry_interval: ?u32,
+    ) Error!*Publication {
+        const bytes_len = std.math.add(
+            usize,
+            topic_bytes.len,
+            payload_bytes.len,
+        ) catch return error.PublicationLimitExceeded;
+        const compact_len = std.math.add(
+            usize,
+            @sizeOf(Publication),
+            bytes_len,
+        ) catch return error.PublicationLimitExceeded;
+        if (compact_len > allocation.len) {
+            return error.PublicationLimitExceeded;
+        }
+        if (allocation.len > std.math.maxInt(u32)) {
+            return error.PublicationLimitExceeded;
+        }
 
         const property_result = owned_properties.clone(
             allocator,
@@ -100,12 +177,17 @@ pub const Publication = struct {
             allocator,
             property_result.properties,
         );
+        const bytes = allocation[@sizeOf(Publication)..compact_len];
+        @memmove(bytes[0..topic_bytes.len], topic_bytes);
+        @memmove(bytes[topic_bytes.len..], payload_bytes);
 
+        const publication: *Publication = @ptrCast(allocation.ptr);
         publication.* = .{
             .allocator = allocator,
             .references = .init(reference_count),
             .bytes = bytes,
-            .topic_len = topic_bytes.len,
+            .allocation_len = @intCast(allocation.len),
+            .topic_len = @intCast(topic_bytes.len),
             .properties = property_result.properties,
             .stored_at_ns = now.nanoseconds,
             .expiry_interval = expiry_interval,
@@ -189,14 +271,24 @@ pub const Publication = struct {
         std.debug.assert(previous != 0);
         if (previous != 1) return;
         const allocator = self.allocator;
-        const allocation_len = @sizeOf(Publication) + self.bytes.len;
-        const allocation: []align(@alignOf(Publication)) u8 =
-            @alignCast(@as([*]u8, @ptrCast(self))[0..allocation_len]);
+        const allocation_len: usize = self.allocation_len;
+        const allocation: Allocation = @alignCast(
+            @as([*]u8, @ptrCast(self))[0..allocation_len],
+        );
         owned_properties.deinit(allocator, self.properties);
         self.* = undefined;
         allocator.free(allocation);
     }
 };
+
+fn sliceWithin(container: []const u8, child: []const u8) bool {
+    const container_start = @intFromPtr(container.ptr);
+    const child_start = @intFromPtr(child.ptr);
+    if (child_start < container_start) return false;
+    const offset = child_start - container_start;
+    return offset <= container.len and
+        child.len <= container.len - offset;
+}
 
 fn keepForwardProperty(property: mqtt.Property) bool {
     // Topic Alias is scoped to the publisher connection. Subscription
@@ -309,6 +401,114 @@ test "publication coallocates header and message bytes" {
     );
     try std.testing.expectEqualStrings("coallocated/topic", publication.topic());
     try std.testing.expectEqualStrings("payload", publication.payload());
+}
+
+test "publication adopts and compacts a prefixed wire packet" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+    const packet_len = 64;
+    const allocation = try failing.allocator().alignedAlloc(
+        u8,
+        .@"16",
+        @sizeOf(Publication) + packet_len,
+    );
+    var allocation_owned = true;
+    defer if (allocation_owned) failing.allocator().free(allocation);
+    const packet = allocation[@sizeOf(Publication)..];
+    @memset(packet, 0xaa);
+    @memcpy(packet[7..24], "coallocated/topic");
+    @memcpy(packet[37..44], "payload");
+
+    const publication = try Publication.createFromPrefixedPublish(
+        failing.allocator(),
+        .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = packet[7..24],
+            .packet_id = 7,
+            .properties = &.{},
+            .payload = packet[37..44],
+        },
+        1,
+        std.Io.Timestamp.fromNanoseconds(0),
+        allocation,
+        packet,
+    );
+    allocation_owned = false;
+    defer publication.release();
+
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@intFromPtr(allocation.ptr), @intFromPtr(publication));
+    try std.testing.expectEqualStrings("coallocated/topic", publication.topic());
+    try std.testing.expectEqualStrings("payload", publication.payload());
+}
+
+test "prefixed publication adoption is failure-safe with owned properties" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const packet_len = 64;
+            const allocation = try allocator.alignedAlloc(
+                u8,
+                .@"16",
+                @sizeOf(Publication) + packet_len,
+            );
+            var allocation_owned = true;
+            defer if (allocation_owned) allocator.free(allocation);
+            const packet = allocation[@sizeOf(Publication)..];
+            @memset(packet, 0xaa);
+            @memcpy(packet[7..20], "failure/topic");
+            @memcpy(packet[20..27], "source!");
+            @memcpy(packet[27..31], "test");
+            @memcpy(packet[37..44], "payload");
+            var properties = [_]mqtt.Property{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = packet[20..27],
+                .value = packet[27..31],
+            } }};
+
+            const publication = try Publication.createFromPrefixedPublish(
+                allocator,
+                .{
+                    .dup = false,
+                    .qos = .at_least_once,
+                    .retain = false,
+                    .topic = packet[7..20],
+                    .packet_id = 9,
+                    .properties = &properties,
+                    .payload = packet[37..44],
+                },
+                2,
+                std.Io.Timestamp.fromNanoseconds(0),
+                allocation,
+                packet,
+            );
+            allocation_owned = false;
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                publication.properties.len,
+            );
+            try std.testing.expectEqualStrings(
+                "source!",
+                publication.properties[0].utf8_pair.key,
+            );
+            try std.testing.expectEqualStrings(
+                "test",
+                publication.properties[0].utf8_pair.value,
+            );
+            publication.release();
+            publication.release();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Context.run,
+        .{},
+    );
 }
 
 test "publication coallocation is failure-safe with owned properties" {

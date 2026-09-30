@@ -927,6 +927,44 @@ moved median throughput from 2,446 to 3,620 publishes/s with four candidate
 wins, but the unusually wide and overlapping host-load ranges make this only
 supporting evidence rather than a general throughput claim.
 
+Owned TCP, TLS and WebSocket broker PUBLISH packets now reserve one
+16-byte-aligned `Publication`-sized prefix on their packet allocation. TCP/TLS
+stream readers preserve that prefix with partial bytes across a timeout. Once ACL,
+retained-state, durable-Session and route-plan work has succeeded, an
+unprefixed-topic live fanout can clone forwarding properties and compact the
+Topic Name plus payload into that same allocation before transferring
+ownership to the shared `Publication`. Alias-resolved topics, listener mount
+points, QoS 2 staging, and route misses retain their prior ownership paths. A
+timed TCP-read regression verifies that the prefixed allocation survives
+partial-body timeout/resume, while the TLS live-broker fuzz covers the stream
+transport path and allocation-failure coverage proves that nested User Property
+cloning leaves the original packet owner intact.
+The three-sample matrix at
+`zig-out/mqtt-large-packet-adoption-final4` (22,278,397 bytes; summary SHA-256
+`598b9f26aae6fc9f56ed9f213ef6f577ec3248aff2572c62a8faa4e406003e23`)
+completed all fifteen broker runs with zero live bytes. Relative to the
+preceding coallocation matrix, the 256-byte serial shape fell from 1,326 to
+686 allocations (2.590 to 1.340 per publish), while the 4-KiB shape fell from
+4,479 to 2,303 allocations (2.187 to 1.125 per publish, 48.6%). The 4-KiB
+shape's cumulative requested bytes fell from 24,492,977 to 15,540,913
+(36.5%). Publisher-32, fanout-32, and balanced-32x32 allocation counts remain
+unchanged because those 64-byte packets already use caller-owned stack
+storage; their peak-live values remain within a few KiB of the prior matrix.
+As before, the counting allocator makes these allocation and ownership
+measurements rather than timing evidence.
+A three-pair alternating-order fixed-client A/B at
+`zig-out/mqtt-large-packet-adoption-ab/run.20260930` (22,162,412 bytes;
+aggregate file-hash digest
+`48cd19d76390337ccc513dcff721d870831977eb93d88d47850213d45b271be4`)
+used four publishers, four subscribers, a 4-KiB payload, window 16, 1,000
+warmups and 10,000 measured publishes per arm. Every arm completed 40,000
+deliveries with checksum 10,780,000. Median throughput moved from 20,022 to
+19,871 publishes/s (-0.8%), median p50 from 1.149 to 1.139 ms, and median p99
+from 2.312 to 2.308 ms. The ranges overlap and the candidate won one of three
+throughput pairs, so this is recorded as no clear timing regression rather
+than a speedup claim; the exact allocation and byte reductions above are the
+supported result.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:

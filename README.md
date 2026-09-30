@@ -1463,6 +1463,13 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # contiguous Topic Name and payload. Empty-property fanout therefore needs one
 # allocation per incoming publication rather than separate object and byte
 # allocations, lowering balanced-32x32 to 0.042 allocations per delivery.
+# Broker reads that exceed the 128-byte caller buffer reserve an aligned
+# Publication prefix. The live fanout path adopts and compacts that allocation
+# after validation/routing preflight, eliminating the second allocation and
+# duplicate live payload buffer. Three-sample results lower 256-byte serial and 4-KiB payload
+# shapes from 2.590/2.187 to 1.340/1.125 allocations per publish; the 4-KiB
+# shape's cumulative requested bytes fall 36.5%, with paired throughput medians
+# remaining within 0.8%.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

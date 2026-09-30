@@ -8,6 +8,12 @@ const keep_alive_reader = @import("keep_alive_reader.zig");
 
 const net = std.Io.net;
 
+/// Broker-facing packet reads may reserve an aligned prefix for transferring
+/// a large packet allocation into a longer-lived object without replacement.
+pub const prefixed_packet_alignment = 16;
+pub const PrefixedPacketAllocation =
+    []align(prefixed_packet_alignment) u8;
+
 pub const Error = mqtt.Error || websocket_runtime.Error ||
     tls_stream.Error || error{
     ConnectionClosed,
@@ -37,6 +43,7 @@ const TcpTransport = struct {
     input_start: usize = 0,
     input_end: usize = 0,
     packet: ?[]u8 = null,
+    packet_prefix_len: u16 = 0,
     packet_read: usize = 0,
 
     fn buffered(self: *const TcpTransport) []const u8 {
@@ -72,10 +79,15 @@ const StreamPacketState = struct {
     header: [5]u8 = undefined,
     header_len: usize = 0,
     packet: ?[]u8 = null,
+    packet_prefix_len: u16 = 0,
     packet_read: usize = 0,
 
     fn deinit(self: *StreamPacketState, allocator: std.mem.Allocator) void {
-        if (self.packet) |packet| allocator.free(packet);
+        if (self.packet) |packet| freePacketBytes(
+            allocator,
+            packet,
+            self.packet_prefix_len,
+        );
         self.* = .{};
     }
 };
@@ -276,7 +288,11 @@ pub const Transport = union(enum) {
     ) void {
         switch (self.*) {
             .tcp => |*tcp| {
-                if (tcp.packet) |packet| allocator.free(packet);
+                if (tcp.packet) |packet| freePacketBytes(
+                    allocator,
+                    packet,
+                    tcp.packet_prefix_len,
+                );
                 tcp.stream.close(tcp.io);
             },
             .tls => |*transport| {
@@ -494,8 +510,66 @@ pub const Transport = union(enum) {
                 null,
                 null,
                 storage,
+                0,
             ),
             else => self.readPacket(allocator, max_packet_size),
+        };
+    }
+
+    /// Broker-oriented variant of `readPacketInto` that reserves an aligned
+    /// prefix on an owned TCP fallback. A returned packet exposes that backing
+    /// allocation so a longer-lived representation can adopt it. Short TCP
+    /// packets still borrow `storage`; other transports keep their existing
+    /// ownership behavior.
+    pub fn readPacketIntoWithPrefix(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        storage: []u8,
+        prefix_len: usize,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |*tcp| readTcpPacketWithPolicy(
+                allocator,
+                tcp,
+                max_packet_size,
+                null,
+                null,
+                storage,
+                prefix_len,
+            ),
+            .tls => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                null,
+                null,
+                prefix_len,
+            ),
+            .tls_vail => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                null,
+                null,
+                prefix_len,
+            ),
+            .tls_server => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                null,
+                null,
+                prefix_len,
+            ),
+            .websocket => |ws| readWebSocketPacketWithPolicy(
+                allocator,
+                ws,
+                max_packet_size,
+                null,
+                null,
+                prefix_len,
+            ),
         };
     }
 
@@ -563,11 +637,66 @@ pub const Transport = union(enum) {
                 timeout,
                 null,
                 storage,
+                0,
             ),
             else => self.readPacketWithInactivityTimeout(
                 allocator,
                 max_packet_size,
                 timeout,
+            ),
+        };
+    }
+
+    /// Keep-Alive-bounded counterpart to `readPacketIntoWithPrefix`.
+    pub fn readPacketWithInactivityTimeoutIntoWithPrefix(
+        self: *Transport,
+        allocator: std.mem.Allocator,
+        max_packet_size: usize,
+        timeout: std.Io.Clock.Duration,
+        storage: []u8,
+        prefix_len: usize,
+    ) Error!OwnedPacket {
+        return switch (self.*) {
+            .tcp => |*tcp| readTcpPacketWithPolicy(
+                allocator,
+                tcp,
+                max_packet_size,
+                timeout,
+                null,
+                storage,
+                prefix_len,
+            ),
+            .tls => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                timeout,
+                null,
+                prefix_len,
+            ),
+            .tls_vail => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                timeout,
+                null,
+                prefix_len,
+            ),
+            .tls_server => |*transport| readStreamPacketWithPolicy(
+                allocator,
+                transport,
+                max_packet_size,
+                timeout,
+                null,
+                prefix_len,
+            ),
+            .websocket => |ws| readWebSocketPacketWithPolicy(
+                allocator,
+                ws,
+                max_packet_size,
+                timeout,
+                null,
+                prefix_len,
             ),
         };
     }
@@ -627,6 +756,7 @@ fn readStreamPacket(
         max_packet_size,
         null,
         null,
+        0,
     );
 }
 
@@ -643,6 +773,7 @@ fn readStreamPacketWithInactivityTimeout(
         max_packet_size,
         timeout,
         null,
+        0,
     );
 }
 
@@ -658,6 +789,7 @@ fn readStreamPacketWithDeadline(
         max_packet_size,
         null,
         deadline,
+        0,
     );
 }
 
@@ -667,6 +799,7 @@ fn readStreamPacketWithPolicy(
     max_packet_size: usize,
     inactivity_timeout: ?std.Io.Clock.Duration,
     absolute_deadline: ?std.Io.Clock.Timestamp,
+    owned_prefix_len: usize,
 ) Error!OwnedPacket {
     const connection = transport.connection;
     var deadline = if (inactivity_timeout) |timeout|
@@ -702,9 +835,15 @@ fn readStreamPacketWithPolicy(
             decoded.value,
         ) catch return error.PacketTooLarge;
         if (packet_len > max_packet_size) return error.PacketTooLarge;
-        const packet = try allocator.alloc(u8, packet_len);
+        const allocated = try allocatePacketBytes(
+            allocator,
+            packet_len,
+            owned_prefix_len,
+        );
+        const packet = allocated.bytes;
         @memcpy(packet[0..state.header_len], state.header[0..state.header_len]);
         state.packet = packet;
+        state.packet_prefix_len = allocated.prefix_len;
         state.packet_read = state.header_len;
     }
 
@@ -725,12 +864,15 @@ fn readStreamPacketWithPolicy(
     }
 
     state.packet = null;
+    const packet_prefix_len = state.packet_prefix_len;
+    state.packet_prefix_len = 0;
     state.packet_read = 0;
     state.header_len = 0;
-    errdefer allocator.free(packet);
+    errdefer freePacketBytes(allocator, packet, packet_prefix_len);
     return .{
         .bytes = packet,
         .fixed = try mqtt.FixedHeader.parse(packet),
+        .prefix_len = packet_prefix_len,
     };
 }
 
@@ -763,15 +905,87 @@ pub const OwnedPacket = struct {
     bytes: []u8,
     fixed: mqtt.FixedHeader,
     owns_bytes: bool = true,
+    prefix_len: u16 = 0,
+
+    pub fn prefixedAllocation(
+        self: OwnedPacket,
+    ) ?PrefixedPacketAllocation {
+        if (!self.owns_bytes or self.prefix_len == 0) return null;
+        return packetAllocationFromPrefix(self.bytes, self.prefix_len);
+    }
 
     pub fn deinit(
         self: *OwnedPacket,
         allocator: std.mem.Allocator,
     ) void {
-        if (self.owns_bytes) allocator.free(self.bytes);
+        if (self.owns_bytes) freePacketBytes(
+            allocator,
+            self.bytes,
+            self.prefix_len,
+        );
         self.* = undefined;
     }
 };
+
+fn packetAllocationFromPrefix(
+    packet: []u8,
+    prefix_len: u16,
+) PrefixedPacketAllocation {
+    std.debug.assert(prefix_len != 0);
+    const allocation_len = packet.len + @as(usize, prefix_len);
+    const allocation_ptr: [*]u8 = @ptrFromInt(
+        @intFromPtr(packet.ptr) - @as(usize, prefix_len),
+    );
+    return @alignCast(allocation_ptr[0..allocation_len]);
+}
+
+fn freePacketBytes(
+    allocator: std.mem.Allocator,
+    packet: []u8,
+    prefix_len: u16,
+) void {
+    if (prefix_len == 0) {
+        allocator.free(packet);
+    } else {
+        allocator.free(packetAllocationFromPrefix(packet, prefix_len));
+    }
+}
+
+const AllocatedPacket = struct {
+    bytes: []u8,
+    prefix_len: u16,
+};
+
+fn allocatePacketBytes(
+    allocator: std.mem.Allocator,
+    packet_len: usize,
+    owned_prefix_len: usize,
+) Error!AllocatedPacket {
+    const prefix_len = std.math.cast(
+        u16,
+        owned_prefix_len,
+    ) orelse return error.PacketTooLarge;
+    if (prefix_len == 0) {
+        return .{
+            .bytes = try allocator.alloc(u8, packet_len),
+            .prefix_len = 0,
+        };
+    }
+    const allocation_len = std.math.add(
+        usize,
+        prefix_len,
+        packet_len,
+    ) catch return error.PacketTooLarge;
+    const allocation = try allocator.alignedAlloc(
+        u8,
+        .@"16",
+        allocation_len,
+    );
+    return .{
+        .bytes = allocation[prefix_len..],
+        .prefix_len = prefix_len,
+    };
+}
 
 test "MQTT packet transport keeps WebSocket state out of line" {
     try std.testing.expect(
@@ -837,6 +1051,7 @@ fn readTcpPacket(
         null,
         null,
         null,
+        0,
     );
 }
 
@@ -854,6 +1069,7 @@ fn readTcpPacketWithInactivityTimeout(
         timeout,
         null,
         null,
+        0,
     );
 }
 
@@ -870,6 +1086,7 @@ fn readTcpPacketWithDeadline(
         null,
         deadline,
         null,
+        0,
     );
 }
 
@@ -880,6 +1097,7 @@ fn readTcpPacketWithPolicy(
     inactivity_timeout: ?std.Io.Clock.Duration,
     absolute_deadline: ?std.Io.Clock.Timestamp,
     caller_storage: ?[]u8,
+    owned_prefix_len: usize,
 ) Error!OwnedPacket {
     var deadline = if (inactivity_timeout) |timeout|
         std.Io.Clock.Timestamp.fromNow(tcp.io, timeout)
@@ -928,11 +1146,17 @@ fn readTcpPacketWithPolicy(
                 };
             }
         }
-        const packet = try allocator.alloc(u8, packet_len);
+        const allocated = try allocatePacketBytes(
+            allocator,
+            packet_len,
+            owned_prefix_len,
+        );
+        const packet = allocated.bytes;
         const copy_len = @min(packet_len, buffered.len);
         @memcpy(packet[0..copy_len], buffered[0..copy_len]);
         tcp.discardBuffered(copy_len);
         tcp.packet = packet;
+        tcp.packet_prefix_len = allocated.prefix_len;
         tcp.packet_read = copy_len;
         if (inactivity_timeout) |timeout| {
             const fixed = try mqtt.FixedHeader.parse(packet);
@@ -966,11 +1190,14 @@ fn readTcpPacketWithPolicy(
     }
 
     tcp.packet = null;
+    const packet_prefix_len = tcp.packet_prefix_len;
+    tcp.packet_prefix_len = 0;
     tcp.packet_read = 0;
-    errdefer allocator.free(packet);
+    errdefer freePacketBytes(allocator, packet, packet_prefix_len);
     return .{
         .bytes = packet,
         .fixed = try mqtt.FixedHeader.parse(packet),
+        .prefix_len = packet_prefix_len,
     };
 }
 
@@ -1059,6 +1286,7 @@ fn readWebSocketPacket(
         max_packet_size,
         null,
         null,
+        0,
     );
 }
 
@@ -1075,6 +1303,7 @@ fn readWebSocketPacketWithInactivityTimeout(
         max_packet_size,
         timeout,
         null,
+        0,
     );
 }
 
@@ -1090,6 +1319,7 @@ fn readWebSocketPacketWithDeadline(
         max_packet_size,
         null,
         deadline,
+        0,
     );
 }
 
@@ -1099,6 +1329,7 @@ fn readWebSocketPacketWithPolicy(
     max_packet_size: usize,
     inactivity_timeout: ?std.Io.Clock.Duration,
     absolute_deadline: ?std.Io.Clock.Timestamp,
+    owned_prefix_len: usize,
 ) Error!OwnedPacket {
     var deadline: std.Io.Clock.Timestamp = if (inactivity_timeout) |timeout|
         .fromNow(ws.connection.io, timeout)
@@ -1114,14 +1345,27 @@ fn readWebSocketPacketWithPolicy(
             // size rather than evidence that all bytes have arrived. MQTT
             // packets commonly span several WebSocket messages.
             if (packet_len <= ws.input.items.len) {
-                const bytes = try allocator.dupe(
-                    u8,
+                const allocated = try allocatePacketBytes(
+                    allocator,
+                    packet_len,
+                    owned_prefix_len,
+                );
+                errdefer freePacketBytes(
+                    allocator,
+                    allocated.bytes,
+                    allocated.prefix_len,
+                );
+                @memcpy(
+                    allocated.bytes,
                     ws.input.items[0..packet_len],
                 );
-                errdefer allocator.free(bytes);
-                const fixed = try mqtt.FixedHeader.parse(bytes);
+                const fixed = try mqtt.FixedHeader.parse(allocated.bytes);
                 discardPacketPrefix(&ws.input, packet_len);
-                return .{ .bytes = bytes, .fixed = fixed };
+                return .{
+                    .bytes = allocated.bytes,
+                    .fixed = fixed,
+                    .prefix_len = allocated.prefix_len,
+                };
             }
         }
         if (ws.input.items.len >= max_packet_size) {
@@ -1539,6 +1783,107 @@ test "TCP packet receive borrows caller storage for complete read-ahead packets"
     try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
     try std.testing.expectEqual(@as(usize, 0), transport.tcp.buffered().len);
     packet.deinit(failing.allocator());
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "TCP packet receive preserves an aligned prefix on owned fallback" {
+    const allocator = std.testing.allocator;
+    var transport = Transport{ .tcp = .{
+        .io = undefined,
+        .stream = undefined,
+    } };
+    var encoded: [131]u8 = @splat(0x5a);
+    encoded[0] = 0x30;
+    encoded[1] = 0x80;
+    encoded[2] = 0x01;
+    @memcpy(transport.tcp.input[0..encoded.len], &encoded);
+    transport.tcp.input_end = encoded.len;
+    var storage: [4]u8 = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+    const prefix_len = 128;
+
+    var packet = try transport.readPacketIntoWithPrefix(
+        failing.allocator(),
+        encoded.len,
+        &storage,
+        prefix_len,
+    );
+    defer packet.deinit(failing.allocator());
+
+    const allocation = packet.prefixedAllocation().?;
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(
+        @intFromPtr(allocation.ptr) + prefix_len,
+        @intFromPtr(packet.bytes.ptr),
+    );
+    try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
+    try std.testing.expectEqual(@as(usize, 0), transport.tcp.buffered().len);
+}
+
+test "TCP prefixed packet allocation survives timeout and resume" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    var transport = Transport.initTcp(io, receiver);
+    defer transport.close(allocator);
+
+    var encoded: [131]u8 = @splat(0x5a);
+    encoded[0] = 0x30;
+    encoded[1] = 0x80;
+    encoded[2] = 0x01;
+    var storage: [4]u8 = undefined;
+    const prefix_len = 128;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+
+    try writeAll(io, sender, encoded[0..7]);
+    try std.testing.expectError(
+        error.Timeout,
+        transport.readPacketWithInactivityTimeoutIntoWithPrefix(
+            failing.allocator(),
+            encoded.len,
+            .{ .raw = .fromMilliseconds(20), .clock = .awake },
+            &storage,
+            prefix_len,
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(u16, prefix_len),
+        transport.tcp.packet_prefix_len,
+    );
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations);
+
+    try writeAll(io, sender, encoded[7..]);
+    var packet = try transport
+        .readPacketWithInactivityTimeoutIntoWithPrefix(
+        failing.allocator(),
+        encoded.len,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+        &storage,
+        prefix_len,
+    );
+    defer packet.deinit(failing.allocator());
+
+    try std.testing.expect(packet.prefixedAllocation() != null);
+    try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
     try std.testing.expect(!failing.has_induced_failure);
 }
 
