@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ETH_P_IP = 0x0800
-PACKET_OUTGOING = 4
+PACKET_HOST = 0
 SOL_PACKET = 263
 PACKET_STATISTICS = 6
 PCAP_MAGIC = 0xA1B2C3D4
@@ -250,9 +250,10 @@ def open_packet_socket(interface: str) -> socket.socket:
             socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(ETH_P_IP)
         )
         capture.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 * 1024 * 1024)
-        # Python's AF_PACKET address tuple expects the protocol in network
-        # byte order, matching sockaddr_ll.sll_protocol.
-        capture.bind((interface, socket.htons(ETH_P_IP)))
+        # The socket() protocol argument is in network byte order, while
+        # Python's AF_PACKET bind tuple accepts the host-order Ethernet type.
+        # Applying htons() twice silently binds a different protocol on Linux.
+        capture.bind((interface, ETH_P_IP))
     except PermissionError as error:
         if capture is not None:
             capture.close()
@@ -293,7 +294,12 @@ def capture(args: argparse.Namespace) -> int:
     def retain(packet: bytes, address: tuple[object, ...]) -> None:
         if len(address) < 3 or address[0] != args.interface:
             return
-        if address[2] != PACKET_OUTGOING:
+        # Linux loopback exposes one cooked IPv4 copy as PACKET_HOST rather
+        # than a separate PACKET_OUTGOING copy. Direction is recovered from
+        # the unique benchmark server port below. Restricting this capture
+        # tool to `lo` prevents physical-interface ingress from being mistaken
+        # for the selected loopback flow.
+        if address[2] != PACKET_HOST:
             return
         parsed = parse_ipv4_udp(packet, args.server_ip, args.server_port)
         if parsed is None:
@@ -345,9 +351,9 @@ def capture(args: argparse.Namespace) -> int:
                 f"mode={args.mode}",
                 f"role_pair={args.role_pair}",
                 "capture_source=linux-af-packet",
-                "capture_boundary=loopback-egress-ip",
+                "capture_boundary=loopback-single-copy-ip",
                 "packet_socket=SOCK_DGRAM",
-                "packet_copy_filter=PACKET_OUTGOING",
+                "packet_copy_filter=PACKET_HOST",
                 "pcap_link_type=raw-ipv4",
                 f"pcap_snaplen={PCAP_SNAPLEN}",
                 f"pcap_max_bytes={PCAP_MAX_BYTES}",

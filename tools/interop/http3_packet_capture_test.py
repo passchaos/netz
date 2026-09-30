@@ -39,6 +39,30 @@ def ipv4_udp(
 
 
 class Http3PacketCaptureTests(unittest.TestCase):
+    def test_packet_socket_uses_network_order_constructor_and_host_order_bind(self) -> None:
+        class FakeSocket:
+            bound = None
+
+            def setsockopt(self, _level: int, _option: int, _value: int) -> None:
+                pass
+
+            def bind(self, address) -> None:
+                self.bound = address
+
+            def settimeout(self, _timeout: float) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        fake = FakeSocket()
+        with mock.patch.object(CAPTURE.socket, "socket", return_value=fake) as create:
+            self.assertIs(CAPTURE.open_packet_socket("lo"), fake)
+        create.assert_called_once_with(
+            socket.AF_PACKET, socket.SOCK_DGRAM, socket.htons(CAPTURE.ETH_P_IP)
+        )
+        self.assertEqual(fake.bound, ("lo", CAPTURE.ETH_P_IP))
+
     def test_permission_denial_is_fail_closed(self) -> None:
         with mock.patch.object(
             CAPTURE.socket, "socket", side_effect=PermissionError(1, "denied")
@@ -52,7 +76,7 @@ class Http3PacketCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "CPU affinity"):
                 CAPTURE.capture(args)
 
-    def test_capture_loop_writes_and_summarizes_outgoing_packet(self) -> None:
+    def test_capture_loop_keeps_single_loopback_host_copy(self) -> None:
         packet = ipv4_udp("127.0.0.1", "127.0.0.1", 40000, 4433, b"data")
 
         class FakeSocket:
@@ -67,9 +91,9 @@ class Http3PacketCaptureTests(unittest.TestCase):
             def recvfrom(self, _size: int):
                 self.calls += 1
                 if self.calls == 1:
-                    return packet, ("lo", CAPTURE.ETH_P_IP, 0)
+                    return packet, ("lo", CAPTURE.ETH_P_IP, CAPTURE.PACKET_HOST)
                 if self.calls == 2:
-                    return packet, ("lo", CAPTURE.ETH_P_IP, CAPTURE.PACKET_OUTGOING)
+                    return packet, ("lo", CAPTURE.ETH_P_IP, 4)
                 raise BlockingIOError()
 
             def getsockopt(self, level: int, option: int, _size: int | None = None):
@@ -135,7 +159,7 @@ class Http3PacketCaptureTests(unittest.TestCase):
                 if self.calls == 1:
                     assert installed_handler is not None
                     installed_handler(0, None)
-                    return packet, ("lo", CAPTURE.ETH_P_IP, CAPTURE.PACKET_OUTGOING)
+                    return packet, ("lo", CAPTURE.ETH_P_IP, CAPTURE.PACKET_HOST)
                 raise BlockingIOError()
 
             def getsockopt(self, level: int, option: int, _size: int | None = None):

@@ -322,6 +322,8 @@ PY
       --mode="$benchmark_mode" --warmup="$warmup" \
       --iterations="$iterations" --streams="$streams" \
       --body-bytes="$body_bytes" --quic-version="$version" \
+      --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
+      --timeout-ms="$timeout_ms" \
       --client-cpu="$client_cpu" --server-cpu="$server_cpu" \
       --capture-cpu="$capture_cpu" \
       --netz-client-capture="$capture_artifact_dir/$benchmark_mode.netz-client+quic-go-server.log" \

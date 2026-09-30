@@ -1977,8 +1977,9 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
 
 The opt-in capture mode starts a dedicated Linux `AF_PACKET`/`SOCK_DGRAM`
 packet socket on a third pinned CPU before each server. It filters the loopback
-egress (`PACKET_OUTGOING`) copy by the pair's unique UDP server port, avoiding
-the duplicate host copy. Both netz endpoints already disable GSO; the runner
+single cooked IPv4 copy (`PACKET_HOST`) by the pair's unique UDP server port.
+Direction is reconstructed from that port rather than inferred from the packet
+type. Both netz endpoints already disable GSO; the runner
 sets `QUIC_GO_DISABLE_GSO=true`, and the Go fixture independently rejects a
 connection whose `ConnectionState().GSO` remains enabled. Each classic-PCAP
 artifact uses DLT_RAW, retains at most 128 bytes per packet, and is capped at

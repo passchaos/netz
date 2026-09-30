@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import re
 import sys
 import tempfile
 import unittest
@@ -19,6 +20,19 @@ SPEC.loader.exec_module(COMPARE)
 
 
 class Http3PacketCaptureCompareTests(unittest.TestCase):
+    def test_runner_forwards_complete_comparison_shape(self) -> None:
+        runner = MODULE_PATH.with_name("http3_quic_go.sh").read_text(
+            encoding="utf-8"
+        )
+        block = re.search(
+            r"compare_captures\(\) \{(?P<body>.*?)\n  \}",
+            runner,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(block)
+        for argument in ("chunk-bytes", "stream-window", "timeout-ms"):
+            self.assertIn(f'--{argument}="$', block.group("body"))
+
     def fixture(self, directory: str) -> argparse.Namespace:
         root = Path(directory)
         first = root / "netz-client.log"
@@ -30,8 +44,8 @@ class Http3PacketCaptureCompareTests(unittest.TestCase):
         common = (
             "record=kernel-capture protocol=http3 mode=upload "
             "capture_source=linux-af-packet "
-            "capture_boundary=loopback-egress-ip "
-            "packet_copy_filter=PACKET_OUTGOING "
+            "capture_boundary=loopback-single-copy-ip "
+            "packet_copy_filter=PACKET_HOST "
             "packet_socket=SOCK_DGRAM pcap_link_type=raw-ipv4 pcap_snaplen=128 "
             "pcap_max_bytes=536870912 "
             "payload_retention=prefix "
@@ -93,6 +107,8 @@ class Http3PacketCaptureCompareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = self.output(self.fixture(directory))
             self.assertIn("captured_totals_equal=true", output)
+            self.assertIn("packet_socket=SOCK_DGRAM", output)
+            self.assertIn("packet_copy_filter=PACKET_HOST", output)
             self.assertIn("sender_packet_size_sequence_equal=true", output)
             self.assertIn("timing_usable=false", output)
 

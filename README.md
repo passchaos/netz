@@ -1709,10 +1709,12 @@ both v1 and v2 by default. Results are labeled `same-application-shape`
 because quic-go's GSO/GRO and ACK/packetization policy are not all externally
 controllable. Add `--stats` for whole-process peak RSS plus separately scoped
 netz explicit-allocator and Go runtime-heap telemetry.
-An independent `--capture` run uses a Linux `AF_PACKET` socket on `lo` to
-capture both mixed role pairs by their unique server ports. It requires
-`CAP_NET_RAW` and a third CPU, disables quic-go GSO, retains a bounded 128-byte
-prefix of each outgoing IPv4 packet in `zig-out/http3-captures`, and
+An independent `--capture` run uses a Linux `AF_PACKET/SOCK_DGRAM` socket on
+`lo` to capture both mixed role pairs by their unique server ports. It requires
+`CAP_NET_RAW`, a third CPU, and enough `net.core.rmem_max` for the requested
+16-MiB packet receive buffer (Linux reports the doubled effective size). The
+capture retains the single loopback `PACKET_HOST` IPv4 copy, disables quic-go
+GSO, stores a bounded 128-byte prefix in `zig-out/http3-captures`, and
 independently recomputes directional UDP datagrams, UDP payload bytes, IP
 bytes, and packet-size-sequence hashes. The runner rejects packet-socket drops,
 PCAP/log/hash/workload mismatches, or a changed quic-go binary across role
