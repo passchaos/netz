@@ -254,7 +254,7 @@ test "MQTT WebSocket server consumes PROXY v1 before HTTP Upgrade" {
         },
     );
     stream_owned = false;
-    var connection = runtime.Connection.initWebSocket(
+    var connection = try runtime.Connection.initWebSocket(
         allocator,
         ws,
         .v5,
@@ -634,7 +634,7 @@ test "MQTT WSS server consumes PROXY v2 before TLS and Upgrade" {
         } },
     );
     stream_owned = false;
-    var connection = runtime.Connection.initWebSocket(
+    var connection = try runtime.Connection.initWebSocket(
         allocator,
         ws,
         .v5,
@@ -1231,7 +1231,7 @@ test "MQTT WebSocket reader preserves MQTT byte stream across messages" {
             },
         },
     );
-    var connection = runtime.Connection.initWebSocket(
+    var connection = try runtime.Connection.initWebSocket(
         allocator,
         ws,
         .v5,
@@ -1549,7 +1549,7 @@ test "MQTT WebSocket adapter rejects text messages" {
             },
         },
     );
-    var connection = runtime.Connection.initWebSocket(
+    var connection = try runtime.Connection.initWebSocket(
         allocator,
         ws,
         .v5,

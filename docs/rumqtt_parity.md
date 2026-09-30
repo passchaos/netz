@@ -674,25 +674,29 @@ ABBA schedule, and caps each artifact at 32 MiB and the matrix at 128 MiB.
 Both brokers use `TCP_NODELAY`; Mosquitto's per-packet verbose logging is
 disabled so logging and delayed ACKs cannot manufacture a comparison result.
 
-The 2026-09-29 aarch64 Linux capture used CPUs 0/1/2 for
+The 2026-09-30 aarch64 Linux capture used CPUs 0/1/2 for
 client/server/sampler, Zig 0.16.0, four ABBA samples per shape, one exact
 subscription per subscriber, MQTT 5 QoS 1, and 2-ms broker RSS sampling. All
 40 broker runs completed their expected deliveries and independently
-recomputed checksums. Rates and p99 are medians; brackets show every sample.
+recomputed checksums. Its complete artifact is
+`zig-out/mqtt-broker-matrix/run.20260930T003902Z.2686404` (22,947,032 bytes);
+the stored summary SHA-256 is
+`6398e8af75bf451a842b651f895caba017e4afcaaab5b3df62253516bd0f7d19`.
+Rates and p99 are medians; brackets show every sample.
 
 | shape (publishers × subscribers, payload, window) | netz publish/s [range] | Mosquitto publish/s [range] | netz/Mosquitto | p99 ms netz / Mosquitto | broker RSS MiB netz / Mosquitto |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| serial (1×1, 256 B, 1) | 17,236 [13,918–18,254] | 34,440 [28,061–35,427] | 0.500× | 0.060 / 0.037 | 3.51 / 2.96 |
-| publishers-32 (32×1, 64 B, 4) | 25,319 [23,428–25,427] | 45,840 [45,453–46,983] | 0.552× | 1.191 / 1.657 | 5.33 / 3.17 |
-| fanout-32 (1×32, 64 B, 4) | 2,376 [2,287–2,432] | 3,920 [3,892–3,962] | 0.606× | 1.708 / 0.805 | 4.69 / 3.13 |
-| balanced-32x32 (32×32, 64 B, 4) | 2,270 [2,083–2,363] | 3,854 [3,828–3,881] | 0.589× | 28.136 / 24.291 | 10.69 / 3.74 |
-| large-payload (4×4, 4096 B, 16) | 14,861 [14,121–15,103] | 19,220 [19,074–19,381] | 0.773× | 1.906 / 1.864 | 9.59 / 5.13 |
+| serial (1×1, 256 B, 1) | 17,494 [16,690–17,658] | 35,606 [35,187–36,004] | 0.491× | 0.054 / 0.028 | 3.40 / 2.96 |
+| publishers-32 (32×1, 64 B, 4) | 25,210 [24,905–25,786] | 45,805 [43,998–46,338] | 0.550× | 1.221 / 1.900 | 4.94 / 3.17 |
+| fanout-32 (1×32, 64 B, 4) | 2,426 [2,399–2,437] | 3,932 [3,922–3,953] | 0.617× | 1.619 / 0.802 | 4.27 / 3.13 |
+| balanced-32x32 (32×32, 64 B, 4) | 2,348 [2,338–2,383] | 3,869 [3,851–3,940] | 0.607× | 28.304 / 24.210 | 10.00 / 3.73 |
+| large-payload (4×4, 4096 B, 16) | 14,605 [14,021–14,817] | 19,022 [18,780–19,135] | 0.768× | 1.866 / 1.869 | 9.42 / 5.13 |
 
 The matrix exposes rather than hides the current deficit. Netz reaches
-0.500–0.773× Mosquitto's median throughput across all five shapes. Its p99 is
-also higher in every shape; the 4-KiB result, 1.906 versus 1.864 ms, is
-effectively tied at this sample count. Median broker RSS is higher in every
-shape, from 3.51 versus 2.96 MiB at 1×1 to 10.69 versus 3.74 MiB at 32×32.
+0.491–0.768× Mosquitto's median throughput across all five shapes. Its p99 is
+lower in the publisher-heavy shape, effectively tied for the 4-KiB shape, and
+higher in the other three. Median broker RSS remains higher in every shape,
+from 3.40 versus 2.96 MiB at 1×1 to 10.00 versus 3.73 MiB at 32×32.
 Client allocation counts are identical because both arms run the same fixed
 netz client binary; they bind harness cost and catch shape drift rather than
 measuring broker-internal allocations. An earlier diagnostic run had left
@@ -701,6 +705,22 @@ in high-fanout/windowed shapes; those values are intentionally discarded. The
 accepted matrix explicitly aligns `TCP_NODELAY=true` on both brokers and omits
 verbose packet logging. These results identify broker scheduling, serial
 latency, and per-connection memory as the next optimization targets.
+
+The per-connection reduction comes from keeping the WebSocket-specific
+transport state out of line. `PacketTransport` previously embedded the full
+WebSocket connection as its largest union member, so every plain TCP MQTT
+connection occupied that size even though it never used HTTP, TLS, WebSocket,
+or compression state. WebSocket/WSS construction now owns one fallible boxed
+transport object, including cleanup on allocation failure, while TCP and the
+pointer-backed TLS variants stay inline. A six-pair fixed-binary ABBA check of
+the balanced 32×32 shape (`bd36916d` baseline, `546e101b` candidate, fixed
+`00aaf0a8` driver) measured 10,920–10,956 versus 10,232–10,256 KiB netz RSS;
+the paired median ratio was 0.935 (-6.5%). The paired throughput ratio was
+0.993, so this is retained as a memory-layout win rather than a throughput
+claim. The complete A/B artifact is
+`zig-out/mqtt-transport-box-ab/run.20260929`. Compared with the prior full
+matrix, the new full capture lowers netz median RSS in all five shapes: 3.0%,
+7.5%, 8.9%, 6.5%, and 1.7% in table order.
 
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
@@ -2794,6 +2814,14 @@ proxy evidence for the entire suite.
    netz-minus-Mosquitto gap fell from 2,284 to 2,124 KiB (7.0%). Every arm
    retained 6,400 deliveries and checksum 356,160. The independent-peer
    memory gap therefore remains.
+   A later `/proc/PID/smaps_rollup` capture separated a 64-connection
+   balanced run's 11,276-KiB RSS into 8,848 KiB anonymous and 2,428 KiB
+   file-backed memory. The largest anonymous mapping was 4,864 KiB, matching
+   the per-slot cost of an inline maximum-sized MQTT transport union. Boxing
+   only its WebSocket member reduced the verified full-matrix netz RSS in all
+   five shapes, including 10,948 to 10,236 KiB for balanced 32×32. Mosquitto
+   still uses materially less memory in every shape, so connection-state
+   sizing remains active work.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

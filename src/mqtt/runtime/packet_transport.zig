@@ -71,16 +71,25 @@ pub const Transport = union(enum) {
     tls: TlsTransport,
     tls_vail: VailTlsTransport,
     tls_server: TlsServerTransport,
-    websocket: WebSocketTransport,
+    // WebSocket Connection carries HTTP/TLS/compression state that is much
+    // larger than the TCP and pointer-backed TLS variants. Keeping it behind
+    // one allocation prevents every plain MQTT connection from paying the
+    // tagged union's maximum inline size.
+    websocket: *WebSocketTransport,
 
     pub fn initTcp(io: std.Io, stream: net.Stream) Transport {
         return .{ .tcp = .{ .io = io, .stream = stream } };
     }
 
     pub fn initWebSocket(
+        allocator: std.mem.Allocator,
         connection: websocket_runtime.Connection,
-    ) Transport {
-        return .{ .websocket = .{ .connection = connection } };
+    ) std.mem.Allocator.Error!Transport {
+        var owned_connection = connection;
+        errdefer owned_connection.close();
+        const transport = try allocator.create(WebSocketTransport);
+        transport.* = .{ .connection = owned_connection };
+        return .{ .websocket = transport };
     }
 
     pub fn initTls(
@@ -107,7 +116,7 @@ pub const Transport = union(enum) {
         return switch (self.*) {
             .tls_server => |transport| transport.connection.peerCertificates(),
             .tls_vail => |transport| transport.connection.peerCertificates(),
-            .websocket => |*ws| ws.connection.peerCertificates(),
+            .websocket => |ws| ws.connection.peerCertificates(),
             // Zig's standard TLS client does not expose its authenticated
             // chain, and cleartext TCP has no certificate identity.
             .tcp, .tls => null,
@@ -118,7 +127,7 @@ pub const Transport = union(enum) {
         return switch (self.*) {
             .tls_vail => |transport| transport.connection.negotiatedAlpn(),
             .tls_server => |transport| transport.connection.negotiatedAlpn(),
-            .websocket => |*ws| ws.connection.negotiatedAlpn(),
+            .websocket => |ws| ws.connection.negotiatedAlpn(),
             // Zig's standard TLS client does not currently expose ALPN.
             .tcp, .tls => null,
         };
@@ -130,7 +139,7 @@ pub const Transport = union(enum) {
         return switch (self.*) {
             .tls_vail => |transport| transport.connection.negotiatedCipherSuite(),
             .tls_server => |transport| transport.connection.negotiatedCipherSuite(),
-            .websocket => |*ws| ws.connection.negotiatedCipherSuite(),
+            .websocket => |ws| ws.connection.negotiatedCipherSuite(),
             .tcp, .tls => null,
         };
     }
@@ -141,7 +150,7 @@ pub const Transport = union(enum) {
         return switch (self.*) {
             .tls_vail => |transport| transport.connection.negotiatedTranscriptHash(),
             .tls_server => |transport| transport.connection.negotiatedTranscriptHash(),
-            .websocket => |*ws| ws.connection.negotiatedTranscriptHash(),
+            .websocket => |ws| ws.connection.negotiatedTranscriptHash(),
             .tcp, .tls => null,
         };
     }
@@ -157,7 +166,7 @@ pub const Transport = union(enum) {
             .tls_server => |transport| transport.connection.updateTrafficKeys(
                 request_peer_update,
             ),
-            .websocket => |*ws| ws.connection.updateTrafficKeys(
+            .websocket => |ws| ws.connection.updateTrafficKeys(
                 request_peer_update,
             ),
             .tcp, .tls => error.TlsKeyUpdateUnavailable,
@@ -170,7 +179,7 @@ pub const Transport = union(enum) {
         return switch (self.*) {
             .tls_vail => |transport| transport.connection.keyUpdateCounts(),
             .tls_server => |transport| transport.connection.keyUpdateCounts(),
-            .websocket => |*ws| ws.connection.keyUpdateCounts(),
+            .websocket => |ws| ws.connection.keyUpdateCounts(),
             .tcp, .tls => null,
         };
     }
@@ -192,7 +201,7 @@ pub const Transport = union(enum) {
                 context,
                 out,
             ),
-            .websocket => |*ws| ws.connection.exportKeyingMaterial(
+            .websocket => |ws| ws.connection.exportKeyingMaterial(
                 label,
                 context,
                 out,
@@ -207,7 +216,7 @@ pub const Transport = union(enum) {
             .tls => |transport| transport.connection.stream.socket.address,
             .tls_vail => |transport| transport.connection.stream.socket.address,
             .tls_server => |transport| transport.connection.stream.socket.address,
-            .websocket => |*ws| ws.connection.stream.socket.address,
+            .websocket => |ws| ws.connection.stream.socket.address,
         };
     }
 
@@ -252,9 +261,10 @@ pub const Transport = union(enum) {
                 transport.packet_state.deinit(allocator);
                 transport.connection.deinit();
             },
-            .websocket => |*ws| {
+            .websocket => |ws| {
                 ws.input.deinit(allocator);
                 ws.connection.close();
+                allocator.destroy(ws);
             },
         }
         self.* = undefined;
@@ -297,7 +307,7 @@ pub const Transport = union(enum) {
             // reader intentionally does not depend on that optimization.
             // Client MQTT encoders relinquish their temporary bytes after the
             // send, so mask them in place and avoid a second payload copy.
-            .websocket => |*ws| if (ws.connection.role == .client)
+            .websocket => |ws| if (ws.connection.role == .client)
                 try ws.connection.sendBinaryInPlace(bytes)
             else
                 try ws.connection.sendBinary(bytes),
@@ -348,7 +358,7 @@ pub const Transport = union(enum) {
                     deadline,
                 );
             },
-            .websocket => |*ws| {
+            .websocket => |ws| {
                 var progress: websocket_runtime.MessageWriteProgress = .{};
                 if (ws.connection.role == .client) {
                     try ws.connection.sendBinaryInPlaceWithDeadline(
@@ -395,7 +405,7 @@ pub const Transport = union(enum) {
                 prefix,
                 payload,
             ),
-            .websocket => |*ws| try ws.connection.sendBinaryParts(
+            .websocket => |ws| try ws.connection.sendBinaryParts(
                 prefix,
                 payload,
             ),
@@ -428,7 +438,7 @@ pub const Transport = union(enum) {
                 transport,
                 max_packet_size,
             ),
-            .websocket => |*ws| readWebSocketPacket(
+            .websocket => |ws| readWebSocketPacket(
                 allocator,
                 ws,
                 max_packet_size,
@@ -475,7 +485,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 timeout,
             ),
-            .websocket => |*ws| readWebSocketPacketWithInactivityTimeout(
+            .websocket => |ws| readWebSocketPacketWithInactivityTimeout(
                 allocator,
                 ws,
                 max_packet_size,
@@ -518,7 +528,7 @@ pub const Transport = union(enum) {
                 max_packet_size,
                 deadline,
             ),
-            .websocket => |*ws| readWebSocketPacketWithDeadline(
+            .websocket => |ws| readWebSocketPacketWithDeadline(
                 allocator,
                 ws,
                 max_packet_size,
@@ -683,6 +693,58 @@ pub const OwnedPacket = struct {
         self.* = undefined;
     }
 };
+
+test "MQTT packet transport keeps WebSocket state out of line" {
+    try std.testing.expect(
+        @sizeOf(Transport) < @sizeOf(WebSocketTransport),
+    );
+}
+
+test "MQTT WebSocket transport allocation failure closes its stream" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer client.close(io);
+    const server = try listener.accept(io);
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Transport.initWebSocket(
+            failing.allocator(),
+            websocket_runtime.testing.initDirectConnection(
+                allocator,
+                io,
+                server,
+                .server,
+                .{},
+            ),
+        ),
+    );
+    var byte: [1]u8 = undefined;
+    var buffers = [_][]u8{&byte};
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try io.vtable.netRead(
+            io.userdata,
+            client.socket.handle,
+            &buffers,
+        ),
+    );
+}
 
 fn readTcpPacket(
     allocator: std.mem.Allocator,

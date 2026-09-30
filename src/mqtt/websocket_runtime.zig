@@ -189,7 +189,8 @@ pub const Server = struct {
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
 
-        var connection = runtime.Connection.initWebSocket(
+        ws_owned = false;
+        var connection = try runtime.Connection.initWebSocket(
             self.allocator,
             ws,
             options.protocol,
@@ -197,7 +198,6 @@ pub const Server = struct {
             options.max_outgoing_inflight,
             options.topic_alias_maximum,
         );
-        ws_owned = false;
         errdefer connection.close();
         if (proxy_metadata) |metadata| {
             connection.attachProxyMetadata(metadata);
@@ -419,7 +419,8 @@ pub const UnixServer = struct {
         var ws = ws_value;
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
-        var connection = runtime.Connection.initWebSocket(
+        ws_owned = false;
+        var connection = try runtime.Connection.initWebSocket(
             self.allocator,
             ws,
             options.protocol,
@@ -427,7 +428,6 @@ pub const UnixServer = struct {
             options.max_outgoing_inflight,
             options.topic_alias_maximum,
         );
-        ws_owned = false;
         errdefer connection.close();
         return if (deadline) |absolute|
             connection.acceptPendingWithDeadline(options, absolute)
@@ -672,7 +672,8 @@ pub const TlsServer = struct {
         var ws_owned = true;
         errdefer if (ws_owned) ws.close();
 
-        var connection = runtime.Connection.initWebSocket(
+        ws_owned = false;
+        var connection = try runtime.Connection.initWebSocket(
             self.allocator,
             ws,
             options.protocol,
@@ -680,7 +681,6 @@ pub const TlsServer = struct {
             options.max_outgoing_inflight,
             options.topic_alias_maximum,
         );
-        ws_owned = false;
         errdefer connection.close();
         if (proxy_metadata) |metadata| {
             connection.attachProxyMetadata(metadata);
@@ -2258,7 +2258,7 @@ fn connectWebSocketAttemptMaybeBefore(
         return error.InvalidSubprotocol;
     }
 
-    var connection = runtime.Connection.initWebSocket(
+    var connection = try runtime.Connection.initWebSocket(
         allocator,
         ws,
         options.protocol,

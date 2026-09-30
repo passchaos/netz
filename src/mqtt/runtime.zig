@@ -2484,7 +2484,8 @@ pub const Connection = struct {
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
-    /// the caller owns the WebSocket opening handshake.
+    /// the caller owns the WebSocket opening handshake. This consumes `ws`
+    /// on both success and allocation failure.
     pub fn initWebSocket(
         allocator: std.mem.Allocator,
         ws: websocket_runtime.Connection,
@@ -2492,10 +2493,10 @@ pub const Connection = struct {
         limits: Limits,
         max_outgoing_inflight: u16,
         topic_alias_maximum: u16,
-    ) Connection {
+    ) std.mem.Allocator.Error!Connection {
         return .{
             .allocator = allocator,
-            .transport = .initWebSocket(ws),
+            .transport = try .initWebSocket(allocator, ws),
             .protocol = protocol,
             .limits = limits,
             .max_outgoing_inflight = max_outgoing_inflight,

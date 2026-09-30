@@ -1426,6 +1426,9 @@ MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 # Mosquitto source is rebuilt and all hash-bound artifacts are retained. This
 # is a same-client workload comparison, not a TCP equal-wire claim.
 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
+# The latest verified five-shape run and the preceding fixed-binary A/B show
+# that out-of-line MQTT WebSocket transport state cuts balanced-32x32 netz
+# broker RSS by 6.5% without a supported throughput claim. See the parity doc.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \
