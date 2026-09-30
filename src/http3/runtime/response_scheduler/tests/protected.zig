@@ -1,6 +1,7 @@
 const std = @import("std");
 const runtime = @import("../../../runtime.zig");
 const quic = @import("../../../../quic/mod.zig");
+const body_sender = @import("../../send/body.zig");
 
 const DeadlineAfterSendIo = struct {
     delegate: std.Io,
@@ -182,6 +183,9 @@ test "HTTP/3 protected response scheduler honors request priority" {
         .vtable = &timed_vtable,
     };
     defer server.quic_server.endpoint.io = timed.delegate;
+    const first_chunk = body_sender.pacedProtectedBodyChunkLimit(
+        server.config,
+    );
     try std.testing.expectError(
         error.Timeout,
         server.sendResponseBodiesPacedWithDeadline(
@@ -195,20 +199,27 @@ test "HTTP/3 protected response scheduler honors request priority" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), timed.send_calls);
-    try std.testing.expectEqualSlices(usize, &.{ 0, 1 }, &committed);
+    try std.testing.expectEqualSlices(
+        usize,
+        &.{ 0, first_chunk },
+        &committed,
+    );
     try std.testing.expectEqual(
         @as(usize, 0),
         server.outbound_bodies.find(low_id).?.written,
     );
     try std.testing.expectEqual(
-        @as(usize, 1),
+        first_chunk,
         server.outbound_bodies.find(high_id).?.written,
     );
 
     server.quic_server.endpoint.io = timed.delegate;
     const suffixes = [_]runtime.ResponseBody{
         responses[0],
-        .{ .stream_id = high_id, .data = responses[1].data[1..] },
+        .{
+            .stream_id = high_id,
+            .data = responses[1].data[first_chunk..],
+        },
     };
     try server.sendResponseBodiesPacedWithTimeout(
         first.from,
@@ -218,7 +229,7 @@ test "HTTP/3 protected response scheduler honors request priority" {
     );
     try std.testing.expectEqualSlices(
         usize,
-        &.{ low_body.len, high_body.len - 1 },
+        &.{ low_body.len, high_body.len - first_chunk },
         &committed,
     );
 

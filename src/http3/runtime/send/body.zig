@@ -178,19 +178,25 @@ pub fn responseBodySendCapacity(
     chunk_limit: usize,
 ) usize {
     if (remaining == 0) return 0;
-    const credit = @min(
+    const transport_credit = @min(
         connection,
         stream,
         congestion,
         datagram_size,
-        chunk_limit,
     );
     // QUIC credit counts the HTTP/3 DATA prefix and QUIC STREAM-frame
     // metadata too. Requiring this conservative margin prevents a candidate
     // with only header-sized credit from winning urgency selection and then
-    // blocking a lower-urgency response that could make useful progress.
-    if (credit <= paced_body_frame_overhead_margin) return 0;
-    return @min(remaining, credit - paced_body_frame_overhead_margin);
+    // blocking a lower-urgency response that could make useful progress. The
+    // chunk limit returned by `pacedBodyChunkLimit` already excludes this
+    // margin, so apply it only to raw transport credit before taking the
+    // final minimum.
+    if (transport_credit <= paced_body_frame_overhead_margin) return 0;
+    return @min(
+        remaining,
+        chunk_limit,
+        transport_credit - paced_body_frame_overhead_margin,
+    );
 }
 
 pub fn pacedProtectedBodyChunkLimit(config: anytype) usize {

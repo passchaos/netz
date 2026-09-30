@@ -31,6 +31,10 @@ test "HTTP/3 response capacity bypasses header-only send credit" {
         @as(usize, 100),
         body_sender.responseBodySendCapacity(100, 512, 512, 512, 1200, 1024),
     );
+    try std.testing.expectEqual(
+        @as(usize, 1024),
+        body_sender.responseBodySendCapacity(2048, 4096, 4096, 4096, 1200, 1024),
+    );
 }
 
 test "HTTP/3 body batch validates transport progress before commit" {
