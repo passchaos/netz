@@ -851,6 +851,32 @@ evidence rather than a general throughput claim. The `runLoop` native stack
 frame grows only by the selected 112-byte buffer delta (0xe70 to 0xee0), and
 the process-RSS samples were too noisy for a separate memory claim.
 
+Network-originated publications now retain their match output in a bounded
+publisher-slot scratch for up to 32 registered subscriptions. The plan remains
+stable while the global state mutex is released for persistence and socket
+writes, but is cleared before that sole reader can process its next PUBLISH;
+local publications, due Wills, system metrics, stale publisher identities, and
+larger subscription sets keep independent exact owned storage. Disconnect
+releases the retained capacity. A fail-first test proves warmed reuse without
+allocation, checks shared-subscription round-robin advancement, and verifies
+that the over-bound fallback fails before moving that cursor. The three-sample
+matrix at `zig-out/mqtt-route-slot-scratch-final2` (22,252,606 bytes; summary
+SHA-256
+`5c66fe00cdafdccdc16c3cdb38b4c6ea5437ea191bd2cd022d51d9139e1a6855`)
+completed all fifteen broker runs with zero live bytes. Relative to the prior
+128-byte receive-scratch matrix, allocation counts fell 19.7%, 24.4%, 23.5%,
+23.4%, and 19.8% in table order. Balanced 32x32 moved from 14,621 to 11,197
+allocations (0.109 per measured delivery) and cumulative requested bytes fell
+from 17,142,677 to 11,885,461; peak live bytes changed by only about 2 KiB. A
+fixed-client, five-pair alternating-order A/B at
+`zig-out/mqtt-route-slot-scratch-ab/run.20260930-final` (37,186,446 bytes;
+aggregate file-hash digest
+`cd34aa824adadd7e3a2dbd8cd142a31e9a3652c0bb1a83d6e9f13c5a8e53eedb`)
+moved median throughput from 3,589 to 3,885 publishes/s (8.2%, four of five
+paired wins) and median p99 from 33.20 to 29.59 ms (10.9%, four of five wins).
+The ranges overlap, so this remains workload-specific supporting evidence
+rather than a general throughput claim.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:

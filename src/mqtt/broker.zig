@@ -436,6 +436,15 @@ const RoutePlan = struct {
     deliveries: []const router_mod.Match,
     session_targets: []const router_mod.Match,
     has_matching_subscriber: bool,
+    scratch_owner: ?*std.ArrayList(router_mod.Match) = null,
+
+    fn deinit(self: RoutePlan, allocator: std.mem.Allocator) void {
+        if (self.scratch_owner) |scratch| {
+            scratch.clearRetainingCapacity();
+        } else {
+            allocator.free(self.storage);
+        }
+    }
 };
 
 const WillPublishProgress = struct {
@@ -480,6 +489,7 @@ const nextConnectionGeneration = session_route.nextConnectionGeneration;
 const sessionSubscriberId = session_route.sessionSubscriberId;
 const sessionRouteId = session_route.sessionRouteId;
 const subscriberIndex = session_route.connectionIndex;
+const route_match_scratch_capacity: usize = 32;
 
 const ClientSlot = struct {
     generation: u32 = 0,
@@ -507,6 +517,10 @@ const ClientSlot = struct {
     writer_mutex: std.Io.Mutex = .init,
     queue: std.ArrayList(Delivery) = .empty,
     queue_head: usize = 0,
+    /// Network publishes keep their route plan alive after the broker state
+    /// lock is released. The publishing task is the sole user of its slot, so
+    /// this buffer can retain that plan without a per-PUBLISH allocation.
+    route_matches: std.ArrayList(router_mod.Match) = .empty,
     /// Connection-local QoS 1/2 payload ownership for transient delivery.
     ///
     /// Durable deliveries are accounted by `session.Store`; recording them
@@ -1209,6 +1223,7 @@ pub const Broker = struct {
         for (self.slots) |*slot| {
             slot.clearQueue();
             slot.queue.deinit(self.allocator);
+            slot.route_matches.deinit(self.allocator);
             slot.transient_inflight_payloads.deinit(self.allocator);
             if (slot.connection) |*connection| connection.close();
         }
@@ -1358,7 +1373,7 @@ pub const Broker = struct {
         ) catch |err| {
             return err;
         };
-        defer self.allocator.free(plan.storage);
+        defer plan.deinit(self.allocator);
         self.publish_messages_received +|= 1;
         self.publish_payload_bytes_received +|= publish.payload.len;
         self.recordPersistentChangeLocked(persistent_changed);
@@ -1506,7 +1521,7 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             return err;
         };
-        defer self.allocator.free(plan.storage);
+        defer plan.deinit(self.allocator);
         if (!self.bridge_qos2.markReleased(key)) {
             self.state_mutex.unlock(self.io);
             return error.InvalidReleaseState;
@@ -1681,7 +1696,7 @@ pub const Broker = struct {
         var plans: [system_metrics.len]RoutePlan = undefined;
         var plan_count: usize = 0;
         defer for (plans[0..plan_count]) |plan| {
-            self.allocator.free(plan.storage);
+            plan.deinit(self.allocator);
         };
         var payloads: [system_metrics.len][64]u8 = undefined;
 
@@ -3674,6 +3689,8 @@ pub const Broker = struct {
             _ = self.pending_qos2.removePublisher(id);
         }
         slot.clearQueue();
+        slot.route_matches.deinit(self.allocator);
+        slot.route_matches = .empty;
         slot.clearTransientInflight();
         // Publish an idle slot only after every field from the old generation
         // has been detached. `claimSlot` observes this state under the same
@@ -4537,7 +4554,7 @@ pub const Broker = struct {
             }
             return err;
         };
-        defer self.allocator.free(plan.storage);
+        defer plan.deinit(self.allocator);
         if (outer_changed) |changed| {
             changed.* = changed.* or persistent_changed;
         }
@@ -4621,12 +4638,13 @@ pub const Broker = struct {
             if (persistent_changed) |changed| changed.* = true;
             if (publication_effect_committed) |committed| committed.* = true;
         }
-        const matches = self.router.matchAllocForPublisher(
-            self.allocator,
-            publish.topic,
+        const match_storage = try self.matchRoutesForPublisherLocked(
+            publisher_id,
             route_publisher_id,
-        ) catch |err| return err;
-        errdefer self.allocator.free(matches);
+            publish.topic,
+        );
+        const matches = match_storage.items;
+        errdefer match_storage.deinit(self.allocator);
         // Compact the router result in place into a stable enqueue plan. This
         // is important for shared subscriptions: running the match a second
         // time would advance their round-robin cursor twice. It also makes the
@@ -4909,7 +4927,66 @@ pub const Broker = struct {
             .deliveries = matches[0..plan_count],
             .session_targets = matches[session_target_start..],
             .has_matching_subscriber = has_matching_subscriber,
+            .scratch_owner = match_storage.scratch_owner,
         };
+    }
+
+    const RouteMatchStorage = struct {
+        items: []router_mod.Match,
+        scratch_owner: ?*std.ArrayList(router_mod.Match) = null,
+
+        fn deinit(
+            self: RouteMatchStorage,
+            allocator: std.mem.Allocator,
+        ) void {
+            if (self.scratch_owner) |scratch| {
+                scratch.clearRetainingCapacity();
+            } else {
+                allocator.free(self.items);
+            }
+        }
+    };
+
+    fn matchRoutesForPublisherLocked(
+        self: *Broker,
+        publisher_id: ?router_mod.SubscriberId,
+        route_publisher_id: ?router_mod.SubscriberId,
+        topic: []const u8,
+    ) Error!RouteMatchStorage {
+        const match_capacity = self.router.subscriptionCount();
+        if (publisher_id) |id| {
+            if (subscriberIndex(id, self.slots.len)) |index| {
+                const slot = &self.slots[index];
+                if (slot.active and
+                    subscriberId(index, slot.generation) == id and
+                    match_capacity <= route_match_scratch_capacity)
+                {
+                    const scratch = &slot.route_matches;
+                    std.debug.assert(scratch.items.len == 0);
+                    errdefer scratch.clearRetainingCapacity();
+                    try scratch.ensureTotalCapacityPrecise(
+                        self.allocator,
+                        match_capacity,
+                    );
+                    scratch.items.len = match_capacity;
+                    const matches = try self.router.matchIntoForPublisher(
+                        topic,
+                        route_publisher_id,
+                        scratch.items,
+                    );
+                    scratch.shrinkRetainingCapacity(matches.len);
+                    return .{
+                        .items = scratch.items,
+                        .scratch_owner = scratch,
+                    };
+                }
+            }
+        }
+        return .{ .items = try self.router.matchAllocForPublisher(
+            self.allocator,
+            topic,
+            route_publisher_id,
+        ) };
     }
 
     fn pruneExpiredSessionRoutesLocked(
@@ -5918,7 +5995,7 @@ pub const Broker = struct {
             &progress.persistent_changed,
             &progress.publication_effect_committed,
         );
-        defer self.allocator.free(plan.storage);
+        defer plan.deinit(self.allocator);
 
         // The state lock cannot be held across socket writes. Queue ownership
         // is committed at this point; the timer loop releases the lock before
@@ -6074,6 +6151,96 @@ test "MQTT delivery queue storage is reserved only for subscribers" {
     try std.testing.expect(
         broker.slots[subscriber_slot].queue.capacity >= queue_capacity,
     );
+}
+
+test "MQTT publisher route plans reuse bounded slot storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_connections = 1 },
+    });
+    defer broker.deinit();
+
+    const slot_index = try broker.claimSlot();
+    const slot = &broker.slots[slot_index];
+    slot.generation = nextConnectionGeneration(slot.generation);
+    const publisher_id = subscriberId(slot_index, slot.generation);
+    try broker.router.subscribe(20, .{ .topic_filter = "tasks/#" });
+    try broker.router.subscribe(10, .{ .topic_filter = "$share/g/tasks/+" });
+    try broker.router.subscribe(11, .{ .topic_filter = "$share/g/tasks/+" });
+
+    var first = try broker.matchRoutesForPublisherLocked(
+        publisher_id,
+        publisher_id,
+        "tasks/a",
+    );
+    try std.testing.expect(first.scratch_owner != null);
+    try std.testing.expectEqual(@as(usize, 2), first.items.len);
+    try std.testing.expectEqual(@as(router_mod.SubscriberId, 10), first.items[1].subscriber_id);
+    const scratch_ptr = first.items.ptr;
+    first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), slot.route_matches.items.len);
+
+    {
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        broker.allocator = failing.allocator();
+        defer broker.allocator = allocator;
+        var second = try broker.matchRoutesForPublisherLocked(
+            publisher_id,
+            publisher_id,
+            "tasks/b",
+        );
+        defer second.deinit(broker.allocator);
+        try std.testing.expect(second.scratch_owner != null);
+        try std.testing.expectEqual(scratch_ptr, second.items.ptr);
+        try std.testing.expectEqual(@as(router_mod.SubscriberId, 11), second.items[1].subscriber_id);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+
+    // Keep retained per-publisher memory bounded. Larger subscription sets
+    // fall back before matching, so an allocation failure cannot advance the
+    // shared group's round-robin cursor.
+    for (30..60) |id| {
+        try broker.router.subscribe(
+            @intCast(id),
+            .{ .topic_filter = "tasks/#" },
+        );
+    }
+    {
+        var failing = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        broker.allocator = failing.allocator();
+        defer broker.allocator = allocator;
+        try std.testing.expectError(
+            error.OutOfMemory,
+            broker.matchRoutesForPublisherLocked(
+                publisher_id,
+                publisher_id,
+                "tasks/c",
+            ),
+        );
+    }
+    var fallback = try broker.matchRoutesForPublisherLocked(
+        null,
+        publisher_id,
+        "tasks/c",
+    );
+    defer fallback.deinit(allocator);
+    try std.testing.expect(fallback.scratch_owner == null);
+    try std.testing.expectEqual(@as(usize, 32), fallback.items.len);
+    try std.testing.expectEqual(
+        @as(router_mod.SubscriberId, 10),
+        fallback.items[fallback.items.len - 1].subscriber_id,
+    );
+
+    broker.releaseClaimedSlot(slot_index);
 }
 
 test "MQTT failed Clean Start journals the durable deletion" {
