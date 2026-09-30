@@ -1501,6 +1501,11 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # identity, and use a bounded size-class cache after PUBREL. The QoS 2 matrix
 # cuts broker allocations 48.5-64.2%; balanced-32x32 falls from 0.109 to 0.043
 # allocations per delivery with neutral fixed-binary timing evidence.
+# Durable Session packets reuse connection-slot encoding scratch while keeping
+# persistence and socket I/O boundaries unchanged. A 64-KiB retention ceiling
+# bounds the tradeoff; the durable QoS 2 matrix cuts allocations 49.0-66.5%,
+# including balanced-32x32 from 3.250 to 1.090 per delivery, with neutral
+# five-pair fixed-binary timing evidence.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

@@ -14,7 +14,6 @@ const session_subscriber_tag: u64 = 1 << 63;
 const max_connection_generation: u32 = (1 << 31) - 1;
 
 pub const EncodedPacket = struct {
-    allocator: std.mem.Allocator,
     bytes: []u8,
     packet_id: u16,
     kind: enum {
@@ -22,21 +21,17 @@ pub const EncodedPacket = struct {
         publish,
         pubrel,
     },
-
-    pub fn deinit(self: *EncodedPacket) void {
-        self.allocator.free(self.bytes);
-        self.* = undefined;
-    }
 };
 
 pub fn encodeTransmission(
+    encoded: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
     protocol: mqtt.ProtocolVersion,
     transmission: session.Transmission,
     maximum_qos: mqtt.QoS,
 ) session.Error!EncodedPacket {
-    var encoded: std.ArrayList(u8) = .empty;
-    errdefer encoded.deinit(allocator);
+    encoded.clearRetainingCapacity();
+    errdefer encoded.clearRetainingCapacity();
     var packet_id: u16 = 0;
     var kind: @FieldType(EncodedPacket, "kind") = .pubrel;
     switch (transmission) {
@@ -49,19 +44,18 @@ pub fn encodeTransmission(
             else
                 .publish;
             try capped.write(
-                &encoded,
+                encoded,
                 allocator,
                 protocol,
             );
         },
         .pubrel => |pubrel| {
             packet_id = pubrel.packet_id;
-            try pubrel.write(&encoded, allocator, protocol);
+            try pubrel.write(encoded, allocator, protocol);
         },
     }
     return .{
-        .allocator = allocator,
-        .bytes = try encoded.toOwnedSlice(allocator),
+        .bytes = encoded.items,
         .packet_id = packet_id,
         .kind = kind,
     };
@@ -83,13 +77,15 @@ test "Session transmission encoding caps publish QoS" {
         .properties = &.{},
         .message_expiry_interval = null,
     } };
-    var encoded = try encodeTransmission(
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(allocator);
+    const encoded = try encodeTransmission(
+        &scratch,
         allocator,
         .v5,
         transmission,
         .at_least_once,
     );
-    defer encoded.deinit();
     var parsed = try mqtt.Publish.parse(
         allocator,
         .v5,
@@ -112,13 +108,15 @@ test "Session transmission capped to QoS0 omits packet identifier" {
         .properties = &.{},
         .message_expiry_interval = null,
     } };
-    var encoded = try encodeTransmission(
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(allocator);
+    const encoded = try encodeTransmission(
+        &scratch,
         allocator,
         .v5,
         transmission,
         .at_most_once,
     );
-    defer encoded.deinit();
     try std.testing.expectEqual(.qos0_publish, encoded.kind);
     try std.testing.expectEqual(@as(u16, 7), encoded.packet_id);
     var parsed = try mqtt.Publish.parse(allocator, .v5, encoded.bytes);
@@ -126,6 +124,46 @@ test "Session transmission capped to QoS0 omits packet identifier" {
     try std.testing.expectEqual(mqtt.QoS.at_most_once, parsed.qos);
     try std.testing.expect(!parsed.dup);
     try std.testing.expectEqual(@as(?u16, null), parsed.packet_id);
+}
+
+test "Session transmission encoding reuses caller scratch" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = failing.allocator();
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(allocator);
+    const transmission = session.Transmission{ .publish = .{
+        .topic = "durable/reuse",
+        .payload = "payload",
+        .qos = .exactly_once,
+        .retain = false,
+        .dup = false,
+        .packet_id = 9,
+        .properties = &.{},
+        .message_expiry_interval = null,
+    } };
+    _ = try encodeTransmission(
+        &scratch,
+        allocator,
+        .v5,
+        transmission,
+        .exactly_once,
+    );
+    const allocation_count = failing.alloc_index;
+    failing.fail_index = allocation_count;
+
+    const encoded = try encodeTransmission(
+        &scratch,
+        allocator,
+        .v5,
+        transmission,
+        .exactly_once,
+    );
+    try std.testing.expectEqual(allocation_count, failing.alloc_index);
+    try std.testing.expectEqual(@as(u16, 9), encoded.packet_id);
+    try std.testing.expectEqual(.publish, encoded.kind);
 }
 
 pub fn connectionSubscriberId(

@@ -828,6 +828,40 @@ fanout-32 (3.385/delivery), 332,797 balanced-32x32 (3.250/delivery), and
 ownership, startup, warmup, measured traffic, and complete teardown; timing is
 intentionally unusable under the counting allocator.
 
+Durable Session delivery now encodes its detached canonical packet into
+connection-slot scratch rather than allocating and freeing a temporary buffer
+for every transmission. The writer mutex gives that buffer one owner, while
+encoding still completes under the broker state lock, persistence still
+completes before socket I/O, and no Session-owned slice escapes the unlock
+boundary. Disconnect releases the scratch, and any allocation above 64 KiB is
+released immediately after its write so a single exceptional message cannot
+leave large storage pinned to every live slot. A fail-first unit test proves a
+warmed ordinary PUBLISH encodes without another allocation, and a separate
+boundary test proves both small-buffer retention and oversized release.
+
+The final three-sample durable allocator matrix at
+`zig-out/mqtt-session-write-scratch-allocator-final` (22,368,160 bytes;
+summary SHA-256
+`ccdd62a64941d0ccead1865d88dfa3866d1f8a17cd950dc0fbfee1755792da35`;
+aggregate file-hash digest
+`84f771ce7fc799dd40e4a35c19fb5662a9d4e41dc6cefb35b21362dd2c557c5d`)
+completed all fifteen runs with `live_bytes=0`. Against the immediately
+preceding durable capture, median allocation counts fell 49.0%, 64.5%, 66.5%,
+66.5%, and 61.1% in shape order. Serial moved from 2,609 to 1,330 allocations
+(5.096 to 2.598/publish), publishers-32 from 13,487 to 4,783 (3.293 to
+1.168/publish), fanout-32 from 221,831 to 74,407 (3.385 to 1.135/delivery),
+balanced-32x32 from 332,797 to 111,645 (3.250 to 1.090/delivery), and
+large-payload from 28,495 to 11,089 (3.478 to 1.354/delivery).
+
+A five-pair alternating-order, fixed-binary durable balanced-32x32 A/B at
+`zig-out/mqtt-session-write-scratch-ab` (36,716,215 bytes; aggregate file-hash
+digest `2da53d9d1aa6181282d33a476227a6b2cc783ba7425ae8bd9812f316aebafc56`)
+used baseline broker `99bacf17`, candidate `679d0e41`, and fixed driver
+`d92ecf95`, with 1,000 warmups and 10,000 measured QoS 2 publishes per arm.
+Every arm completed 320,000 deliveries with checksum 18,656,000. Paired
+medians were +0.3% throughput, -0.5% p50, and -0.2% p99; all ranges overlap,
+so timing is neutral and the exact allocator reduction is the supported result.
+
 A five-pair fixed-binary balanced-32x32 A/B at
 `zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest
 `bd7b0a350ed4e607a87120f007689ec428c9060a387f1ee83f9ef958fe0e33cc`)
