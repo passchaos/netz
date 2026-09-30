@@ -767,6 +767,36 @@ allocations (0.109 per delivery), while serial and large-payload used 2,606
 and a median of 8,837 respectively. These are allocation diagnostics only; the
 thread-safe counting allocator marks timing as unusable.
 
+Inbound QoS 2 `Pending` transactions now place the Topic Name, payload, source
+Client ID, and optional username in one allocation while retaining separate
+deep ownership for nested MQTT properties. The slices preserve their existing
+API and snapshot representation; destruction reconstructs and frees the one
+complete allocation. A fail-after-one test proves the property-free boundary
+and physical layout, and exhaustive allocation-failure coverage exercises
+nested User Property cleanup. The three-sample matrix at
+`zig-out/mqtt-qos2-coalloc-final` (22,359,565 bytes; summary SHA-256
+`00f6c45977e184865b17971dac8087d6e69c358939471f13aa140b88559bd3a9`)
+completed all fifteen runs with zero live bytes. Allocation counts fell by
+24.6-32.6% across the five QoS 2 shapes: serial 2,606 to 1,966,
+publishers-32 13,356 to 9,004, fanout-32 7,491 to 5,187,
+balanced-32x32 11,197 to 7,741, and large-payload 8,837 to a 6,663 median.
+Balanced allocation density fell from 0.109 to 0.076 per delivery without
+changing cumulative requested bytes.
+
+Two five-pair fixed-binary balanced-32x32 A/B sets at
+`zig-out/mqtt-qos2-coalloc-ab` (36,718,144 bytes; aggregate file-hash digest
+`a9f33ea6bf8a82752e46515ee5f7f61aea2fbb43bb23305387e3c7906a97ae04`)
+moved the paired throughput median by +0.5%, p50 by -0.9%, and p99 by -0.9%,
+with six of ten wins for each metric. A separate 50,000-publish,
+32-publisher/one-subscriber five-pair run at
+`zig-out/mqtt-qos2-coalloc-publishers-ab/run.20260930` (15,467 bytes;
+aggregate file-hash digest
+`f78d99db3f718770b3dea97d99730c6cfaf72e8b514890f13cc73d901aa9e925`)
+produced four of five throughput wins and a +1.0% paired median. Its p50/p99
+paired medians improved 1.9%/2.1%, with three wins each. These overlapping
+ranges support no timing-regression conclusion; the exact allocation-count
+reduction is the primary result.
+
 The first complete capture is
 `zig-out/mqtt-broker-allocator-matrix/run.20260930T-final3` (22,253,198
 bytes); summary SHA-256 is

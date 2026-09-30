@@ -24,6 +24,7 @@ pub const Key = packed struct(u80) {
 pub const Pending = struct {
     allocator: std.mem.Allocator,
     bytes: []u8,
+    allocation_len: usize,
     topic_len: usize,
     retain: bool,
     /// Retained-source identity captured from the first PUBLISH. The strings
@@ -70,20 +71,42 @@ pub const Pending = struct {
             publish.topic.len,
             publish.payload.len,
         ) catch return error.OutOfMemory;
-        const bytes = try allocator.alloc(u8, bytes_len);
-        errdefer allocator.free(bytes);
+        const source_client_id_len = if (source_client_id) |value|
+            value.len
+        else
+            0;
+        const source_username_len = if (source_username) |value|
+            value.len
+        else
+            0;
+        const allocation_len = std.math.add(
+            usize,
+            std.math.add(
+                usize,
+                bytes_len,
+                source_client_id_len,
+            ) catch return error.OutOfMemory,
+            source_username_len,
+        ) catch return error.OutOfMemory;
+        const allocation = try allocator.alloc(u8, allocation_len);
+        errdefer allocator.free(allocation);
+        const bytes = allocation[0..bytes_len];
         @memcpy(bytes[0..publish.topic.len], publish.topic);
         @memcpy(bytes[publish.topic.len..], publish.payload);
-        const source_client_id_owned = if (source_client_id) |value|
-            try allocator.dupe(u8, value)
-        else
-            null;
-        errdefer if (source_client_id_owned) |value| allocator.free(value);
-        const source_username_owned = if (source_username) |value|
-            try allocator.dupe(u8, value)
-        else
-            null;
-        errdefer if (source_username_owned) |value| allocator.free(value);
+        var identity_offset = bytes_len;
+        const source_client_id_owned = if (source_client_id) |value| blk: {
+            const owned = allocation[identity_offset..][0..value.len];
+            @memcpy(owned, value);
+            identity_offset += value.len;
+            break :blk owned;
+        } else null;
+        const source_username_owned = if (source_username) |value| blk: {
+            const owned = allocation[identity_offset..][0..value.len];
+            @memcpy(owned, value);
+            identity_offset += value.len;
+            break :blk owned;
+        } else null;
+        std.debug.assert(identity_offset == allocation.len);
         const property_result = owned_properties.clone(
             allocator,
             publish.properties,
@@ -95,6 +118,7 @@ pub const Pending = struct {
         return .{
             .allocator = allocator,
             .bytes = bytes,
+            .allocation_len = allocation.len,
             .topic_len = publish.topic.len,
             .retain = publish.retain,
             .source_client_id = source_client_id_owned,
@@ -110,9 +134,7 @@ pub const Pending = struct {
 
     pub fn deinit(self: *Pending) void {
         owned_properties.deinit(self.allocator, self.properties);
-        if (self.source_username) |value| self.allocator.free(value);
-        if (self.source_client_id) |value| self.allocator.free(value);
-        self.allocator.free(self.bytes);
+        self.allocator.free(self.bytes.ptr[0..self.allocation_len]);
         self.* = undefined;
     }
 
@@ -555,6 +577,83 @@ fn remainingAfterDowntimeNs(
         std.math.maxInt(u64),
     ));
     return value -| elapsed;
+}
+
+test "QoS 2 pending coallocates message and source identity bytes" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    var pending = try Pending.createWithSource(
+        failing.allocator(),
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "coallocated/topic",
+            .packet_id = 7,
+            .payload = "payload",
+        },
+        "client",
+        "user",
+        1883,
+        .zero,
+    );
+    defer pending.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(
+        @intFromPtr(pending.bytes.ptr) + pending.bytes.len,
+        @intFromPtr(pending.source_client_id.?.ptr),
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(pending.source_client_id.?.ptr) +
+            pending.source_client_id.?.len,
+        @intFromPtr(pending.source_username.?.ptr),
+    );
+    try std.testing.expectEqualStrings(
+        "coallocated/topic",
+        pending.bytes[0..pending.topic_len],
+    );
+    try std.testing.expectEqualStrings(
+        "payload",
+        pending.bytes[pending.topic_len..],
+    );
+}
+
+test "QoS 2 pending coallocation is failure-safe with properties" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var properties = [_]mqtt.Property{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "source",
+                .value = "test",
+            } }};
+            var pending = try Pending.createWithSource(
+                allocator,
+                .{
+                    .dup = false,
+                    .qos = .exactly_once,
+                    .retain = false,
+                    .topic = "failure/topic",
+                    .packet_id = 9,
+                    .properties = &properties,
+                    .payload = "payload",
+                },
+                "client",
+                "user",
+                1883,
+                .zero,
+            );
+            pending.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Context.run,
+        .{},
+    );
 }
 
 test "QoS 2 store owns bytes and preserves the first duplicate PUBLISH" {
