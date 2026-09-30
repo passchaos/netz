@@ -57,6 +57,72 @@ test "session clean start and expiry control Session Present" {
     try std.testing.expect(!after_expiry.session_present);
 }
 
+test "session reuses bounded outgoing publish wire storage" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = failing.allocator();
+    var store = Store.init(allocator, .{ .max_sessions = 1 });
+    defer store.deinit();
+    const opened = try store.open("wire-cache", false, 60, .zero);
+    const options: session.EnqueueOptions = .{
+        .qos = .at_least_once,
+        .now = .zero,
+    };
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "cache/topic",
+        "payload",
+        options,
+    );
+    try std.testing.expectEqual(
+        @as(usize, "wire-cache".len + "cache/topic".len + "payload".len),
+        (try store.stats(opened.handle)).owned_wire_bytes,
+    );
+    var output: [1]Transmission = undefined;
+    const first = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    const first_wire = first[0].publish.topic.ptr;
+    _ = try store.handleAck(
+        opened.handle,
+        .puback,
+        first[0].publish.packet_id,
+        0,
+    );
+    try std.testing.expectEqual(
+        @as(usize, "wire-cache".len),
+        (try store.stats(opened.handle)).owned_wire_bytes,
+    );
+    const allocations = failing.allocations;
+    failing.fail_index = failing.alloc_index;
+
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "cache/topic",
+        "payload",
+        options,
+    );
+    const second = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(allocations, failing.allocations);
+    try std.testing.expectEqual(first_wire, second[0].publish.topic.ptr);
+    _ = try store.handleAck(
+        opened.handle,
+        .puback,
+        second[0].publish.packet_id,
+        0,
+    );
+}
+
 test "session maps MQTT versions to expiry semantics" {
     try std.testing.expectEqual(
         @as(u32, 0),

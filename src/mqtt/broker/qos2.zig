@@ -10,6 +10,7 @@ const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
 const persistence = @import("../persistence/codec.zig");
 const router = @import("../router.zig");
+const StorageCache = @import("../storage_cache.zig").Cache;
 
 pub const Error = mqtt.Error || error{
     PendingLimitExceeded,
@@ -19,104 +20,6 @@ pub const Error = mqtt.Error || error{
 pub const Key = packed struct(u80) {
     publisher_id: router.SubscriberId,
     packet_id: u16,
-};
-
-const PendingStorageCache = struct {
-    const max_cacheable_storage: usize = 64 * 1024;
-    const max_cached_bytes: usize = 1024 * 1024;
-    const class_count: usize = @ctz(max_cacheable_storage) + 1;
-    const link_size = @sizeOf(usize);
-
-    allocator: std.mem.Allocator,
-    max_blocks: usize,
-    heads: [class_count]?[*]u8 = .{null} ** class_count,
-    block_count: usize = 0,
-    byte_count: usize = 0,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        max_blocks: usize,
-    ) PendingStorageCache {
-        return .{ .allocator = allocator, .max_blocks = max_blocks };
-    }
-
-    fn deinit(self: *PendingStorageCache) void {
-        for (self.heads, 0..) |maybe_head, size_class| {
-            var head = maybe_head;
-            const storage_len = @as(usize, 1) << @intCast(size_class);
-            while (head) |pointer| {
-                const storage = pointer[0..storage_len];
-                const next_address = std.mem.readInt(
-                    usize,
-                    storage[0..link_size],
-                    .native,
-                );
-                head = if (next_address == 0)
-                    null
-                else
-                    @ptrFromInt(next_address);
-                self.allocator.free(storage);
-            }
-        }
-        self.* = undefined;
-    }
-
-    fn acquire(
-        self: *PendingStorageCache,
-        required_len: usize,
-    ) std.mem.Allocator.Error![]u8 {
-        if (required_len == 0) return self.allocator.alloc(u8, 0);
-        const storage_len = if (required_len <= max_cacheable_storage)
-            std.math.ceilPowerOfTwo(usize, required_len) catch unreachable
-        else
-            required_len;
-        if (storage_len <= max_cacheable_storage) {
-            const size_class: usize = @ctz(storage_len);
-            if (self.heads[size_class]) |pointer| {
-                const storage = pointer[0..storage_len];
-                const next_address = std.mem.readInt(
-                    usize,
-                    storage[0..link_size],
-                    .native,
-                );
-                self.heads[size_class] = if (next_address == 0)
-                    null
-                else
-                    @ptrFromInt(next_address);
-                self.block_count -= 1;
-                self.byte_count -= storage.len;
-                return storage;
-            }
-        }
-        return self.allocator.alloc(u8, storage_len);
-    }
-
-    fn release(self: *PendingStorageCache, storage: []u8) void {
-        if (storage.len >= link_size and
-            storage.len <= max_cacheable_storage and
-            std.math.isPowerOfTwo(storage.len) and
-            self.block_count < self.max_blocks and
-            storage.len <= max_cached_bytes -
-                @min(max_cached_bytes, self.byte_count))
-        {
-            const size_class: usize = @ctz(storage.len);
-            const next_address = if (self.heads[size_class]) |head|
-                @intFromPtr(head)
-            else
-                0;
-            std.mem.writeInt(
-                usize,
-                storage[0..link_size],
-                next_address,
-                .native,
-            );
-            self.heads[size_class] = storage.ptr;
-            self.block_count += 1;
-            self.byte_count += storage.len;
-            return;
-        }
-        self.allocator.free(storage);
-    }
 };
 
 pub const Pending = struct {
@@ -164,7 +67,7 @@ pub const Pending = struct {
 
     fn createWithSourceAndCache(
         allocator: std.mem.Allocator,
-        cache: ?*PendingStorageCache,
+        cache: ?*StorageCache,
         publish: mqtt.Publish,
         source_client_id: ?[]const u8,
         source_username: ?[]const u8,
@@ -262,7 +165,7 @@ pub const Pending = struct {
 
     fn deinitWithCache(
         self: *Pending,
-        cache: ?*PendingStorageCache,
+        cache: ?*StorageCache,
     ) void {
         owned_properties.deinit(self.allocator, self.properties);
         const allocation = self.bytes.ptr[0..self.allocation_len];
@@ -319,7 +222,7 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     maximum: usize,
     entries: std.AutoHashMapUnmanaged(Key, Pending) = .empty,
-    storage_cache: PendingStorageCache,
+    storage_cache: StorageCache,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -722,44 +625,6 @@ fn remainingAfterDowntimeNs(
     return value -| elapsed;
 }
 
-test "QoS 2 pending storage cache respects the transaction bound" {
-    const allocator = std.testing.allocator;
-    {
-        var cache = PendingStorageCache.init(allocator, 2);
-        defer cache.deinit();
-
-        const first = try cache.acquire(80);
-        const second = try cache.acquire(80);
-        const excess = try cache.acquire(80);
-        cache.release(first);
-        cache.release(second);
-        cache.release(excess);
-        try std.testing.expectEqual(@as(usize, 2), cache.block_count);
-        try std.testing.expectEqual(@as(usize, 256), cache.byte_count);
-    }
-    {
-        var cache = PendingStorageCache.init(
-            allocator,
-            std.math.maxInt(usize),
-        );
-        defer cache.deinit();
-        const block_count = PendingStorageCache.max_cached_bytes /
-            PendingStorageCache.max_cacheable_storage;
-        var blocks: [block_count + 1][]u8 = undefined;
-        for (&blocks) |*storage| {
-            storage.* = try cache.acquire(
-                PendingStorageCache.max_cacheable_storage,
-            );
-        }
-        for (blocks) |storage| cache.release(storage);
-        try std.testing.expectEqual(block_count, cache.block_count);
-        try std.testing.expectEqual(
-            PendingStorageCache.max_cached_bytes,
-            cache.byte_count,
-        );
-    }
-}
-
 test "QoS 2 pending coallocates message and source identity bytes" {
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
@@ -864,7 +729,10 @@ test "QoS 2 store reuses bounded pending storage" {
     var first = store.take(10, 7).?;
     const first_storage = first.bytes.ptr;
     store.recycle(&first);
-    try std.testing.expectEqual(@as(usize, 1), store.storage_cache.block_count);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        store.storage_cache.cachedBlockCount(),
+    );
 
     var second_publish = first_publish;
     second_publish.packet_id = 8;

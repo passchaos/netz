@@ -862,6 +862,44 @@ Every arm completed 320,000 deliveries with checksum 18,656,000. Paired
 medians were +0.3% throughput, -0.5% p50, and -0.2% p99; all ranges overlap,
 so timing is neutral and the exact allocator reduction is the supported result.
 
+Completed outgoing Session messages now return their coallocated Topic Name
+and payload block to a Store-owned power-of-two cache. The cache implementation
+is shared with inbound QoS 2 storage rather than duplicating allocator policy,
+while each Store keeps independent ownership. Session reuse retains no more
+blocks than the configured Session limit and no more than 1 MiB total; blocks
+above 64 KiB are freed immediately. The byte limits and `owned_wire_bytes`
+gauges continue to charge exact live Topic Name, payload, and property bytes
+rather than size-class rounding or idle cache capacity. Tests cover block-count
+and byte ceilings, oversized release, exact Session accounting, pointer reuse,
+allocation-free steady-state enqueue/drain/ACK, and cache teardown.
+
+The final three-sample matrix at
+`zig-out/mqtt-session-wire-cache-allocator-final2` (22,376,564 bytes; summary
+SHA-256 `a5a7a9b4c1834d20b85db9b83386d06d26e1ae14ec3b90c58ad380345d3e9de6`;
+aggregate file-hash digest
+`48ebad386bccce09f14a4297f5272414d7b3bf3f9933298564a8a260f0120c8a`)
+completed all fifteen runs with `live_bytes=0`. Relative to the preceding
+Session-write-scratch capture, allocation counts fell another 48.0%, 90.9%,
+99.0%, 99.0%, and 78.2% in shape order: serial used 692 allocations
+(1.352/publish), publishers-32 437 (0.107/publish), fanout-32 756
+(0.012/delivery), balanced-32x32 1,106 (0.011/delivery), and large-payload
+2,414 (0.295/delivery). Median peak live bytes varied from -0.1% to +2.0%; the
+largest increase was 143,250 bytes in the 4-KiB shape and remains below the
+explicit 1-MiB cache ceiling.
+
+A two-shape, five-pair alternating-order fixed-binary A/B at
+`zig-out/mqtt-session-wire-cache-ab-final` (36,737,527 bytes; aggregate
+file-hash digest
+`1218260adc6b7c82164ee0242c171141ec1dd7330e5aa4c526e96d9f6bbd77fb`)
+used baseline broker `679d0e41`, candidate `a5b0dc64`, and fixed driver
+`d92ecf95`, with a 3,600-second Session Expiry, 1,000 warmups, and 10,000
+measured QoS 2 publishes per arm. Every balanced arm completed 320,000
+deliveries with checksum 18,656,000; every 4-KiB arm completed 40,000 with
+checksum 10,780,000. Paired throughput/p50/p99 medians were
+-1.1%/+1.3%/+0.5% for balanced-32x32 and -0.6%/+0.0%/+0.7% for large-payload.
+The ranges overlap and timing is neutral; the repeatable allocator reduction
+is the supported result.
+
 A five-pair fixed-binary balanced-32x32 A/B at
 `zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest
 `bd7b0a350ed4e607a87120f007689ec428c9060a387f1ee83f9ef958fe0e33cc`)

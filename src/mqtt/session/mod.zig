@@ -9,6 +9,7 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
 const persistence = @import("../persistence/codec.zig");
+const StorageCache = @import("../storage_cache.zig").Cache;
 
 pub const Error = mqtt.Error || error{
     SessionNotFound,
@@ -255,6 +256,7 @@ const OwnedPublish = struct {
     /// two slices removes one allocator round trip without sharing reconnect
     /// ownership or changing snapshot/wire views.
     wire: []u8,
+    wire_allocation_len: usize,
     topic: []u8,
     payload: []u8,
     qos: mqtt.QoS,
@@ -264,9 +266,14 @@ const OwnedPublish = struct {
     expiry_interval: ?u32,
     allocation_bytes: usize,
 
-    fn deinit(self: *OwnedPublish, allocator: std.mem.Allocator) void {
+    fn deinit(
+        self: *OwnedPublish,
+        allocator: std.mem.Allocator,
+        cache: *StorageCache,
+    ) void {
         owned_properties.deinit(allocator, self.properties);
-        allocator.free(self.wire);
+        const allocation = self.wire.ptr[0..self.wire_allocation_len];
+        cache.release(allocation);
         self.* = undefined;
     }
 };
@@ -342,7 +349,11 @@ const Session = struct {
     next_packet_id: u16 = 1,
     allocation_bytes: usize,
 
-    fn deinit(self: *Session, allocator: std.mem.Allocator) void {
+    fn deinit(
+        self: *Session,
+        allocator: std.mem.Allocator,
+        cache: *StorageCache,
+    ) void {
         for (self.subscriptions.items) |*maybe_subscription| {
             if (maybe_subscription.*) |*subscription| {
                 subscription.deinit(allocator);
@@ -350,17 +361,19 @@ const Session = struct {
         }
         self.subscriptions.deinit(allocator);
         for (self.queued.items) |*maybe_publish| {
-            if (maybe_publish.*) |*publish| publish.deinit(allocator);
+            if (maybe_publish.*) |*publish| {
+                publish.deinit(allocator, cache);
+            }
         }
         self.queued.deinit(allocator);
         for (self.inflight.items) |*maybe_inflight| {
             if (maybe_inflight.*) |*inflight| {
-                inflight.publish.deinit(allocator);
+                inflight.publish.deinit(allocator, cache);
             }
         }
         self.inflight.deinit(allocator);
         if (self.pending_qos0) |*pending| {
-            pending.publish.deinit(allocator);
+            pending.publish.deinit(allocator, cache);
         }
         self.packet_index.deinit(allocator);
         self.incoming_qos2.deinit(allocator);
@@ -377,6 +390,7 @@ pub const Store = struct {
     route_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     session_count: usize = 0,
     total_bytes: usize = 0,
+    publish_wire_cache: StorageCache,
     next_generation: u64 = 1,
     next_route_id: u64 = 1,
     /// Conservative lower bound for the next offline Session expiry.
@@ -390,18 +404,26 @@ pub const Store = struct {
         allocator: std.mem.Allocator,
         options: Options,
     ) Store {
-        return .{ .allocator = allocator, .options = options };
+        return .{
+            .allocator = allocator,
+            .options = options,
+            .publish_wire_cache = .init(allocator, options.max_sessions),
+        };
     }
 
     pub fn deinit(self: *Store) void {
         for (self.sessions.items) |*maybe_session| {
             if (maybe_session.*) |*session| {
-                session.deinit(self.allocator);
+                session.deinit(
+                    self.allocator,
+                    &self.publish_wire_cache,
+                );
             }
         }
         self.sessions.deinit(self.allocator);
         self.client_index.deinit(self.allocator);
         self.route_index.deinit(self.allocator);
+        self.publish_wire_cache.deinit();
         self.* = undefined;
     }
 
@@ -811,13 +833,17 @@ pub const Store = struct {
         for (0..queued_count) |_| {
             var restored = try readPublishSnapshot(
                 self.allocator,
+                &self.publish_wire_cache,
                 cursor,
                 restore_now.nanoseconds,
                 downtime_ns,
                 false,
             );
             if (restored) |*publish| {
-                errdefer publish.deinit(self.allocator);
+                errdefer publish.deinit(
+                    self.allocator,
+                    &self.publish_wire_cache,
+                );
                 if (queuedPayloadLimitReached(
                     self.options,
                     session.queued_payload_bytes,
@@ -859,6 +885,7 @@ pub const Store = struct {
             ) orelse return error.CorruptSnapshot;
             var publish = (try readPublishSnapshot(
                 self.allocator,
+                &self.publish_wire_cache,
                 cursor,
                 restore_now.nanoseconds,
                 downtime_ns,
@@ -866,7 +893,10 @@ pub const Store = struct {
             )) orelse {
                 continue;
             };
-            errdefer publish.deinit(self.allocator);
+            errdefer publish.deinit(
+                self.allocator,
+                &self.publish_wire_cache,
+            );
             if (packet_id == 0 or
                 session.packet_index.contains(packet_id))
             {
@@ -1593,6 +1623,7 @@ pub const Store = struct {
         }
         var publish = try clonePublish(
             self.allocator,
+            &self.publish_wire_cache,
             topic,
             payload,
             options.qos,
@@ -1600,7 +1631,10 @@ pub const Store = struct {
             options.properties,
             options.now.nanoseconds,
         );
-        errdefer publish.deinit(self.allocator);
+        errdefer publish.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
         try self.ensureBytes(session, publish.allocation_bytes);
         const queued_payload_bytes = std.math.add(
             usize,
@@ -1704,6 +1738,7 @@ pub const Store = struct {
 
         var publish = try clonePublish(
             self.allocator,
+            &self.publish_wire_cache,
             topic,
             payload,
             options.qos,
@@ -1711,7 +1746,10 @@ pub const Store = struct {
             options.properties,
             options.now.nanoseconds,
         );
-        errdefer publish.deinit(self.allocator);
+        errdefer publish.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
         try self.ensureBytes(session, publish.allocation_bytes);
         try session.packet_index.ensureUnusedCapacity(self.allocator, 1);
         const append_needed: usize = @intFromBool(
@@ -2149,7 +2187,10 @@ pub const Store = struct {
             session.pending_qos0 = null;
             session.allocation_bytes -= publish.allocation_bytes;
             self.total_bytes -= publish.allocation_bytes;
-            publish.deinit(self.allocator);
+            publish.deinit(
+                self.allocator,
+                &self.publish_wire_cache,
+            );
             advanceQueueHead(session);
             return .dropped;
         }
@@ -2191,7 +2232,10 @@ pub const Store = struct {
         session.pending_qos0 = null;
         session.allocation_bytes -= publish.allocation_bytes;
         self.total_bytes -= publish.allocation_bytes;
-        publish.deinit(self.allocator);
+        publish.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
         advanceQueueHead(session);
     }
 
@@ -2506,7 +2550,10 @@ pub const Store = struct {
         self.sessions.items[index] = null;
         self.session_count -= 1;
         self.total_bytes -= session.allocation_bytes;
-        session.deinit(self.allocator);
+        session.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
     }
 
     fn isExpired(
@@ -2558,7 +2605,10 @@ pub const Store = struct {
                 session.queued_payload_bytes -= removed.payload.len;
                 session.allocation_bytes -= removed.allocation_bytes;
                 self.total_bytes -= removed.allocation_bytes;
-                removed.deinit(self.allocator);
+                removed.deinit(
+                    self.allocator,
+                    &self.publish_wire_cache,
+                );
                 changed = true;
             }
         }
@@ -2589,12 +2639,16 @@ pub const Store = struct {
         session.inflight_payload_bytes -= inflight.publish.payload.len;
         session.allocation_bytes -= inflight.publish.allocation_bytes;
         self.total_bytes -= inflight.publish.allocation_bytes;
-        inflight.publish.deinit(self.allocator);
+        inflight.publish.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
     }
 };
 
 fn clonePublish(
     allocator: std.mem.Allocator,
+    cache: *StorageCache,
     topic: []const u8,
     payload: []const u8,
     qos: mqtt.QoS,
@@ -2604,8 +2658,9 @@ fn clonePublish(
 ) Error!OwnedPublish {
     const wire_len = std.math.add(usize, topic.len, payload.len) catch
         return error.SessionByteLimitExceeded;
-    const wire = try allocator.alloc(u8, wire_len);
-    errdefer allocator.free(wire);
+    const allocation = try cache.acquire(wire_len);
+    errdefer cache.release(allocation);
+    const wire = allocation[0..wire_len];
     @memcpy(wire[0..topic.len], topic);
     @memcpy(wire[topic.len..], payload);
     const property_result = owned_properties.clone(
@@ -2627,6 +2682,7 @@ fn clonePublish(
     ) catch return error.SessionByteLimitExceeded;
     return .{
         .wire = wire,
+        .wire_allocation_len = allocation.len,
         .topic = wire[0..topic.len],
         .payload = wire[topic.len..],
         .qos = qos,
@@ -2734,6 +2790,7 @@ fn writePublishSnapshot(
 
 fn readPublishSnapshot(
     allocator: std.mem.Allocator,
+    cache: *StorageCache,
     cursor: *persistence.Cursor,
     restore_now_ns: i96,
     downtime_ns: i96,
@@ -2760,6 +2817,7 @@ fn readPublishSnapshot(
 
     var publish = try clonePublish(
         allocator,
+        cache,
         topic,
         payload,
         qos,
@@ -2767,6 +2825,7 @@ fn readPublishSnapshot(
         properties,
         restore_now_ns,
     );
+    errdefer publish.deinit(allocator, cache);
     if (!ignore_expiry) if (remaining_ns) |remaining| {
         const interval = publish.expiry_interval orelse
             return error.CorruptSnapshot;

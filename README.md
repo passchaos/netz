@@ -1506,6 +1506,10 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # bounds the tradeoff; the durable QoS 2 matrix cuts allocations 49.0-66.5%,
 # including balanced-32x32 from 3.250 to 1.090 per delivery, with neutral
 # five-pair fixed-binary timing evidence.
+# Completed Session Topic Name/payload blocks also enter a 64-KiB-per-block,
+# 1-MiB-total Store cache shared in implementation with pending QoS 2 storage.
+# Balanced and fanout durable QoS 2 fall to 0.011/0.012 allocations/delivery;
+# two-shape fixed-binary timing remains neutral.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \
