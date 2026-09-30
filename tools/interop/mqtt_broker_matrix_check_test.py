@@ -14,7 +14,12 @@ SPEC.loader.exec_module(CHECK)
 
 
 class MqttBrokerMatrixCheckTest(unittest.TestCase):
-    def make_matrix(self, root: Path, qos: int = 1) -> None:
+    def make_matrix(
+        self,
+        root: Path,
+        qos: int = 1,
+        session_expiry_seconds: int = 0,
+    ) -> None:
         identity = root / "identity"
         identity.mkdir(parents=True)
         for name in CHECK.IDENTITY_FILES - {"mosquitto-head.txt"}:
@@ -44,7 +49,9 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
             "record=environment protocol=mqtt5 transport=tcp "
             f"mode=qos{qos}-fanout-matrix benchmark_scope=same-client-workload "
             "timing_usable=true client_tcp_nodelay=true "
-            "server_tcp_nodelay=true shapes=5 samples=4 schedule=abba "
+            "server_tcp_nodelay=true "
+            f"session_expiry_seconds={session_expiry_seconds} "
+            "shapes=5 samples=4 schedule=abba "
             "client_cpu=0 server_cpu=1 sampler_cpu=2 "
             "rss_source=proc-vmrss-sampled-2ms max_artifact_bytes=33554432 "
             "max_matrix_bytes=134217728 host=test arch=aarch64 "
@@ -71,6 +78,7 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                     f"mode=qos{qos}-fanout benchmark_scope=same-client-workload "
                     "timing_usable=true client_tcp_nodelay=true "
                     "server_tcp_nodelay=true "
+                    f"session_expiry_seconds={session_expiry_seconds} "
                     f"broker_order={CHECK.expected_order(sample)} "
                     "client_cpu=0 server_cpu=1 sampler_cpu=2 complete=true\n"
                     "record=verified protocol=mqtt5 transport=tcp "
@@ -83,7 +91,9 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                     f"deliveries={shape.messages * shape.subscribers} "
                     f"payload_bytes={shape.payload_bytes} "
                     f"publisher_window={shape.window} "
-                    f"server_queue_capacity={queue} checksum={checksum} "
+                    f"server_queue_capacity={queue} "
+                    f"session_expiry_seconds={session_expiry_seconds} "
+                    f"checksum={checksum} "
                     "client_io=zio-std-io "
                     "server_io=zio-std-io+mosquitto-event-loop complete=true\n",
                     encoding="utf-8",
@@ -108,7 +118,8 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                         f"publishers={shape.publishers} subscribers={shape.subscribers} "
                         "overlapping_subscriptions=1 "
                         f"publisher_window={shape.window} server_queue_capacity={queue} "
-                        f"session_expiry_seconds=0 warmup={shape.warmup} "
+                        f"session_expiry_seconds={session_expiry_seconds} "
+                        f"warmup={shape.warmup} "
                         f"publishes={shape.messages} "
                         f"deliveries={shape.messages * shape.subscribers} "
                         f"payload_bytes={shape.payload_bytes} elapsed_ns={elapsed} "
@@ -136,8 +147,21 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-    def verify(self, root: Path, qos: int = 1) -> list[str]:
-        return CHECK.verify(root, 4, 0, 1, 2, qos)
+    def verify(
+        self,
+        root: Path,
+        qos: int = 1,
+        session_expiry_seconds: int = 0,
+    ) -> list[str]:
+        return CHECK.verify(
+            root,
+            4,
+            0,
+            1,
+            2,
+            qos,
+            session_expiry_seconds,
+        )
 
     def test_accepts_complete_matrix(self) -> None:
         with TemporaryDirectory() as directory:
@@ -156,6 +180,18 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
             output = self.verify(root, qos=2)
             self.assertIn("mode=qos2-fanout-matrix", output[0])
             self.assertIn("mode=qos2-fanout", output[1])
+
+    def test_accepts_persistent_session_matrix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_matrix(root, qos=2, session_expiry_seconds=3600)
+            output = self.verify(
+                root,
+                qos=2,
+                session_expiry_seconds=3600,
+            )
+            self.assertIn("session_expiry_seconds=3600", output[0])
+            self.assertIn("session_expiry_seconds=3600", output[1])
 
     def test_rejects_missing_shape(self) -> None:
         with TemporaryDirectory() as directory:

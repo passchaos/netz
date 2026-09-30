@@ -56,6 +56,7 @@ const Config = struct {
     ignore_connection_errors: bool = false,
     allocator_stats: bool = false,
     allocator_stats_qos: ?u2 = null,
+    allocator_stats_session_expiry_seconds: ?u32 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -402,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
                 "protocol=mqtt5 transport=tcp mode=qos{d}-fanout " ++
                 "timing_usable=false allocator_scope=broker-explicit " ++
                 "connection_scope=persistent client_tcp_nodelay=true " ++
-                "server_tcp_nodelay=true " ++
+                "server_tcp_nodelay=true session_expiry_seconds={d} " ++
                 "configured_connections={d} alloc_count={d} " ++
                 "free_count={d} resize_count={d} remap_count={d} " ++
                 "total_allocated_bytes={d} total_freed_bytes={d} " ++
@@ -412,6 +413,7 @@ pub fn main(init: std.process.Init) !void {
                 "alloc_le_65536={d} alloc_gt_65536={d} complete=true\n",
             .{
                 config.allocator_stats_qos orelse 1,
+                config.allocator_stats_session_expiry_seconds orelse 0,
                 config.connections,
                 snapshot.alloc_count,
                 snapshot.free_count,
@@ -899,6 +901,17 @@ fn parseArgs(
                 2
             else
                 return error.InvalidArgument;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--allocator-stats-session-expiry-seconds=",
+        )) {
+            config.allocator_stats_session_expiry_seconds =
+                try std.fmt.parseInt(
+                    u32,
+                    arg["--allocator-stats-session-expiry-seconds=".len..],
+                    10,
+                );
         } else {
             return error.InvalidArgument;
         }
@@ -917,7 +930,10 @@ fn parseArgs(
     {
         return error.InvalidArgument;
     }
-    if (config.allocator_stats_qos != null and !config.allocator_stats) {
+    if ((config.allocator_stats_qos != null or
+        config.allocator_stats_session_expiry_seconds != null) and
+        !config.allocator_stats)
+    {
         return error.InvalidArgument;
     }
     if ((config.username == null) != (config.password == null)) {

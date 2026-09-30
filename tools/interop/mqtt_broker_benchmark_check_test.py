@@ -13,7 +13,13 @@ SPEC.loader.exec_module(CHECK)
 
 
 class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
-    def record(self, server: str, server_io: str, qos: int = 1) -> str:
+    def record(
+        self,
+        server: str,
+        server_io: str,
+        qos: int = 1,
+        session_expiry_seconds: int = 0,
+    ) -> str:
         elapsed = 1_000_000
         return (
             "record=result implementation=netz protocol=mqtt5 transport=tcp "
@@ -24,7 +30,8 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             "connection_scope=persistent publishers=2 subscribers=2 "
             "overlapping_subscriptions=1 publisher_window=8 "
             "server_queue_capacity=1024 "
-            "session_expiry_seconds=0 warmup=10 publishes=100 deliveries=200 "
+            f"session_expiry_seconds={session_expiry_seconds} "
+            "warmup=10 publishes=100 deliveries=200 "
             f"payload_bytes=256 elapsed_ns={elapsed} publishes_per_s=100000 "
             "deliveries_per_s=200000 p50_ns=10 p99_ns=20 p999_ns=30 "
             "client_alloc_count=100 client_total_allocated_bytes=10000 "
@@ -32,9 +39,24 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             "checksum=53900 complete=true\n"
         )
 
-    def verify(self, netz: Path, mosquitto: Path, qos: int = 1) -> str:
+    def verify(
+        self,
+        netz: Path,
+        mosquitto: Path,
+        qos: int = 1,
+        session_expiry_seconds: int = 0,
+    ) -> str:
         return CHECK.verify(
-            netz, mosquitto, 2, 2, 10, 100, 256, 8, qos=qos
+            netz,
+            mosquitto,
+            2,
+            2,
+            10,
+            100,
+            256,
+            8,
+            qos=qos,
+            session_expiry_seconds=session_expiry_seconds,
         )
 
     def test_accepts_complete_pair(self) -> None:
@@ -68,6 +90,40 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
                 self.record("mosquitto", "mosquitto-event-loop", qos=2)
             )
             with self.assertRaisesRegex(ValueError, "mode"):
+                self.verify(netz, mosquitto)
+
+    def test_accepts_persistent_session_pair(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record(
+                "netz", "zio-std-io", session_expiry_seconds=3600
+            ))
+            mosquitto.write_text(self.record(
+                "mosquitto",
+                "mosquitto-event-loop",
+                session_expiry_seconds=3600,
+            ))
+            output = self.verify(
+                netz,
+                mosquitto,
+                session_expiry_seconds=3600,
+            )
+            self.assertIn("session_expiry_seconds=3600", output)
+
+    def test_rejects_session_expiry_mismatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record(
+                "netz", "zio-std-io", session_expiry_seconds=3600
+            ))
+            mosquitto.write_text(self.record(
+                "mosquitto",
+                "mosquitto-event-loop",
+                session_expiry_seconds=3600,
+            ))
+            with self.assertRaisesRegex(ValueError, "session_expiry_seconds"):
                 self.verify(netz, mosquitto)
 
     def test_accepts_broker_rss_pair(self) -> None:

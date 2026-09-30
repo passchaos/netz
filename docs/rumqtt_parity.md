@@ -737,6 +737,34 @@ future QoS 2 transaction-state work the same fixed binaries, source lock,
 completion checks, CPU assignment, queue bounds and retained artifacts already
 used for QoS 1.
 
+The runner and both strict checkers now accept
+`MQTT_SESSION_EXPIRY_SECONDS=0..4294967295` and bind its canonical value into
+the driver result, run-order, environment, shape, allocator, and completion
+records. A nonzero value keeps each MQTT 5 publisher and subscriber Session
+durable while the connection remains online; this matrix measures the cost of
+durable Session ownership during live traffic, not disconnected queue replay.
+The 3,600-second QoS 2 capture at
+`zig-out/mqtt-broker-durable-qos2-matrix-final` (23,132,475 bytes; summary
+SHA-256 `efc6de9d35fd92e85813a9883e547c8a9abdf89a0387abe2d256f2c28ea7d861`;
+aggregate file-hash digest
+`db57b9318f1a424ad29044fe0707bec3d782a9e68aed6fab7704837740fd2f66`)
+completed all 40 ABBA broker runs with exact delivery counts and checksums.
+Rates and p99 are medians:
+
+| durable QoS 2 shape | netz publish/s [range] | Mosquitto publish/s [range] | netz/Mosquitto | p99 ms netz / Mosquitto | broker RSS MiB netz / Mosquitto |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| serial | 12,650 [12,312–12,724] | 20,311 [18,719–21,220] | 0.623× | 0.081 / 0.057 | 4.56 / 2.96 |
+| publishers-32 | 23,403 [23,301–23,456] | 32,431 [32,298–32,726] | 0.722× | 5.120 / 3.440 | 5.49 / 3.28 |
+| fanout-32 | 1,521 [1,517–1,532] | 2,265 [2,249–2,279] | 0.672× | 2.625 / 1.466 | 5.63 / 3.13 |
+| balanced-32x32 | 1,515 [1,462–1,528] | 2,548 [2,512–2,580] | 0.595× | 83.261 / 44.896 | 6.42 / 3.60 |
+| large-payload | 10,656 [10,490–10,668] | 14,341 [14,249–15,076] | 0.743× | 5.667 / 4.963 | 5.52 / 3.42 |
+
+As with the transient QoS 2 capture, this durable result exposes a throughput,
+tail-latency, and RSS deficit in all five shapes. Separate QoS 1 and QoS 2
+two-publisher/two-subscriber smoke runs also completed 400 deliveries per
+broker with checksum 23,320, covering both acknowledgement flows before the
+full durable QoS 2 capture.
+
 Broker-owned allocations now have a separate diagnostic matrix rather than
 being inferred from the common client's counters. Run it with:
 
@@ -787,6 +815,18 @@ serial 2,606 to 1,327, publishers-32 13,356 to 4,780, fanout-32 7,491 to
 median. Balanced allocation density fell from 0.109 to 0.043 per delivery;
 cumulative requested bytes fell 2.8%, while the 1-MiB cache bound makes the
 retention tradeoff explicit.
+
+The matching 3,600-second durable-Session allocator capture at
+`zig-out/mqtt-broker-durable-qos2-allocator-final` (22,370,470 bytes; summary
+SHA-256 `8621642a739ba033a6c0fde6ed6acb549fe1769d6a03ffa6b7b28c77defaa2ad`;
+aggregate file-hash digest
+`f7da261081d729ebc3546ce130ce2e2e354aafcbd8c84bb8b4d8a41bf864d571`)
+completed all fifteen runs with `live_bytes=0`. Median allocation counts were
+2,609 serial (5.096/publish), 13,487 publishers-32 (3.293/publish), 221,831
+fanout-32 (3.385/delivery), 332,797 balanced-32x32 (3.250/delivery), and
+28,495 large-payload (3.478/delivery). These figures include durable Session
+ownership, startup, warmup, measured traffic, and complete teardown; timing is
+intentionally unusable under the counting allocator.
 
 A five-pair fixed-binary balanced-32x32 A/B at
 `zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest
@@ -3190,10 +3230,11 @@ proxy evidence for the entire suite.
 2. Reduce the production broker deficits exposed by the five-shape
    publisher-window, latency, allocation and RSS matrices above. Netz currently
    trails Mosquitto across the measured QoS 2 shapes and in several QoS 1
-   shapes, while broker RSS remains an active deficit. QoS 2 now uses the same
-   artifact, CPU, order, completion and queue-capacity controls; add a durable-
-   Session matrix variant with those controls before drawing broader broker
-   conclusions.
+   shapes, while broker RSS remains an active deficit. QoS 2 and its completed
+   3,600-second durable-Session variant now use the same artifact, CPU, order,
+   completion and queue-capacity controls. The durable matrix also trails
+   Mosquitto across all five shapes, so scheduling, tail latency, and
+   per-connection memory remain active work.
    The connection-local Packet Identifier tracker now replaces five embedded
    65,536-bit tables (40 KiB in every connection, even before QoS traffic)
    with independent incoming/outgoing sparse stage maps. Each direction

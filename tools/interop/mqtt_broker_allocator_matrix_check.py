@@ -106,7 +106,12 @@ def require_regular_file(path: Path) -> None:
         raise ValueError(f"missing or invalid regular file: {path}")
 
 
-def validate_driver(record: dict[str, str], shape: Shape, qos: int) -> None:
+def validate_driver(
+    record: dict[str, str],
+    shape: Shape,
+    qos: int,
+    session_expiry_seconds: int,
+) -> None:
     queue_capacity = max(1_024, shape.warmup, shape.messages)
     expected = {
         "record": "result",
@@ -127,7 +132,7 @@ def validate_driver(record: dict[str, str], shape: Shape, qos: int) -> None:
         "overlapping_subscriptions": "1",
         "publisher_window": str(shape.window),
         "server_queue_capacity": str(queue_capacity),
-        "session_expiry_seconds": "0",
+        "session_expiry_seconds": str(session_expiry_seconds),
         "warmup": str(shape.warmup),
         "publishes": str(shape.messages),
         "deliveries": str(shape.messages * shape.subscribers),
@@ -171,6 +176,7 @@ def validate_allocator(
     record: dict[str, str],
     shape: Shape,
     qos: int,
+    session_expiry_seconds: int,
 ) -> dict[str, int]:
     expected = {
         "record": "allocator",
@@ -184,6 +190,7 @@ def validate_allocator(
         "connection_scope": "persistent",
         "client_tcp_nodelay": "true",
         "server_tcp_nodelay": "true",
+        "session_expiry_seconds": str(session_expiry_seconds),
         "configured_connections": str(shape.publishers + shape.subscribers),
         "complete": "true",
     }
@@ -224,6 +231,7 @@ def verify(
     client_cpu: int,
     server_cpu: int,
     qos: int = 1,
+    session_expiry_seconds: int = 0,
 ) -> list[str]:
     if samples <= 0:
         raise ValueError("samples must be positive")
@@ -231,6 +239,8 @@ def verify(
         raise ValueError("client/server CPUs must be distinct and non-negative")
     if qos not in (1, 2):
         raise ValueError("QoS must be 1 or 2")
+    if not 0 <= session_expiry_seconds <= (1 << 32) - 1:
+        raise ValueError("invalid Session Expiry Interval")
     total_bytes = sum(
         path.stat().st_size for path in root.rglob("*")
         if path.is_file() and not path.is_symlink()
@@ -259,6 +269,7 @@ def verify(
         "benchmark_scope": "same-client-workload",
         "timing_usable": "false",
         "allocator_scope": "broker-explicit",
+        "session_expiry_seconds": str(session_expiry_seconds),
         "shapes": str(len(SHAPES)),
         "samples": str(samples),
         "schedule": "sequential",
@@ -289,6 +300,7 @@ def verify(
     output = [
         "record=allocator-matrix-environment protocol=mqtt5 transport=tcp "
         f"mode=qos{qos}-fanout-allocator-matrix "
+        f"session_expiry_seconds={session_expiry_seconds} "
         "benchmark_scope=same-client-workload timing_usable=false "
         "allocator_scope=broker-explicit connection_scope=persistent "
         "client_tcp_nodelay=true server_tcp_nodelay=true "
@@ -327,15 +339,24 @@ def verify(
             ):
                 raise ValueError(f"missing broker ready marker: {run}")
             allocator = validate_allocator(
-                one_record(server_log, "allocator"), shape, qos
+                one_record(server_log, "allocator"),
+                shape,
+                qos,
+                session_expiry_seconds,
             )
-            validate_driver(one_record(run / "driver.log", "result"), shape, qos)
+            validate_driver(
+                one_record(run / "driver.log", "result"),
+                shape,
+                qos,
+                session_expiry_seconds,
+            )
             for key in values:
                 values[key].append(allocator[key])
         medians = {key: int(statistics.median(value)) for key, value in values.items()}
         output.append(
             "record=allocator-matrix-shape protocol=mqtt5 transport=tcp "
             f"mode=qos{qos}-fanout-allocator-matrix "
+            f"session_expiry_seconds={session_expiry_seconds} "
             "benchmark_scope=same-client-workload timing_usable=false "
             "allocator_scope=broker-explicit "
             f"shape={shape.name} samples={samples} "
@@ -366,6 +387,7 @@ def verify(
     output.append(
         "record=allocator-matrix-complete protocol=mqtt5 transport=tcp "
         f"mode=qos{qos}-fanout-allocator-matrix "
+        f"session_expiry_seconds={session_expiry_seconds} "
         "benchmark_scope=same-client-workload timing_usable=false "
         f"shapes={len(SHAPES)} samples_per_shape={samples} "
         f"broker_runs={len(SHAPES) * samples} complete=true"
@@ -379,6 +401,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--qos", type=int, choices=(1, 2), default=1)
+    parser.add_argument(
+        "--session-expiry-seconds", type=int, default=0
+    )
     parser.add_argument("--client-cpu", type=int)
     parser.add_argument("--server-cpu", type=int)
     args = parser.parse_args()
@@ -389,7 +414,12 @@ def main() -> None:
     if args.root is None or args.client_cpu is None or args.server_cpu is None:
         parser.error("matrix verification arguments are required")
     for line in verify(
-        args.root, args.samples, args.client_cpu, args.server_cpu, args.qos
+        args.root,
+        args.samples,
+        args.client_cpu,
+        args.server_cpu,
+        args.qos,
+        args.session_expiry_seconds,
     ):
         print(line)
 

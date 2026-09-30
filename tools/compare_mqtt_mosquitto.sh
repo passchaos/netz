@@ -14,6 +14,7 @@ messages=${MESSAGES:-2000}
 payload_bytes=${PAYLOAD_BYTES:-256}
 publisher_window=${PUBLISHER_WINDOW:-16}
 qos=${MQTT_QOS:-1}
+session_expiry_seconds=${MQTT_SESSION_EXPIRY_SECONDS:-0}
 broker_order=${MQTT_BROKER_ORDER:-netz-first}
 client_cpu=${MQTT_CLIENT_CPU:-}
 server_cpu=${MQTT_SERVER_CPU:-}
@@ -22,6 +23,13 @@ stats=${MQTT_STATS:-false}
 max_artifact_bytes=33554432
 if [[ "$qos" != 1 && "$qos" != 2 ]]; then
   echo 'MQTT_QOS must be 1 or 2' >&2
+  exit 2
+fi
+if [[ ! "$session_expiry_seconds" =~ ^(0|[1-9][0-9]*)$ ||
+      ${#session_expiry_seconds} -gt 10 ||
+      (${#session_expiry_seconds} -eq 10 &&
+       "$session_expiry_seconds" > 4294967295) ]]; then
+  echo 'MQTT_SESSION_EXPIRY_SECONDS must be between 0 and 4294967295' >&2
   exit 2
 fi
 if [[ "$broker_order" != netz-first && "$broker_order" != mosquitto-first ]]; then
@@ -205,6 +213,7 @@ run_driver() {
     "--qos=$qos" \
     "--publisher-window=$publisher_window" \
     "--server-queue-capacity=$max_queued_messages" \
+    "--session-expiry-seconds=$session_expiry_seconds" \
     "--server-implementation=$server_implementation" \
     "--server-io=$server_io" \
     --server-tcp-nodelay=true)
@@ -283,8 +292,8 @@ EOF
   finish_rss_sampler
 }
 
-printf 'record=run-order protocol=mqtt5 transport=tcp mode=qos%s-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true broker_order=%s client_cpu=%s server_cpu=%s sampler_cpu=%s complete=true\n' \
-  "$qos" \
+printf 'record=run-order protocol=mqtt5 transport=tcp mode=qos%s-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true session_expiry_seconds=%s broker_order=%s client_cpu=%s server_cpu=%s sampler_cpu=%s complete=true\n' \
+  "$qos" "$session_expiry_seconds" \
   "$broker_order" "${client_cpu:-unbound}" "${server_cpu:-unbound}" \
   "${sampler_cpu:-unbound}"
 if [[ "$broker_order" == netz-first ]]; then
@@ -311,6 +320,7 @@ check_args=(python3 \
   --messages "$messages" \
   --payload-bytes "$payload_bytes" \
   --qos "$qos" \
+  --session-expiry-seconds "$session_expiry_seconds" \
   --publisher-window "$publisher_window" \
   --server-queue-capacity "$max_queued_messages")
 if [[ "$stats" == true ]]; then

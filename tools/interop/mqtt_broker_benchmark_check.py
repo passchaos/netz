@@ -62,6 +62,7 @@ def validate(
     window: int,
     queue_capacity: int,
     qos: int,
+    session_expiry_seconds: int,
 ) -> None:
     expected = {
         "record": "result",
@@ -82,7 +83,7 @@ def validate(
         "overlapping_subscriptions": "1",
         "publisher_window": str(window),
         "server_queue_capacity": str(queue_capacity),
-        "session_expiry_seconds": "0",
+        "session_expiry_seconds": str(session_expiry_seconds),
         "warmup": str(warmup),
         "publishes": str(messages),
         "deliveries": str(messages * subscribers),
@@ -126,6 +127,7 @@ def verify(
     rss_source: str = "proc-vmrss-sampled-2ms",
     queue_capacity: int = 1_024,
     qos: int = 1,
+    session_expiry_seconds: int = 0,
 ) -> str:
     if min(
         publishers, subscribers, messages, payload_bytes, window,
@@ -134,16 +136,19 @@ def verify(
         raise ValueError("invalid MQTT benchmark configuration")
     if qos not in (1, 2):
         raise ValueError("QoS must be 1 or 2")
+    if not 0 <= session_expiry_seconds <= (1 << 32) - 1:
+        raise ValueError("invalid Session Expiry Interval")
     netz = result(netz_path)
     mosquitto = result(mosquitto_path)
     validate(
         netz, "netz", "zio-std-io", publishers, subscribers, warmup,
         messages, payload_bytes, window, queue_capacity, qos,
+        session_expiry_seconds,
     )
     validate(
         mosquitto, "mosquitto", "mosquitto-event-loop", publishers,
         subscribers, warmup, messages, payload_bytes, window, queue_capacity,
-        qos,
+        qos, session_expiry_seconds,
     )
     if netz["checksum"] != mosquitto["checksum"]:
         raise ValueError("broker checksums differ")
@@ -166,7 +171,8 @@ def verify(
             f"publishers={publishers} subscribers={subscribers} "
             f"warmup={warmup} publishes={messages} "
             f"deliveries={messages * subscribers} "
-            "overlapping_subscriptions=1 session_expiry_seconds=0 "
+            "overlapping_subscriptions=1 "
+            f"session_expiry_seconds={session_expiry_seconds} "
             f"publisher_window={window} payload_bytes={payload_bytes} "
             f"server_queue_capacity={queue_capacity} "
             "connection_scope=persistent "
@@ -195,6 +201,7 @@ def verify(
         f"publishes={messages} deliveries={messages * subscribers} "
         f"payload_bytes={payload_bytes} publisher_window={window} "
         f"server_queue_capacity={queue_capacity} "
+        f"session_expiry_seconds={session_expiry_seconds} "
         f"checksum={expected_checksum} client_io=zio-std-io "
         "server_io=zio-std-io+mosquitto-event-loop complete=true"
     )
@@ -211,6 +218,9 @@ def main() -> None:
     parser.add_argument("--messages", type=int, required=True)
     parser.add_argument("--payload-bytes", type=int, required=True)
     parser.add_argument("--qos", type=int, choices=(1, 2), default=1)
+    parser.add_argument(
+        "--session-expiry-seconds", type=int, default=0
+    )
     parser.add_argument("--publisher-window", type=int, required=True)
     parser.add_argument("--server-queue-capacity", type=int, required=True)
     parser.add_argument("--netz-server-rss", type=Path)
@@ -224,6 +234,7 @@ def main() -> None:
             args.publisher_window,
             args.netz_server_rss, args.mosquitto_server_rss, args.rss_source,
             args.server_queue_capacity, args.qos,
+            args.session_expiry_seconds,
         )
     )
 

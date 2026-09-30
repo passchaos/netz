@@ -6,12 +6,20 @@ driver=${2:?netz MQTT benchmark driver path}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 samples=${MQTT_ALLOCATOR_MATRIX_SAMPLES:-4}
 qos=${MQTT_QOS:-1}
+session_expiry_seconds=${MQTT_SESSION_EXPIRY_SECONDS:-0}
 if [[ ! "$samples" =~ ^[0-9]+$ || "$samples" -eq 0 ]]; then
   echo 'MQTT_ALLOCATOR_MATRIX_SAMPLES must be positive' >&2
   exit 2
 fi
 if [[ "$qos" != 1 && "$qos" != 2 ]]; then
   echo 'MQTT_QOS must be 1 or 2' >&2
+  exit 2
+fi
+if [[ ! "$session_expiry_seconds" =~ ^(0|[1-9][0-9]*)$ ||
+      ${#session_expiry_seconds} -gt 10 ||
+      (${#session_expiry_seconds} -eq 10 &&
+       "$session_expiry_seconds" > 4294967295) ]]; then
+  echo 'MQTT_SESSION_EXPIRY_SECONDS must be between 0 and 4294967295' >&2
   exit 2
 fi
 if [[ -n "${MQTT_ALLOCATOR_MATRIX_ROOT:-}" ]]; then
@@ -57,8 +65,8 @@ install -m 0755 "$repo_root/tools/interop/mqtt_broker_allocator_matrix_check.py"
   "$root/identity/mqtt_broker_allocator_matrix_check.py"
 
 sha256() { sha256sum "$1" | awk '{print $1}'; }
-printf 'record=environment protocol=mqtt5 transport=tcp mode=qos%s-fanout-allocator-matrix benchmark_scope=same-client-workload timing_usable=false allocator_scope=broker-explicit connection_scope=persistent client_tcp_nodelay=true server_tcp_nodelay=true shapes=%s samples=%s schedule=sequential client_cpu=%s server_cpu=%s timeout_seconds=60 max_artifact_bytes=33554432 max_matrix_bytes=134217728 host=%s arch=%s kernel=%s zig=%s netz_build_mode=ReleaseFast netz_broker_sha256=%s driver_sha256=%s runner_sha256=%s checker_sha256=%s complete=true\n' \
-  "$qos" \
+printf 'record=environment protocol=mqtt5 transport=tcp mode=qos%s-fanout-allocator-matrix benchmark_scope=same-client-workload timing_usable=false allocator_scope=broker-explicit connection_scope=persistent client_tcp_nodelay=true server_tcp_nodelay=true session_expiry_seconds=%s shapes=%s samples=%s schedule=sequential client_cpu=%s server_cpu=%s timeout_seconds=60 max_artifact_bytes=33554432 max_matrix_bytes=134217728 host=%s arch=%s kernel=%s zig=%s netz_build_mode=ReleaseFast netz_broker_sha256=%s driver_sha256=%s runner_sha256=%s checker_sha256=%s complete=true\n' \
+  "$qos" "$session_expiry_seconds" \
   "$(python3 "$root/identity/mqtt_broker_allocator_matrix_check.py" --list-shapes | wc -l)" \
   "$samples" "$client_cpu" "$server_cpu" "$(hostname)" "$(uname -m)" \
   "$(uname -r)" "$(zig version)" \
@@ -90,6 +98,7 @@ while IFS=$'\t' read -r shape publishers subscribers warmup messages payload win
       "--max-queued-deliveries=$queue_capacity" \
       --max-outgoing-inflight=64 --allocator-stats \
       "--allocator-stats-qos=$qos" \
+      "--allocator-stats-session-expiry-seconds=$session_expiry_seconds" \
       >"$run/server.log" 2>&1 &
     server_pid=$!
     for _ in $(seq 1 200); do
@@ -108,6 +117,7 @@ while IFS=$'\t' read -r shape publishers subscribers warmup messages payload win
       "--subscribers=$subscribers" "--warmup-messages=$warmup" \
       "--messages=$messages" "--payload-bytes=$payload" \
       "--qos=$qos" \
+      "--session-expiry-seconds=$session_expiry_seconds" \
       "--publisher-window=$window" \
       "--server-queue-capacity=$queue_capacity" \
       --server-implementation=netz --server-io=zio-std-io \
@@ -123,6 +133,7 @@ done < <(python3 "$root/identity/mqtt_broker_allocator_matrix_check.py" --list-s
 python3 "$root/identity/mqtt_broker_allocator_matrix_check.py" \
   --root "$root" --samples "$samples" \
   --qos "$qos" \
+  --session-expiry-seconds "$session_expiry_seconds" \
   --client-cpu "$client_cpu" --server-cpu "$server_cpu" \
   >"$work/summary.log"
 cp "$work/summary.log" "$root/summary.log"
@@ -130,6 +141,7 @@ cmp "$work/summary.log" <(
   python3 "$root/identity/mqtt_broker_allocator_matrix_check.py" \
     --root "$root" --samples "$samples" \
     --qos "$qos" \
+    --session-expiry-seconds "$session_expiry_seconds" \
     --client-cpu "$client_cpu" --server-cpu "$server_cpu"
 )
 matrix_bytes=$(du -sb "$root" | awk '{print $1}')

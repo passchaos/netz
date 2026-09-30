@@ -155,6 +155,7 @@ def verify_environment(
     server_cpu: int,
     sampler_cpu: int,
     qos: int,
+    session_expiry_seconds: int,
 ) -> dict[str, str]:
     record = one_record(path, "environment")
     expected = {
@@ -165,6 +166,7 @@ def verify_environment(
         "timing_usable": "true",
         "client_tcp_nodelay": "true",
         "server_tcp_nodelay": "true",
+        "session_expiry_seconds": str(session_expiry_seconds),
         "shapes": str(len(SHAPES)),
         "samples": str(samples),
         "schedule": "abba",
@@ -232,6 +234,7 @@ def verify(
     server_cpu: int,
     sampler_cpu: int,
     qos: int = 1,
+    session_expiry_seconds: int = 0,
 ) -> list[str]:
     if samples <= 0 or samples % 4 != 0:
         raise ValueError("matrix samples must be a positive multiple of four")
@@ -241,6 +244,8 @@ def verify(
         raise ValueError("matrix CPUs must be distinct non-negative values")
     if qos not in (1, 2):
         raise ValueError("QoS must be 1 or 2")
+    if not 0 <= session_expiry_seconds <= (1 << 32) - 1:
+        raise ValueError("invalid Session Expiry Interval")
     total_bytes = sum(
         path.stat().st_size for path in root.rglob("*")
         if path.is_file() and not path.is_symlink()
@@ -254,11 +259,12 @@ def verify(
     )
     environment = verify_environment(
         root / "environment.log", samples, client_cpu, server_cpu,
-        sampler_cpu, qos,
+        sampler_cpu, qos, session_expiry_seconds,
     )
     output = [
         "record=matrix-environment protocol=mqtt5 transport=tcp "
         f"mode=qos{qos}-fanout-matrix benchmark_scope=same-client-workload "
+        f"session_expiry_seconds={session_expiry_seconds} "
         f"timing_usable=true shapes={len(SHAPES)} samples={samples} "
         "client_tcp_nodelay=true server_tcp_nodelay=true "
         f"schedule=abba client_cpu={client_cpu} server_cpu={server_cpu} "
@@ -317,6 +323,7 @@ def verify(
                 "timing_usable": "true",
                 "client_tcp_nodelay": "true",
                 "server_tcp_nodelay": "true",
+                "session_expiry_seconds": str(session_expiry_seconds),
                 "broker_order": expected_order(sample),
                 "client_cpu": str(client_cpu),
                 "server_cpu": str(server_cpu),
@@ -349,7 +356,7 @@ def verify(
                 netz_log, mosquitto_log, shape.publishers, shape.subscribers,
                 shape.warmup, shape.messages, shape.payload_bytes, shape.window,
                 netz_rss, mosquitto_rss, "proc-vmrss-sampled-2ms",
-                queue_capacity, qos,
+                queue_capacity, qos, session_expiry_seconds,
             )
             expected_verified = SINGLE.fields(single_output.splitlines()[-1])
             actual_verified = one_record(run / "runner.log", "verified")
@@ -395,6 +402,7 @@ def verify(
             f"deliveries={shape.messages * shape.subscribers} "
             f"payload_bytes={shape.payload_bytes} publisher_window={shape.window} "
             f"server_queue_capacity={queue_capacity} "
+            f"session_expiry_seconds={session_expiry_seconds} "
             f"netz_median_publishes_per_s={netz_rate} "
             f"netz_min_publishes_per_s={min(values['netz']['publishes_per_s'])} "
             f"netz_max_publishes_per_s={max(values['netz']['publishes_per_s'])} "
@@ -428,6 +436,7 @@ def verify(
     output.append(
         "record=matrix-complete protocol=mqtt5 transport=tcp "
         f"mode=qos{qos}-fanout-matrix benchmark_scope=same-client-workload "
+        f"session_expiry_seconds={session_expiry_seconds} "
         f"timing_usable=true shapes={len(SHAPES)} samples_per_shape={samples} "
         f"paired_samples={len(SHAPES) * samples} "
         f"broker_runs={len(SHAPES) * samples * 2} complete=true"
@@ -441,6 +450,9 @@ def main() -> None:
     parser.add_argument("--root", type=Path)
     parser.add_argument("--samples", type=int, default=4)
     parser.add_argument("--qos", type=int, choices=(1, 2), default=1)
+    parser.add_argument(
+        "--session-expiry-seconds", type=int, default=0
+    )
     parser.add_argument("--client-cpu", type=int)
     parser.add_argument("--server-cpu", type=int)
     parser.add_argument("--sampler-cpu", type=int)
@@ -454,7 +466,7 @@ def main() -> None:
         parser.error("matrix verification arguments are required")
     for line in verify(
         args.root, args.samples, args.client_cpu, args.server_cpu,
-        args.sampler_cpu, args.qos,
+        args.sampler_cpu, args.qos, args.session_expiry_seconds,
     ):
         print(line)
 

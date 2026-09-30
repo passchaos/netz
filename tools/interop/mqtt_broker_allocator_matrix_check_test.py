@@ -16,7 +16,12 @@ SPEC.loader.exec_module(CHECK)
 
 
 class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
-    def make_matrix(self, root: Path, qos: int = 1) -> None:
+    def make_matrix(
+        self,
+        root: Path,
+        qos: int = 1,
+        session_expiry_seconds: int = 0,
+    ) -> None:
         identity = root / "identity"
         identity.mkdir(parents=True)
         for name in CHECK.IDENTITY_FILES:
@@ -37,6 +42,7 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
             "benchmark_scope=same-client-workload timing_usable=false "
             "allocator_scope=broker-explicit connection_scope=persistent "
             "client_tcp_nodelay=true server_tcp_nodelay=true "
+            f"session_expiry_seconds={session_expiry_seconds} "
             "shapes=5 samples=2 "
             "schedule=sequential client_cpu=0 server_cpu=1 "
             "timeout_seconds=60 "
@@ -62,6 +68,7 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
                     "timing_usable=false allocator_scope=broker-explicit "
                     "connection_scope=persistent client_tcp_nodelay=true "
                     "server_tcp_nodelay=true "
+                    f"session_expiry_seconds={session_expiry_seconds} "
                     f"configured_connections={shape.publishers + shape.subscribers} "
                     f"alloc_count={alloc_count} free_count={alloc_count} "
                     "resize_count=1 remap_count=2 "
@@ -82,7 +89,8 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
                     "server_tcp_nodelay=true connection_scope=persistent "
                     f"publishers={shape.publishers} subscribers={shape.subscribers} "
                     f"overlapping_subscriptions=1 publisher_window={shape.window} "
-                    f"server_queue_capacity={queue} session_expiry_seconds=0 "
+                    f"server_queue_capacity={queue} "
+                    f"session_expiry_seconds={session_expiry_seconds} "
                     f"warmup={shape.warmup} publishes={shape.messages} "
                     f"deliveries={shape.messages * shape.subscribers} "
                     f"payload_bytes={shape.payload_bytes} "
@@ -112,6 +120,21 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
             output = CHECK.verify(root, 2, 0, 1, qos=2)
             self.assertIn("mode=qos2-fanout-allocator-matrix", output[0])
             self.assertIn("mode=qos2-fanout-allocator-matrix", output[1])
+
+    def test_accepts_qos2_persistent_session_matrix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_matrix(root, qos=2, session_expiry_seconds=3600)
+            output = CHECK.verify(
+                root,
+                2,
+                0,
+                1,
+                qos=2,
+                session_expiry_seconds=3600,
+            )
+            self.assertIn("mode=qos2-fanout-allocator-matrix", output[0])
+            self.assertIn("session_expiry_seconds=3600", output[0])
 
     def test_rejects_live_bytes(self) -> None:
         with TemporaryDirectory() as directory:
