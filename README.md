@@ -1479,6 +1479,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # dequeue under one state-lock acquisition. Durable selection still precedes
 # live delivery and all persistence/socket I/O remains outside the lock; a
 # five-pair balanced-32x32 run reduced median p50 by 16.4%.
+# Live overlapping-subscription merge now checks only the destination queue
+# tail instead of scanning its full backlog. Two fixed-binary five-pair
+# balanced-32x32 runs produced 7/10 throughput wins with a +2.2% paired median,
+# while paired p50/p99 medians fell 6.3%/6.4%; allocator counts are unchanged.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

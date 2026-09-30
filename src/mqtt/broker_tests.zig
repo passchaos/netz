@@ -535,6 +535,90 @@ test "broker routes QoS 1 across live TCP clients" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker merges overlapping live subscriptions at the queue tail" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try testBroker(allocator, io, 2, 64);
+    defer broker.deinit();
+
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 2,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try connect(
+        allocator,
+        io,
+        broker,
+        "overlap-subscriber",
+        &.{},
+    );
+    defer subscriber.close();
+    var publisher = try connect(
+        allocator,
+        io,
+        broker,
+        "overlap-publisher",
+        &.{},
+    );
+    defer publisher.close();
+
+    var first_suback = try subscribeWithIdentifier(
+        &subscriber,
+        .{ .topic_filter = "overlap/#", .qos = .at_least_once },
+        3,
+    );
+    defer first_suback.deinit(allocator);
+    var second_suback = try subscribeWithIdentifier(
+        &subscriber,
+        .{ .topic_filter = "overlap/+", .qos = .at_least_once },
+        9,
+    );
+    defer second_suback.deinit(allocator);
+
+    try publisher.publish(
+        "overlap/value",
+        "merged",
+        .{ .qos = .at_least_once },
+    );
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings("merged", delivered.publish.payload);
+    var identifiers: [2]usize = undefined;
+    var identifier_count: usize = 0;
+    for (delivered.publish.properties) |property| {
+        if (property == .varint and
+            property.varint.id == .subscription_identifier)
+        {
+            if (identifier_count == identifiers.len) {
+                return error.TestUnexpectedResult;
+            }
+            identifiers[identifier_count] = property.varint.value;
+            identifier_count += 1;
+        }
+    }
+    try std.testing.expectEqualSlices(
+        usize,
+        &.{ 3, 9 },
+        identifiers[0..identifier_count],
+    );
+    try subscriber.writePubAck(delivered.publish.packet_id.?, 0);
+    try std.testing.expectError(
+        error.Timeout,
+        subscriber.readClientPacketEventWithTimeout(.fromMilliseconds(50)),
+    );
+
+    try disconnectAll(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker trusted local publication uses normal live routing" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

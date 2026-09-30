@@ -665,6 +665,15 @@ const ClientSlot = struct {
         self.queue.appendAssumeCapacity(delivery);
     }
 
+    fn tailDeliveryForPublication(
+        self: *ClientSlot,
+        publication: *Publication,
+    ) ?*Delivery {
+        if (self.queuedCount() == 0) return null;
+        const delivery = &self.queue.items[self.queue.items.len - 1];
+        return if (delivery.publication == publication) delivery else null;
+    }
+
     fn removePublication(self: *ClientSlot, publication: *Publication) usize {
         var removed: usize = 0;
         var index = self.queue_head;
@@ -684,6 +693,45 @@ const ClientSlot = struct {
         return removed;
     }
 };
+
+test "MQTT live overlap merge uses the current queue tail" {
+    const allocator = std.testing.allocator;
+    var slot: ClientSlot = .{};
+    defer slot.queue.deinit(allocator);
+    try slot.queue.ensureTotalCapacityPrecise(allocator, 4);
+
+    var prior_publication: Publication = undefined;
+    var current_publication: Publication = undefined;
+    var later_publication: Publication = undefined;
+    slot.appendDeliveryAssumeCapacity(.{
+        .publication = &prior_publication,
+        .qos = .at_most_once,
+        .retain = false,
+    });
+    try std.testing.expect(
+        slot.tailDeliveryForPublication(&current_publication) == null,
+    );
+
+    slot.appendDeliveryAssumeCapacity(.{
+        .publication = &current_publication,
+        .qos = .at_least_once,
+        .retain = false,
+    });
+    _ = slot.popDelivery();
+    const current = slot.tailDeliveryForPublication(
+        &current_publication,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, current.qos);
+
+    slot.appendDeliveryAssumeCapacity(.{
+        .publication = &later_publication,
+        .qos = .at_most_once,
+        .retain = false,
+    });
+    try std.testing.expect(
+        slot.tailDeliveryForPublication(&current_publication) == null,
+    );
+}
 
 /// Point-in-time broker gauges. State-backed fields are collected under the
 /// same lock as routing and Session transitions, so their cross-field
@@ -4880,15 +4928,13 @@ pub const Broker = struct {
                 self.slots.len,
             ).?;
             const destination = &self.slots[destination_index];
-            var duplicate: ?*Delivery = null;
-            for (destination.queue.items[destination.queue_head..]) |
-                *queued_delivery,
-            | {
-                if (queued_delivery.publication == publication.?) {
-                    duplicate = queued_delivery;
-                    break;
-                }
-            }
+            // A Publication is unique to this route operation, which holds
+            // `state_mutex` until every destination has been materialized.
+            // If an overlapping subscription already enqueued it for this
+            // client, that delivery must still be at the queue tail.
+            const duplicate = destination.tailDeliveryForPublication(
+                publication.?,
+            );
             const delivery_qos = minQos(
                 if (self.options.upgrade_outgoing_qos)
                     match.subscription.qos

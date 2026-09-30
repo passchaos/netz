@@ -1011,6 +1011,30 @@ five pairs, p50 won four, and the wide host-load ranges overlap, so these are
 supporting latency/no-regression measurements rather than a general speedup
 claim.
 
+Live overlapping-subscription merge now uses the routing transaction's queue
+tail instead of linearly scanning each destination's complete pending queue.
+Every broker Publication is unique to one route operation, and that operation
+holds `state_mutex` while it materializes all destinations, so an earlier raw
+match for the same client can only be the current tail; an older equal pointer
+cannot exist because queued Publications remain referenced. A local queue test
+covers consumed-prefix and non-tail rejection, while a live MQTT 5 test proves
+that two overlapping subscriptions still produce one PUBLISH with both
+Subscription Identifiers and no duplicate delivery. The three-sample matrix at
+`zig-out/mqtt-tail-merge-allocator-final` (22,280,513 bytes; summary SHA-256
+`4b4e51b1eef76c76eef638fe35e12e86f2f60e876e5d1b2f3da07919a413a21c`)
+reproduced all five prior allocation counts and cumulative requested-byte
+totals, including 4,285 allocations (0.042 per delivery) for balanced-32x32,
+and all fifteen runs ended with zero live bytes. Two independent five-pair
+fixed-binary balanced-32x32 A/B sets at `zig-out/mqtt-tail-merge-ab`
+(36,634,384 bytes; aggregate file-hash digest
+`5bf9744678bbd9c7b4956e4f57800336d08413c94579889df3f9eabd8d5739ab`)
+completed 320,000 deliveries per arm with checksum 18,656,000. Across all ten
+pairs the candidate won seven throughput pairs, seven p50 pairs, and eight p99
+pairs; paired-ratio medians were +2.2%, -6.3%, and -6.4% respectively. Raw
+throughput medians moved from 3,555 to 3,698 publishes/s. The samples include
+wide host-load outliers, so this remains workload-specific supporting evidence
+for the bounded-complexity improvement rather than a general throughput claim.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:
