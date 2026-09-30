@@ -1442,6 +1442,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # median broker throughput 55.7%.
 # Small Session-route plans use caller-owned scratch; fixed-binary fanout-32
 # A/B improved median broker throughput 2.7% while serial remained neutral.
+# Online fanout and durable Session PUBLISHes reuse each connection's retained
+# property scratch. The verified three-sample allocator matrix cuts allocation
+# counts by 25.7-69.5% across all five shapes; timing remains intentionally
+# excluded from this instrumentation-heavy diagnostic.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

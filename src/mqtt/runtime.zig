@@ -2465,7 +2465,10 @@ pub const Connection = struct {
     write_scratch: std.ArrayList(u8) = .empty,
     /// Scratch for synthesized or filtered properties used only while the
     /// corresponding packet is encoded. Property values remain borrowed from
-    /// the caller or connection state and are never retained here.
+    /// the caller or connection state and are never retained here. Broker
+    /// fanout and durable Session replay share this storage while holding the
+    /// connection's single-writer boundary, avoiding one property-array
+    /// allocation for every delivered PUBLISH.
     write_property_scratch: std.ArrayList(mqtt.Property) = .empty,
     pending_ping_packets: std.ArrayList(OwnedPacket) = .empty,
     pending_ping_packet_head: usize = 0,
@@ -3628,8 +3631,9 @@ pub const Connection = struct {
         if (mqtt.topicAlias(value.properties) != null) {
             return error.InvalidProperty;
         }
-        var properties: std.ArrayList(mqtt.Property) = .empty;
-        defer properties.deinit(self.allocator);
+        const properties = &self.write_property_scratch;
+        properties.clearRetainingCapacity();
+        defer properties.clearRetainingCapacity();
         if (self.protocol == .v5) {
             try properties.ensureTotalCapacity(
                 self.allocator,
@@ -3653,7 +3657,7 @@ pub const Connection = struct {
         const property_count_before_alias = properties.items.len;
         const outgoing_topic = try self.prepareAutomaticTopicAlias(
             value.topic,
-            &properties,
+            properties,
         );
         const automatic_alias_added =
             properties.items.len != property_count_before_alias;
@@ -8730,6 +8734,10 @@ test "MQTT Session PUBLISH projects Topic Alias per Network Connection" {
         transmission,
         .exactly_once,
     );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.write_property_scratch.items.len,
+    );
     var first_packet = try peer.readPacket(allocator, 4096);
     defer first_packet.deinit(allocator);
     var first = try mqtt.Publish.parse(allocator, .v5, first_packet.bytes);
@@ -8744,9 +8752,23 @@ test "MQTT Session PUBLISH projects Topic Alias per Network Connection" {
     try std.testing.expect(connection.write_scratch.items.len <
         first_packet.bytes.len);
 
+    // The next delivery reuses both the encoded-prefix and synthesized-
+    // property storage. Its existing Topic Alias also needs no map growth, so
+    // the complete write succeeds when every new allocation is rejected.
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    connection.allocator = failing.allocator();
+    defer connection.allocator = allocator;
     try connection.writeSessionTransmission(
         transmission,
         .exactly_once,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.write_property_scratch.items.len,
     );
     var second_packet = try peer.readPacket(allocator, 4096);
     defer second_packet.deinit(allocator);

@@ -5477,8 +5477,14 @@ pub const Broker = struct {
                 },
                 else => return err,
             };
-            var properties: std.ArrayList(mqtt.Property) = .empty;
-            defer properties.deinit(self.allocator);
+            // `flushSlot` holds this connection's writer mutex, so the
+            // connection-level property scratch is exclusively owned for the
+            // complete prepare/alias/encode/write transaction. Retain its
+            // capacity across deliveries instead of allocating one temporary
+            // property array for every routed PUBLISH.
+            const properties = &connection.write_property_scratch;
+            properties.clearRetainingCapacity();
+            defer properties.clearRetainingCapacity();
             const identifier_count =
                 delivery.additional_subscription_identifiers.len +
                 @intFromBool(delivery.subscription_identifier != null);
@@ -5491,7 +5497,7 @@ pub const Broker = struct {
                 self.allocator.free(identifiers);
             };
             if (!try delivery.publication.appendDeliveryPropertiesMany(
-                &properties,
+                properties,
                 self.allocator,
                 connection.protocol,
                 delivery.identifiersInto(identifiers),
@@ -5503,7 +5509,7 @@ pub const Broker = struct {
             const outgoing_topic = try connection
                 .prepareAutomaticTopicAlias(
                 visible_topic,
-                &properties,
+                properties,
             );
             const packet_id = connection.writePublish(
                 outgoing_topic,

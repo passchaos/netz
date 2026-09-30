@@ -802,6 +802,24 @@ RSS was effectively unchanged. The artifact is
 `zig-out/mqtt-session-plan-ab/run.20260930`; the full matrix completed all 40
 runs, while the fixed-binary result remains the causal evidence.
 
+Outgoing live fanout and durable Session replay now also reuse the existing
+connection-owned property scratch while holding that connection's writer
+mutex. Property descriptors continue to borrow their immutable Publication or
+Session values only through the synchronous encode/write call, but the backing
+descriptor array grows at most to the connection's high-water mark instead of
+being allocated and freed for every delivery. A fail-first second Session
+write proves that a warmed property-bearing Topic Alias replay needs no new
+allocation. The three-sample five-shape allocator matrix at
+`zig-out/mqtt-property-scratch-final2` (22,231,273 bytes; summary SHA-256
+`737976e8f6a1a6358bb2cda094c3c9e60741ff9dcee2ce7e7a982520390382a8`)
+completed all fifteen broker runs with `live_bytes=0`. Against the preceding
+four-sample matrix above, allocation counts fell 25.7%, 33.1%, 46.2%, 69.5%,
+and 30.6% in table order. The balanced shape dropped from 421,950 to 128,765
+allocations and from 60,112,229 to 17,893,589 cumulative requested bytes;
+peak live bytes remained effectively unchanged. Because the counting
+allocator changes the hot path and labels timing unusable, these results are
+allocation evidence rather than a throughput claim.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:
