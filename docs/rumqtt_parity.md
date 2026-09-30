@@ -989,6 +989,28 @@ won three of five pairs and the host-load ranges overlap, so these remain
 workload-specific supporting measurements rather than a general superiority
 claim.
 
+The slot writer now performs its durable-Session selection and, when that
+queue is empty, its live-delivery dequeue inside one state-lock acquisition.
+Durable work retains strict priority; a durable mutation is unlocked and
+persisted before any socket write or subsequent live dequeue, and an encoded
+Session packet is now owned by a defer before that persistence step so an I/O
+failure cannot leak it. The allocator matrix at
+`zig-out/mqtt-single-dequeue-lock-final` (22,279,881 bytes; summary SHA-256
+`d6eeec90ac44c464f45ed4242573cf61242109f1d509dcc24d516e746a592181`)
+reproduced the previous allocation counts and cumulative requested bytes in
+all five shapes with zero live bytes. A five-pair fixed-binary,
+alternating-order balanced-32x32 A/B at
+`zig-out/mqtt-single-dequeue-lock-ab/run.20260930` (37,027,612 bytes;
+aggregate file-hash digest
+`0483aa60061cf94d917d5cd63830d1430a98bdb3e179ef9ded957b4ec08d946b`)
+completed 320,000 deliveries per arm with checksum 18,656,000. Raw medians
+moved from 3,514 to 3,582 publishes/s (+1.9%), p50 from 17.846 to 14.920 ms
+(-16.4%), and p99 from 35.082 to 33.126 ms (-5.6%). Paired-ratio medians were
++0.6%, -12.3%, and -2.9% respectively. Throughput and p99 each won three of
+five pairs, p50 won four, and the wide host-load ranges overlap, so these are
+supporting latency/no-regression measurements rather than a general speedup
+claim.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:

@@ -5407,25 +5407,26 @@ pub const Broker = struct {
         slot: *ClientSlot,
     ) Error!void {
         while (true) {
+            self.state_mutex.lockUncancelable(self.io);
             var take_changed = false;
-            const maybe_packet = self.takeSessionPacketLocked(
+            const maybe_packet = self.takeSessionPacketAssumeLocked(
                 slot,
                 &take_changed,
             ) catch |err| {
+                self.state_mutex.unlock(self.io);
                 if (take_changed) {
                     try self.finalizePersistentChange(true, true);
                 }
                 return err;
             };
-            if (take_changed or maybe_packet != null) {
+            if (maybe_packet) |packet_value| {
+                self.state_mutex.unlock(self.io);
+                var packet = packet_value;
+                defer packet.deinit();
                 // Commit logs retain their historical behavior of recording
                 // every selected Session packet, including retransmissions.
                 // Change autosave advances only for snapshot-visible changes.
                 try self.finalizePersistentChange(true, take_changed);
-            }
-            if (maybe_packet) |packet_value| {
-                var packet = packet_value;
-                defer packet.deinit();
                 // Selecting a durable QoS 1/2 message moves it from queued to
                 // inflight and assigns its Packet Identifier. Sync that state
                 // before the bytes can reach the peer, so restart retransmits
@@ -5511,7 +5512,11 @@ pub const Broker = struct {
                 }
                 continue;
             }
-            self.state_mutex.lockUncancelable(self.io);
+            if (take_changed) {
+                self.state_mutex.unlock(self.io);
+                try self.finalizePersistentChange(true, true);
+                continue;
+            }
             if (!slot.active or slot.connection == null or
                 slot.queuedCount() == 0)
             {
@@ -5639,13 +5644,14 @@ pub const Broker = struct {
         }
     }
 
-    /// Reserve and encode one Session transmission under the state lock.
+    /// Reserve and encode one Session transmission while the caller holds the
+    /// state lock.
     ///
     /// `drainInto` mutates queued/inflight ownership. Encoding before unlocking
     /// guarantees its borrowed views cannot be invalidated by an ACK or
     /// takeover, while the detached byte slice keeps network I/O outside the
     /// global lock.
-    fn takeSessionPacketLocked(
+    fn takeSessionPacketAssumeLocked(
         self: *Broker,
         slot: *ClientSlot,
         persistent_changed_out: *bool,
@@ -5653,8 +5659,6 @@ pub const Broker = struct {
         persistent_changed_out.* = false;
         const handle = slot.session_handle orelse return null;
         const connection = &(slot.connection orelse return null);
-        self.state_mutex.lockUncancelable(self.io);
-        defer self.state_mutex.unlock(self.io);
         const route_id = try self.sessions.routeId(handle);
         const client_id = try self.sessions.clientId(handle);
         const persistent_session = self.sessionIsPersistentLocked(handle);

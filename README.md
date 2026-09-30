@@ -1475,6 +1475,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # routing/Session mutex after every successful fanout write. A five-pair
 # balanced-32x32 A/B raised the median from 2,891 to 3,374 publishes/s and
 # reduced median p99 from 38.66 to 32.15 ms; host-load ranges still overlap.
+# A live queue drain now performs its empty durable-Session probe and live
+# dequeue under one state-lock acquisition. Durable selection still precedes
+# live delivery and all persistence/socket I/O remains outside the lock; a
+# five-pair balanced-32x32 run reduced median p50 by 16.4%.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \
