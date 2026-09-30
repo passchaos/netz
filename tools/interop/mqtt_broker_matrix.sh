@@ -5,9 +5,14 @@ netz_broker=${1:?netz broker executable path}
 driver=${2:?netz MQTT benchmark driver path}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 samples=${MQTT_MATRIX_SAMPLES:-4}
+qos=${MQTT_QOS:-1}
 if [[ ! "$samples" =~ ^[0-9]+$ || "$samples" -eq 0 ||
       $((samples % 4)) -ne 0 ]]; then
   echo 'MQTT_MATRIX_SAMPLES must be a positive multiple of four' >&2
+  exit 2
+fi
+if [[ "$qos" != 1 && "$qos" != 2 ]]; then
+  echo 'MQTT_QOS must be 1 or 2' >&2
   exit 2
 fi
 if [[ -n "${MQTT_MATRIX_ROOT:-}" ]]; then
@@ -92,8 +97,8 @@ if [[ ${#matrix_shapes[@]} -eq 0 ]]; then
 fi
 
 sha256() { sha256sum "$1" | awk '{print $1}'; }
-printf 'record=environment protocol=mqtt5 transport=tcp mode=qos1-fanout-matrix benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true shapes=%s samples=%s schedule=abba client_cpu=%s server_cpu=%s sampler_cpu=%s rss_source=proc-vmrss-sampled-2ms max_artifact_bytes=33554432 max_matrix_bytes=134217728 host=%s arch=%s kernel=%s zig=%s netz_build_mode=ReleaseFast mosquitto_revision=%s mosquitto_source_clean=true netz_broker_sha256=%s driver_sha256=%s mosquitto_binary_sha256=%s single_runner_sha256=%s matrix_runner_sha256=%s single_checker_sha256=%s config_helper_sha256=%s matrix_checker_sha256=%s mosquitto_build_helper_sha256=%s mosquitto_configure_log_sha256=%s mosquitto_build_log_sha256=%s mosquitto_source_state_sha256=%s complete=true\n' \
-  "${#matrix_shapes[@]}" "$samples" "$client_cpu" "$server_cpu" "$sampler_cpu" \
+printf 'record=environment protocol=mqtt5 transport=tcp mode=qos%s-fanout-matrix benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true shapes=%s samples=%s schedule=abba client_cpu=%s server_cpu=%s sampler_cpu=%s rss_source=proc-vmrss-sampled-2ms max_artifact_bytes=33554432 max_matrix_bytes=134217728 host=%s arch=%s kernel=%s zig=%s netz_build_mode=ReleaseFast mosquitto_revision=%s mosquitto_source_clean=true netz_broker_sha256=%s driver_sha256=%s mosquitto_binary_sha256=%s single_runner_sha256=%s matrix_runner_sha256=%s single_checker_sha256=%s config_helper_sha256=%s matrix_checker_sha256=%s mosquitto_build_helper_sha256=%s mosquitto_configure_log_sha256=%s mosquitto_build_log_sha256=%s mosquitto_source_state_sha256=%s complete=true\n' \
+  "$qos" "${#matrix_shapes[@]}" "$samples" "$client_cpu" "$server_cpu" "$sampler_cpu" \
   "$(hostname)" "$(uname -m)" "$(uname -r)" "$(zig version)" \
   "$mosquitto_revision" \
   "$(sha256 "$matrix_root/identity/netz-broker")" \
@@ -125,6 +130,7 @@ for shape_record in "${matrix_shapes[@]}"; do
     PUBLISHERS="$publishers" SUBSCRIBERS="$subscribers" \
       WARMUP_MESSAGES="$warmup" MESSAGES="$messages" \
       PAYLOAD_BYTES="$payload" PUBLISHER_WINDOW="$window" \
+      MQTT_QOS="$qos" \
       MQTT_STATS=true MQTT_BROKER_ORDER="$order" \
       MQTT_CLIENT_CPU="$client_cpu" MQTT_SERVER_CPU="$server_cpu" \
       MQTT_SAMPLER_CPU="$sampler_cpu" \
@@ -148,12 +154,14 @@ fi
 : >"$matrix_root/summary.log"
 python3 "$matrix_root/identity/mqtt_broker_matrix_check.py" \
   --root "$matrix_root" --samples "$samples" \
+  --qos "$qos" \
   --client-cpu "$client_cpu" --server-cpu "$server_cpu" \
   --sampler-cpu "$sampler_cpu" >"$build_work/summary.log"
 cp "$build_work/summary.log" "$matrix_root/summary.log"
 cmp "$build_work/summary.log" <(
   python3 "$matrix_root/identity/mqtt_broker_matrix_check.py" \
     --root "$matrix_root" --samples "$samples" \
+    --qos "$qos" \
     --client-cpu "$client_cpu" --server-cpu "$server_cpu" \
     --sampler-cpu "$sampler_cpu"
 )

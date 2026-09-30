@@ -18,6 +18,7 @@ const Config = struct {
     warmup_messages: usize = default_warmup_messages,
     messages: usize = default_messages,
     payload_bytes: usize = default_payload_bytes,
+    qos: netz.mqtt.QoS = .at_least_once,
     overlapping_subscriptions: usize = 1,
     publisher_window: usize = 1,
     server_queue_capacity: usize = 0,
@@ -34,6 +35,8 @@ const Worker = struct {
     warmup_messages: usize,
     measured_messages: usize,
     payload_bytes: usize,
+    qos: netz.mqtt.QoS,
+    inflight_limit: usize,
     ready: *std.atomic.Value(usize),
     warmup_complete: *std.atomic.Value(usize),
     failed: *std.atomic.Value(bool),
@@ -58,6 +61,17 @@ const Worker = struct {
     }
 
     fn runFallible(self: *@This()) !void {
+        var qos2_pending: std.ArrayList(u16) = .empty;
+        defer qos2_pending.deinit(self.allocator);
+        if (self.qos == .exactly_once) {
+            try qos2_pending.ensureTotalCapacityPrecise(
+                self.allocator,
+                @min(
+                    @max(self.warmup_messages, self.measured_messages),
+                    self.inflight_limit,
+                ),
+            );
+        }
         const previously_ready = self.ready.fetchAdd(1, .acq_rel);
         if (previously_ready + 1 == self.subscriber_count) {
             self.all_ready.set(self.io);
@@ -65,13 +79,13 @@ const Worker = struct {
         self.begin.waitUncancelable(self.io);
 
         var checksum: u64 = 0;
-        try self.consume(self.warmup_messages, &checksum);
+        try self.consume(self.warmup_messages, &checksum, &qos2_pending);
         const previously_warm = self.warmup_complete.fetchAdd(1, .acq_rel);
         if (previously_warm + 1 == self.subscriber_count) {
             self.all_warm.set(self.io);
         }
         self.measured_start.waitUncancelable(self.io);
-        try self.consume(self.measured_messages, &checksum);
+        try self.consume(self.measured_messages, &checksum, &qos2_pending);
         self.checksum.* = checksum;
         self.finished_ns.* = nowNs(self.io);
     }
@@ -80,11 +94,15 @@ const Worker = struct {
         self: *@This(),
         message_count: usize,
         checksum: *u64,
+        qos2_pending: *std.ArrayList(u16),
     ) !void {
+        if (self.qos == .exactly_once) {
+            return self.consumeQoS2(message_count, checksum, qos2_pending);
+        }
         for (0..message_count) |_| {
             var delivery = try self.client.readPublish();
             defer delivery.deinit(self.allocator);
-            if (delivery.publish.qos != .at_least_once or
+            if (delivery.publish.qos != self.qos or
                 delivery.publish.payload.len != self.payload_bytes)
             {
                 return error.InvalidBenchmarkPacket;
@@ -93,10 +111,62 @@ const Worker = struct {
             checksum.* +%= delivery.publish.payload[
                 delivery.publish.payload.len - 1
             ];
-            try self.client.writePubAck(
-                delivery.publish.packet_id.?,
-                0,
-            );
+            try self.client.writePubAck(delivery.publish.packet_id.?, 0);
+        }
+    }
+
+    fn consumeQoS2(
+        self: *@This(),
+        message_count: usize,
+        checksum: *u64,
+        pending: *std.ArrayList(u16),
+    ) !void {
+        pending.clearRetainingCapacity();
+        var received: usize = 0;
+        var completed: usize = 0;
+        while (completed < message_count) {
+            var event = try self.client.readClientPacketEvent();
+            defer event.deinit(self.allocator);
+            switch (event) {
+                .publish => |delivery| {
+                    if (received == message_count or
+                        delivery.publish.qos != .exactly_once or
+                        delivery.publish.payload.len != self.payload_bytes)
+                    {
+                        return error.InvalidQoS2Delivery;
+                    }
+                    const packet_id = delivery.publish.packet_id.?;
+                    if (std.mem.indexOfScalar(
+                        u16,
+                        pending.items,
+                        packet_id,
+                    ) != null) return error.DuplicateQoS2Delivery;
+                    pending.appendAssumeCapacity(packet_id);
+                    checksum.* +%= delivery.publish.payload[0];
+                    checksum.* +%= delivery.publish.payload[
+                        delivery.publish.payload.len - 1
+                    ];
+                    try self.client.writePubRec(packet_id, 0);
+                    received += 1;
+                },
+                .pubrel => |pubrel| {
+                    const index = std.mem.indexOfScalar(
+                        u16,
+                        pending.items,
+                        pubrel.ack.packet_id,
+                    ) orelse return error.UnexpectedPubRel;
+                    if (!pubrel.ack.accepted()) {
+                        return error.RefusedPubRel;
+                    }
+                    try self.client.writePubComp(pubrel.ack.packet_id, 0);
+                    _ = pending.swapRemove(index);
+                    completed += 1;
+                },
+                else => return error.UnexpectedSubscriberPacket,
+            }
+        }
+        if (received != message_count or pending.items.len != 0) {
+            return error.IncompleteQoS2Delivery;
         }
     }
 };
@@ -141,14 +211,14 @@ pub fn main(init: std.process.Init) !void {
             var suback = try subscriber.subscribe(
                 &.{.{
                     .topic_filter = filter,
-                    .qos = .at_least_once,
+                    .qos = config.qos,
                 }},
                 .{},
             );
             defer suback.deinit(allocator);
             if (suback.suback.reason_codes.len != 1 or
                 suback.suback.reason_codes[0] !=
-                    @intFromEnum(netz.mqtt.QoS.at_least_once))
+                    @intFromEnum(config.qos))
             {
                 return error.SubscriptionRefused;
             }
@@ -213,6 +283,8 @@ pub fn main(init: std.process.Init) !void {
             .warmup_messages = config.warmup_messages,
             .measured_messages = config.messages,
             .payload_bytes = config.payload_bytes,
+            .qos = config.qos,
+            .inflight_limit = config.publisher_window,
             .ready = &ready,
             .warmup_complete = &warmup_complete,
             .failed = &failed,
@@ -244,6 +316,7 @@ pub fn main(init: std.process.Init) !void {
         payload,
         config.warmup_messages,
         config.publisher_window,
+        config.qos,
         io,
         allocator,
         null,
@@ -259,6 +332,7 @@ pub fn main(init: std.process.Init) !void {
         payload,
         config.messages,
         config.publisher_window,
+        config.qos,
         io,
         allocator,
         latency_samples,
@@ -307,6 +381,7 @@ pub fn main(init: std.process.Init) !void {
         \\  subscribers: {d}
         \\  overlapping subscriptions/client: {d}
         \\  publisher window: {d}
+        \\  delivery QoS: {d}
         \\  server queue capacity: {d}
         \\  session expiry seconds: {d}
         \\  warmup publishes: {d}
@@ -330,6 +405,7 @@ pub fn main(init: std.process.Init) !void {
         config.subscribers,
         config.overlapping_subscriptions,
         config.publisher_window,
+        @intFromEnum(config.qos),
         config.server_queue_capacity,
         config.session_expiry_seconds,
         config.warmup_messages,
@@ -349,7 +425,7 @@ pub fn main(init: std.process.Init) !void {
     });
     std.debug.print(
         "record=result implementation=netz protocol=mqtt5 transport=tcp " ++
-            "mode=qos1-fanout role_pair=netz-client+{s}-server " ++
+            "mode=qos{d}-fanout role_pair=netz-client+{s}-server " ++
             "client_io=zio-std-io server_io={s} " ++
             "benchmark_scope=same-client-workload timing_usable=true " ++
             "client_tcp_nodelay=true server_tcp_nodelay={s} " ++
@@ -363,6 +439,7 @@ pub fn main(init: std.process.Init) !void {
             "client_total_allocated_bytes={d} client_peak_live_bytes={d} " ++
             "checksum={d} complete=true\n",
         .{
+            @intFromEnum(config.qos),
             config.server_implementation,
             config.server_io,
             config.server_tcp_nodelay,
@@ -481,6 +558,14 @@ fn parseArgs(
             config.payload_bytes = try parsePositiveUsize(
                 arg["--payload-bytes=".len..],
             );
+        } else if (std.mem.startsWith(u8, arg, "--qos=")) {
+            const value = arg["--qos=".len..];
+            config.qos = if (std.mem.eql(u8, value, "1"))
+                .at_least_once
+            else if (std.mem.eql(u8, value, "2"))
+                .exactly_once
+            else
+                return error.InvalidArgument;
         } else if (std.mem.startsWith(
             u8,
             arg,
@@ -567,6 +652,7 @@ fn publishWindowed(
     payload: []const u8,
     message_count: usize,
     window: usize,
+    qos: netz.mqtt.QoS,
     io: std.Io,
     allocator: std.mem.Allocator,
     latency_samples: ?[]u64,
@@ -581,6 +667,12 @@ fn publishWindowed(
     defer allocator.free(packet_ids);
     const sent_ns = try allocator.alloc(u64, total_window);
     defer allocator.free(sent_ns);
+    var no_qos2_released: [0]bool = .{};
+    const qos2_released = if (qos == .exactly_once)
+        try allocator.alloc(bool, total_window)
+    else
+        no_qos2_released[0..];
+    defer if (qos2_released.len != 0) allocator.free(qos2_released);
     var offset: usize = 0;
     while (offset < message_count) {
         const count = @min(total_window, message_count - offset);
@@ -593,22 +685,84 @@ fn publishWindowed(
                 .writePublish(
                 publish_topic,
                 payload,
-                .{ .qos = .at_least_once },
+                .{ .qos = qos },
             )).?;
             sent_ns[index] = nowNs(io);
         }
-        for (0..count) |index| {
-            const publisher_index = index % publishers.len;
-            try publishers[publisher_index].completePublish(
-                packet_ids[index],
-                .at_least_once,
-            );
-            if (latency_samples) |samples| {
-                samples[offset + index] = nowNs(io) -| sent_ns[index];
+        if (qos == .at_least_once) {
+            for (0..count) |index| {
+                const publisher_index = index % publishers.len;
+                try publishers[publisher_index].completePublish(
+                    packet_ids[index],
+                    qos,
+                );
+                if (latency_samples) |samples| {
+                    samples[offset + index] = nowNs(io) -| sent_ns[index];
+                }
+            }
+        } else {
+            @memset(qos2_released[0..count], false);
+            for (publishers, 0..) |*publisher, publisher_index| {
+                const publisher_count = if (publisher_index < count)
+                    (count - 1 - publisher_index) / publishers.len + 1
+                else
+                    0;
+                var completed: usize = 0;
+                while (completed < publisher_count) {
+                    var event = try publisher.readClientPacketEvent();
+                    defer event.deinit(allocator);
+                    switch (event) {
+                        .pubrec => |pubrec| {
+                            const index = findWindowPacket(
+                                packet_ids[0..count],
+                                publishers.len,
+                                publisher_index,
+                                pubrec.ack.packet_id,
+                            ) orelse return error.UnexpectedPubRec;
+                            if (qos2_released[index]) {
+                                return error.DuplicatePubRec;
+                            }
+                            try publisher.applyPubRec(pubrec.ack);
+                            qos2_released[index] = true;
+                        },
+                        .pubcomp => |pubcomp| {
+                            const index = findWindowPacket(
+                                packet_ids[0..count],
+                                publishers.len,
+                                publisher_index,
+                                pubcomp.ack.packet_id,
+                            ) orelse return error.UnexpectedPubComp;
+                            if (!qos2_released[index]) {
+                                return error.PubCompBeforePubRec;
+                            }
+                            try publisher.applyPubComp(pubcomp.ack);
+                            packet_ids[index] = 0;
+                            completed += 1;
+                            if (latency_samples) |samples| {
+                                samples[offset + index] =
+                                    nowNs(io) -| sent_ns[index];
+                            }
+                        },
+                        else => return error.UnexpectedPublisherPacket,
+                    }
+                }
             }
         }
         offset += count;
     }
+}
+
+fn findWindowPacket(
+    packet_ids: []const u16,
+    publisher_count: usize,
+    publisher_index: usize,
+    packet_id: u16,
+) ?usize {
+    var index = publisher_index;
+    while (index < packet_ids.len) : (index += publisher_count) {
+        if (packet_ids[index] == packet_id) return index;
+    }
+    return null;
 }
 
 fn percentile(

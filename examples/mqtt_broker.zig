@@ -55,6 +55,7 @@ const Config = struct {
     restore: bool = true,
     ignore_connection_errors: bool = false,
     allocator_stats: bool = false,
+    allocator_stats_qos: ?u2 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -398,7 +399,7 @@ pub fn main(init: std.process.Init) !void {
         if (snapshot.current_bytes != 0) return error.MemoryLeak;
         std.debug.print(
             "record=allocator implementation=netz endpoint_role=server " ++
-                "protocol=mqtt5 transport=tcp mode=qos1-fanout " ++
+                "protocol=mqtt5 transport=tcp mode=qos{d}-fanout " ++
                 "timing_usable=false allocator_scope=broker-explicit " ++
                 "connection_scope=persistent client_tcp_nodelay=true " ++
                 "server_tcp_nodelay=true " ++
@@ -410,6 +411,7 @@ pub fn main(init: std.process.Init) !void {
                 "alloc_le_4096={d} alloc_le_16384={d} " ++
                 "alloc_le_65536={d} alloc_gt_65536={d} complete=true\n",
             .{
+                config.allocator_stats_qos orelse 1,
                 config.connections,
                 snapshot.alloc_count,
                 snapshot.free_count,
@@ -885,6 +887,18 @@ fn parseArgs(
             config.ignore_connection_errors = true;
         } else if (std.mem.eql(u8, arg, "--allocator-stats")) {
             config.allocator_stats = true;
+        } else if (std.mem.startsWith(
+            u8,
+            arg,
+            "--allocator-stats-qos=",
+        )) {
+            const value = arg["--allocator-stats-qos=".len..];
+            config.allocator_stats_qos = if (std.mem.eql(u8, value, "1"))
+                1
+            else if (std.mem.eql(u8, value, "2"))
+                2
+            else
+                return error.InvalidArgument;
         } else {
             return error.InvalidArgument;
         }
@@ -901,6 +915,9 @@ fn parseArgs(
             config.autosave_change_count != null or
             !config.restore))
     {
+        return error.InvalidArgument;
+    }
+    if (config.allocator_stats_qos != null and !config.allocator_stats) {
         return error.InvalidArgument;
     }
     if ((config.username == null) != (config.password == null)) {

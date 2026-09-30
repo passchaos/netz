@@ -16,7 +16,7 @@ SPEC.loader.exec_module(CHECK)
 
 
 class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
-    def make_matrix(self, root: Path) -> None:
+    def make_matrix(self, root: Path, qos: int = 1) -> None:
         identity = root / "identity"
         identity.mkdir(parents=True)
         for name in CHECK.IDENTITY_FILES:
@@ -33,7 +33,7 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
         }
         (root / "environment.log").write_text(
             "record=environment protocol=mqtt5 transport=tcp "
-            "mode=qos1-fanout-allocator-matrix "
+            f"mode=qos{qos}-fanout-allocator-matrix "
             "benchmark_scope=same-client-workload timing_usable=false "
             "allocator_scope=broker-explicit connection_scope=persistent "
             "client_tcp_nodelay=true server_tcp_nodelay=true "
@@ -58,7 +58,7 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
                 (run / "server.log").write_text(
                     "netz MQTT 3.1.1/5 broker listening server_io=zio-std-io\n"
                     "record=allocator implementation=netz endpoint_role=server "
-                    "protocol=mqtt5 transport=tcp mode=qos1-fanout "
+                    f"protocol=mqtt5 transport=tcp mode=qos{qos}-fanout "
                     "timing_usable=false allocator_scope=broker-explicit "
                     "connection_scope=persistent client_tcp_nodelay=true "
                     "server_tcp_nodelay=true "
@@ -75,7 +75,7 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
                 )
                 (run / "driver.log").write_text(
                     "record=result implementation=netz protocol=mqtt5 "
-                    "transport=tcp mode=qos1-fanout "
+                    f"transport=tcp mode=qos{qos}-fanout "
                     "role_pair=netz-client+netz-server client_io=zio-std-io "
                     "server_io=zio-std-io benchmark_scope=same-client-workload "
                     "timing_usable=true client_tcp_nodelay=true "
@@ -104,6 +104,14 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
             self.assertEqual(len(output), len(CHECK.SHAPES) + 2)
             self.assertIn("broker_runs=10", output[-1])
             self.assertIn("shape=balanced-32x32", output[-3])
+
+    def test_accepts_complete_qos2_matrix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_matrix(root, qos=2)
+            output = CHECK.verify(root, 2, 0, 1, qos=2)
+            self.assertIn("mode=qos2-fanout-allocator-matrix", output[0])
+            self.assertIn("mode=qos2-fanout-allocator-matrix", output[1])
 
     def test_rejects_live_bytes(self) -> None:
         with TemporaryDirectory() as directory:

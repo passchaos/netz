@@ -13,11 +13,11 @@ SPEC.loader.exec_module(CHECK)
 
 
 class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
-    def record(self, server: str, server_io: str) -> str:
+    def record(self, server: str, server_io: str, qos: int = 1) -> str:
         elapsed = 1_000_000
         return (
             "record=result implementation=netz protocol=mqtt5 transport=tcp "
-            f"mode=qos1-fanout role_pair=netz-client+{server}-server "
+            f"mode=qos{qos}-fanout role_pair=netz-client+{server}-server "
             f"client_io=zio-std-io server_io={server_io} "
             "benchmark_scope=same-client-workload timing_usable=true "
             "client_tcp_nodelay=true server_tcp_nodelay=true "
@@ -32,8 +32,10 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             "checksum=53900 complete=true\n"
         )
 
-    def verify(self, netz: Path, mosquitto: Path) -> str:
-        return CHECK.verify(netz, mosquitto, 2, 2, 10, 100, 256, 8)
+    def verify(self, netz: Path, mosquitto: Path, qos: int = 1) -> str:
+        return CHECK.verify(
+            netz, mosquitto, 2, 2, 10, 100, 256, 8, qos=qos
+        )
 
     def test_accepts_complete_pair(self) -> None:
         with TemporaryDirectory() as directory:
@@ -45,6 +47,28 @@ class MqttBrokerBenchmarkCheckTest(unittest.TestCase):
             )
             output = self.verify(netz, mosquitto)
             self.assertIn("client_io=zio-std-io", output)
+
+    def test_accepts_qos2_pair(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io", qos=2))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop", qos=2)
+            )
+            output = self.verify(netz, mosquitto, qos=2)
+            self.assertIn("mode=qos2-fanout", output)
+
+    def test_rejects_qos_mode_mismatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            netz = Path(directory, "netz.log")
+            mosquitto = Path(directory, "mosquitto.log")
+            netz.write_text(self.record("netz", "zio-std-io", qos=2))
+            mosquitto.write_text(
+                self.record("mosquitto", "mosquitto-event-loop", qos=2)
+            )
+            with self.assertRaisesRegex(ValueError, "mode"):
+                self.verify(netz, mosquitto)
 
     def test_accepts_broker_rss_pair(self) -> None:
         with TemporaryDirectory() as directory:

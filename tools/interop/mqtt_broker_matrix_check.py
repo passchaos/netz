@@ -154,12 +154,13 @@ def verify_environment(
     client_cpu: int,
     server_cpu: int,
     sampler_cpu: int,
+    qos: int,
 ) -> dict[str, str]:
     record = one_record(path, "environment")
     expected = {
         "protocol": "mqtt5",
         "transport": "tcp",
-        "mode": "qos1-fanout-matrix",
+        "mode": f"qos{qos}-fanout-matrix",
         "benchmark_scope": "same-client-workload",
         "timing_usable": "true",
         "client_tcp_nodelay": "true",
@@ -230,6 +231,7 @@ def verify(
     client_cpu: int,
     server_cpu: int,
     sampler_cpu: int,
+    qos: int = 1,
 ) -> list[str]:
     if samples <= 0 or samples % 4 != 0:
         raise ValueError("matrix samples must be a positive multiple of four")
@@ -237,6 +239,8 @@ def verify(
         {client_cpu, server_cpu, sampler_cpu}
     ) != 3:
         raise ValueError("matrix CPUs must be distinct non-negative values")
+    if qos not in (1, 2):
+        raise ValueError("QoS must be 1 or 2")
     total_bytes = sum(
         path.stat().st_size for path in root.rglob("*")
         if path.is_file() and not path.is_symlink()
@@ -250,11 +254,11 @@ def verify(
     )
     environment = verify_environment(
         root / "environment.log", samples, client_cpu, server_cpu,
-        sampler_cpu,
+        sampler_cpu, qos,
     )
     output = [
         "record=matrix-environment protocol=mqtt5 transport=tcp "
-        "mode=qos1-fanout-matrix benchmark_scope=same-client-workload "
+        f"mode=qos{qos}-fanout-matrix benchmark_scope=same-client-workload "
         f"timing_usable=true shapes={len(SHAPES)} samples={samples} "
         "client_tcp_nodelay=true server_tcp_nodelay=true "
         f"schedule=abba client_cpu={client_cpu} server_cpu={server_cpu} "
@@ -308,7 +312,7 @@ def verify(
             expected_marker = {
                 "protocol": "mqtt5",
                 "transport": "tcp",
-                "mode": "qos1-fanout",
+                "mode": f"qos{qos}-fanout",
                 "benchmark_scope": "same-client-workload",
                 "timing_usable": "true",
                 "client_tcp_nodelay": "true",
@@ -345,7 +349,7 @@ def verify(
                 netz_log, mosquitto_log, shape.publishers, shape.subscribers,
                 shape.warmup, shape.messages, shape.payload_bytes, shape.window,
                 netz_rss, mosquitto_rss, "proc-vmrss-sampled-2ms",
-                queue_capacity,
+                queue_capacity, qos,
             )
             expected_verified = SINGLE.fields(single_output.splitlines()[-1])
             actual_verified = one_record(run / "runner.log", "verified")
@@ -383,7 +387,7 @@ def verify(
             raise ValueError(f"invalid matrix ratios for {shape.name}")
         output.append(
             "record=matrix-shape protocol=mqtt5 transport=tcp "
-            "mode=qos1-fanout benchmark_scope=same-client-workload "
+            f"mode=qos{qos}-fanout benchmark_scope=same-client-workload "
             f"timing_usable=true shape={shape.name} samples={samples} "
             "client_tcp_nodelay=true server_tcp_nodelay=true "
             f"publishers={shape.publishers} subscribers={shape.subscribers} "
@@ -423,7 +427,7 @@ def verify(
         )
     output.append(
         "record=matrix-complete protocol=mqtt5 transport=tcp "
-        "mode=qos1-fanout-matrix benchmark_scope=same-client-workload "
+        f"mode=qos{qos}-fanout-matrix benchmark_scope=same-client-workload "
         f"timing_usable=true shapes={len(SHAPES)} samples_per_shape={samples} "
         f"paired_samples={len(SHAPES) * samples} "
         f"broker_runs={len(SHAPES) * samples * 2} complete=true"
@@ -436,6 +440,7 @@ def main() -> None:
     parser.add_argument("--list-shapes", action="store_true")
     parser.add_argument("--root", type=Path)
     parser.add_argument("--samples", type=int, default=4)
+    parser.add_argument("--qos", type=int, choices=(1, 2), default=1)
     parser.add_argument("--client-cpu", type=int)
     parser.add_argument("--server-cpu", type=int)
     parser.add_argument("--sampler-cpu", type=int)
@@ -449,7 +454,7 @@ def main() -> None:
         parser.error("matrix verification arguments are required")
     for line in verify(
         args.root, args.samples, args.client_cpu, args.server_cpu,
-        args.sampler_cpu,
+        args.sampler_cpu, args.qos,
     ):
         print(line)
 

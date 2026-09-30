@@ -1431,10 +1431,14 @@ MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 # Mosquitto source is rebuilt and all hash-bound artifacts are retained. This
 # is a same-client workload comparison, not a TCP equal-wire claim.
 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
+# Exercise the same artifact, scheduling, completion, and queue-capacity gates
+# with interleaved QoS 2 PUBLISH/PUBREC/PUBREL/PUBCOMP transactions.
+MQTT_QOS=2 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
 # Profile broker-owned allocation counts, bytes, size buckets and teardown
 # across the same five shapes. This diagnostic deliberately marks timing as
 # unusable because its thread-safe counting allocator changes the hot path.
 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
+MQTT_QOS=2 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # The latest verified five-shape run and the preceding fixed-binary A/B show
 # that out-of-line MQTT WebSocket transport state cuts balanced-32x32 netz
 # broker RSS by 6.5% without a supported throughput claim. See the parity doc.

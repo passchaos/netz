@@ -13,12 +13,17 @@ warmup_messages=${WARMUP_MESSAGES:-100}
 messages=${MESSAGES:-2000}
 payload_bytes=${PAYLOAD_BYTES:-256}
 publisher_window=${PUBLISHER_WINDOW:-16}
+qos=${MQTT_QOS:-1}
 broker_order=${MQTT_BROKER_ORDER:-netz-first}
 client_cpu=${MQTT_CLIENT_CPU:-}
 server_cpu=${MQTT_SERVER_CPU:-}
 sampler_cpu=${MQTT_SAMPLER_CPU:-}
 stats=${MQTT_STATS:-false}
 max_artifact_bytes=33554432
+if [[ "$qos" != 1 && "$qos" != 2 ]]; then
+  echo 'MQTT_QOS must be 1 or 2' >&2
+  exit 2
+fi
 if [[ "$broker_order" != netz-first && "$broker_order" != mosquitto-first ]]; then
   echo 'MQTT_BROKER_ORDER must be netz-first or mosquitto-first' >&2
   exit 2
@@ -197,6 +202,7 @@ run_driver() {
     "--warmup-messages=$warmup_messages" \
     "--messages=$messages" \
     "--payload-bytes=$payload_bytes" \
+    "--qos=$qos" \
     "--publisher-window=$publisher_window" \
     "--server-queue-capacity=$max_queued_messages" \
     "--server-implementation=$server_implementation" \
@@ -210,7 +216,7 @@ run_driver() {
   grep -Fq 'MQTT 5 TCP broker fanout workload' "$output"
   grep -Fq 'client io backend: zio-std-io' "$output"
   grep -Fq \
-    "record=result implementation=netz protocol=mqtt5 transport=tcp mode=qos1-fanout role_pair=netz-client+$server_implementation-server client_io=zio-std-io server_io=$server_io" \
+    "record=result implementation=netz protocol=mqtt5 transport=tcp mode=qos$qos-fanout role_pair=netz-client+$server_implementation-server client_io=zio-std-io server_io=$server_io" \
     "$output"
   grep -Eq 'publishes/s: [1-9][0-9]*' "$output"
   grep -Eq 'deliveries/s: [1-9][0-9]*' "$output"
@@ -277,7 +283,8 @@ EOF
   finish_rss_sampler
 }
 
-printf 'record=run-order protocol=mqtt5 transport=tcp mode=qos1-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true broker_order=%s client_cpu=%s server_cpu=%s sampler_cpu=%s complete=true\n' \
+printf 'record=run-order protocol=mqtt5 transport=tcp mode=qos%s-fanout benchmark_scope=same-client-workload timing_usable=true client_tcp_nodelay=true server_tcp_nodelay=true broker_order=%s client_cpu=%s server_cpu=%s sampler_cpu=%s complete=true\n' \
+  "$qos" \
   "$broker_order" "${client_cpu:-unbound}" "${server_cpu:-unbound}" \
   "${sampler_cpu:-unbound}"
 if [[ "$broker_order" == netz-first ]]; then
@@ -303,6 +310,7 @@ check_args=(python3 \
   --warmup "$warmup_messages" \
   --messages "$messages" \
   --payload-bytes "$payload_bytes" \
+  --qos "$qos" \
   --publisher-window "$publisher_window" \
   --server-queue-capacity "$max_queued_messages")
 if [[ "$stats" == true ]]; then

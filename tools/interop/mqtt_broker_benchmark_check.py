@@ -61,13 +61,14 @@ def validate(
     payload_bytes: int,
     window: int,
     queue_capacity: int,
+    qos: int,
 ) -> None:
     expected = {
         "record": "result",
         "implementation": "netz",
         "protocol": "mqtt5",
         "transport": "tcp",
-        "mode": "qos1-fanout",
+        "mode": f"qos{qos}-fanout",
         "role_pair": f"netz-client+{server}-server",
         "client_io": "zio-std-io",
         "server_io": server_io,
@@ -124,21 +125,25 @@ def verify(
     mosquitto_server_rss: Path | None = None,
     rss_source: str = "proc-vmrss-sampled-2ms",
     queue_capacity: int = 1_024,
+    qos: int = 1,
 ) -> str:
     if min(
         publishers, subscribers, messages, payload_bytes, window,
         queue_capacity,
     ) <= 0 or warmup < 0:
         raise ValueError("invalid MQTT benchmark configuration")
+    if qos not in (1, 2):
+        raise ValueError("QoS must be 1 or 2")
     netz = result(netz_path)
     mosquitto = result(mosquitto_path)
     validate(
         netz, "netz", "zio-std-io", publishers, subscribers, warmup,
-        messages, payload_bytes, window, queue_capacity,
+        messages, payload_bytes, window, queue_capacity, qos,
     )
     validate(
         mosquitto, "mosquitto", "mosquitto-event-loop", publishers,
         subscribers, warmup, messages, payload_bytes, window, queue_capacity,
+        qos,
     )
     if netz["checksum"] != mosquitto["checksum"]:
         raise ValueError("broker checksums differ")
@@ -155,7 +160,7 @@ def verify(
         if rss_source != "proc-vmrss-sampled-2ms":
             raise ValueError(f"unsupported RSS source {rss_source!r}")
         common = (
-            "protocol=mqtt5 transport=tcp mode=qos1-fanout "
+            f"protocol=mqtt5 transport=tcp mode=qos{qos}-fanout "
             "benchmark_scope=same-client-workload timing_usable=true "
             "client_tcp_nodelay=true server_tcp_nodelay=true "
             f"publishers={publishers} subscribers={subscribers} "
@@ -183,7 +188,7 @@ def verify(
             "complete=true",
         ))
     records.append(
-        "record=verified protocol=mqtt5 transport=tcp mode=qos1-fanout "
+        f"record=verified protocol=mqtt5 transport=tcp mode=qos{qos}-fanout "
         "benchmark_scope=same-client-workload timing_usable=true "
         "client_tcp_nodelay=true server_tcp_nodelay=true "
         f"publishers={publishers} subscribers={subscribers} warmup={warmup} "
@@ -205,6 +210,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, required=True)
     parser.add_argument("--messages", type=int, required=True)
     parser.add_argument("--payload-bytes", type=int, required=True)
+    parser.add_argument("--qos", type=int, choices=(1, 2), default=1)
     parser.add_argument("--publisher-window", type=int, required=True)
     parser.add_argument("--server-queue-capacity", type=int, required=True)
     parser.add_argument("--netz-server-rss", type=Path)
@@ -217,7 +223,7 @@ def main() -> None:
             args.subscribers, args.warmup, args.messages, args.payload_bytes,
             args.publisher_window,
             args.netz_server_rss, args.mosquitto_server_rss, args.rss_source,
-            args.server_queue_capacity,
+            args.server_queue_capacity, args.qos,
         )
     )
 

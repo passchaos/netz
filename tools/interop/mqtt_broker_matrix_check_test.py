@@ -14,7 +14,7 @@ SPEC.loader.exec_module(CHECK)
 
 
 class MqttBrokerMatrixCheckTest(unittest.TestCase):
-    def make_matrix(self, root: Path) -> None:
+    def make_matrix(self, root: Path, qos: int = 1) -> None:
         identity = root / "identity"
         identity.mkdir(parents=True)
         for name in CHECK.IDENTITY_FILES - {"mosquitto-head.txt"}:
@@ -42,7 +42,7 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
         }
         (root / "environment.log").write_text(
             "record=environment protocol=mqtt5 transport=tcp "
-            "mode=qos1-fanout-matrix benchmark_scope=same-client-workload "
+            f"mode=qos{qos}-fanout-matrix benchmark_scope=same-client-workload "
             "timing_usable=true client_tcp_nodelay=true "
             "server_tcp_nodelay=true shapes=5 samples=4 schedule=abba "
             "client_cpu=0 server_cpu=1 sampler_cpu=2 "
@@ -68,13 +68,13 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                 artifacts.mkdir(parents=True)
                 (run / "runner.log").write_text(
                     "record=run-order protocol=mqtt5 transport=tcp "
-                    "mode=qos1-fanout benchmark_scope=same-client-workload "
+                    f"mode=qos{qos}-fanout benchmark_scope=same-client-workload "
                     "timing_usable=true client_tcp_nodelay=true "
                     "server_tcp_nodelay=true "
                     f"broker_order={CHECK.expected_order(sample)} "
                     "client_cpu=0 server_cpu=1 sampler_cpu=2 complete=true\n"
                     "record=verified protocol=mqtt5 transport=tcp "
-                    "mode=qos1-fanout benchmark_scope=same-client-workload "
+                    f"mode=qos{qos}-fanout benchmark_scope=same-client-workload "
                     "timing_usable=true client_tcp_nodelay=true "
                     "server_tcp_nodelay=true "
                     f"publishers={shape.publishers} "
@@ -100,7 +100,7 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                     )
                     (artifacts / f"{server}-result.txt").write_text(
                         "record=result implementation=netz protocol=mqtt5 "
-                        "transport=tcp mode=qos1-fanout "
+                        f"transport=tcp mode=qos{qos}-fanout "
                         f"role_pair=netz-client+{server}-server client_io=zio-std-io "
                         f"server_io={server_io} benchmark_scope=same-client-workload "
                         "timing_usable=true client_tcp_nodelay=true "
@@ -136,8 +136,8 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-    def verify(self, root: Path) -> list[str]:
-        return CHECK.verify(root, 4, 0, 1, 2)
+    def verify(self, root: Path, qos: int = 1) -> list[str]:
+        return CHECK.verify(root, 4, 0, 1, 2, qos)
 
     def test_accepts_complete_matrix(self) -> None:
         with TemporaryDirectory() as directory:
@@ -148,6 +148,14 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
             self.assertIn("broker_runs=40", output[-1])
             self.assertIn("shape=balanced-32x32", output[-3])
             self.assertIn("netz_min_publishes_per_s=200001", output[1])
+
+    def test_accepts_complete_qos2_matrix(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_matrix(root, qos=2)
+            output = self.verify(root, qos=2)
+            self.assertIn("mode=qos2-fanout-matrix", output[0])
+            self.assertIn("mode=qos2-fanout", output[1])
 
     def test_rejects_missing_shape(self) -> None:
         with TemporaryDirectory() as directory:

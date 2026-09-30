@@ -644,6 +644,7 @@ and independently calculated checksum, then tears down every child:
 zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 MQTT_STATS=true zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
+MQTT_QOS=2 zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
 ```
 
 `MOSQUITTO_BIN` may select an existing executable, while `MOSQUITTO_ROOT`
@@ -651,7 +652,8 @@ overrides the default `~/Work/mosquitto` checkout used for an isolated build.
 Source builds require the audited `5cd25465` revision unless
 `MOSQUITTO_COMMIT` explicitly selects another revision;
 `PUBLISHERS`, `SUBSCRIBERS`, `WARMUP_MESSAGES`, `MESSAGES`, `PAYLOAD_BYTES`,
-and `PUBLISHER_WINDOW` select a bounded smoke or longer measurement. Building
+and `PUBLISHER_WINDOW` select a bounded smoke or longer measurement;
+`MQTT_QOS=1|2` selects the complete acknowledgement flow. Building
 Mosquitto requires its normal development dependencies, including cJSON
 headers; the gate reports that requirement rather than silently using an
 unrelated system broker. `MQTT_STATS=true` additionally samples each broker's
@@ -708,11 +710,39 @@ accepted matrix explicitly aligns `TCP_NODELAY=true` on both brokers and omits
 verbose packet logging. These results identify broker scheduling, serial
 latency, and per-connection memory as the next optimization targets.
 
+The same driver and strict artifact pipeline now cover QoS 2. Subscriber tasks
+consume interleaved PUBLISH and PUBREL events through one socket reader, track
+the bounded set of pending Packet Identifiers, and send PUBREC/PUBCOMP without
+assuming adjacent control packets. Publisher completion similarly demultiplexes
+interleaved PUBREC/PUBCOMP packets per connection and applies each transition
+through the production runtime state machine. This preserves the configured
+publisher window instead of serializing QoS 2 to an easier window-one shape.
+The 2026-09-30 CPU-0/1/2 capture at
+`zig-out/mqtt-broker-qos2-matrix-final` (23,119,009 bytes; summary SHA-256
+`05159fc9b9026eeda85879f54e3c6309e5d12b5565f82e60fbc81922965a36af`)
+completed all 40 ABBA runs with exact delivery counts and independently
+recomputed checksums. Rates and p99 are medians:
+
+| QoS 2 shape | netz publish/s [range] | Mosquitto publish/s [range] | netz/Mosquitto | p99 ms netz / Mosquitto | broker RSS MiB netz / Mosquitto |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| serial | 13,826 [12,925–14,687] | 19,715 [16,894–21,404] | 0.701× | 0.080 / 0.059 | 4.59 / 2.96 |
+| publishers-32 | 22,690 [22,401–22,806] | 32,012 [31,231–32,157] | 0.709× | 5.220 / 3.460 | 5.55 / 3.31 |
+| fanout-32 | 1,535 [1,519–1,571] | 2,225 [2,216–2,252] | 0.690× | 2.647 / 1.469 | 5.71 / 3.13 |
+| balanced-32x32 | 1,499 [1,461–1,522] | 2,541 [2,502–2,585] | 0.590× | 85.226 / 45.432 | 6.37 / 3.56 |
+| large-payload | 11,501 [10,808–11,611] | 15,018 [14,780–15,129] | 0.766× | 5.185 / 4.551 | 5.20 / 3.40 |
+
+This first measured QoS 2 baseline intentionally exposes a consistent
+performance and RSS deficit rather than making a superiority claim. It gives
+future QoS 2 transaction-state work the same fixed binaries, source lock,
+completion checks, CPU assignment, queue bounds and retained artifacts already
+used for QoS 1.
+
 Broker-owned allocations now have a separate diagnostic matrix rather than
 being inferred from the common client's counters. Run it with:
 
 ```sh
 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
+MQTT_QOS=2 zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 ```
 
 The broker's explicit allocator is wrapped only when its opt-in
@@ -727,6 +757,15 @@ tree,
 identity hashes, allocation-size bucket sum, allocated/freed-byte equality and
 zero live bytes after complete broker teardown, then independently regenerates
 the summary.
+
+The QoS 2 allocator capture at
+`zig-out/mqtt-broker-qos2-allocator-final` (22,360,709 bytes; summary SHA-256
+`358aee6e4b00098c566e5119f96e4bed9e72cb9d664aa733a3c153c64334a541`)
+completed all fifteen runs with zero live bytes. It records the additional
+four-stage transaction ownership directly: balanced-32x32 used 11,197 broker
+allocations (0.109 per delivery), while serial and large-payload used 2,606
+and a median of 8,837 respectively. These are allocation diagnostics only; the
+thread-safe counting allocator marks timing as unusable.
 
 The first complete capture is
 `zig-out/mqtt-broker-allocator-matrix/run.20260930T-final3` (22,253,198
@@ -3115,11 +3154,12 @@ proxy evidence for the entire suite.
    closes the interval between checkpoints for protocol-visible durable
    mutations. Cross-node replication/consensus remains separate work.
 2. Reduce the production broker deficits exposed by the five-shape
-   publisher-window, latency, allocation and RSS matrix above. Netz currently
-   trails Mosquitto in serial, publisher-heavy and balanced 32×32 throughput,
-   while broker RSS remains higher in all five tested shapes. Add QoS 2 and
-   durable-Session matrix variants only with the same artifact, CPU, order,
-   completion and queue-capacity controls.
+   publisher-window, latency, allocation and RSS matrices above. Netz currently
+   trails Mosquitto across the measured QoS 2 shapes and in several QoS 1
+   shapes, while broker RSS remains an active deficit. QoS 2 now uses the same
+   artifact, CPU, order, completion and queue-capacity controls; add a durable-
+   Session matrix variant with those controls before drawing broader broker
+   conclusions.
    The connection-local Packet Identifier tracker now replaces five embedded
    65,536-bit tables (40 KiB in every connection, even before QoS traffic)
    with independent incoming/outgoing sparse stage maps. Each direction
