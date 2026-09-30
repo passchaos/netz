@@ -807,16 +807,22 @@ fn readTcpPacketWithPolicy(
         if (tcp.header_len >= tcp.header.len) {
             return error.MalformedRemainingLength;
         }
-        try readTcpExactWithDeadline(
+        // The first byte and the first Remaining Length byte are both always
+        // present in a complete MQTT packet. Request them together so the
+        // common one-byte Remaining Length case needs one transport read for
+        // its fixed header. A short read advances `header_len` precisely, so
+        // timeout/cancellation can resume without losing the first byte.
+        const header_read_len: usize = if (tcp.header_len == 0) 2 else 1;
+        const previous_header_len = tcp.header_len;
+        tcp.header_len += try readTcpSomeWithDeadline(
             tcp,
-            tcp.header[tcp.header_len .. tcp.header_len + 1],
+            tcp.header[tcp.header_len .. tcp.header_len + header_read_len],
             deadline,
         );
-        tcp.header_len += 1;
-        if (tcp.header_len == 1) {
+        if (previous_header_len == 0) {
             _ = try mqtt.packetTypeFromFirstByte(tcp.header[0]);
         }
-        if (tcp.header_len == 1 or
+        if (tcp.header_len < 2 or
             (tcp.header[tcp.header_len - 1] & 0x80) != 0)
         {
             continue;
@@ -862,21 +868,6 @@ fn readTcpPacketWithPolicy(
         .bytes = packet,
         .fixed = try mqtt.FixedHeader.parse(packet),
     };
-}
-
-fn readTcpExactWithDeadline(
-    tcp: *TcpTransport,
-    buffer: []u8,
-    deadline: ?std.Io.Clock.Timestamp,
-) Error!void {
-    var offset: usize = 0;
-    while (offset < buffer.len) {
-        offset += try readTcpSomeWithDeadline(
-            tcp,
-            buffer[offset..],
-            deadline,
-        );
-    }
 }
 
 fn readTcpSomeWithDeadline(
@@ -1342,6 +1333,52 @@ test "TCP packet receive allocates the owned packet exactly once" {
     try std.testing.expectEqualSlices(u8, &wire_bytes, packet.bytes);
     try std.testing.expectEqual(@as(usize, 130), packet.fixed.remaining_len);
     try std.testing.expectEqual(@as(usize, 3), packet.fixed.header_len);
+}
+
+test "TCP packet receive resumes after a split initial header timeout" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    var transport = Transport.initTcp(io, receiver);
+    defer transport.close(allocator);
+
+    try writeAll(io, sender, &.{0xc0});
+    try std.testing.expectError(
+        error.Timeout,
+        transport.readPacketWithDeadline(
+            allocator,
+            mqtt.ping_packet_len,
+            .fromNow(io, .{
+                .raw = .fromMilliseconds(20),
+                .clock = .awake,
+            }),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), transport.tcp.header_len);
+
+    try writeAll(io, sender, &.{0x00});
+    var packet = try transport.readPacketWithDeadline(
+        allocator,
+        mqtt.ping_packet_len,
+        .fromNow(io, .{
+            .raw = .fromSeconds(1),
+            .clock = .awake,
+        }),
+    );
+    defer packet.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &.{ 0xc0, 0x00 }, packet.bytes);
 }
 
 test "TCP packet receive rejects oversize before allocating" {
