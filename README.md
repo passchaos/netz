@@ -1455,6 +1455,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # connection slot; larger/local/Will plans keep exact owned storage. This
 # lowers balanced-32x32 to 0.109 broker allocations per delivery without
 # changing shared-subscription cursor semantics.
+# Empty listener namespaces borrow validated inbound Topic Names through an
+# explicit lifetime-carrying result, while configured mount points retain
+# owned concatenation. This lowers balanced-32x32 again to 0.076 allocations
+# per delivery without changing the existing always-owning public helper.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

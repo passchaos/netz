@@ -877,6 +877,30 @@ paired wins) and median p99 from 33.20 to 29.59 ms (10.9%, four of five wins).
 The ranges overlap, so this remains workload-specific supporting evidence
 rather than a general throughput claim.
 
+The default empty listener namespace now maps an inbound Topic Name through an
+explicit `MappedTopic` borrowed result rather than allocating an identical
+copy. Non-empty mount points still own their canonical prefix concatenation,
+and the existing `mapTopicAlloc` API keeps its always-owning contract. The
+borrowed packet remains alive throughout ACL checks, QoS 2 staging, retained
+storage, route planning and shared-Publication construction, each of which
+either consumes it synchronously or deep-copies state that escapes the call.
+A fail-first namespace test verifies pointer identity and allocation-free
+destruction for the empty prefix, alongside owned non-empty-prefix cleanup.
+The final three-sample matrix at
+`zig-out/mqtt-topic-borrow-current-final` (22,264,280 bytes; summary SHA-256
+`79dcab464e9ad353f5d206f6af7a1ac6013936b5db6eb84a5724f9d542767c06`)
+completed all fifteen broker runs with zero live bytes. Relative to the
+route-scratch matrix, allocation counts fell another 24.6%, 32.6%, 30.8%,
+30.9%, and 24.6% in table order. Balanced 32x32 moved from 11,197 to 7,741
+allocations, or 0.109 to 0.076 per measured delivery; the combined sequence
+has removed 98.2% of the original 421,950 broker allocations. A longer
+fixed-client five-pair A/B at
+`zig-out/mqtt-topic-borrow-long-ab/run.20260930` used 1,000 warmups and 10,000
+measured publishes per arm. The candidate won two pairs and moved median
+throughput from 3,688 to 3,617 publishes/s (-1.9%) with heavily overlapping
+ranges, so no throughput conclusion is drawn from that noisy run; the exact
+allocation reduction is the supported result.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:

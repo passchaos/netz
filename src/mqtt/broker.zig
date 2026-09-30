@@ -4204,13 +4204,13 @@ pub const Broker = struct {
         const namespace = listener_namespace.Namespace{
             .prefix = publisher.topicNamespace(),
         };
-        const mapped_topic = try namespace.mapTopicAlloc(
+        var mapped_topic = try namespace.mapTopic(
             self.allocator,
             publish.topic,
         );
-        defer self.allocator.free(mapped_topic);
+        defer mapped_topic.deinit(self.allocator);
         var canonical_publish = publish;
-        canonical_publish.topic = mapped_topic;
+        canonical_publish.topic = mapped_topic.value;
         const publisher_slot = try self.slotForSubscriber(publisher_id);
         if (self.options.protect_reserved_topics and
             !clientMayPublishTopic(canonical_publish.topic))

@@ -14,6 +14,18 @@ pub const Error = MapError || error{
     TopicOutsideNamespace,
 };
 
+/// A validated canonical Topic Name. An empty listener namespace borrows the
+/// original name; a non-empty namespace owns its prefixed representation.
+pub const MappedTopic = struct {
+    value: []const u8,
+    allocation: ?[]u8 = null,
+
+    pub fn deinit(self: *MappedTopic, allocator: std.mem.Allocator) void {
+        if (self.allocation) |bytes| allocator.free(bytes);
+        self.* = undefined;
+    }
+};
+
 pub const Namespace = struct {
     prefix: []const u8 = &.{},
     owned: bool = false,
@@ -52,6 +64,20 @@ pub const Namespace = struct {
     ) MapError![]u8 {
         try mqtt.validateTopicName(topic);
         return self.prependAlloc(allocator, topic);
+    }
+
+    /// Map an inbound Topic Name while borrowing it for the common empty
+    /// namespace. The result must not outlive `topic` and must be deinitialized
+    /// so a non-empty namespace can release its owned prefix concatenation.
+    pub fn mapTopic(
+        self: Namespace,
+        allocator: std.mem.Allocator,
+        topic: []const u8,
+    ) MapError!MappedTopic {
+        try mqtt.validateTopicName(topic);
+        if (self.prefix.len == 0) return .{ .value = topic };
+        const mapped = try self.prependAlloc(allocator, topic);
+        return .{ .value = mapped, .allocation = mapped };
     }
 
     pub fn mapFilterAlloc(
@@ -222,6 +248,30 @@ test "listener namespace maps publish, filter, shared filter and delivery" {
         "sensor/value",
         try namespace.visibleTopic(topic),
     );
+}
+
+test "listener namespace borrows identity topic and owns prefixed topic" {
+    const allocator = std.testing.allocator;
+    const topic = "sensor/value";
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    var identity = try (Namespace{}).mapTopic(
+        failing.allocator(),
+        topic,
+    );
+    defer identity.deinit(failing.allocator());
+    try std.testing.expect(identity.allocation == null);
+    try std.testing.expectEqual(topic.ptr, identity.value.ptr);
+    try std.testing.expectEqualStrings(topic, identity.value);
+    try std.testing.expect(!failing.has_induced_failure);
+
+    const namespace = try Namespace.init("tenant/");
+    var prefixed = try namespace.mapTopic(allocator, topic);
+    defer prefixed.deinit(allocator);
+    try std.testing.expect(prefixed.allocation != null);
+    try std.testing.expectEqualStrings("tenant/sensor/value", prefixed.value);
 }
 
 test "listener namespace rejects invalid prefixes and cross-namespace topics" {
