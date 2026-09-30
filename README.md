@@ -1429,9 +1429,9 @@ zig build compare-mqtt-mosquitto-matrix -Doptimize=ReleaseFast
 # The latest verified five-shape run and the preceding fixed-binary A/B show
 # that out-of-line MQTT WebSocket transport state cuts balanced-32x32 netz
 # broker RSS by 6.5% without a supported throughput claim. See the parity doc.
-# The current matrix also includes a TCP fixed-header read coalescing change;
-# fixed-binary serial A/B reduced io_uring_enter calls 20.0% and raised median
-# publish throughput 5.9%.
+# The current matrix also includes a 512-byte TCP packet read-ahead path; a
+# fixed-old-client serial A/B reduced io_uring_enter calls 61.8% and raised
+# median broker throughput 55.7%.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \
