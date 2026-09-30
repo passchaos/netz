@@ -1459,6 +1459,10 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # explicit lifetime-carrying result, while configured mount points retain
 # owned concatenation. This lowers balanced-32x32 again to 0.076 allocations
 # per delivery without changing the existing always-owning public helper.
+# Shared broker Publications coallocate their ref-counted header with the
+# contiguous Topic Name and payload. Empty-property fanout therefore needs one
+# allocation per incoming publication rather than separate object and byte
+# allocations, lowering balanced-32x32 to 0.042 allocations per delivery.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

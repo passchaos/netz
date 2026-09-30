@@ -72,8 +72,19 @@ pub const Publication = struct {
             topic_bytes.len,
             payload_bytes.len,
         ) catch return error.PublicationLimitExceeded;
-        const bytes = try allocator.alloc(u8, bytes_len);
-        errdefer allocator.free(bytes);
+        const allocation_len = std.math.add(
+            usize,
+            @sizeOf(Publication),
+            bytes_len,
+        ) catch return error.PublicationLimitExceeded;
+        const allocation = try allocator.alignedAlloc(
+            u8,
+            .of(Publication),
+            allocation_len,
+        );
+        errdefer allocator.free(allocation);
+        const publication: *Publication = @ptrCast(allocation.ptr);
+        const bytes = allocation[@sizeOf(Publication)..];
         @memcpy(bytes[0..topic_bytes.len], topic_bytes);
         @memcpy(bytes[topic_bytes.len..], payload_bytes);
 
@@ -90,7 +101,6 @@ pub const Publication = struct {
             property_result.properties,
         );
 
-        const publication = try allocator.create(Publication);
         publication.* = .{
             .allocator = allocator,
             .references = .init(reference_count),
@@ -179,10 +189,12 @@ pub const Publication = struct {
         std.debug.assert(previous != 0);
         if (previous != 1) return;
         const allocator = self.allocator;
+        const allocation_len = @sizeOf(Publication) + self.bytes.len;
+        const allocation: []align(@alignOf(Publication)) u8 =
+            @alignCast(@as([*]u8, @ptrCast(self))[0..allocation_len]);
         owned_properties.deinit(allocator, self.properties);
-        allocator.free(self.bytes);
         self.* = undefined;
-        allocator.destroy(self);
+        allocator.free(allocation);
     }
 };
 
@@ -265,4 +277,69 @@ test "publication strips aliases and decrements expiry at queue write" {
         std.Io.Timestamp.fromNanoseconds(5 * std.time.ns_per_s),
     ));
     try std.testing.expectEqual(@as(usize, 0), properties.items.len);
+}
+
+test "publication coallocates header and message bytes" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+    const publication = try Publication.createFromPublish(
+        failing.allocator(),
+        .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = "coallocated/topic",
+            .packet_id = 7,
+            .properties = &.{},
+            .payload = "payload",
+        },
+        1,
+        std.Io.Timestamp.fromNanoseconds(0),
+    );
+    defer publication.release();
+
+    try std.testing.expectEqual(@as(usize, 1), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(
+        @intFromPtr(publication) + @sizeOf(Publication),
+        @intFromPtr(publication.bytes.ptr),
+    );
+    try std.testing.expectEqualStrings("coallocated/topic", publication.topic());
+    try std.testing.expectEqualStrings("payload", publication.payload());
+}
+
+test "publication coallocation is failure-safe with owned properties" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var properties = [_]mqtt.Property{.{ .utf8_pair = .{
+                .id = .user_property,
+                .key = "source",
+                .value = "test",
+            } }};
+            const publication = try Publication.createFromPublish(
+                allocator,
+                .{
+                    .dup = false,
+                    .qos = .at_least_once,
+                    .retain = false,
+                    .topic = "failure/topic",
+                    .packet_id = 9,
+                    .properties = &properties,
+                    .payload = "payload",
+                },
+                2,
+                std.Io.Timestamp.fromNanoseconds(0),
+            );
+            publication.release();
+            publication.release();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Context.run,
+        .{},
+    );
 }

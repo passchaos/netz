@@ -901,6 +901,32 @@ throughput from 3,688 to 3,617 publishes/s (-1.9%) with heavily overlapping
 ranges, so no throughput conclusion is drawn from that noisy run; the exact
 allocation reduction is the supported result.
 
+Shared broker `Publication` state now coallocates its aligned reference-counted
+header with the contiguous Topic Name and payload tail. Properties retain their
+independent deep-owned representation because their nested UTF-8/binary values
+have separate lifetimes and cleanup, but the common property-free fanout path
+now needs one allocation per incoming publication instead of one for bytes and
+one for metadata. Release reconstructs the exact aligned allocation only after
+the final atomic reference is dropped. A fail-after-one test proves the
+property-free construction boundary and physical layout, while an exhaustive
+allocation-failure test covers nested User Property ownership and two-reference
+release. The final three-sample matrix at
+`zig-out/mqtt-publication-coalloc-final` (22,262,696 bytes; summary SHA-256
+`8025616b208cb08d1c0e81a20f3f545e91192e7db5de6b0eeaf726c7a5e9e7c2`)
+completed all fifteen broker runs with zero live bytes. Relative to the topic-
+borrow matrix, allocation counts fell another 32.6%, 48.3%, 44.4%, 44.6%, and
+32.7% in table order. Balanced 32x32 moved from 7,741 to 4,285 allocations, or
+0.076 to 0.042 per measured delivery; cumulative requested bytes and peak live
+bytes are unchanged because the same bytes now share one allocation. Across
+the optimization sequence this removes 99.0% of the original 421,950 broker
+allocations in that shape. A fixed-client five-pair long A/B at
+`zig-out/mqtt-publication-coalloc-ab/run.20260930` (37,086,178 bytes;
+aggregate file-hash digest
+`d6ad78fdef719c835ebb286b687c5e7d48e3b0c66a53c9f6bf690b50449846a7`)
+moved median throughput from 2,446 to 3,620 publishes/s with four candidate
+wins, but the unusually wide and overlapping host-load ranges make this only
+supporting evidence rather than a general throughput claim.
+
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
 evidence and must not be cited as current zio performance:
