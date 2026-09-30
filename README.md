@@ -1446,11 +1446,11 @@ zig build bench-mqtt-broker-allocator-matrix -Doptimize=ReleaseFast
 # property scratch. The verified three-sample allocator matrix cuts allocation
 # counts by 25.7-69.5% across all five shapes; timing remains intentionally
 # excluded from this instrumentation-heavy diagnostic.
-# The broker's single-reader TCP loop also supplies caller storage for complete
-# short read-ahead packets, removing the per-PUBACK owned-buffer allocation;
-# packets not complete in read-ahead, oversized packets, TLS, and WebSocket
-# packets keep the resumable owned path. Balanced-32x32 now measures 0.177
-# broker allocations per delivery.
+# The broker's single-reader TCP loop also supplies 128 bytes of caller storage
+# for ACKs and common small PUBLISH packets. Eligible fragmented packets remain
+# in connection-owned read-ahead across timeouts, while oversized packets, TLS,
+# and WebSocket keep the resumable owned path. Balanced-32x32 now measures
+# 0.143 broker allocations per delivery.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \

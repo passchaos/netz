@@ -901,7 +901,23 @@ fn readTcpPacketWithPolicy(
         };
         if (packet_len > max_packet_size) return error.PacketTooLarge;
         if (caller_storage) |storage| {
-            if (packet_len <= buffered.len and packet_len <= storage.len) {
+            if (packet_len <= storage.len and
+                packet_len <= tcp.input.len)
+            {
+                if (packet_len > buffered.len) {
+                    // Keep a caller-buffer-sized packet in connection-owned
+                    // read-ahead until it is complete. A timeout can then
+                    // return without retaining a pointer into the caller's
+                    // temporary storage or allocating a resumable packet.
+                    tcp.compactBuffered();
+                    std.debug.assert(tcp.input_end < packet_len);
+                    tcp.input_end += try readTcpSomeWithDeadline(
+                        tcp,
+                        tcp.input[tcp.input_end..packet_len],
+                        deadline,
+                    );
+                    continue;
+                }
                 const bytes = storage[0..packet_len];
                 @memcpy(bytes, buffered[0..packet_len]);
                 tcp.discardBuffered(packet_len);
@@ -1523,6 +1539,65 @@ test "TCP packet receive borrows caller storage for complete read-ahead packets"
     try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
     try std.testing.expectEqual(@as(usize, 0), transport.tcp.buffered().len);
     packet.deinit(failing.allocator());
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "TCP packet receive resumes a fragmented caller-storage packet without allocation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const sender = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    defer sender.close(io);
+    const receiver = try listener.accept(io);
+    var transport = Transport.initTcp(io, receiver);
+    defer transport.close(allocator);
+    var storage: [4]u8 = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
+    try writeAll(io, sender, &.{ 0x40, 0x02, 0x00 });
+    try std.testing.expectError(
+        error.Timeout,
+        transport.readPacketWithInactivityTimeoutInto(
+            failing.allocator(),
+            storage.len,
+            .{ .raw = .fromMilliseconds(20), .clock = .awake },
+            &storage,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x40, 0x02, 0x00 },
+        transport.tcp.buffered(),
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+
+    try writeAll(io, sender, &.{0x07});
+    var packet = try transport.readPacketWithInactivityTimeoutInto(
+        failing.allocator(),
+        storage.len,
+        .{ .raw = .fromSeconds(1), .clock = .awake },
+        &storage,
+    );
+    defer packet.deinit(failing.allocator());
+    try std.testing.expect(!packet.owns_bytes);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x40, 0x02, 0x00, 0x07 },
+        packet.bytes,
+    );
+    try std.testing.expectEqual(@as(usize, 0), transport.tcp.buffered().len);
     try std.testing.expect(!failing.has_induced_failure);
 }
 

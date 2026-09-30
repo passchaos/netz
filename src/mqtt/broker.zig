@@ -6180,6 +6180,8 @@ test "MQTT failed Clean Start journals the durable deletion" {
 }
 
 const ClientTask = struct {
+    const packet_storage_capacity = 128;
+
     broker: *Broker,
     slot_index: usize,
     subscriber_id: router_mod.SubscriberId,
@@ -6215,10 +6217,11 @@ const ClientTask = struct {
         connection: *runtime.Connection,
         connect: mqtt.Connect,
     ) !void {
-        // Common ACK/PING/DISCONNECT packets fit here and can borrow this
-        // storage for one event-loop turn. Larger or fragmented packets retain
-        // the runtime's owned-allocation path.
-        var packet_storage: [16]u8 = undefined;
+        // Common small PUBLISH packets as well as ACK/PING/DISCONNECT fit here
+        // and can borrow this storage for one event-loop turn. Larger packets
+        // retain the owned-allocation path without inflating every task stack
+        // to the transport's complete read-ahead capacity.
+        var packet_storage: [packet_storage_capacity]u8 = undefined;
         while (true) {
             var event = connection.readBrokerEventWithKeepAliveInto(
                 &packet_storage,

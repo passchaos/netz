@@ -820,26 +820,36 @@ peak live bytes remained effectively unchanged. Because the counting
 allocator changes the hot path and labels timing unusable, these results are
 allocation evidence rather than a throughput claim.
 
-The broker's single-reader TCP event loop now passes a 16-byte caller buffer
-to the packet transport. A complete read-ahead PUBACK, PUBREC, PUBREL, PUBCOMP,
-PINGREQ, or short DISCONNECT is copied there and marked borrowed until that
-event is deinitialized; it no longer needs a heap object merely to preserve the
-public owned-packet API. Once its length is known, a packet not yet complete in
-read-ahead retains the existing heap-backed state so timeout/cancellation
-resumption is unchanged; packets larger than the caller buffer fall back to
-exact allocation, and TLS/WS/WSS keep their existing owned paths. Focused tests
-run a borrowed PUBACK under a fail-first allocator,
-verify that event destruction does not free caller memory, and prove that an
-undersized buffer fails over without consuming read-ahead bytes. The final
-three-sample matrix at `zig-out/mqtt-borrowed-ack-final` (22,238,099 bytes;
-summary SHA-256
-`06b1c639c75b415ff2a291d669dee8515378cbbd54edaa308fd5758600c42dfe`)
+The broker's single-reader TCP event loop first used a 16-byte caller buffer
+to remove the per-PUBACK/PUBREC/PUBREL/PUBCOMP/PINGREQ/short-DISCONNECT owned
+packet allocation. It now uses a bounded 128-byte buffer, covering common
+small PUBLISH packets without inflating every task stack to the transport's
+full 512-byte read-ahead capacity. Once the packet length is known, eligible
+fragmented bytes remain in connection-owned read-ahead across timeout and are
+copied to caller storage only when complete; this avoids retaining a pointer
+into temporary caller memory. Larger packets fall back to the existing exact
+owned allocation, while TLS/WS/WSS retain their existing owned paths. Focused
+fail-first tests cover a borrowed PUBACK, destruction without freeing caller
+memory, undersized-buffer fallback without consuming read-ahead, and a
+split three-byte prefix followed by timeout/resume without allocation.
+
+The final three-sample matrix at `zig-out/mqtt-borrow-128-final` (22,239,361
+bytes; summary SHA-256
+`d984b37b5ccb209b04be818272c2ebea9d09e95e9dd9cd26022147da8e923c54`)
 completed all fifteen broker runs with zero live bytes. Relative to the
-property-scratch matrix, allocation counts fell another 16.5%, 16.6%, 85.9%,
-85.9%, and 44.2% in table order. Balanced 32x32 fell from 128,765 to 18,109
-allocations, or 1.257 to 0.177 per measured delivery; cumulative requested
-bytes moved from 17,893,589 to 17,451,093 and peak live bytes remained stable.
-As above, allocator instrumentation deliberately excludes timing claims.
+16-byte caller-buffer matrix, allocation counts fell another 19.8%, 19.3%,
+and 19.3% for publishers-32, fanout-32, and balanced-32x32; the 256-byte serial
+and 4-KiB payloads deliberately remain on the owned fallback. Balanced 32x32
+fell from 18,109 to 14,621 allocations, or 0.177 to 0.143 per measured
+delivery. Relative to the original 421,950-allocation baseline, the combined
+property-scratch and caller-buffer work removes 96.5% of broker allocations in
+that shape. A fixed-client five-pair, alternating-order comparison at
+`zig-out/mqtt-read-ahead-borrow-128-ab/run.20260930` measured candidate
+throughput higher in three pairs and moved the median from 3,640 to 3,813
+publishes/s (4.8%); ranges overlap, so this is retained as no-regression
+evidence rather than a general throughput claim. The `runLoop` native stack
+frame grows only by the selected 112-byte buffer delta (0xe70 to 0xee0), and
+the process-RSS samples were too noisy for a separate memory claim.
 
 The numeric comparison below is the 2026-08-18 same-host `ReleaseFast`
 window-one run from the former Threaded client harness. It remains historical
