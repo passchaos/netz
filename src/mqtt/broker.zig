@@ -469,8 +469,8 @@ const RegistrationProgress = struct {
     rollback_changed: bool = false,
 };
 
-const EncodedSessionPacket = struct {
-    encoded: session_route.EncodedPacket,
+const DetachedSessionPacket = struct {
+    detached: session_route.DetachedPacket,
     payload_len: usize,
     handle: session_mod.Handle,
     route_id: u64,
@@ -487,6 +487,8 @@ const sessionRouteId = session_route.sessionRouteId;
 const subscriberIndex = session_route.connectionIndex;
 const route_match_scratch_capacity: usize = 32;
 const session_write_scratch_retain_limit: usize = 64 * 1024;
+const session_property_scratch_retain_capacity =
+    session_write_scratch_retain_limit / @sizeOf(mqtt.Property);
 
 const ClientSlot = struct {
     generation: u32 = 0,
@@ -518,13 +520,18 @@ const ClientSlot = struct {
     /// lock is released. The publishing task is the sole user of its slot, so
     /// this buffer can retain that plan without a per-PUBLISH allocation.
     route_matches: std.ArrayList(router_mod.Match) = .empty,
-    /// Complete canonical Session packets are encoded under `state_mutex`,
-    /// then written after releasing it. The slot writer is serialized, so
-    /// retaining this detached byte buffer removes per-delivery allocation
+    /// Complete canonical Session transmissions are detached under
+    /// `state_mutex`, then encoded and written after releasing it. The slot
+    /// writer is serialized, so retaining this detached byte buffer removes
+    /// per-delivery allocation
     /// churn without borrowing Session memory across the unlock boundary.
     /// Oversized packets are released after their write so one exceptional
     /// Application Message cannot pin more than 64 KiB in every live slot.
     session_write_scratch: std.ArrayList(u8) = .empty,
+    /// Metadata for the detached Session transmission above. Variable-length
+    /// property values point into `session_write_scratch`; the array itself is
+    /// independently retained because MQTT properties are tagged unions.
+    session_property_scratch: std.ArrayList(mqtt.Property) = .empty,
     /// Connection-local QoS 1/2 payload ownership for transient delivery.
     ///
     /// Durable deliveries are accounted by `session.Store`; recording them
@@ -598,17 +605,22 @@ const ClientSlot = struct {
         self.transient_inflight_payload_bytes = 0;
     }
 
-    fn releaseOversizedSessionWriteScratch(
+    fn releaseOversizedSessionScratch(
         self: *ClientSlot,
         allocator: std.mem.Allocator,
     ) void {
-        if (self.session_write_scratch.capacity <=
+        if (self.session_write_scratch.capacity >
             session_write_scratch_retain_limit)
         {
-            return;
+            self.session_write_scratch.deinit(allocator);
+            self.session_write_scratch = .empty;
         }
-        self.session_write_scratch.deinit(allocator);
-        self.session_write_scratch = .empty;
+        if (self.session_property_scratch.capacity >
+            session_property_scratch_retain_capacity)
+        {
+            self.session_property_scratch.deinit(allocator);
+            self.session_property_scratch = .empty;
+        }
     }
 
     fn queuedCount(self: ClientSlot) usize {
@@ -753,13 +765,14 @@ test "durable Session write scratch retains only bounded packets" {
     const allocator = std.testing.allocator;
     var slot: ClientSlot = .{};
     defer slot.session_write_scratch.deinit(allocator);
+    defer slot.session_property_scratch.deinit(allocator);
 
     try slot.session_write_scratch.ensureTotalCapacityPrecise(
         allocator,
         1024,
     );
     const retained = slot.session_write_scratch.allocatedSlice().ptr;
-    slot.releaseOversizedSessionWriteScratch(allocator);
+    slot.releaseOversizedSessionScratch(allocator);
     try std.testing.expectEqual(
         retained,
         slot.session_write_scratch.allocatedSlice().ptr,
@@ -769,10 +782,20 @@ test "durable Session write scratch retains only bounded packets" {
         allocator,
         session_write_scratch_retain_limit + 1,
     );
-    slot.releaseOversizedSessionWriteScratch(allocator);
+    slot.releaseOversizedSessionScratch(allocator);
     try std.testing.expectEqual(
         @as(usize, 0),
         slot.session_write_scratch.capacity,
+    );
+
+    try slot.session_property_scratch.ensureTotalCapacityPrecise(
+        allocator,
+        session_property_scratch_retain_capacity + 1,
+    );
+    slot.releaseOversizedSessionScratch(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        slot.session_property_scratch.capacity,
     );
 }
 
@@ -1313,6 +1336,7 @@ pub const Broker = struct {
             slot.queue.deinit(self.allocator);
             slot.route_matches.deinit(self.allocator);
             slot.session_write_scratch.deinit(self.allocator);
+            slot.session_property_scratch.deinit(self.allocator);
             slot.transient_inflight_payloads.deinit(self.allocator);
             if (slot.connection) |*connection| connection.close();
         }
@@ -3784,6 +3808,8 @@ pub const Broker = struct {
         slot.route_matches = .empty;
         slot.session_write_scratch.deinit(self.allocator);
         slot.session_write_scratch = .empty;
+        slot.session_property_scratch.deinit(self.allocator);
+        slot.session_property_scratch = .empty;
         slot.clearTransientInflight();
         // Publish an idle slot only after every field from the old generation
         // has been detached. `claimSlot` observes this state under the same
@@ -5517,7 +5543,7 @@ pub const Broker = struct {
             if (maybe_packet) |packet_value| {
                 self.state_mutex.unlock(self.io);
                 const packet = packet_value;
-                defer slot.releaseOversizedSessionWriteScratch(
+                defer slot.releaseOversizedSessionScratch(
                     self.allocator,
                 );
                 // Commit logs retain their historical behavior of recording
@@ -5529,11 +5555,11 @@ pub const Broker = struct {
                 // before the bytes can reach the peer, so restart retransmits
                 // the same identifier with DUP rather than inventing a new
                 // transaction.
-                slot.connection.?.writeEncodedSessionTransmission(
-                    packet.encoded.bytes,
+                slot.connection.?.writePreparedSessionTransmission(
+                    packet.detached.transmission,
                 ) catch |err| switch (err) {
                     error.OutgoingPacketTooLarge => {
-                        if (packet.encoded.kind == .pubrel) return err;
+                        if (packet.detached.kind == .pubrel) return err;
                         // Match Mosquitto's oversized outgoing handling: once
                         // the peer's Maximum Packet Size rejects a PUBLISH,
                         // remove that transaction and continue draining rather
@@ -5541,7 +5567,7 @@ pub const Broker = struct {
                         self.state_mutex.lockUncancelable(self.io);
                         const drop_action = self.sessions.dropOversizedPublish(
                             packet.handle,
-                            packet.encoded.packet_id,
+                            packet.detached.packet_id,
                         ) catch null;
                         const persistent_changed = drop_action != null and
                             drop_action.? == .dropped and
@@ -5555,11 +5581,11 @@ pub const Broker = struct {
                         continue;
                     },
                     else => {
-                        if (packet.encoded.kind != .pubrel) {
+                        if (packet.detached.kind != .pubrel) {
                             self.state_mutex.lockUncancelable(self.io);
                             const retry = self.sessions.retryUnsentPublish(
                                 packet.handle,
-                                packet.encoded.packet_id,
+                                packet.detached.packet_id,
                             );
                             self.state_mutex.unlock(self.io);
                             retry catch {};
@@ -5567,16 +5593,16 @@ pub const Broker = struct {
                         return err;
                     },
                 };
-                if (packet.encoded.kind != .pubrel) {
+                if (packet.detached.kind != .pubrel) {
                     self.recordPublishSent(packet.payload_len);
                 }
-                if (packet.encoded.kind == .qos0_publish) {
+                if (packet.detached.kind == .qos0_publish) {
                     self.state_mutex.lockUncancelable(self.io);
                     const completion = self.sessions
                         .completeQoS0Transmission(
                         packet.handle,
                         packet.route_id,
-                        packet.encoded.packet_id,
+                        packet.detached.packet_id,
                     );
                     const current_handle = self.sessions.handleForRouteId(
                         packet.route_id,
@@ -5747,18 +5773,18 @@ pub const Broker = struct {
         }
     }
 
-    /// Reserve and encode one Session transmission while the caller holds the
+    /// Reserve and detach one Session transmission while the caller holds the
     /// state lock.
     ///
-    /// `drainInto` mutates queued/inflight ownership. Encoding before unlocking
-    /// guarantees its borrowed views cannot be invalidated by an ACK or
-    /// takeover, while the detached byte slice keeps network I/O outside the
-    /// global lock.
+    /// `drainInto` mutates queued/inflight ownership. Deep copying before
+    /// unlocking guarantees its views cannot be invalidated by an ACK or
+    /// takeover, while detached scratch keeps encoding and network I/O outside
+    /// the global lock.
     fn takeSessionPacketAssumeLocked(
         self: *Broker,
         slot: *ClientSlot,
         persistent_changed_out: *bool,
-    ) Error!?EncodedSessionPacket {
+    ) Error!?DetachedSessionPacket {
         persistent_changed_out.* = false;
         const handle = slot.session_handle orelse return null;
         const connection = &(slot.connection orelse return null);
@@ -5845,10 +5871,10 @@ pub const Broker = struct {
                 },
                 .pubrel => 0,
             };
-            const encoded = session_route.encodeTransmission(
+            const detached = session_route.detachTransmission(
                 &slot.session_write_scratch,
+                &slot.session_property_scratch,
                 self.allocator,
-                connection.protocol,
                 wire_transmission,
                 connection.localMaximumQoS(),
             ) catch |err| {
@@ -5864,7 +5890,7 @@ pub const Broker = struct {
             persistent_changed_out.* = persistent_changed;
             self.recordPersistentChangeLocked(persistent_changed);
             return .{
-                .encoded = encoded,
+                .detached = detached,
                 .payload_len = payload_len,
                 .handle = handle,
                 .route_id = route_id,

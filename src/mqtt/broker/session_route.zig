@@ -1,4 +1,4 @@
-//! Stable broker routing identities and detached Session packet encoding.
+//! Stable broker routing identities and detached Session transmissions.
 //!
 //! Connection subscriber IDs are short-lived capabilities tied to a slot
 //! generation. Session subscriber IDs survive disconnect and takeover so the
@@ -13,8 +13,8 @@ const session = @import("../session/mod.zig");
 const session_subscriber_tag: u64 = 1 << 63;
 const max_connection_generation: u32 = (1 << 31) - 1;
 
-pub const EncodedPacket = struct {
-    bytes: []u8,
+pub const DetachedPacket = struct {
+    transmission: session.Transmission,
     packet_id: u16,
     kind: enum {
         qos0_publish,
@@ -23,19 +23,23 @@ pub const EncodedPacket = struct {
     },
 };
 
-pub fn encodeTransmission(
-    encoded: *std.ArrayList(u8),
+pub fn detachTransmission(
+    bytes: *std.ArrayList(u8),
+    properties: *std.ArrayList(mqtt.Property),
     allocator: std.mem.Allocator,
-    protocol: mqtt.ProtocolVersion,
     transmission: session.Transmission,
     maximum_qos: mqtt.QoS,
-) session.Error!EncodedPacket {
-    encoded.clearRetainingCapacity();
-    errdefer encoded.clearRetainingCapacity();
+) session.Error!DetachedPacket {
+    bytes.clearRetainingCapacity();
+    properties.clearRetainingCapacity();
+    errdefer {
+        bytes.clearRetainingCapacity();
+        properties.clearRetainingCapacity();
+    }
     var packet_id: u16 = 0;
-    var kind: @FieldType(EncodedPacket, "kind") = .pubrel;
-    switch (transmission) {
-        .publish => |publish| {
+    var kind: @FieldType(DetachedPacket, "kind") = .pubrel;
+    const detached: session.Transmission = switch (transmission) {
+        .publish => |publish| blk: {
             var capped = publish;
             capped.qos = minQos(capped.qos, maximum_qos);
             packet_id = publish.packet_id;
@@ -43,21 +47,105 @@ pub fn encodeTransmission(
                 .qos0_publish
             else
                 .publish;
-            try capped.write(
-                encoded,
+            const byte_count = try detachedPublishByteCount(capped);
+            try bytes.ensureTotalCapacity(
                 allocator,
-                protocol,
+                byte_count,
             );
+            try properties.ensureTotalCapacity(
+                allocator,
+                capped.properties.len,
+            );
+            bytes.items.len = byte_count;
+            var offset: usize = 0;
+            capped.topic = copyBytes(bytes.items, &offset, capped.topic);
+            capped.payload = copyBytes(bytes.items, &offset, capped.payload);
+            for (capped.properties) |property| {
+                properties.appendAssumeCapacity(copyProperty(
+                    bytes.items,
+                    &offset,
+                    property,
+                ));
+            }
+            std.debug.assert(offset == bytes.items.len);
+            capped.properties = properties.items;
+            break :blk .{ .publish = capped };
         },
         .pubrel => |pubrel| {
             packet_id = pubrel.packet_id;
-            try pubrel.write(encoded, allocator, protocol);
+            return .{
+                .transmission = .{ .pubrel = pubrel },
+                .packet_id = packet_id,
+                .kind = kind,
+            };
         },
-    }
+    };
     return .{
-        .bytes = encoded.items,
+        .transmission = detached,
         .packet_id = packet_id,
         .kind = kind,
+    };
+}
+
+fn detachedPublishByteCount(
+    publish: session.PublishTransmission,
+) session.Error!usize {
+    var count = std.math.add(
+        usize,
+        publish.topic.len,
+        publish.payload.len,
+    ) catch return error.SessionByteLimitExceeded;
+    for (publish.properties) |property| {
+        const property_bytes = switch (property) {
+            .binary => |value| value.value.len,
+            .utf8 => |value| value.value.len,
+            .utf8_pair => |value| std.math.add(
+                usize,
+                value.key.len,
+                value.value.len,
+            ) catch return error.SessionByteLimitExceeded,
+            else => 0,
+        };
+        count = std.math.add(
+            usize,
+            count,
+            property_bytes,
+        ) catch return error.SessionByteLimitExceeded;
+    }
+    return count;
+}
+
+fn copyBytes(
+    storage: []u8,
+    offset: *usize,
+    source: []const u8,
+) []u8 {
+    const destination = storage[offset.*..][0..source.len];
+    @memcpy(destination, source);
+    offset.* += source.len;
+    return destination;
+}
+
+fn copyProperty(
+    storage: []u8,
+    offset: *usize,
+    property: mqtt.Property,
+) mqtt.Property {
+    return switch (property) {
+        .byte, .two_byte, .four_byte, .varint => property,
+        .binary => |value| .{ .binary = .{
+            .id = value.id,
+            .value = copyBytes(storage, offset, value.value),
+        } },
+        .utf8 => |value| .{ .utf8 = .{
+            .id = value.id,
+            .value = copyBytes(storage, offset, value.value),
+        } },
+        .utf8_pair => |value| .{ .utf8_pair = .{
+            .id = value.id,
+            .key = copyBytes(storage, offset, value.key),
+            .value = copyBytes(storage, offset, value.value),
+        } },
     };
 }
 
@@ -65,7 +153,7 @@ fn minQos(a: mqtt.QoS, b: mqtt.QoS) mqtt.QoS {
     return if (@intFromEnum(a) < @intFromEnum(b)) a else b;
 }
 
-test "Session transmission encoding caps publish QoS" {
+test "detached Session transmission caps publish QoS" {
     const allocator = std.testing.allocator;
     const transmission = session.Transmission{ .publish = .{
         .topic = "maximum/qos",
@@ -77,26 +165,26 @@ test "Session transmission encoding caps publish QoS" {
         .properties = &.{},
         .message_expiry_interval = null,
     } };
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(allocator);
-    const encoded = try encodeTransmission(
-        &scratch,
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(allocator);
+    const detached = try detachTransmission(
+        &bytes,
+        &properties,
         allocator,
-        .v5,
         transmission,
         .at_least_once,
     );
-    var parsed = try mqtt.Publish.parse(
-        allocator,
-        .v5,
-        encoded.bytes,
+    try std.testing.expectEqual(.publish, detached.kind);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        detached.transmission.publish.qos,
     );
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqual(mqtt.QoS.at_least_once, parsed.qos);
-    try std.testing.expectEqual(@as(?u16, 7), parsed.packet_id);
+    try std.testing.expectEqual(@as(u16, 7), detached.packet_id);
 }
 
-test "Session transmission capped to QoS0 omits packet identifier" {
+test "detached Session transmission records QoS0 completion metadata" {
     const allocator = std.testing.allocator;
     const transmission = session.Transmission{ .publish = .{
         .topic = "maximum/qos0",
@@ -108,62 +196,116 @@ test "Session transmission capped to QoS0 omits packet identifier" {
         .properties = &.{},
         .message_expiry_interval = null,
     } };
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(allocator);
-    const encoded = try encodeTransmission(
-        &scratch,
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(allocator);
+    const detached = try detachTransmission(
+        &bytes,
+        &properties,
         allocator,
-        .v5,
         transmission,
         .at_most_once,
     );
-    try std.testing.expectEqual(.qos0_publish, encoded.kind);
-    try std.testing.expectEqual(@as(u16, 7), encoded.packet_id);
-    var parsed = try mqtt.Publish.parse(allocator, .v5, encoded.bytes);
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqual(mqtt.QoS.at_most_once, parsed.qos);
-    try std.testing.expect(!parsed.dup);
-    try std.testing.expectEqual(@as(?u16, null), parsed.packet_id);
+    try std.testing.expectEqual(.qos0_publish, detached.kind);
+    try std.testing.expectEqual(@as(u16, 7), detached.packet_id);
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        detached.transmission.publish.qos,
+    );
 }
 
-test "Session transmission encoding reuses caller scratch" {
+test "detached Session transmission owns bytes and reuses caller scratch" {
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
         .{},
     );
     const allocator = failing.allocator();
-    var scratch: std.ArrayList(u8) = .empty;
-    defer scratch.deinit(allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+    var property_scratch: std.ArrayList(mqtt.Property) = .empty;
+    defer property_scratch.deinit(allocator);
+    var topic = [_]u8{ 'd', 'u', 'r', 'a', 'b', 'l', 'e' };
+    var payload = [_]u8{ 'p', 'a', 'y', 'l', 'o', 'a', 'd' };
+    var binary = [_]u8{ 'b', 'i', 'n' };
+    var response_topic = [_]u8{ 'r', 'e', 'p', 'l', 'y' };
+    var key = [_]u8{ 'k', 'e', 'y' };
+    var value = [_]u8{ 'v', 'a', 'l', 'u', 'e' };
+    var source_properties = [_]mqtt.Property{
+        .{ .binary = .{
+            .id = .correlation_data,
+            .value = &binary,
+        } },
+        .{ .utf8 = .{
+            .id = .response_topic,
+            .value = &response_topic,
+        } },
+        .{ .utf8_pair = .{
+            .id = .user_property,
+            .key = &key,
+            .value = &value,
+        } },
+    };
     const transmission = session.Transmission{ .publish = .{
-        .topic = "durable/reuse",
-        .payload = "payload",
+        .topic = &topic,
+        .payload = &payload,
         .qos = .exactly_once,
         .retain = false,
         .dup = false,
         .packet_id = 9,
-        .properties = &.{},
+        .properties = &source_properties,
         .message_expiry_interval = null,
     } };
-    _ = try encodeTransmission(
-        &scratch,
+    const first = try detachTransmission(
+        &bytes,
+        &property_scratch,
         allocator,
-        .v5,
         transmission,
         .exactly_once,
+    );
+    @memset(&topic, 'x');
+    @memset(&payload, 'x');
+    @memset(&binary, 'x');
+    @memset(&response_topic, 'x');
+    @memset(&key, 'x');
+    @memset(&value, 'x');
+    try std.testing.expectEqualStrings(
+        "durable",
+        first.transmission.publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "payload",
+        first.transmission.publish.payload,
+    );
+    try std.testing.expectEqualStrings(
+        "bin",
+        first.transmission.publish.properties[0].binary.value,
+    );
+    try std.testing.expectEqualStrings(
+        "reply",
+        first.transmission.publish.properties[1].utf8.value,
+    );
+    try std.testing.expectEqualStrings(
+        "key",
+        first.transmission.publish.properties[2].utf8_pair.key,
+    );
+    try std.testing.expectEqualStrings(
+        "value",
+        first.transmission.publish.properties[2].utf8_pair.value,
     );
     const allocation_count = failing.alloc_index;
     failing.fail_index = allocation_count;
 
-    const encoded = try encodeTransmission(
-        &scratch,
+    const detached = try detachTransmission(
+        &bytes,
+        &property_scratch,
         allocator,
-        .v5,
         transmission,
         .exactly_once,
     );
     try std.testing.expectEqual(allocation_count, failing.alloc_index);
-    try std.testing.expectEqual(@as(u16, 9), encoded.packet_id);
-    try std.testing.expectEqual(.publish, encoded.kind);
+    try std.testing.expectEqual(@as(u16, 9), detached.packet_id);
+    try std.testing.expectEqual(.publish, detached.kind);
 }
 
 pub fn connectionSubscriberId(

@@ -828,16 +828,17 @@ fanout-32 (3.385/delivery), 332,797 balanced-32x32 (3.250/delivery), and
 ownership, startup, warmup, measured traffic, and complete teardown; timing is
 intentionally unusable under the counting allocator.
 
-Durable Session delivery now encodes its detached canonical packet into
-connection-slot scratch rather than allocating and freeing a temporary buffer
-for every transmission. The writer mutex gives that buffer one owner, while
-encoding still completes under the broker state lock, persistence still
-completes before socket I/O, and no Session-owned slice escapes the unlock
-boundary. Disconnect releases the scratch, and any allocation above 64 KiB is
-released immediately after its write so a single exceptional message cannot
-leave large storage pinned to every live slot. A fail-first unit test proves a
-warmed ordinary PUBLISH encodes without another allocation, and a separate
-boundary test proves both small-buffer retention and oversized release.
+Durable Session delivery now materializes its detached canonical transmission
+into connection-slot scratch rather than allocating and freeing temporary
+storage for every message. The writer mutex gives that storage one owner,
+while detachment still completes under the broker state lock, persistence
+still completes before socket I/O, and no Session-owned slice escapes the
+unlock boundary. Disconnect releases the scratch, and any byte or property
+storage above 64 KiB is released immediately after its write so a single
+exceptional message cannot leave large storage pinned to every live slot. A
+fail-first unit test proves a warmed ordinary PUBLISH detaches without another
+allocation, and a separate boundary test proves both small-buffer retention
+and oversized release.
 
 The final three-sample durable allocator matrix at
 `zig-out/mqtt-session-write-scratch-allocator-final` (22,368,160 bytes;
@@ -899,6 +900,37 @@ checksum 10,780,000. Paired throughput/p50/p99 medians were
 -1.1%/+1.3%/+0.5% for balanced-32x32 and -0.6%/+0.0%/+0.7% for large-payload.
 The ranges overlap and timing is neutral; the repeatable allocator reduction
 is the supported result.
+
+The broker's detached transmission now preserves typed metadata plus deep
+copies of its visible Topic Name, payload, and every variable-length MQTT 5
+property value. After the persistence barrier, the connection applies its
+current Topic Alias state and performs the only wire encoding. This removes
+the former state-lock encode followed by an unlocked parse and second encode;
+it does not borrow Session memory outside the lock, move persistence or socket
+I/O into the lock, or change the alias oversize fallback. Tests cover QoS
+capping, QoS 0 completion metadata, deep-copy independence for User Properties,
+allocation-free scratch reuse, and the existing real durable reconnect that
+establishes then reuses a Topic Alias.
+
+The three-sample allocator regression artifact at
+`zig-out/mqtt-session-detach-allocator-final` (22,382,296 bytes; summary
+SHA-256 `cc9e9ab6808582b5cbf49f01d409ae53c48f7c318a4efb429810e9adca603971`;
+aggregate file-hash digest
+`6a60453eb78711d6bd19c715d73f2c6e3673477490a578999d0dcaa332c13128`)
+completed all fifteen runs with `live_bytes=0` and reproduced the cache-era
+allocation density: fanout-32 and balanced-32x32 both remained at 0.011
+allocations per delivery.
+
+A two-shape, five-pair alternating-order fixed-binary A/B at
+`zig-out/mqtt-session-detach-ab` (36,751,745 bytes; aggregate file-hash digest
+`e6887b8977a282f9551f5d9e7e866987ff84847780045e6db53f71d8a0a8a58b`)
+used baseline broker `a5b0dc64`, candidate `f3513c44`, and fixed driver
+`6e528bd1`, again with a 3,600-second Session Expiry, 1,000 warmups, and 10,000
+measured QoS 2 publishes per arm. Every balanced arm completed 320,000
+deliveries with checksum 18,656,000, and every 4-KiB arm completed 40,000 with
+checksum 10,780,000. The candidate won throughput in all ten pairs. Paired
+throughput/p50/p99 medians improved 6.1%/5.7%/5.7% for balanced-32x32 and
+4.1%/1.2%/4.1% for large-payload.
 
 A five-pair fixed-binary balanced-32x32 A/B at
 `zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest

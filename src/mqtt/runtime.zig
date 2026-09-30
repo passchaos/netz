@@ -3527,6 +3527,22 @@ pub const Connection = struct {
         });
     }
 
+    /// Write a detached broker Session transmission whose Topic Name is
+    /// already projected through the destination listener namespace and whose
+    /// QoS is already capped to that listener's Maximum QoS. All borrowed
+    /// slices must remain valid through this synchronous call.
+    pub fn writePreparedSessionTransmission(
+        self: *Connection,
+        transmission: @import("session/mod.zig").Transmission,
+    ) Error!void {
+        return switch (transmission) {
+            .publish => |publish_value| self.writeSessionPublish(
+                publish_value,
+            ),
+            .pubrel => |pubrel| self.writeSessionPubRel(pubrel),
+        };
+    }
+
     /// Write an already-selected durable Session transmission while projecting
     /// its canonical topic through this connection's listener namespace.
     /// PUBREL has no topic and is forwarded unchanged.

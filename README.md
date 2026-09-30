@@ -1501,11 +1501,10 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # identity, and use a bounded size-class cache after PUBREL. The QoS 2 matrix
 # cuts broker allocations 48.5-64.2%; balanced-32x32 falls from 0.109 to 0.043
 # allocations per delivery with neutral fixed-binary timing evidence.
-# Durable Session packets reuse connection-slot encoding scratch while keeping
-# persistence and socket I/O boundaries unchanged. A 64-KiB retention ceiling
-# bounds the tradeoff; the durable QoS 2 matrix cuts allocations 49.0-66.5%,
-# including balanced-32x32 from 3.250 to 1.090 per delivery, with neutral
-# five-pair fixed-binary timing evidence.
+# Durable Session transmissions use connection-slot detached scratch while
+# keeping persistence and socket I/O outside the state lock. A 64-KiB retention
+# ceiling bounds the tradeoff and removes the former encode/parse/re-encode
+# round trip; fixed-binary balanced and 4-KiB throughput improve 6.1% and 4.1%.
 # Completed Session Topic Name/payload blocks also enter a 64-KiB-per-block,
 # 1-MiB-total Store cache shared in implementation with pending QoS 2 storage.
 # Balanced and fanout durable QoS 2 fall to 0.011/0.012 allocations/delivery;
