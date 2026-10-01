@@ -3195,8 +3195,11 @@ MQTT 3.1.1 and MQTT 5. Both complete SUBSCRIBE and exact self-delivery, then
 complete a multibyte-length UNSUBSCRIBE and use PUBACK plus PINGRESP as an
 ordered barrier proving route removal and connection health. This deliberately
 validates MQTT's full UTF-8 field limit rather than copying Mosquitto's private
-200-level rejection policy. The outbound QoS 2 gate also directly ports Mosquitto's
-source-hash-locked Receive Maximum 1 and 2 cases with three messages each. It
+200-level rejection policy. The shared public Topic Name and Topic Filter
+validators also reject 65,536-byte inputs before router mutation or packet
+output, while accepting the 65,535-byte boundary. The outbound QoS 2 gate also
+directly ports Mosquitto's source-hash-locked Receive Maximum 1 and 2 cases
+with three messages each. It
 fills the negotiated window, proves the next PUBLISH remains withheld through
 PUBREC/PUBREL, returns one slot only at PUBCOMP, and requires each queued
 PUBLISH immediately after that release. The source-locked QoS 1 inflight-expiry

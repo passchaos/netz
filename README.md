@@ -900,7 +900,8 @@ Current protocol coverage includes:
   traffic gating, broker event-loop policy hooks, Protocol Error on method
   mismatch, properties, exact packet bounds, minimal remaining length, MQTT
   UTF-8 string validation with opt-in Mosquitto-compatible strict
-  control/noncharacter rejection, response-topic/topic-name/filter validation,
+  control/noncharacter rejection, response-topic/topic-name/filter validation
+  including the complete 65,535-byte wire limit,
   clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5
   property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
   wildcard and shared-subscription matching with MQTT 5 No Local/shared-subscription combination rejection,

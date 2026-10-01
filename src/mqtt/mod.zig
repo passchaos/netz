@@ -434,7 +434,10 @@ pub fn hasWildcards(value: []const u8) bool {
 }
 
 pub fn validTopicName(topic: []const u8) bool {
-    return topic.len > 0 and validMqttUtf8(topic) and !hasWildcards(topic);
+    return topic.len > 0 and
+        topic.len <= std.math.maxInt(u16) and
+        validMqttUtf8(topic) and
+        !hasWildcards(topic);
 }
 
 pub fn validateTopicName(topic: []const u8) Error!void {
@@ -442,6 +445,7 @@ pub fn validateTopicName(topic: []const u8) Error!void {
 }
 
 pub fn validTopicFilter(filter: []const u8) bool {
+    if (filter.len == 0 or filter.len > std.math.maxInt(u16)) return false;
     if (!validMqttUtf8(filter)) return false;
     if (std.mem.startsWith(u8, filter, "$share/")) return validSharedTopicFilter(filter);
     return validTopicFilterLevels(filter);
@@ -4150,6 +4154,43 @@ test "MQTT topic validation and filter matching" {
     try std.testing.expectError(error.InvalidTopic, writePublish(&encoded, std.testing.allocator, .v5, "bad/#", "payload", .{}));
     try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&encoded, std.testing.allocator, .v5, 1, &.{}, &[_]Subscription{.{ .topic_filter = "bad/#/filter" }}));
     try std.testing.expectError(error.InvalidSubscription, Subscribe.write(&encoded, std.testing.allocator, .v5, 1, &.{}, &[_]Subscription{.{ .topic_filter = "$share/group" }}));
+}
+
+test "MQTT topic validation enforces the UTF-8 wire length transactionally" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, std.math.maxInt(u16) + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 'a');
+    const maximum = oversized[0..std.math.maxInt(u16)];
+
+    try std.testing.expect(validTopicName(maximum));
+    try std.testing.expect(validTopicFilter(maximum));
+    try std.testing.expectError(error.InvalidTopic, validateTopicName(oversized));
+    try std.testing.expectError(
+        error.InvalidSubscription,
+        validateTopicFilter(oversized),
+    );
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoded.appendSlice(allocator, "existing output");
+    try std.testing.expectError(
+        error.InvalidTopic,
+        writePublish(&encoded, allocator, .v5, oversized, "payload", .{}),
+    );
+    try std.testing.expectEqualStrings("existing output", encoded.items);
+    try std.testing.expectError(
+        error.InvalidSubscription,
+        Subscribe.write(
+            &encoded,
+            allocator,
+            .v5,
+            1,
+            &.{},
+            &.{.{ .topic_filter = oversized }},
+        ),
+    );
+    try std.testing.expectEqualStrings("existing output", encoded.items);
 }
 
 test "MQTT connack ack and ping controls" {
