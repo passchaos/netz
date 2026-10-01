@@ -910,7 +910,14 @@ Current protocol coverage includes:
   store with exact O(1) lookup, wildcard matching, MQTT 5 expiry countdown,
   optional broker-driven periodic expiry pruning with persisted removals,
   Retain Handling 0/1/2, shared-subscription suppression, QoS downgrade and
-  connection-scoped property stripping, plus a bounded persistent Session
+  connection-scoped property stripping, plus lazy connection-lifetime writers
+  for transient QoS 2 subscribers so fanout does not serialize unrelated
+  socket progress; writer ordering remains per connection, PINGRESP drains
+  older delivery work, self-delivery stays synchronous so its PUBLISH precedes
+  PUBACK/PUBCOMP, and a 16-message scheduling high watermark restores
+  synchronous backpressure before the configured hard queue limit, while QoS
+  0/1 and durable Session delivery retain their ordered synchronous path, plus
+  a bounded persistent Session
   Store with full subscription restoration, Session Expiry, offline QoS 1/2
   queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
   out-of-order ACKs and incoming QoS 2 deduplication, atomic versioned broker

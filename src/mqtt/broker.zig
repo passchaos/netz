@@ -434,7 +434,11 @@ const Delivery = struct {
 
 const RoutePlan = struct {
     storage: []router_mod.Match,
+    /// Online transient targets below the asynchronous queue high watermark.
     deliveries: []const router_mod.Match,
+    /// Persistent live QoS 0, same-connection, and backpressured transient
+    /// targets remain on the ordered caller-owned flush path.
+    synchronous_deliveries: []const router_mod.Match,
     session_targets: []const router_mod.Match,
     has_matching_subscriber: bool,
     scratch_owner: ?*std.ArrayList(router_mod.Match) = null,
@@ -446,6 +450,12 @@ const RoutePlan = struct {
             allocator.free(self.storage);
         }
     }
+};
+
+const NetworkDeliveryMode = enum {
+    synchronous,
+    asynchronous,
+    deferred,
 };
 
 const WillPublishProgress = struct {
@@ -487,8 +497,14 @@ const sessionRouteId = session_route.sessionRouteId;
 const subscriberIndex = session_route.connectionIndex;
 const route_match_scratch_capacity: usize = 32;
 const session_write_scratch_retain_limit: usize = 64 * 1024;
+const transient_delivery_async_high_watermark: usize = 16;
 const session_property_scratch_retain_capacity =
     session_write_scratch_retain_limit / @sizeOf(mqtt.Property);
+
+const DeliveryWriter = struct {
+    stop: std.atomic.Value(bool) = .init(false),
+    future: std.Io.Future(?anyerror),
+};
 
 const ClientSlot = struct {
     generation: u32 = 0,
@@ -514,6 +530,10 @@ const ClientSlot = struct {
     /// Borrowed from `ClientTask.connect` while this slot is active.
     username: ?[]const u8 = null,
     writer_mutex: std.Io.Mutex = .init,
+    /// A lazily started connection-lifetime writer waits here for routed
+    /// deliveries. Pure publishers therefore pay no extra coroutine cost.
+    delivery_ready: std.Io.Event = .unset,
+    delivery_writer: ?*DeliveryWriter = null,
     queue: std.ArrayList(Delivery) = .empty,
     queue_head: usize = 0,
     /// Network publishes keep their route plan alive after the broker state
@@ -721,6 +741,64 @@ const ClientSlot = struct {
         return removed;
     }
 };
+
+fn shouldScheduleTransientDelivery(
+    session_persistent: bool,
+    qos: mqtt.QoS,
+    queued_count: usize,
+    high_watermark: usize,
+    same_connection: bool,
+) bool {
+    std.debug.assert(high_watermark != 0);
+    return !same_connection and !session_persistent and qos == .exactly_once and
+        queued_count < high_watermark;
+}
+
+test "MQTT transient delivery scheduling respects persistence and watermark" {
+    const limit = transient_delivery_async_high_watermark;
+    try std.testing.expect(shouldScheduleTransientDelivery(
+        false,
+        .exactly_once,
+        0,
+        limit,
+        false,
+    ));
+    try std.testing.expect(shouldScheduleTransientDelivery(
+        false,
+        .exactly_once,
+        limit - 1,
+        limit,
+        false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        false,
+        .exactly_once,
+        limit,
+        limit,
+        false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        false,
+        .at_least_once,
+        0,
+        limit,
+        false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        true,
+        .exactly_once,
+        0,
+        limit,
+        false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        false,
+        .exactly_once,
+        0,
+        limit,
+        true,
+    ));
+}
 
 test "MQTT live overlap merge uses the current queue tail" {
     const allocator = std.testing.allocator;
@@ -1332,6 +1410,7 @@ pub const Broker = struct {
 
     pub fn deinit(self: *Broker) void {
         for (self.slots) |*slot| {
+            std.debug.assert(slot.delivery_writer == null);
             slot.clearQueue();
             slot.queue.deinit(self.allocator);
             slot.route_matches.deinit(self.allocator);
@@ -1475,6 +1554,7 @@ pub const Broker = struct {
             self.finishPartialPersistentChange(persistent_changed);
         };
         const plan = self.enqueuePublishLocked(
+            false,
             null,
             publish,
             null,
@@ -1604,6 +1684,7 @@ pub const Broker = struct {
         var persistent_changed = false;
         var publication_effect_committed = false;
         const plan = self.enqueuePublishLocked(
+            false,
             null,
             publish,
             null,
@@ -1827,6 +1908,7 @@ pub const Broker = struct {
                 metric,
             );
             const plan = self.enqueuePublishLocked(
+                false,
                 null,
                 .{
                     .dup = false,
@@ -3240,6 +3322,10 @@ pub const Broker = struct {
         // authenticated wire identity used by listener read ACLs.
         slot.username = connect.username;
         errdefer slot.username = null;
+        // A slot can retain a harmless late notification from its previous
+        // generation. No writer exists while the slot is being registered.
+        slot.delivery_ready.reset();
+        std.debug.assert(slot.delivery_writer == null);
         const id = subscriberId(slot_index, slot.generation);
         const now = std.Io.Clock.awake.now(self.io);
         // `find` removes an expired Session without exposing its route ID.
@@ -3823,6 +3909,7 @@ pub const Broker = struct {
         slot.listener_access_control = null;
         slot.retained_source_id = null;
         slot.username = null;
+        std.debug.assert(slot.delivery_writer == null);
         slot.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
@@ -4556,6 +4643,8 @@ pub const Broker = struct {
 
         var properties: std.ArrayList(mqtt.Property) = .empty;
         defer properties.deinit(self.allocator);
+        var deferred_plan: ?RoutePlan = null;
+        defer if (deferred_plan) |plan| plan.deinit(self.allocator);
         const maybe_publish = pending.asPublish(
             ack.packet_id,
             std.Io.Clock.awake.now(self.io),
@@ -4568,14 +4657,14 @@ pub const Broker = struct {
             return err;
         };
         if (maybe_publish) |publish| {
-            self.routeReleasedPublishMode(
+            deferred_plan = self.routeReleasedPublishMode(
+                .deferred,
                 publisher_id,
                 publisher,
                 publish,
                 pending.source_client_id orelse source_client_id,
                 pending.source_username,
                 pending.source_listener_id,
-                false,
                 false,
                 false,
                 &persistent_changed,
@@ -4600,11 +4689,11 @@ pub const Broker = struct {
             persistent_changed,
             persistent_changed,
         );
-        // Socket delivery is intentionally delayed until after the atomic
+        // Socket delivery is intentionally scheduled only after the atomic
         // pending-QoS2 removal/routing persistence transaction above.
         self.persistence_mutex.unlock(self.io);
         persistence_locked = false;
-        try self.flushAllSlots();
+        if (deferred_plan) |plan| try self.dispatchNetworkPlan(plan);
 
         const publisher_slot = try self.slotForSubscriber(publisher_id);
         publisher_slot.writer_mutex.lockUncancelable(self.io);
@@ -4623,23 +4712,29 @@ pub const Broker = struct {
         acknowledge_qos1: bool,
         prefixed_packet: ?*runtime.OwnedPacket,
     ) Error!void {
-        return self.routeReleasedPublishMode(
-            publisher_id,
-            publisher,
-            publish,
-            source_client_id,
-            source_username,
-            source_listener_id,
-            acknowledge_qos1,
-            true,
-            true,
-            null,
-            prefixed_packet,
-        );
+        const mode: NetworkDeliveryMode = if (!self.options.upgrade_outgoing_qos and
+            publish.qos != .exactly_once) .synchronous else .asynchronous;
+        const deferred_plan = switch (mode) {
+            inline else => |comptime_mode| try self.routeReleasedPublishMode(
+                comptime_mode,
+                publisher_id,
+                publisher,
+                publish,
+                source_client_id,
+                source_username,
+                source_listener_id,
+                acknowledge_qos1,
+                true,
+                null,
+                prefixed_packet,
+            ),
+        };
+        std.debug.assert(deferred_plan == null);
     }
 
     fn routeReleasedPublishMode(
         self: *Broker,
+        comptime delivery_mode: NetworkDeliveryMode,
         publisher_id: router_mod.SubscriberId,
         publisher: *runtime.Connection,
         publish: mqtt.Publish,
@@ -4648,10 +4743,9 @@ pub const Broker = struct {
         source_listener_id: ?u64,
         acknowledge_qos1: bool,
         count_persistent_change: bool,
-        flush_routed_deliveries: bool,
         outer_changed: ?*bool,
         prefixed_packet: ?*runtime.OwnedPacket,
-    ) Error!void {
+    ) Error!?RoutePlan {
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
         var persistent_changed = false;
@@ -4664,7 +4758,8 @@ pub const Broker = struct {
                 self.finishPartialPersistentChange(persistent_changed);
             }
         };
-        const plan = self.enqueuePublishLocked(
+        var plan = self.enqueuePublishLocked(
+            delivery_mode != .synchronous,
             publisher_id,
             publish,
             source_client_id,
@@ -4680,7 +4775,8 @@ pub const Broker = struct {
             }
             return err;
         };
-        defer plan.deinit(self.allocator);
+        var plan_owned = true;
+        defer if (plan_owned) plan.deinit(self.allocator);
         if (outer_changed) |changed| {
             changed.* = changed.* or persistent_changed;
         }
@@ -4724,7 +4820,20 @@ pub const Broker = struct {
             };
             publisher_slot.writer_mutex.unlock(self.io);
         };
-        if (flush_routed_deliveries) try self.flushPlan(plan);
+        switch (delivery_mode) {
+            .synchronous => {
+                try self.flushPlan(plan);
+                return null;
+            },
+            .asynchronous => {
+                try self.dispatchNetworkPlan(plan);
+                return null;
+            },
+            .deferred => {
+                plan_owned = false;
+                return plan;
+            },
+        }
     }
 
     /// Apply retained state and enqueue live fanout while `state_mutex` is held.
@@ -4736,6 +4845,7 @@ pub const Broker = struct {
     /// Session route used for No Local matching.
     fn enqueuePublishLocked(
         self: *Broker,
+        comptime classify_async: bool,
         publisher_id: ?router_mod.SubscriberId,
         publish: mqtt.Publish,
         source_client_id: ?[]const u8,
@@ -5048,9 +5158,59 @@ pub const Broker = struct {
         for (enqueued_count..plan.len) |_| publication.?.release();
         self.releaseRouteReservations(plan);
         publication_committed = true;
+
+        // Keep live QoS 0 deliveries for persistent Sessions and self-matched
+        // delivery on the ordered caller path. The latter preserves the
+        // existing PUBLISH-before-PUBACK/PUBCOMP same-connection boundary.
+        // Also apply a lower scheduling high watermark before the configured
+        // hard queue/drop limit, so an arbitrarily fast publisher cannot turn
+        // asynchronous socket progress into unbounded latency and retained
+        // Publication memory.
+        const async_high_watermark = @min(
+            self.options.limits.max_queued_deliveries_per_connection,
+            transient_delivery_async_high_watermark,
+        );
+        var synchronous_delivery_start = plan_count;
+        if (!classify_async) {
+            // No destination can become QoS 2, so preserve the original
+            // ordered path without another per-match classification pass.
+            synchronous_delivery_start = 0;
+        } else {
+            var delivery_index = plan_count;
+            while (delivery_index != 0) {
+                delivery_index -= 1;
+                const destination_index = subscriberIndex(
+                    matches[delivery_index].subscriber_id,
+                    self.slots.len,
+                ).?;
+                const destination = &self.slots[destination_index];
+                const queued_delivery = destination.tailDeliveryForPublication(
+                    publication.?,
+                ) orelse unreachable;
+                if (shouldScheduleTransientDelivery(
+                    destination.session_persistent,
+                    queued_delivery.qos,
+                    destination.queuedCount(),
+                    async_high_watermark,
+                    publisher_id != null and
+                        matches[delivery_index].subscriber_id == publisher_id.?,
+                )) {
+                    continue;
+                }
+                synchronous_delivery_start -= 1;
+                if (delivery_index != synchronous_delivery_start) {
+                    std.mem.swap(
+                        router_mod.Match,
+                        &matches[delivery_index],
+                        &matches[synchronous_delivery_start],
+                    );
+                }
+            }
+        }
         return .{
             .storage = matches,
-            .deliveries = matches[0..plan_count],
+            .deliveries = matches[0..synchronous_delivery_start],
+            .synchronous_deliveries = matches[synchronous_delivery_start..plan_count],
             .session_targets = matches[session_target_start..],
             .has_matching_subscriber = has_matching_subscriber,
             .scratch_owner = match_storage.scratch_owner,
@@ -5472,7 +5632,31 @@ pub const Broker = struct {
         // prefix searches and remains safe when concurrent publish plans
         // interleave outside the broker state mutex.
         try self.flushMatches(plan.deliveries);
+        try self.flushMatches(plan.synchronous_deliveries);
         try self.flushMatches(plan.session_targets);
+    }
+
+    /// Live/transient destinations have independent connection-lifetime
+    /// writers. Durable Session sends still mutate shared Session/persistence
+    /// state while being detached, so keep those targets on the ordered
+    /// caller-owned flush path instead of manufacturing global lock contention.
+    fn dispatchNetworkPlan(self: *Broker, plan: RoutePlan) Error!void {
+        self.scheduleMatches(plan.deliveries);
+        try self.flushMatches(plan.synchronous_deliveries);
+        try self.flushMatches(plan.session_targets);
+    }
+
+    fn scheduleMatches(
+        self: *Broker,
+        matches: []const router_mod.Match,
+    ) void {
+        for (matches) |match| {
+            const slot_index = subscriberIndex(
+                match.subscriber_id,
+                self.slots.len,
+            ) orelse continue;
+            self.slots[slot_index].delivery_ready.set(self.io);
+        }
     }
 
     fn flushPublisherMatch(
@@ -5485,6 +5669,12 @@ pub const Broker = struct {
             self.slots.len,
         ) orelse return;
         for (plan.deliveries) |match| {
+            if (match.subscriber_id == publisher_id) {
+                try self.flushSlot(slot_index, &self.slots[slot_index]);
+                return;
+            }
+        }
+        for (plan.synchronous_deliveries) |match| {
             if (match.subscriber_id == publisher_id) {
                 try self.flushSlot(slot_index, &self.slots[slot_index]);
                 return;
@@ -6125,6 +6315,7 @@ pub const Broker = struct {
             }
         }
         const plan = try self.enqueuePublishLocked(
+            false,
             publisher_id,
             publish,
             will.client_id,
@@ -6583,18 +6774,76 @@ const ClientTask = struct {
         defer connect.deinit(task.broker.allocator);
         const slot = &task.broker.slots[task.slot_index];
         const connection = &slot.connection.?;
-
-        task.runLoop(slot, connection, connect.connect) catch |err| {
-            if (!ungracefulTransportClose(err)) {
-                task.result.* = err;
-            }
-        };
-        task.broker.unregister(
+        defer task.broker.unregister(
             task.slot_index,
             task.subscriber_id,
         ) catch |err| {
             task.result.* = err;
         };
+
+        var read_error: ?anyerror = null;
+        task.runLoop(slot, connection, connect.connect) catch |err| {
+            if (!ungracefulTransportClose(err)) read_error = err;
+        };
+        const writer_error = task.stopDeliveryWriter(slot);
+        if (read_error) |err| task.result.* = err;
+        if (writer_error) |err| {
+            if (!ungracefulTransportClose(err) and task.result.* == null) {
+                task.result.* = err;
+            }
+        }
+    }
+
+    fn ensureDeliveryWriter(
+        task: ClientTask,
+        slot: *ClientSlot,
+    ) (std.mem.Allocator.Error || std.Io.ConcurrentError)!void {
+        if (slot.delivery_writer != null) return;
+        task.broker.state_mutex.lockUncancelable(task.broker.io);
+        const session_persistent = slot.session_persistent;
+        task.broker.state_mutex.unlock(task.broker.io);
+        if (session_persistent) return;
+
+        const writer = try task.broker.allocator.create(DeliveryWriter);
+        errdefer task.broker.allocator.destroy(writer);
+        writer.* = .{
+            .future = undefined,
+        };
+        writer.future = try std.Io.concurrent(
+            task.broker.io,
+            DeliveryWriterTask.run,
+            .{
+                task.broker,
+                task.slot_index,
+                &writer.stop,
+            },
+        );
+        task.broker.state_mutex.lockUncancelable(task.broker.io);
+        slot.delivery_writer = writer;
+        task.broker.state_mutex.unlock(task.broker.io);
+    }
+
+    fn stopDeliveryWriter(
+        task: ClientTask,
+        slot: *ClientSlot,
+    ) ?anyerror {
+        task.broker.state_mutex.lockUncancelable(task.broker.io);
+        const writer = slot.delivery_writer orelse {
+            task.broker.state_mutex.unlock(task.broker.io);
+            return null;
+        };
+        slot.delivery_writer = null;
+        task.broker.state_mutex.unlock(task.broker.io);
+        defer task.broker.allocator.destroy(writer);
+        writer.stop.store(true, .release);
+        slot.delivery_ready.set(task.broker.io);
+        const writer_error = writer.future.cancel(task.broker.io);
+        slot.delivery_ready.reset();
+        if (writer_error) |err| return switch (err) {
+            error.Canceled => null,
+            else => err,
+        };
+        return null;
     }
 
     fn runLoop(
@@ -6658,6 +6907,13 @@ const ClientTask = struct {
                         )) return;
                         return err;
                     };
+                    if (connection.localMaximumQoS() == .exactly_once) {
+                        for (owned.subscribe.subscriptions) |subscription| {
+                            if (subscription.qos != .exactly_once) continue;
+                            try task.ensureDeliveryWriter(slot);
+                            break;
+                        }
+                    }
                 },
                 .unsubscribe => |*owned| {
                     task.broker.handleUnsubscribe(
@@ -6916,6 +7172,13 @@ const ClientTask = struct {
                 },
                 .pingreq => {
                     slot.writer_mutex.lockUncancelable(task.broker.io);
+                    // A PINGRESP is an observable ordering barrier for this
+                    // connection. Preserve the pre-writer behavior by
+                    // draining every earlier routed PUBLISH first.
+                    task.broker.flushSlotLocked(slot) catch |err| {
+                        slot.writer_mutex.unlock(task.broker.io);
+                        return err;
+                    };
                     connection.writePingResp() catch |err| {
                         slot.writer_mutex.unlock(task.broker.io);
                         return err;
@@ -6972,6 +7235,29 @@ const ClientTask = struct {
             };
         }
         return true;
+    }
+};
+
+const DeliveryWriterTask = struct {
+    fn run(
+        broker: *Broker,
+        slot_index: usize,
+        stop: *std.atomic.Value(bool),
+    ) ?anyerror {
+        const slot = &broker.slots[slot_index];
+        while (true) {
+            slot.delivery_ready.waitUncancelable(broker.io);
+            // Reset before draining so a notification racing with the drain
+            // remains set for the next turn instead of being lost afterward.
+            slot.delivery_ready.reset();
+            if (stop.load(.acquire)) return null;
+            broker.flushSlot(slot_index, slot) catch |err| {
+                if (slot.connection) |*connection| {
+                    connection.interrupt() catch {};
+                }
+                return err;
+            };
+        }
     }
 };
 

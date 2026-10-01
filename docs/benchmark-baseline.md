@@ -5440,6 +5440,38 @@ range. The median netz-minus-Mosquitto gap fell from 2,284 to 2,124 KiB
 narrows but does not close the independent-peer memory gap and remains memory
 evidence rather than a throughput claim.
 
+Transient QoS 2 broker fanout now uses one lazy writer per subscribed
+connection instead of making a publisher wait for every unrelated subscriber
+socket. The writer starts only after a QoS 2 subscription is processed, shares
+the existing per-connection write serialization, preserves PINGRESP as an
+ordered output barrier, and is joined before slot reuse. Self-delivery stays on
+the synchronous path so its PUBLISH precedes PUBACK/PUBCOMP on the shared
+connection. A queue depth of 16 returns that destination to synchronous
+backpressure before the configured hard queue/drop limit. QoS 0/1 and durable
+Session delivery retain their original synchronous paths.
+
+A fixed-binary CPU-0/client and CPU-1/server A/B used 32 publishers, 32
+subscribers, MQTT 5 QoS 2, a four-message publisher window, 1,000 warmups and
+10,000 measured 64-byte publishes. All fourteen arms completed 320,000
+deliveries with checksum 18,656,000. Baseline/candidate throughput medians were
+1,591/2,240 publishes/s; the paired candidate/baseline median was 1.417x with
+7/7 wins. Paired p50 and p99 medians fell to 0.653x and 0.682x. The exact
+final-binary QoS 1 five-shape matrix exercises the synchronous route and is the
+current-path control; no QoS 1 speedup is attributed to this change. Three
+5,000-publish RSS pairs measured transient QoS 2 medians of 6,544 KiB baseline
+and 6,708 KiB candidate. Three durable-Session QoS 2 controls, which also start
+no writer, measured 6,624/6,620 KiB with overlapping timing.
+
+The retained baseline broker, candidate broker, fixed driver, and complete
+paired log have SHA-256 values
+`cadec82a5d73be2c98beb865f5ae9d0a7c724d66d51d04cfd6b00e34f1bfcbaa`,
+`cc2c445614e2c49687c0a32281f3bb765795f3999f640014531d51539941bcad`,
+`dda118b3c68c0c24f4a77ad9e3c5b939f6df17c6904de7bb131c971e07aafc36`,
+and `326fec275da8588cfc4a03ce41b67bdad1344e5ba2f5bd1b17b8adb77d47d839`
+respectively. The strict QoS 1/QoS 2 five-shape matrix summary hashes are
+`5f32c63cbd4c0167a4f99c1b1d7f44794d9da516a5a79ee36c053996bc762574`
+and `1df7a0be6e51b819ccde56b9c5d0d99e972a54f95b43cb555dde16149c18a465`.
+
 ## MQTT shared-subscription router
 
 The maintained executable obtains its clock from zio-backed `std.Io` and names

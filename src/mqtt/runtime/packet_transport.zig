@@ -340,6 +340,19 @@ pub const Transport = union(enum) {
         }
     }
 
+    /// Interrupt any blocking transport operation without taking ownership.
+    /// Unlike `shutdown`, this also reaches through a WebSocket wrapper to its
+    /// underlying stream; the normal owner must still call `close` afterward.
+    pub fn interrupt(self: *Transport) Error!void {
+        switch (self.*) {
+            .websocket => |ws| try ws.connection.stream.shutdown(
+                ws.connection.io,
+                .both,
+            ),
+            else => try self.shutdown(),
+        }
+    }
+
     pub fn writePacket(
         self: *Transport,
         bytes: []u8,

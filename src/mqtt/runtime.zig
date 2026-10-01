@@ -2632,6 +2632,14 @@ pub const Connection = struct {
         try self.transport.shutdown();
     }
 
+    /// Retire the connection and interrupt a blocking reader or writer on any
+    /// transport, including MQTT-over-WebSocket. Ownership remains with this
+    /// connection until `close`.
+    pub fn interrupt(self: *Connection) Error!void {
+        self.transport_unusable.store(true, .release);
+        try self.transport.interrupt();
+    }
+
     /// Return the verified client certificate chain for an mTLS server
     /// connection. The DER slices are owned by the transport and remain valid
     /// until `close`; anonymous or non-mTLS transports return null.
