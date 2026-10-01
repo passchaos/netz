@@ -157,9 +157,9 @@ pub fn main(init: std.process.Init) !void {
         finished: std.Io.Event = .unset,
 
         fn run(shared: *@This()) void {
+            defer shared.finished.set(shared.io);
             runFallible(shared) catch |err| {
                 shared.err = err;
-                shared.finished.set(shared.io);
             };
         }
 
@@ -220,10 +220,8 @@ pub fn main(init: std.process.Init) !void {
             {
                 return error.IncompleteTransfer;
             }
-            // Application completion precedes session teardown. The client
-            // progress future below is canceled only after this point, so all
-            // terminal FIN/reset packets have already been validated.
-            shared.finished.set(shared.io);
+            // Completion is published by `run` only after session teardown,
+            // while the client progress worker is still servicing transport.
         }
     };
 
@@ -388,16 +386,39 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     const Progress = struct {
-        fn run(session: *netz.webtransport.runtime.HandshakeClientSession) ?anyerror {
-            while (true) session.serviceTransport() catch |err| return err;
+        fn run(
+            session: *netz.webtransport.runtime.HandshakeClientSession,
+            stop: *std.atomic.Value(bool),
+        ) ?anyerror {
+            while (!stop.load(.acquire)) {
+                session.serviceTransportWithTimeout(
+                    .fromMilliseconds(10),
+                ) catch |err| switch (err) {
+                    error.Timeout => continue,
+                    error.ConnectionClosed => return null,
+                    else => return err,
+                };
+            }
+            return null;
         }
     };
-    var progress = try std.Io.concurrent(io, Progress.run, .{&client});
+    var stop_progress = std.atomic.Value(bool).init(false);
+    var progress = try std.Io.concurrent(
+        io,
+        Progress.run,
+        .{ &client, &stop_progress },
+    );
+    var progress_joined = false;
+    defer {
+        if (!progress_joined) _ = progress.cancel(io);
+    }
     shared.finished.waitUncancelable(io);
     const elapsed_ns = nowNs(io) -| started_ns;
-    const progress_result = progress.cancel(io);
+    stop_progress.store(true, .release);
+    const progress_result = progress.await(io);
+    progress_joined = true;
     if (progress_result) |err| switch (err) {
-        error.Canceled => {},
+        error.ConnectionClosed => {},
         else => return err,
     };
     server_task.await(io);

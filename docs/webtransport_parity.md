@@ -626,6 +626,25 @@ MiB/s (7.83 ms median), another 26% over the preceding 405 MiB/s median. The
 underlying 54-packet QUIC STREAM microbenchmark measured a 688 ns/packet
 state-only median versus 1155 ns/packet for the owning GRO batch.
 
+The handshake client and rejected-handshake session now expose
+`serviceTransportWithTimeout` and `serviceTransportWithDeadline`; the stateful
+protected client forwards the same bounded transport-pump API. The GRO stream
+benchmark services the client in 10 ms intervals, publishes server completion
+only after Session teardown, and stops and awaits the worker cooperatively.
+This fixes a teardown race in which canceling a future blocked in an otherwise
+idle UDP receive could hang after the peer had already received and validated
+the complete payload and FIN. In a fixed-binary CPU-0 A/B of the 4 MiB,
+eight-slice `--send-all --enable-gro-receive` shape, the baseline hit the outer
+2-second watchdog in all 7 runs; the candidate completed all 7 in
+13.944-14.951 ms at 267-286 MiB/s, with 358-359 read events and checksum
+534,773,760. The non-GRO control completed in both arms for all 7 pairs, with
+22.365 ms baseline and 22.216 ms candidate medians (0.990 paired median ratio).
+This is liveness evidence, not a throughput-speedup claim. The retained
+baseline, candidate, and paired-log SHA-256 values are respectively
+`73e897a03ed825da1538ecb0c0cf0789ab22fbc2fe57e3d853cdd3c793b12b98`,
+`a9b58c65373cf4cb0eb50cee3c3ec6dcc6990bf3b265b3946220dc2127a61271`, and
+`9e8f51a99d4da29f5349fcc6bfa84c422cd1641e5b2ac078652394deab0a2d3f`.
+
 The benchmark now also accepts `--streams` and `--transfer-bytes`. A four-stream
 1 MiB-per-stream real-handshake run completed at 70 MiB/s aggregate with 3971
 socket-visible partial writes, exercising the batch API rather than four

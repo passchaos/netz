@@ -4772,6 +4772,29 @@ pub const RejectedHandshakeSession = struct {
         try self.h3.established.connection.servicePacketServicingTimers();
     }
 
+    /// Process one timer-aware QUIC receive for at most `timeout`.
+    /// A non-positive timeout returns `error.Timeout` without reading UDP.
+    pub fn serviceTransportWithTimeout(
+        self: *RejectedHandshakeSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.h3.established.connection
+            .servicePacketServicingTimersTimeout(.{ .duration = .{
+            .raw = timeout,
+            .clock = .awake,
+        } });
+    }
+
+    /// Process one timer-aware QUIC receive until the awake-clock `deadline`.
+    pub fn serviceTransportWithDeadline(
+        self: *RejectedHandshakeSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        try self.h3.established.connection
+            .servicePacketServicingTimersDeadline(deadline);
+    }
+
     /// Drive recovery until the rejected CONNECT response is acknowledged.
     /// Pure receive-credit advertisements do not prolong this application-
     /// delivery boundary.
@@ -9453,14 +9476,39 @@ pub const HandshakeClientSession = struct {
     /// Drive one timer-aware QUIC receive without consuming WebTransport data.
     ///
     /// Event loops waiting on a peer-side terminal condition still need to
-    /// process ACK, loss and PTO state after their final local FIN/reset. This
-    /// method is cancelable through the caller's `std.Io` future and keeps the
-    /// underlying HTTP/3 connection encapsulated.
+    /// process ACK, loss and PTO state after their final local FIN/reset. The
+    /// timeout/deadline variants let long-lived workers stop cooperatively
+    /// without canceling an in-flight socket receive.
     pub fn serviceTransport(
         self: *HandshakeClientSession,
     ) Error!void {
         if (self.dispatcher != null) return error.InvalidDispatcherState;
         try self.h3.established.connection.servicePacketServicingTimers();
+    }
+
+    /// Process one timer-aware QUIC receive for at most `timeout`.
+    /// A non-positive timeout returns `error.Timeout` without reading UDP.
+    pub fn serviceTransportWithTimeout(
+        self: *HandshakeClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try self.h3.established.connection
+            .servicePacketServicingTimersTimeout(.{ .duration = .{
+            .raw = timeout,
+            .clock = .awake,
+        } });
+    }
+
+    /// Process one timer-aware QUIC receive until the awake-clock `deadline`.
+    pub fn serviceTransportWithDeadline(
+        self: *HandshakeClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.h3.established.connection
+            .servicePacketServicingTimersDeadline(deadline);
     }
 
     pub fn resetStream(
@@ -12593,6 +12641,20 @@ pub const StatefulProtectedClientSession = struct {
         self: *StatefulProtectedClientSession,
     ) Error!void {
         return self.session.serviceTransport();
+    }
+
+    pub fn serviceTransportWithTimeout(
+        self: *StatefulProtectedClientSession,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.serviceTransportWithTimeout(timeout);
+    }
+
+    pub fn serviceTransportWithDeadline(
+        self: *StatefulProtectedClientSession,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.serviceTransportWithDeadline(deadline);
     }
 
     pub fn resetStream(
@@ -16866,6 +16928,10 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
         },
     });
     defer client.deinit();
+    try std.testing.expectError(
+        error.Timeout,
+        client.serviceTransportWithTimeout(.zero),
+    );
     const max_datagram_size = client.maxDatagramSize();
     try std.testing.expect(max_datagram_size != 0);
     const oversized = try allocator.alloc(u8, max_datagram_size + 1);

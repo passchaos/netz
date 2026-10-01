@@ -5587,12 +5587,17 @@ zig build bench-webtransport-stream -Doptimize=ReleaseFast -- \
   --send-timeout-ms=30000
 ```
 
-The benchmark now keeps a cancelable client receive future alive after its last
+The benchmark now keeps a bounded client transport pump alive after its last
 FIN/reset so ACK, loss and PTO state continue progressing until the server has
-validated every terminal event. This removes the prior large-stream teardown
-deadlock. Its send-all, fair `writeStreams`, and FIN paths share one absolute
-awake-clock deadline created immediately before the associated-stream workload;
-the default is 30 seconds and `--send-timeout-ms` overrides it. In single-stream
+validated every terminal event and torn down its Session. The worker calls
+`serviceTransportWithTimeout` in 10 ms intervals, checks an atomic stop flag,
+and is awaited cooperatively instead of canceling an in-flight UDP receive.
+Handshake clients and rejected-handshake sessions also expose
+`serviceTransportWithDeadline`, and the stateful protected client forwards both
+bounded service APIs. This removes the prior large-stream teardown deadlock.
+The send-all, fair `writeStreams`, and FIN paths share one absolute awake-clock
+deadline created immediately before the associated-stream workload; the
+default is 30 seconds and `--send-timeout-ms` overrides it. In single-stream
 `--send-all` mode, `--stream-slices=N` selects the zero-join scatter/gather
 sender. Slice descriptors are built before timing and the output includes the
 selected count, so `N=1` and `N=8` provide an equivalent-byte/checksum A/B
@@ -5610,6 +5615,20 @@ verified 532,480 bytes and checksum 67,891,200. Elapsed time ranged
 from the exact terminal/byte result. This is deterministic
 cancellation/recovery evidence, not an equal-wire wtransport throughput
 comparison.
+
+A fixed-binary CPU-0 liveness A/B used a 4 MiB transfer, eight input slices,
+`--send-all --enable-gro-receive`, and an outer 2-second watchdog. The baseline
+timed out in all 7 runs after the application transfer had completed; the
+bounded-service candidate completed all 7 in 13.944-14.951 ms at 267-286 MiB/s,
+with 358-359 read events and checksum 534,773,760. All 7 non-GRO control pairs
+completed in both arms: the baseline median was 22.365 ms, the candidate median
+was 22.216 ms, and the paired candidate/baseline median was 0.990. The result
+establishes teardown liveness without claiming a throughput speedup. The fixed
+baseline binary, candidate binary, and paired log have SHA-256 values
+`73e897a03ed825da1538ecb0c0cf0789ab22fbc2fe57e3d853cdd3c793b12b98`,
+`a9b58c65373cf4cb0eb50cee3c3ec6dcc6990bf3b265b3946220dc2127a61271`, and
+`9e8f51a99d4da29f5349fcc6bfa84c422cd1641e5b2ac078652394deab0a2d3f`,
+respectively.
 
 The internal harness terminal table was subsequently raised from 64 to a
 bounded 256 entries. Three 128-stream/64-KiB mixed FIN/reset runs under seeded

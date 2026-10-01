@@ -1115,7 +1115,13 @@ Handshake-backed sessions additionally expose caller-buffer incremental stream
 reads before FIN, flow-credit return after every delivered prefix, mapped
 32-bit WebTransport RESET_STREAM/STOP_SENDING APIs, and typed data/reset/stopped
 events while retaining the whole-FIN receive helper for compatibility. Once a
-local STOP_SENDING is committed, buffered and later in-flight bytes on that
+client application runs an explicit transport pump,
+`serviceTransportWithTimeout` and `serviceTransportWithDeadline` provide
+timer-aware bounded receive intervals so a worker can observe a stop condition
+and exit cooperatively without canceling an in-flight UDP receive. Rejected
+handshake sessions expose the same methods, and the stateful protected client
+forwards them. After a local STOP_SENDING is committed, buffered and later
+in-flight bytes on that
 direction are drained without application delivery: only connection-level
 MAX_DATA credit is restored, the cancelled stream's MAX_STREAM_DATA limit is
 not expanded, and terminal FIN triggers transport stream retirement. The
