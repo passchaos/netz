@@ -44,6 +44,17 @@ pub const MessageWriteProgress = struct {
     frame_committed: bool = false,
 };
 
+/// Fill independent RFC 6455 mask keys with one backend CSPRNG request. This
+/// preserves a fresh unpredictable key per frame without paying one I/O
+/// dispatch or `getrandom` syscall for every frame in an encoded batch.
+pub inline fn randomMaskKeys(
+    io: std.Io,
+    keys: [][4]u8,
+) std.Io.RandomSecureError!void {
+    if (keys.len == 0) return;
+    try std.Io.randomSecure(io, std.mem.sliceAsBytes(keys));
+}
+
 /// One automatic Pong or peer-Close echo whose encoded wire bytes must remain
 /// stable across a bounded receive timeout. `frame` is populated only when
 /// the receive API owes the caller the control frame after the reply commits.

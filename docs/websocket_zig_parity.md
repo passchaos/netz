@@ -482,6 +482,33 @@ the same sixteen-slice compressed workload measured 37.032-38.500 us/roundtrip
 202.91-210.96 logical MiB/s). The common sixteen-frame case still uses one
 bounded stack batch, so the prior coalescing benefit is retained while the
 connection no longer owns a duplicate encoded-message allocation.
+
+A 2026-09-30 zio-era audit found that those batches still called the secure
+random backend once for every masked client frame. One H1 trace with five
+warmups and twenty measured messages made 403 `getrandom` calls: 400 for the
+sixteen masks per message and three for setup. The H1, H2, and H3 batch writers
+now fill up to sixteen independent four-byte mask keys with one CSPRNG request;
+every frame still carries its own fresh unpredictable key. The same trace now
+makes 28 calls, exactly one per message plus the three setup calls.
+
+Seven alternating CPU-0 fixed-binary pairs with fifty warmups measured the
+production compressed-fragmented echo path:
+
+| Transport | Baseline median | Batched-mask median | Paired ratio | Reduction |
+|---|---:|---:|---:|---:|
+| H1 Upgrade, 1,000 rounds | 143.901 us | 70.876 us | 0.4929 | 50.7% |
+| RFC 8441, 1,000 rounds | 121.229 us | 31.329 us | 0.2581 | 74.2% |
+| RFC 9220, 500 rounds | 145.937 us | 56.293 us | 0.3833 | 61.7% |
+
+All 21 primary pairs completed with the expected checksum and favored the
+candidate. Five-pair uncompressed-fragmented controls, which use the same H2
+and H3 mask batches without the compressor, measured 107.344 to 16.477 us on
+H2 and 191.387 to 105.028 us on H3. Fifteen-pair unfragmented H2/H3 controls
+overlapped and had candidate/baseline paired medians of 1.0108 and 1.0121;
+those paths do not execute the new batch helper, so no single-frame performance
+claim is made. Exact binaries and logs are retained under
+`zig-out/websocket-fragmented-echo-ab/`.
+
 The HTTP/2 Extended CONNECT, traditional CONNECT, and tunnel-response builders
 now stage their pseudo-headers and ordinary headers in 16-entry stack buffers,
 matching the ordinary HTTP/2 request/response path. Larger application header

@@ -3943,13 +3943,18 @@ pub fn Connection(comptime role: common.Role) type {
 
             var encoded: [fragmented_write_scratch_len]u8 align(64) =
                 undefined;
+            var mask_keys: [max_batched_fragments][4]u8 = undefined;
+            if (role == .client) {
+                try common.randomMaskKeys(
+                    self.io(),
+                    mask_keys[0..fragments.len],
+                );
+            }
             var offset: usize = 0;
             for (fragments, 0..) |fragment, index| {
                 var mask_key: ?[4]u8 = null;
                 if (role == .client) {
-                    var key: [4]u8 = undefined;
-                    try std.Io.randomSecure(self.io(), &key);
-                    mask_key = key;
+                    mask_key = mask_keys[index];
                 }
                 const frame = try websocket.writeFrameInto(
                     encoded[offset..],

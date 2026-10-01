@@ -5117,6 +5117,43 @@ flow-controlled tunnel writer once yields a 2.2-3.2x fragmented-path gain; the
 remaining 15.1-16.0% cost against the one-frame control represents actual
 frame header/mask handling. All samples verified checksum 51,000.
 
+A fresh 2026-09-30 zio-era syscall audit showed that batching the wire write
+had not batched secure mask generation: an H1 run with five warmups and twenty
+measured sixteen-frame messages made 403 `getrandom` calls. Filling sixteen
+independent RFC 6455 mask keys in one CSPRNG request reduced this to 28 calls,
+one per message plus three setup calls. The same bounded strategy is used by
+H1, RFC 8441, and RFC 9220 batch writers.
+
+Seven alternating CPU-0 fixed-binary pairs with fifty warmups produced:
+
+| Workload | Baseline range / median | Candidate range / median | Paired median ratio |
+|---|---:|---:|---:|
+| H1 compressed, 1,000 rounds | 141.956-149.281 / 143.901 us | 69.735-71.309 / 70.876 us | 0.4929 |
+| H2 compressed, 1,000 rounds | 119.854-122.356 / 121.229 us | 31.160-31.586 / 31.329 us | 0.2581 |
+| H3 compressed, 500 rounds | 144.640-148.644 / 145.937 us | 55.171-59.143 / 56.293 us | 0.3833 |
+
+Every primary pair favored the candidate and retained checksum 255,000 for H1
+and H2 or 127,500 for H3. Five-pair uncompressed-fragmented controls measured
+107.344 to 16.477 us median on H2 (paired ratio 0.1545) and 191.387 to 105.028
+us on H3 (0.5415), showing that secure-random dispatch rather than compression
+was the shared bottleneck. Fifteen-pair ordinary single-frame H2/H3 controls
+had overlapping ranges and paired ratios 1.0108/1.0121; the changed batch path
+is not executed there, so no single-frame result is claimed.
+
+The ignored `zig-out/websocket-fragmented-echo-ab/` directory retains the
+fixed binaries and `mask-batch-paired-final.log` with SHA-256
+`db784ed3fbec15c31fda81235564dc07c9de26d6132f56f8faee9bd8906f005f`.
+Baseline/candidate binary identities are respectively
+`8db861f5b0552515a03863e9a9e724c078382bad188a6d3368e3c65bb69ab3c0` /
+`ced67738076f3bc2dc5a40f8834d52edc6c0ff2d85ba90d46033199993587096`
+for H1,
+`07a71e3872c4b6087c7d3f6ebb9c0a6b4209a44ca5859b27595316dd3eec07ea` /
+`1f7bb090f3c05363f25829b0a31315db7deb03847faec4c4d832915223dc1396`
+for H2, and
+`03cdb3961dbbf0f09eab0c862c5aff68e52ac04ac389e5a7e4b2548a846efee8` /
+`489871a713a53442a140759c7cef6f7d4244795dd5d7dcdb321a6803a649f03d`
+for H3.
+
 The cross-process `bench-websocket-hyper-h2` harness runs a persistent RFC
 8441 binary echo against Hyper 1.11.0 (`084473f7`) in both client/server role
 pairings. Client and server are pinned to separate CPUs; h2c setup, peer

@@ -6157,6 +6157,8 @@ pub const Connection = struct {
         // frame boundaries without sixteen loopback syscalls for a 16-slice
         // application message. Larger messages retain the streaming fallback.
         var encoded: [masked_write_scratch_len]u8 align(64) = undefined;
+        const max_mask_key_batch: usize = 16;
+        var mask_keys: [max_mask_key_batch][4]u8 = undefined;
         var cursor: usize = 0;
         for (0..frame_count) |index| {
             const range = compressedFragmentRange(
@@ -6165,8 +6167,18 @@ pub const Connection = struct {
                 index,
             );
             const payload = compressed_payload[range.start..range.end];
-            var mask_key: [4]u8 = undefined;
-            try std.Io.randomSecure(self.io, &mask_key);
+            const mask_key_index = index % max_mask_key_batch;
+            if (mask_key_index == 0) {
+                const key_count = @min(
+                    max_mask_key_batch,
+                    frame_count - index,
+                );
+                try common.randomMaskKeys(
+                    self.io,
+                    mask_keys[0..key_count],
+                );
+            }
+            const mask_key = mask_keys[mask_key_index];
             var header_storage: [websocket.max_frame_header_len]u8 = undefined;
             const header = try websocket.writeFrameHeaderInto(
                 &header_storage,
@@ -9004,6 +9016,11 @@ pub const H2Connection = struct {
                 // all encoded payload bytes fit bounded stack storage; larger
                 // compressed messages stream one frame at a time below.
                 var masked: [masked_write_scratch_len]u8 align(64) = undefined;
+                var mask_keys: [max_batched_frames][4]u8 = undefined;
+                try common.randomMaskKeys(
+                    self.tunnel.connection.io,
+                    mask_keys[0..batch_count],
+                );
                 var masked_len: usize = 0;
                 var fits = true;
                 for (0..batch_count) |batch_index| {
@@ -9020,11 +9037,7 @@ pub const H2Connection = struct {
                         break;
                     }
                     const payload = compressed_payload[range.start..range.end];
-                    var mask_key: [4]u8 = undefined;
-                    try std.Io.randomSecure(
-                        self.tunnel.connection.io,
-                        &mask_key,
-                    );
+                    const mask_key = mask_keys[batch_index];
                     parts[batch_index * 2] =
                         try websocket.writeFrameHeaderInto(
                             &headers[batch_index],
@@ -9139,6 +9152,11 @@ pub const H2Connection = struct {
 
             if (self.role == .client) {
                 var masked: [masked_write_scratch_len]u8 align(64) = undefined;
+                var mask_keys: [max_batched_frames][4]u8 = undefined;
+                try common.randomMaskKeys(
+                    self.tunnel.connection.io,
+                    mask_keys[0..batch_count],
+                );
                 var masked_len: usize = 0;
                 var fits = true;
                 for (0..batch_count) |batch_index| {
@@ -9148,11 +9166,7 @@ pub const H2Connection = struct {
                         fits = false;
                         break;
                     }
-                    var mask_key: [4]u8 = undefined;
-                    try std.Io.randomSecure(
-                        self.tunnel.connection.io,
-                        &mask_key,
-                    );
+                    const mask_key = mask_keys[batch_index];
                     parts[batch_index * 2] =
                         try websocket.writeFrameHeaderInto(
                             &headers[batch_index],
