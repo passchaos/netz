@@ -435,6 +435,12 @@ pub fn encodeDynamicBlockWithReferenceLimit(
     reference_limit: u64,
     references: *std.ArrayList(u64),
 ) !void {
+    const original_list_len = list.items.len;
+    const original_reference_len = references.items.len;
+    errdefer {
+        list.shrinkRetainingCapacity(original_list_len);
+        references.shrinkRetainingCapacity(original_reference_len);
+    }
     const dynamic_references_possible =
         reference_limit != 0 and
         table.entryCount() != 0 and

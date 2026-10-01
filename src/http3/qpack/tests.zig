@@ -741,6 +741,47 @@ test "HTTP/3 QPACK small dynamic block keeps allocation-free scratch" {
     try std.testing.expectEqual(field_count, references.items.len);
 }
 
+test "HTTP/3 QPACK dynamic block rolls back output and references on OOM" {
+    const allocator = std.testing.allocator;
+    var table = Qpack.DynamicTable.init(allocator, 256);
+    defer table.deinit();
+    try table.setCapacity(256);
+    const absolute_index = try table.insert("x-dynamic", "value");
+
+    const prefix = "seed";
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    // Leave room for the two-byte field-section prefix, but not the following
+    // dynamic indexed field. The reference is appended before that write.
+    try encoded.ensureTotalCapacityPrecise(allocator, prefix.len + 2);
+    encoded.appendSliceAssumeCapacity(prefix);
+
+    var references: std.ArrayList(u64) = .empty;
+    defer references.deinit(allocator);
+    try references.ensureTotalCapacityPrecise(allocator, 2);
+    references.appendAssumeCapacity(99);
+
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Qpack.encodeDynamicBlockKnownReceived(
+            &encoded,
+            fail_first.allocator(),
+            &.{.{ .name = "x-dynamic", .value = "value" }},
+            table,
+            table.insert_count,
+            &references,
+        ),
+    );
+    try std.testing.expect(fail_first.has_induced_failure);
+    try std.testing.expectEqualStrings(prefix, encoded.items);
+    try std.testing.expectEqualSlices(u64, &.{99}, references.items);
+    try std.testing.expectEqual(@as(u64, 0), absolute_index);
+}
+
 test "HTTP/3 QPACK large reference scratch OOM precedes output mutation" {
     const allocator = std.testing.allocator;
     var table = Qpack.DynamicTable.init(allocator, 4096);
