@@ -1874,6 +1874,10 @@ pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chu
     }
     var encoded_len: usize = 0;
     for (chunks) |chunk| {
+        // A zero-sized chunk terminates the transfer coding. Empty application
+        // slices therefore contribute no wire bytes; the one terminator below
+        // remains the only zero-sized chunk in the message.
+        if (chunk.len == 0) continue;
         encoded_len = std.math.add(usize, encoded_len, hexDigitLen(chunk.len)) catch return error.RenderBufferTooSmall;
         encoded_len = std.math.add(usize, encoded_len, 2) catch return error.RenderBufferTooSmall;
         encoded_len = std.math.add(usize, encoded_len, chunk.len) catch return error.RenderBufferTooSmall;
@@ -1884,6 +1888,7 @@ pub fn encodeChunked(list: *std.ArrayList(u8), allocator: std.mem.Allocator, chu
     encoded_len = std.math.add(usize, encoded_len, 2) catch return error.RenderBufferTooSmall;
     try list.ensureUnusedCapacity(allocator, encoded_len);
     for (chunks) |chunk| {
+        if (chunk.len == 0) continue;
         var tmp: [32]u8 = undefined;
         const rendered = try std.fmt.bufPrint(&tmp, "{x}\r\n", .{chunk.len});
         try list.appendSlice(allocator, rendered);
@@ -2873,9 +2878,28 @@ test "HTTP/1 chunked codec" {
     const encoded_with_trailer = try allocator.dupe(u8, encoded.items);
     defer allocator.free(encoded_with_trailer);
 
+    var sparse: std.ArrayList(u8) = .empty;
+    defer sparse.deinit(allocator);
+    try sparse.ensureTotalCapacityPrecise(
+        allocator,
+        encoded_with_trailer.len,
+    );
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try encodeChunked(
+        &sparse,
+        no_alloc.allocator(),
+        &.{ "", "hello", "", " world", "" },
+        &trailers,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(encoded_with_trailer, sparse.items);
+
     encoded.clearRetainingCapacity();
     try encoded.ensureTotalCapacity(allocator, encoded_with_trailer.len);
-    var no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     try encodeChunked(&encoded, no_alloc.allocator(), &chunks, &trailers);
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings(encoded_with_trailer, encoded.items);
@@ -2886,6 +2910,20 @@ test "HTTP/1 chunked codec" {
     try encodeChunked(&encoded, no_alloc.allocator(), &.{}, &.{});
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqualStrings("0\r\n\r\n", encoded.items);
+
+    encoded.clearRetainingCapacity();
+    try encodeChunked(&encoded, allocator, &.{ "", "", "" }, &trailers);
+    try std.testing.expectEqualStrings(
+        "0\r\nDigest: sha-256=demo\r\n\r\n",
+        encoded.items,
+    );
+    var all_empty = try decodeChunked(allocator, encoded.items, .{});
+    defer all_empty.deinit(allocator);
+    try std.testing.expectEqualStrings("", all_empty.body);
+    try std.testing.expectEqualStrings(
+        "sha-256=demo",
+        all_empty.trailers[0].value,
+    );
 
     no_alloc = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var empty_decoded = try decodeChunked(no_alloc.allocator(), "0\r\n\r\nnext", .{});

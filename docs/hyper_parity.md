@@ -295,6 +295,12 @@ buffer compaction, and works when every trailer byte arrives in a separate
 transport read. Focused request and response regressions cover both directions,
 matching Hyper's documented response-side obsolete-line-folding behavior.
 
+The aggregate chunked encoder now matches the streaming writer by eliding empty
+application slices. Since a zero-sized HTTP/1 chunk is the message terminator,
+emitting one for an empty slice would truncate any later chunks and trailers.
+Mixed empty/non-empty and all-empty regressions verify one final terminator,
+correct trailer placement, and exact-capacity allocation-free output.
+
 The aggregate HTTP/1 readers apply `Limits.max_body_bytes` to decoded chunk
 payload only, not chunk-size lines, extensions, CRLF framing, trailers, or
 bytes read ahead from the next pipelined message. Exact-limit and empty chunked
