@@ -475,6 +475,7 @@ pub fn parseRequestHead(
     const version = try Version.parse(request_line.version);
     try validateTransferEncodingForVersion(version, parsed.headers);
     try validateRequestHostParts(
+        method,
         version,
         request_line.target,
         parsed.headers,
@@ -705,7 +706,12 @@ pub fn validateRequestHead(
     );
     defer parsed.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed.headers);
-    try validateRequestHostParts(version, parts.target, parsed.headers);
+    try validateRequestHostParts(
+        method,
+        version,
+        parts.target,
+        parsed.headers,
+    );
     _ = try requestFraming(parsed.headers);
 }
 
@@ -1552,6 +1558,28 @@ pub fn validateOutgoingResponseBodyForStatus(status: u16, headers: []const Heade
     }
 }
 
+/// CONNECT request content has no generally defined semantics. RFC 9110
+/// therefore forbids both length delimiters and transfer codings instead of
+/// allowing even an apparently empty framed body onto a persistent connection.
+pub fn validateOutgoingRequestBodyForMethod(
+    method: Method,
+    headers: []const Header,
+    body: []const u8,
+    trailers: []const Header,
+) Error!void {
+    if (method != .CONNECT) return;
+    if ((try contentLength(headers)) != null) {
+        return error.InvalidContentLength;
+    }
+    if (hasHeaderNamed(headers, "transfer-encoding")) {
+        return error.InvalidTransferEncoding;
+    }
+    if (hasHeaderNamed(headers, "trailer") or trailers.len != 0) {
+        return error.InvalidTrailer;
+    }
+    if (body.len != 0) return error.InvalidContentLength;
+}
+
 fn responseForbidsBody(status: u16, request_method: ?Method) bool {
     if (statusCodeForbidsBody(status)) return true;
     return switch (request_method orelse return false) {
@@ -1621,7 +1649,13 @@ fn validateRequestForWrite(
     if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
     try validateTransferEncodingForVersion(version, headers);
-    try validateRequestHostParts(version, target, headers);
+    try validateRequestHostParts(method, version, target, headers);
+    try validateOutgoingRequestBodyForMethod(
+        method,
+        headers,
+        body,
+        &.{},
+    );
     const framing = try requestFraming(headers);
     if (framing.must_close) return error.InvalidContentLength;
     switch (framing.body) {
@@ -1864,16 +1898,31 @@ pub fn validateConnectTarget(target: []const u8) Error!void {
 }
 
 pub fn validateRequestHost(request: Request) Error!void {
-    try validateRequestHostParts(request.version, request.target, request.headers);
+    try validateRequestHostParts(
+        request.method,
+        request.version,
+        request.target,
+        request.headers,
+    );
 }
 
-fn validateRequestHostParts(version: Version, target: []const u8, headers: []const Header) Error!void {
+fn validateRequestHostParts(
+    method: Method,
+    version: Version,
+    target: []const u8,
+    headers: []const Header,
+) Error!void {
     const host = try validateHostHeaderBlockValue(version, headers);
-    if (absoluteFormAuthority(target)) |authority| {
-        try validateHostValue(authority);
-        if (host) |host_value| {
-            if (!std.ascii.eqlIgnoreCase(wire.trimOws(host_value), authority)) return error.InvalidHost;
-        }
+    const target_authority = if (method == .CONNECT)
+        target
+    else
+        absoluteFormAuthority(target) orelse return;
+    try validateHostValue(target_authority);
+    if (host) |host_value| {
+        if (!std.ascii.eqlIgnoreCase(
+            wire.trimOws(host_value),
+            target_authority,
+        )) return error.InvalidHost;
     }
 }
 
@@ -2345,6 +2394,8 @@ test "HTTP/1 low-level request writers validate framing before output" {
     const prefix = "already-written";
     const invalid_cases = [_]struct {
         expected: Error,
+        method: Method = .POST,
+        target: []const u8 = "/upload",
         version: Version,
         headers: []const Header,
         body: []const u8,
@@ -2434,6 +2485,39 @@ test "HTTP/1 low-level request writers validate framing before output" {
             },
             .body = "0\r\nContent-Length: 0\r\n\r\n",
         },
+        .{
+            .expected = error.InvalidHost,
+            .method = .CONNECT,
+            .target = "example.com:443",
+            .version = .http_1_1,
+            .headers = &.{.{
+                .name = "Host",
+                .value = "other.example:443",
+            }},
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidContentLength,
+            .method = .CONNECT,
+            .target = "example.com:443",
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com:443" },
+                .{ .name = "Content-Length", .value = "0" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .method = .CONNECT,
+            .target = "example.com:443",
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com:443" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+            .body = "0\r\n\r\n",
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -2446,8 +2530,8 @@ test "HTTP/1 low-level request writers validate framing before output" {
             writeRequest(
                 &encoded,
                 allocator,
-                .POST,
-                "/upload",
+                case.method,
+                case.target,
                 case.version,
                 case.headers,
                 case.body,
@@ -2460,8 +2544,8 @@ test "HTTP/1 low-level request writers validate framing before output" {
             writeRequestChecked(
                 &encoded,
                 allocator,
-                .POST,
-                "/upload",
+                case.method,
+                case.target,
                 case.version,
                 case.headers,
                 case.body,
@@ -2482,6 +2566,22 @@ test "HTTP/1 low-level request writers validate framing before output" {
     );
     try std.testing.expectEqualStrings(
         "GET /legacy HTTP/1.0\r\n\r\n",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .CONNECT,
+        "example.com:443",
+        .http_1_1,
+        &.{.{ .name = "Host", .value = "example.com:443" }},
+        "",
+    );
+    try std.testing.expectEqualStrings(
+        "CONNECT example.com:443 HTTP/1.1\r\n" ++
+            "Host: example.com:443\r\n\r\n",
         encoded.items,
     );
 
@@ -3340,6 +3440,36 @@ test "HTTP/1 validates Host authority rules" {
     var duplicate_req = try parseRequest(allocator, duplicate, .{});
     defer duplicate_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHost, validateRequestHost(duplicate_req));
+
+    const matching_connect =
+        "CONNECT example.com:443 HTTP/1.1\r\n" ++
+        "Host: example.com:443\r\n\r\n";
+    var connect_req = try parseRequest(allocator, matching_connect, .{});
+    defer connect_req.deinit(allocator);
+    try validateRequestHost(connect_req);
+
+    const mismatched_connect =
+        "CONNECT example.com:443 HTTP/1.1\r\n" ++
+        "Host: other.example:443\r\n\r\n";
+    var mismatched_connect_req = try parseRequest(
+        allocator,
+        mismatched_connect,
+        .{},
+    );
+    defer mismatched_connect_req.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidHost,
+        validateRequestHost(mismatched_connect_req),
+    );
+    var borrowed_headers: [2]Header = undefined;
+    try std.testing.expectError(
+        error.InvalidHost,
+        parseRequestHead(
+            mismatched_connect,
+            &borrowed_headers,
+            .{},
+        ),
+    );
 
     try std.testing.expectError(error.InvalidHost, validateHostValue(""));
     try std.testing.expectError(error.InvalidHost, validateHostValue("example.com:"));

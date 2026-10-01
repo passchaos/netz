@@ -887,11 +887,12 @@ pub fn prepareRequest(
             return error.InvalidHost;
         }
     }
-    if (options.method == .CONNECT and
-        (options.body.len != 0 or options.trailers.len != 0))
-    {
-        return error.InvalidContentLength;
-    }
+    try http1.validateOutgoingRequestBodyForMethod(
+        options.method,
+        scratch.request_headers.items,
+        options.body,
+        options.trailers,
+    );
     const use_chunked = try chunkedWriteFraming(
         options.version,
         scratch.request_headers.items,

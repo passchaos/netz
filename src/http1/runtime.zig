@@ -11853,6 +11853,22 @@ test "HTTP/1 runtime validates outbound request and response framing before writ
         .headers = &.{.{ .name = "Host", .value = "example.com:443" }},
         .body = "not allowed",
     }));
+    try std.testing.expectError(error.InvalidContentLength, writeRequestToStream(allocator, io, stream, .{
+        .method = .CONNECT,
+        .target = "example.com:443",
+        .headers = &.{
+            .{ .name = "Host", .value = "example.com:443" },
+            .{ .name = "Content-Length", .value = "0" },
+        },
+    }));
+    try std.testing.expectError(error.InvalidTransferEncoding, writeRequestToStream(allocator, io, stream, .{
+        .method = .CONNECT,
+        .target = "example.com:443",
+        .headers = &.{
+            .{ .name = "Host", .value = "example.com:443" },
+            .{ .name = "Transfer-Encoding", .value = "chunked" },
+        },
+    }));
     try std.testing.expectError(error.InvalidContentLength, writeResponseToStream(allocator, io, stream, .{
         .status = 200,
         .headers = &.{.{ .name = "Content-Length", .value = "5" }},

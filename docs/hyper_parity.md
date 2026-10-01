@@ -135,6 +135,9 @@ benchmark response:
   Non-empty response bodies must match a declared Content-Length, while empty
   HEAD-style metadata remains valid; pre-encoded chunked bodies must contain
   one complete body with valid trailers and no ambiguous suffix bytes;
+- CONNECT request authority must agree with Host across borrowed, owned and
+  runtime validation, and senders reject request content, Content-Length,
+  Transfer-Encoding and trailers as required by RFC 9110;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each
