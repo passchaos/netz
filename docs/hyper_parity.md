@@ -1237,6 +1237,11 @@ The two `usize` limits emitted as `SETTINGS_HEADER_TABLE_SIZE` and
 connection and listener construction now rejects larger values instead of
 silently advertising `2^32-1` while enforcing a different local policy. The
 maximum representable value is preserved exactly in the encoded SETTINGS.
+HPACK prefix-integer decoding likewise accepts the complete `u64` range. Its
+final high-order group uses checked shifting and addition, while unterminated
+or wider encodings return `IntegerOverflow` instead of truncating high bits or
+relying on a build-mode overflow trap. Boundary tests round-trip `u64::max`
+and reject both terminal and continuing over-width inputs.
 After the limit is crossed, the decoder still consumes and validates the rest
 of the block and applies incremental-indexing updates, keeping the connection's
 compression context synchronized for later streams without retaining oversized

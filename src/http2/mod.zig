@@ -2322,12 +2322,21 @@ pub const Hpack = struct {
         var value: u64 = first & prefix_max;
         if (value < prefix_max) return value;
 
-        var shift: u6 = 0;
+        var shift: usize = 0;
         while (true) {
             const byte = try cursor.readByte();
-            value = std.math.add(u64, value, @as(u64, byte & 0x7f) << shift) catch return error.IntegerOverflow;
+            if (shift >= @bitSizeOf(u64)) return error.IntegerOverflow;
+            const increment = std.math.shlExact(
+                u64,
+                @as(u64, byte & 0x7f),
+                @intCast(shift),
+            ) catch return error.IntegerOverflow;
+            value = std.math.add(u64, value, increment) catch
+                return error.IntegerOverflow;
             if ((byte & 0x80) == 0) return value;
-            if (shift >= 56) return error.IntegerOverflow;
+            if (shift > @bitSizeOf(u64) - 7) {
+                return error.IntegerOverflow;
+            }
             shift += 7;
         }
     }
@@ -2524,6 +2533,42 @@ pub const Hpack = struct {
         return size <= threshold;
     }
 };
+
+test "HTTP/2 HPACK prefix integer covers the complete u64 range" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try Hpack.encodeInteger(
+        &encoded,
+        allocator,
+        5,
+        0,
+        std.math.maxInt(u64),
+    );
+
+    var cursor = wire.Cursor.init(encoded.items[1..]);
+    try std.testing.expectEqual(
+        std.math.maxInt(u64),
+        try Hpack.decodeInteger(encoded.items[0], &cursor, 5),
+    );
+    try std.testing.expect(cursor.eof());
+}
+
+test "HTTP/2 HPACK prefix integer rejects values wider than u64" {
+    const continued = [_]u8{0x80} ** 10;
+    var unterminated = wire.Cursor.init(&continued);
+    try std.testing.expectError(
+        error.IntegerOverflow,
+        Hpack.decodeInteger(0x1f, &unterminated, 5),
+    );
+
+    const terminal_overflow = [_]u8{0x80} ** 9 ++ [_]u8{0x02};
+    var terminated = wire.Cursor.init(&terminal_overflow);
+    try std.testing.expectError(
+        error.IntegerOverflow,
+        Hpack.decodeInteger(0x1f, &terminated, 5),
+    );
+}
 
 test "HTTP/2 frame and settings roundtrip" {
     const allocator = std.testing.allocator;
