@@ -1632,7 +1632,7 @@ fn validateRequestForWrite(
         // This low-level serializer accepts an already transfer-coded body.
         // Callers that have unencoded chunks should use the runtime writer or
         // `encodeChunked` first.
-        .chunked => {},
+        .chunked => try validateChunkedBodyForWrite(body),
         .close_delimited => unreachable,
     }
 }
@@ -1711,9 +1711,22 @@ fn validateResponseForWrite(
     );
     const declared_content_length = try contentLength(headers);
     if (has_transfer_encoding) {
-        _ = try responseTransferEncodingIsCloseDelimited(headers);
+        const close_delimited = try responseTransferEncodingIsCloseDelimited(
+            headers,
+        );
         if (declared_content_length != null) {
             return error.InvalidContentLength;
+        }
+        // An empty representation can be metadata for a HEAD response (and a
+        // 304 is already constrained to empty above). For an emitted body,
+        // however, a final chunked coding must contain exactly one complete
+        // chunked wire body so no suffix can be interpreted as another message.
+        if (!close_delimited and body.len != 0) {
+            try validateChunkedBodyForWrite(body);
+        }
+    } else if (body.len != 0) {
+        if (declared_content_length) |declared| {
+            if (declared != body.len) return error.InvalidContentLength;
         }
     }
 }
@@ -2068,6 +2081,13 @@ const ChunkedBodyScan = struct {
     trailer_start: usize,
 };
 
+const ChunkedWireLayout = struct {
+    body_len: usize,
+    trailer_start: usize,
+    trailer_fields_end: usize,
+    consumed: usize,
+};
+
 fn scanChunkedBody(bytes: []const u8) Error!ChunkedBodyScan {
     var pos: usize = 0;
     var extension_bytes: usize = 0;
@@ -2099,6 +2119,45 @@ fn scanChunkedBody(bytes: []const u8) Error!ChunkedBodyScan {
     }
 }
 
+fn scanChunkedWireBody(bytes: []const u8) Error!ChunkedWireLayout {
+    const scan = try scanChunkedBody(bytes);
+    const trailer_end_rel = std.mem.indexOf(
+        u8,
+        bytes[scan.trailer_start..],
+        "\r\n",
+    ) orelse return error.BufferTooShort;
+    var trailer_fields_end = scan.trailer_start + trailer_end_rel;
+    // A zero-length trailer block is the CRLF immediately following the zero
+    // chunk. Otherwise consume fields through the first empty line.
+    if (trailer_end_rel != 0) {
+        const full_end_rel = std.mem.indexOf(
+            u8,
+            bytes[scan.trailer_start..],
+            "\r\n\r\n",
+        ) orelse return error.BufferTooShort;
+        trailer_fields_end = scan.trailer_start + full_end_rel;
+    }
+    const consumed = if (trailer_end_rel == 0)
+        scan.trailer_start + 2
+    else
+        trailer_fields_end + 4;
+    return .{
+        .body_len = scan.body_len,
+        .trailer_start = scan.trailer_start,
+        .trailer_fields_end = trailer_fields_end,
+        .consumed = consumed,
+    };
+}
+
+fn validateChunkedBodyForWrite(bytes: []const u8) Error!void {
+    const layout = try scanChunkedWireBody(bytes);
+    if (layout.consumed != bytes.len) return error.InvalidChunk;
+    try validateTrailerFields(
+        bytes[layout.trailer_start..layout.trailer_fields_end],
+        .{ .max_headers = std.math.maxInt(usize) },
+    );
+}
+
 fn copyChunkedBody(bytes: []const u8, out: []u8) Error!void {
     var pos: usize = 0;
     var out_pos: usize = 0;
@@ -2126,30 +2185,25 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
             .consumed = "0\r\n\r\n".len,
         };
     }
-    const scan = try scanChunkedBody(bytes);
-    const body = if (scan.body_len == 0) @constCast(&[_]u8{}) else try allocator.alloc(u8, scan.body_len);
-    errdefer if (scan.body_len != 0) allocator.free(body);
+    const layout = try scanChunkedWireBody(bytes);
+    const body = if (layout.body_len == 0) @constCast(&[_]u8{}) else try allocator.alloc(u8, layout.body_len);
+    errdefer if (layout.body_len != 0) allocator.free(body);
     try copyChunkedBody(bytes, body);
 
-    const trailer_end_rel = std.mem.indexOf(u8, bytes[scan.trailer_start..], "\r\n") orelse return error.BufferTooShort;
-    var trailer_block_end = scan.trailer_start + trailer_end_rel;
-    // A zero-length trailer block is represented by the CRLF immediately after
-    // the terminating zero-size chunk. Otherwise parse until the empty line.
-    if (trailer_end_rel != 0) {
-        const full_end_rel = std.mem.indexOf(u8, bytes[scan.trailer_start..], "\r\n\r\n") orelse return error.BufferTooShort;
-        trailer_block_end = scan.trailer_start + full_end_rel;
-    }
-    const consumed = if (trailer_end_rel == 0) scan.trailer_start + 2 else trailer_block_end + 4;
-    if (trailer_end_rel == 0) {
+    if (layout.trailer_start == layout.trailer_fields_end) {
         return .{
             .body = body,
             .trailers = @constCast(&[_]Header{}),
             .trailer_value_storage = @constCast(&[_][]u8{}),
-            .consumed = consumed,
+            .consumed = layout.consumed,
         };
     }
 
-    var lines = std.mem.splitSequence(u8, bytes[scan.trailer_start..trailer_block_end], "\r\n");
+    var lines = std.mem.splitSequence(
+        u8,
+        bytes[layout.trailer_start..layout.trailer_fields_end],
+        "\r\n",
+    );
     // Response-only compatibility must never relax trailer field syntax.
     var parsed_trailers = try parseHeaderLines(
         allocator,
@@ -2163,7 +2217,7 @@ pub fn decodeChunked(allocator: std.mem.Allocator, bytes: []const u8, options: P
         .body = body,
         .trailers = parsed_trailers.headers,
         .trailer_value_storage = parsed_trailers.value_storage,
-        .consumed = consumed,
+        .consumed = layout.consumed,
     };
 }
 
@@ -2353,6 +2407,33 @@ test "HTTP/1 low-level request writers validate framing before output" {
             },
             .body = "",
         },
+        .{
+            .expected = error.BufferTooShort,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+            .body = "5\r\nhello\r\n",
+        },
+        .{
+            .expected = error.InvalidChunk,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+            .body = "0\r\n\r\nnext",
+        },
+        .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+            .body = "0\r\nContent-Length: 0\r\n\r\n",
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -2456,6 +2537,7 @@ test "HTTP/1 low-level response writers validate framing before output" {
         expected: Error,
         version: Version,
         headers: []const Header,
+        body: []const u8 = "",
     }{
         .{
             .expected = error.InvalidTransferEncoding,
@@ -2497,6 +2579,30 @@ test "HTTP/1 low-level response writers validate framing before output" {
                 .{ .name = "Content-Length", .value = "5" },
             },
         },
+        .{
+            .expected = error.InvalidContentLength,
+            .version = .http_1_1,
+            .headers = &.{.{ .name = "Content-Length", .value = "5" }},
+            .body = "body",
+        },
+        .{
+            .expected = error.BufferTooShort,
+            .version = .http_1_1,
+            .headers = &.{.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            }},
+            .body = "4\r\npong\r\n",
+        },
+        .{
+            .expected = error.InvalidChunk,
+            .version = .http_1_1,
+            .headers = &.{.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            }},
+            .body = "0\r\n\r\nnext",
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -2513,7 +2619,7 @@ test "HTTP/1 low-level response writers validate framing before output" {
                 200,
                 "OK",
                 case.headers,
-                "",
+                case.body,
             ),
         );
         try std.testing.expectEqualStrings(prefix, encoded.items);
@@ -2527,7 +2633,7 @@ test "HTTP/1 low-level response writers validate framing before output" {
                 200,
                 "OK",
                 case.headers,
-                "",
+                case.body,
             ),
         );
         try std.testing.expectEqualStrings(prefix, encoded.items);
@@ -2548,6 +2654,39 @@ test "HTTP/1 low-level response writers validate framing before output" {
     );
     try std.testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeResponse(
+        &encoded,
+        allocator,
+        .http_1_1,
+        200,
+        "OK",
+        &.{.{ .name = "Transfer-Encoding", .value = "chunked" }},
+        "4\r\npong\r\n0\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "\r\n" ++
+            "4\r\npong\r\n0\r\n\r\n",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        200,
+        "OK",
+        &.{.{ .name = "Transfer-Encoding", .value = "chunked" }},
+        "",
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
         encoded.items,
     );
 }

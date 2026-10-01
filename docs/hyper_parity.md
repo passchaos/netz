@@ -131,7 +131,10 @@ benchmark response:
 - low-level request/response writers apply the same Host, HTTP-version and
   Transfer-Encoding grammar before reserving output; requests additionally
   reject missing or mismatched framing and both directions reject simultaneous
-  Content-Length plus Transfer-Encoding instead of emitting ambiguous bytes;
+  Content-Length plus Transfer-Encoding instead of emitting ambiguous bytes.
+  Non-empty response bodies must match a declared Content-Length, while empty
+  HEAD-style metadata remains valid; pre-encoded chunked bodies must contain
+  one complete body with valid trailers and no ambiguous suffix bytes;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each
