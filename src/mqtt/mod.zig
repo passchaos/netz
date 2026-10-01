@@ -147,13 +147,15 @@ pub const FixedHeader = struct {
     }
 
     pub fn write(self: FixedHeader, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-        return writeFixedHeaderAssumeCapacity(
-            list,
-            allocator,
-            self.packet_type,
-            self.flags,
-            self.remaining_len,
+        if (self.remaining_len > 268_435_455) {
+            return error.RemainingLengthTooLarge;
+        }
+        const encoded_len = 1 + remainingLengthEncodedLen(self.remaining_len);
+        try list.ensureUnusedCapacity(allocator, encoded_len);
+        list.appendAssumeCapacity(
+            (@as(u8, @intFromEnum(self.packet_type)) << 4) | self.flags,
         );
+        encodeRemainingLengthAssumeCapacity(list, self.remaining_len);
     }
 };
 
@@ -209,6 +211,25 @@ test "MQTT fixed header write is transactional" {
         }).write(&encoded, std.testing.allocator),
     );
     try std.testing.expectEqualSlices(u8, &.{0xa5}, encoded.items);
+
+    var exact_storage: [5]u8 = undefined;
+    var exact = std.ArrayList(u8).initBuffer(&exact_storage);
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try (FixedHeader{
+        .packet_type = .publish,
+        .flags = 0,
+        .remaining_len = 268_435_455,
+        .header_len = 0,
+    }).write(&exact, no_alloc.allocator());
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x30, 0xff, 0xff, 0xff, 0x7f },
+        exact.items,
+    );
 }
 
 fn validateControlFlags(fixed: FixedHeader) Error!void {

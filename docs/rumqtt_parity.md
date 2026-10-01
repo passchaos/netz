@@ -1371,10 +1371,12 @@ path for CONNECT, ACK, SUBSCRIBE and the other control packets. Neither layer
 allocates temporary variable-header or property buffers; failing-allocator
 codec and socket tests prove warmed writes are allocation-free while parsing
 verifies exact wire parity and invalid input leaves prior output unchanged.
-The standalone `FixedHeader.write` entry point now uses that same prevalidated,
-single-reservation path. An invalid Remaining Length or allocation failure
-therefore leaves existing output intact instead of exposing a partial Control
-Packet byte; a one-byte-capacity fail-first regression locks that boundary.
+The standalone `FixedHeader.write` entry point now prevalidates and reserves
+exactly its two-to-five-byte header before writing. An invalid Remaining Length
+or allocation failure therefore leaves existing output intact instead of
+exposing a partial Control Packet byte, while even the maximum Remaining Length
+does not reserve its unsupplied 256-MiB body. One-byte-capacity fail-first and
+exact five-byte-capacity regressions lock both boundaries.
 CONNECT itself now applies the same direct path across MQTT 3.1.1/5 Client ID,
 Will properties/topic/payload and username/password instead of assembling and
 copying a whole temporary variable payload. CONNACK and QoS PUBACK/PUBREC/
