@@ -1268,18 +1268,37 @@ pub fn writeServerHandshake(
 ) !void {
     try validateClientKey(client_key);
     try validateServerHandshakeHeaders(extra_headers);
+    const response_prefix =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ";
     const key = acceptKey(client_key);
-    try list.appendSlice(allocator, "HTTP/1.1 101 Switching Protocols\r\n");
-    try list.appendSlice(allocator, "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ");
-    try list.appendSlice(allocator, &key);
-    try list.appendSlice(allocator, "\r\n");
+    var response_len = response_prefix.len + key.len;
+    response_len = std.math.add(usize, response_len, 2) catch
+        return error.PayloadTooLarge;
     for (extra_headers) |header| {
-        try list.appendSlice(allocator, header.name);
-        try list.appendSlice(allocator, ": ");
-        try list.appendSlice(allocator, header.value);
-        try list.appendSlice(allocator, "\r\n");
+        response_len = std.math.add(usize, response_len, header.name.len) catch
+            return error.PayloadTooLarge;
+        response_len = std.math.add(usize, response_len, 2) catch
+            return error.PayloadTooLarge;
+        response_len = std.math.add(usize, response_len, header.value.len) catch
+            return error.PayloadTooLarge;
+        response_len = std.math.add(usize, response_len, 2) catch
+            return error.PayloadTooLarge;
     }
-    try list.appendSlice(allocator, "\r\n");
+    response_len = std.math.add(usize, response_len, 2) catch
+        return error.PayloadTooLarge;
+
+    try list.ensureUnusedCapacity(allocator, response_len);
+    list.appendSliceAssumeCapacity(response_prefix);
+    list.appendSliceAssumeCapacity(&key);
+    list.appendSliceAssumeCapacity("\r\n");
+    for (extra_headers) |header| {
+        list.appendSliceAssumeCapacity(header.name);
+        list.appendSliceAssumeCapacity(": ");
+        list.appendSliceAssumeCapacity(header.value);
+        list.appendSliceAssumeCapacity("\r\n");
+    }
+    list.appendSliceAssumeCapacity("\r\n");
 }
 
 fn validateServerHandshakeHeaders(headers: []const wire.Header) !void {
@@ -2934,6 +2953,55 @@ test "WebSocket server handshake writer validates generated response" {
         "dGhlIHNhbXBsZSBub25jZQ==",
         &.{.{ .name = "X-Test", .value = "ok\r\nInjected: yes" }},
     ));
+}
+
+test "WebSocket server handshake write is transactional and exactly reserved" {
+    const allocator = std.testing.allocator;
+    const client_key = "dGhlIHNhbXBsZSBub25jZQ==";
+    const extra_headers = &[_]wire.Header{
+        .{ .name = "X-Test", .value = "ok" },
+    };
+    const expected =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "X-Test: ok\r\n" ++
+        "\r\n";
+
+    var failure: std.ArrayList(u8) = .empty;
+    defer failure.deinit(allocator);
+    try failure.ensureTotalCapacityPrecise(allocator, "seed".len);
+    failure.appendSliceAssumeCapacity("seed");
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeServerHandshake(
+            &failure,
+            fail_first.allocator(),
+            client_key,
+            extra_headers,
+        ),
+    );
+    try std.testing.expectEqualStrings("seed", failure.items);
+
+    var exact_storage: [expected.len]u8 = undefined;
+    var exact = std.ArrayList(u8).initBuffer(&exact_storage);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try writeServerHandshake(
+        &exact,
+        no_alloc.allocator(),
+        client_key,
+        extra_headers,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings(expected, exact.items);
 }
 
 test {
