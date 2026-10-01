@@ -662,10 +662,10 @@ pub const Frame = struct {
             return error.IntegerOverflow;
         const frame_type_len = try quic.varint.length(self.frame_type);
         const payload_len_len = try quic.varint.length(payload_len_u64);
-        try list.ensureUnusedCapacity(
-            allocator,
-            @as(usize, frame_type_len) + payload_len_len + self.payload.len,
-        );
+        try list.ensureUnusedCapacity(allocator, try frameWireLen(
+            self.frame_type,
+            self.payload.len,
+        ));
         quic.varint.encodeWithLenAssumeCapacity(
             list,
             self.frame_type,
@@ -684,6 +684,14 @@ fn frameHeaderWireLen(frame_type: u64, payload_len: usize) Error!usize {
     const type_len = try quic.varint.length(frame_type);
     const payload_len_u64 = std.math.cast(u64, payload_len) orelse return error.IntegerOverflow;
     return std.math.add(usize, type_len, try quic.varint.length(payload_len_u64)) catch error.IntegerOverflow;
+}
+
+fn frameWireLen(frame_type: u64, payload_len: usize) Error!usize {
+    return std.math.add(
+        usize,
+        try frameHeaderWireLen(frame_type, payload_len),
+        payload_len,
+    ) catch error.IntegerOverflow;
 }
 
 fn appendVarintAssumeCapacity(list: *std.ArrayList(u8), value: u64) Error!void {
@@ -1986,9 +1994,14 @@ fn writeStreamPrefix(list: *std.ArrayList(u8), allocator: std.mem.Allocator, str
 }
 
 pub fn writeSettingsFrame(list: *std.ArrayList(u8), allocator: std.mem.Allocator, settings: Settings) Error!void {
+    const original_len = list.items.len;
+    errdefer list.items.len = original_len;
     const payload_len = try settings.payloadLen();
+    try list.ensureUnusedCapacity(
+        allocator,
+        try frameWireLen(FrameType.settings, payload_len),
+    );
     try writeFrameHeader(list, allocator, FrameType.settings, payload_len);
-    try list.ensureUnusedCapacity(allocator, payload_len);
     try settings.writePayloadAssumeCapacity(list);
 }
 
@@ -6473,6 +6486,38 @@ test "HTTP/3 typed settings state tracks negotiation" {
     const parsed_frame = try Frame.parse(direct_frame.items);
     try std.testing.expectEqual(FrameType.settings, parsed_frame.frame_type);
     try std.testing.expectEqualSlices(u8, payload.items, parsed_frame.payload);
+}
+
+test "HTTP/3 SETTINGS frame write is transactional and exactly reserved" {
+    const allocator = std.testing.allocator;
+    const settings = Settings{ .qpack_max_table_capacity = 64 };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoded.ensureTotalCapacityPrecise(allocator, 2);
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeSettingsFrame(&encoded, failing.allocator(), settings),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    var exact_storage: [5]u8 = undefined;
+    var exact = std.ArrayList(u8).initBuffer(&exact_storage);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try writeSettingsFrame(&exact, no_alloc.allocator(), settings);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x04, 0x03, 0x01, 0x40, 0x40 },
+        exact.items,
+    );
 }
 
 test "HTTP/3 accepted early data rejects reduced remembered settings" {

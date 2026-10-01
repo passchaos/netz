@@ -495,7 +495,11 @@ session-level payload and STREAM-descriptor scratch, independent of ordinary
 messages and Push encodings that must remain live while encoder instructions
 are sent first. SETTINGS encodes all three critical-stream prefixes before
 forming any borrowing slice, so ArrayList growth cannot invalidate a previously
-built frame. The dynamic-QPACK handshake test records stable critical-scratch
+built frame. The standalone SETTINGS frame encoder likewise computes and
+reserves its complete header-plus-payload length before appending either part;
+a fail-first exact-capacity regression proves allocation failure cannot expose
+a partial frame, while a preallocated exact-size frame requires no growth.
+The dynamic-QPACK handshake test records stable critical-scratch
 capacity and backing pointers across steady-state instruction/feedback rounds;
 a direct connection test forces the initial SETTINGS allocation to fail and
 verifies settings state, all critical stream offsets, prefix flags, and packet
