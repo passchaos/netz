@@ -229,6 +229,20 @@ below 238 ns. Five default-shape runs measured 236-241 ns borrowed,
 alternatives were rejected by A/B evidence: scalar CRLF/header fusion regressed
 to 259-261 ns/op, and vectorized colon search followed by token validation
 regressed to 253-257 ns/op.
+The ordinary no-obs-fold owned parser now retains up to sixteen validated
+header descriptors on the stack during its counting pass. Common requests copy
+those descriptors into the one exact result allocation instead of parsing and
+validating every line a second time; larger sets preserve the prior exact-count
+allocation and second fill pass, so no geometric attacker-controlled scratch is
+introduced. Seven CPU-0, order-alternated fixed-binary pairs at
+`zig-out/http1-header-single-pass-ab` (24,775,320 bytes; aggregate file-hash
+digest `3720f5740a69e13253d4774ebe2bb6d533f3af78ffe58ac077edfa6b3136b061`)
+used parser binaries `3b0e2e34`/`c2a452da`. The five-million-parse owned
+scenario improved in all seven pairs from 920 ns/op median (920-928) to
+580 ns/op (580-582), a 37.0% reduction. The separate 16-request persistent
+pipeline control used binaries `e8d53279`/`ea584e02` and moved from 794 to
+803 ns/request by paired medians (+1.1%) with overlapping ranges; that runtime
+uses its caller-buffer borrowed parser, so no pipeline improvement is claimed.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,

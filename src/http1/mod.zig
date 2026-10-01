@@ -977,6 +977,10 @@ fn parseHeaderLinesNoFold(
     options: ParseOptions,
     policy: HeaderParsePolicy,
 ) Error!ParsedHeaders {
+    // Preserve the first validation pass for the common small header set.
+    // Larger sets still count exactly before allocating and filling their
+    // result, avoiding geometric temporary storage on attacker-sized input.
+    var common_headers: [16]Header = undefined;
     var scan = lines;
     var count: usize = 0;
     while (scan.next()) |line| {
@@ -989,7 +993,7 @@ fn parseHeaderLinesNoFold(
             }
             return error.MalformedHeader;
         }
-        _ = parseHeaderLine(
+        const header = parseHeaderLine(
             line,
             policy.allow_spaces_before_colon,
         ) catch |err| {
@@ -1001,6 +1005,7 @@ fn parseHeaderLinesNoFold(
             continue;
         };
         if (count >= options.max_headers) return error.TooManyHeaders;
+        if (count < common_headers.len) common_headers[count] = header;
         count += 1;
     }
 
@@ -1013,6 +1018,13 @@ fn parseHeaderLinesNoFold(
 
     const headers = try allocator.alloc(Header, count);
     errdefer allocator.free(headers);
+    if (count <= common_headers.len) {
+        @memcpy(headers, common_headers[0..count]);
+        return .{
+            .headers = headers,
+            .value_storage = @constCast(&[_][]u8{}),
+        };
+    }
     var fill = lines;
     var index: usize = 0;
     while (fill.next()) |line| {
@@ -2124,6 +2136,54 @@ test "HTTP/1 request parse and serialize" {
     try writeRequest(&one_alloc_out, one_alloc_allocator, req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expect(!one_alloc.has_induced_failure);
     try std.testing.expectEqualStrings(raw, one_alloc_out.items);
+}
+
+test "HTTP/1 owned headers cross the single-pass stack boundary" {
+    const common =
+        "x-00: 00\r\n" ++
+        "x-01: 01\r\n" ++
+        "x-02: 02\r\n" ++
+        "x-03: 03\r\n" ++
+        "x-04: 04\r\n" ++
+        "x-05: 05\r\n" ++
+        "x-06: 06\r\n" ++
+        "x-07: 07\r\n" ++
+        "x-08: 08\r\n" ++
+        "x-09: 09\r\n" ++
+        "x-10: 10\r\n" ++
+        "x-11: 11\r\n" ++
+        "x-12: 12\r\n" ++
+        "x-13: 13\r\n" ++
+        "x-14: 14\r\n" ++
+        "x-15: 15\r\n";
+    const common_lines = std.mem.splitSequence(u8, common, "\r\n");
+    var inline_headers = try parseHeaderLinesNoFold(
+        std.testing.allocator,
+        common_lines,
+        .{ .max_headers = 17 },
+        .{},
+    );
+    defer inline_headers.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 16), inline_headers.headers.len);
+    try std.testing.expectEqualStrings(
+        "15",
+        inline_headers.headers[15].value,
+    );
+
+    const fallback = common ++ "x-16: 16\r\n";
+    const fallback_lines = std.mem.splitSequence(u8, fallback, "\r\n");
+    var fallback_headers = try parseHeaderLinesNoFold(
+        std.testing.allocator,
+        fallback_lines,
+        .{ .max_headers = 17 },
+        .{},
+    );
+    defer fallback_headers.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 17), fallback_headers.headers.len);
+    try std.testing.expectEqualStrings(
+        "16",
+        fallback_headers.headers[16].value,
+    );
 }
 
 test "HTTP/1 borrowed request heads parse pipelines without allocation" {

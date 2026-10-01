@@ -1386,6 +1386,9 @@ comparison gaps are recorded in `docs/benchmark-baseline.md`:
 ```sh
 zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
+# The common owned parser retains up to 16 validated header descriptors during
+# its counting pass, avoiding a second parse while preserving exact allocation
+# for larger header sets.
 taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
   --mode=fixed --warmup=20 --iterations=200
