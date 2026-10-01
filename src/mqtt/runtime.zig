@@ -1203,6 +1203,12 @@ pub const PendingAcceptedClient = struct {
             return error.InvalidProperty;
         }
         const connect = self.connect.connect;
+        if (connect.clean_start) {
+            // A clean start discards any prior Session, so MQTT 3.1.1 and 5
+            // both require the successful CONNACK's Session Present bit to be
+            // zero regardless of a direct server caller's requested value.
+            resolved.session_present = false;
+        }
         if (!self.protocol_allowed or
             !resolved.accepted_protocol_versions.allows(connect.protocol))
         {
@@ -3124,6 +3130,9 @@ pub const Connection = struct {
                         packet.bytes,
                     );
                     errdefer value.deinit(allocator);
+                    if (options.clean_start and value.session_present) {
+                        return error.InvalidFlags;
+                    }
                     if (self.authentication.phase ==
                         .authenticating)
                     {
@@ -6713,6 +6722,11 @@ test "MQTT runtime resolves connection acceptance policies" {
             },
         },
     };
+    const clean_options = try pending.resolvedOptions(.{
+        .session_present = true,
+    });
+    try std.testing.expect(!clean_options.session_present);
+
     const v5_options = try pending.resolvedOptions(.{
         .server_keep_alive_seconds = 20,
         .maximum_keep_alive_seconds = 10,
@@ -6755,6 +6769,84 @@ test "MQTT runtime resolves connection acceptance policies" {
         error.InvalidProperty,
         pending.resolvedOptions(.{ .maximum_keep_alive_seconds = 0 }),
     );
+}
+
+test "MQTT client rejects Session Present after Clean Start" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        listener: *net.Server,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            runFallible(self) catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+                var peer = PacketTransport.initTcp(
+                    self.io,
+                    try self.listener.accept(self.io),
+                );
+                defer peer.close(self.allocator);
+                var packet = try peer.readPacket(self.allocator, 4096);
+                defer packet.deinit(self.allocator);
+                var connect = try mqtt.Connect.parse(
+                    self.allocator,
+                    packet.bytes,
+                );
+                defer connect.deinit(self.allocator);
+                try std.testing.expectEqual(protocol, connect.protocol);
+                try std.testing.expect(connect.clean_start);
+
+                var invalid_connack = [_]u8{
+                    0x20,
+                    if (protocol == .v5) 0x03 else 0x02,
+                    0x01,
+                    0x00,
+                    0x00,
+                };
+                const response_len: usize = if (protocol == .v5) 5 else 4;
+                try peer.writePacket(invalid_connack[0..response_len]);
+            }
+        }
+    };
+    var shared = Shared{
+        .listener = &listener,
+        .io = io,
+        .allocator = allocator,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |protocol| {
+        try std.testing.expectError(
+            error.InvalidFlags,
+            Client.connectAttempt(allocator, io, listener.socket.address, .{
+                .protocol = protocol,
+                .client_id = "clean-client",
+                .clean_start = true,
+                .limits = .{ .max_packet_size = 4096 },
+            }),
+        );
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "MQTT runtime exposes CONNACK session present" {

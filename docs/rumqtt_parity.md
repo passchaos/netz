@@ -1595,8 +1595,10 @@ MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
 - MQTT 3.1.1 CleanSession=0 resumes subscriptions and offline QoS 1/2 state
   indefinitely, while CleanSession=1 discards that Session.
 - CONNACK Session Present, SUBACK, UNSUBACK and QoS ACK packets use each
-  connection's wire format. MQTT 5-only reason codes are downgraded to the
-  success-only MQTT 3.1.1 ACK representation.
+  connection's wire format. A Clean Start request forces Session Present off
+  in server responses, while clients reject a peer that returns the forbidden
+  combination under either MQTT 3.1.1 or MQTT 5. MQTT 5-only reason codes are
+  downgraded to the success-only MQTT 3.1.1 ACK representation.
 - QoS 2 still routes only at PUBREL and completes PUBREC/PUBREL/PUBCOMP across
   both versions.
 

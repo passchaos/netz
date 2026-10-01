@@ -902,7 +902,8 @@ Current protocol coverage includes:
   UTF-8 string validation with opt-in Mosquitto-compatible strict
   control/noncharacter rejection, response-topic/topic-name/filter validation
   including the complete 65,535-byte wire limit,
-  clean-session empty-client-id checks, version-specific MQTT 3.1.1/v5
+  clean-session empty-client-id checks and bidirectional Clean Start/Session
+  Present enforcement, version-specific MQTT 3.1.1/v5
   property and SUBSCRIBE option validation, payload-format UTF-8 validation, and
   wildcard and shared-subscription matching with MQTT 5 No Local/shared-subscription combination rejection,
   a broker-grade topic-level subscription trie with hashed literal edges,
