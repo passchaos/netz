@@ -93,6 +93,15 @@ pub const FrameHeader = struct {
     mask_key: ?[4]u8,
     header_len: usize,
 
+    /// Return the complete encoded frame length without permitting a
+    /// peer-provided payload length to wrap the platform `usize` boundary.
+    pub fn wireLen(self: FrameHeader) Error!usize {
+        const payload_len = std.math.cast(usize, self.payload_len) orelse
+            return error.PayloadTooLarge;
+        return std.math.add(usize, self.header_len, payload_len) catch
+            error.PayloadTooLarge;
+    }
+
     pub fn parse(bytes: []const u8) Error!FrameHeader {
         if (bytes.len < 2) return error.BufferTooShort;
         const b0 = bytes[0];
@@ -355,13 +364,13 @@ pub fn parseFrameWithHeader(
     options: ParseFrameOptions,
 ) Error!Frame {
     try validateFrameHeader(header, options);
-    const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
-    if (bytes.len < header.header_len + payload_len) return error.BufferTooShort;
-    const payload = try allocator.dupe(u8, bytes[header.header_len .. header.header_len + payload_len]);
+    const consumed = try header.wireLen();
+    if (bytes.len < consumed) return error.BufferTooShort;
+    const payload = try allocator.dupe(u8, bytes[header.header_len..consumed]);
     errdefer allocator.free(payload);
     if (header.mask_key) |mask| applyMask(payload, mask, 0);
     try validatePayload(header, payload, options);
-    return .{ .header = header, .payload = payload, .consumed = header.header_len + payload_len };
+    return .{ .header = header, .payload = payload, .consumed = consumed };
 }
 
 /// Decode one frame into caller-owned payload storage.
@@ -386,13 +395,8 @@ pub fn parseFrameIntoWithHeader(
     options: ParseFrameOptions,
 ) Error!BorrowedFrame {
     try validateFrameHeader(header, options);
-    const payload_len = std.math.cast(usize, header.payload_len) orelse
-        return error.PayloadTooLarge;
-    const consumed = std.math.add(
-        usize,
-        header.header_len,
-        payload_len,
-    ) catch return error.PayloadTooLarge;
+    const consumed = try header.wireLen();
+    const payload_len = consumed - header.header_len;
     if (bytes.len < consumed) return error.BufferTooShort;
     if (out.len < payload_len) return error.BufferTooShort;
     const payload = out[0..payload_len];
@@ -420,13 +424,7 @@ pub fn parseFrameInPlaceWithHeader(
     options: ParseFrameOptions,
 ) Error!BorrowedFrame {
     try validateFrameHeader(header, options);
-    const payload_len = std.math.cast(usize, header.payload_len) orelse
-        return error.PayloadTooLarge;
-    const consumed = std.math.add(
-        usize,
-        header.header_len,
-        payload_len,
-    ) catch return error.PayloadTooLarge;
+    const consumed = try header.wireLen();
     if (bytes.len < consumed) return error.BufferTooShort;
     const payload = bytes[header.header_len..consumed];
     if (header.mask_key) |mask| applyMask(payload, mask, 0);
@@ -1982,6 +1980,32 @@ test "WebSocket frame decodes masked payload into caller storage" {
             header,
             .{ .expect_mask = .unmasked },
         ),
+    );
+}
+
+test "WebSocket predecoded frame rejects total length overflow" {
+    const header = FrameHeader{
+        .fin = true,
+        .opcode = .binary,
+        .masked = false,
+        .payload_len = @intCast(std.math.maxInt(usize)),
+        .mask_key = null,
+        .header_len = max_frame_header_len,
+    };
+    try std.testing.expectError(error.PayloadTooLarge, header.wireLen());
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        parseFrameWithHeader(std.testing.allocator, &.{}, header, .{}),
+    );
+
+    var output: [0]u8 = .{};
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        parseFrameIntoWithHeader(&output, &.{}, header, .{}),
+    );
+    try std.testing.expectError(
+        error.PayloadTooLarge,
+        parseFrameInPlaceWithHeader(&output, header, .{}),
     );
 }
 

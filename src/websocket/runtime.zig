@@ -5656,7 +5656,7 @@ pub const Connection = struct {
         const header = try websocket.FrameHeader.parse(available);
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
-        const total_len = header.header_len + payload_len;
+        const total_len = try header.wireLen();
         try ensureIncomingFrameBuffered(self, header, total_len, deadline);
         available = message_buffer.unread(
             &self.inbuf,
@@ -8632,7 +8632,7 @@ pub const H2Connection = struct {
         const header = try websocket.FrameHeader.parse(available);
         const payload_len = std.math.cast(usize, header.payload_len) orelse return error.PayloadTooLarge;
         if (payload_len > self.limits.max_frame_bytes) return error.MessageTooLarge;
-        const total_len = header.header_len + payload_len;
+        const total_len = try header.wireLen();
         try ensureIncomingFrameBuffered(self, header, total_len, deadline);
         available = message_buffer.unread(
             &self.inbuf,

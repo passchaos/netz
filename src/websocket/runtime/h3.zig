@@ -2380,11 +2380,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (payload_len > self.limits.max_frame_bytes) {
                 return error.MessageTooLarge;
             }
-            const total_len = std.math.add(
-                usize,
-                header.header_len,
-                payload_len,
-            ) catch return error.PayloadTooLarge;
+            const total_len = try header.wireLen();
             try self.ensureIncomingFrameBuffered(header, total_len, deadline);
             available = message_buffer.unread(
                 &self.inbuf,
@@ -2617,11 +2613,7 @@ pub fn Connection(comptime role: common.Role) type {
             else
                 out;
             if (payload_len > payload_out.len) return error.PayloadTooLarge;
-            const total_len = std.math.add(
-                usize,
-                header.header_len,
-                payload_len,
-            ) catch return error.PayloadTooLarge;
+            const total_len = try header.wireLen();
             try self.ensureIncomingFrameBuffered(
                 header,
                 total_len,

@@ -333,6 +333,12 @@ same-process masked short-frame loop measured 4.30 ns/frame with header reuse
 versus 7.85 ns/frame for the former duplicate parse, a 1.83x reduction in that
 fixed parser component. Length-boundary and masked/unmasked equivalence tests
 cover both allocating and caller-buffer predecoded APIs.
+Those predecoded APIs now derive the complete wire length through one checked
+`FrameHeader.wireLen` operation. HTTP/1, RFC 8441, and RFC 9220 receive paths
+share it, so a payload that fits `usize` but whose header-plus-payload length
+does not fit returns `PayloadTooLarge` instead of wrapping on a narrow target
+or trapping for a caller-constructed header. A boundary test covers allocating,
+caller-buffer, and in-place decode entry points.
 Aggregate H1, RFC 8441, and RFC 9220 receives now transfer the transport's
 incremental UTF-8 state into `MessageAssembler`: both frame parsing and message
 assembly skip their otherwise-repeated payload scans, and finalization trusts
