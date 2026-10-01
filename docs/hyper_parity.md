@@ -122,6 +122,9 @@ benchmark response:
   status-line grammar. Even an empty optional reason phrase retains its
   mandatory separating SP, while a peer line that omits that delimiter is
   rejected instead of being normalized differently by separate parser paths;
+- Transfer-Encoding parsing validates coding and parameter tokens without
+  allocation, honors commas inside quoted parameter values, rejects malformed
+  or unterminated parameters, and rejects parameters on `chunked` itself;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each

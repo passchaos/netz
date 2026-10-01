@@ -520,7 +520,7 @@ pub fn parseResponseHead(
 
     const forbidden = responseForbidsBody(status, context.request_method);
     const framing: BodyFraming = if (forbidden) .none else switch (bodyFraming(parsed.headers) catch |err| switch (err) {
-        error.InvalidTransferEncoding => if (responseTransferEncodingIsCloseDelimited(parsed.headers))
+        error.InvalidTransferEncoding => if (try responseTransferEncodingIsCloseDelimited(parsed.headers))
             .close_delimited
         else
             return error.InvalidTransferEncoding,
@@ -1256,7 +1256,7 @@ fn parseResponseBody(
 ) Error!ParsedBody {
     return parseBody(allocator, bytes, body_start, headers, options) catch |err| switch (err) {
         error.InvalidTransferEncoding => blk: {
-            if (!responseTransferEncodingIsCloseDelimited(headers)) return error.InvalidTransferEncoding;
+            if (!try responseTransferEncodingIsCloseDelimited(headers)) return error.InvalidTransferEncoding;
             break :blk .{
                 .framing = .close_delimited,
                 .body = bytes[body_start..],
@@ -1389,42 +1389,126 @@ fn updateTransferEncodingFraming(
     saw_chunked: *bool,
     final_is_chunked: *bool,
 ) Error!void {
-    var tokens = std.mem.splitScalar(u8, value, ',');
-    while (tokens.next()) |raw_token| {
-        const token = wire.trimOws(raw_token);
-        if (token.len == 0) return error.InvalidTransferEncoding;
-        const is_chunked = std.ascii.eqlIgnoreCase(token, "chunked");
+    var pos: usize = 0;
+    var saw_coding = false;
+    while (true) {
+        skipTransferOws(value, &pos);
+        const name_start = pos;
+        while (pos < value.len and validHeaderNameByte(value[pos])) {
+            pos += 1;
+        }
+        if (pos == name_start) return error.InvalidTransferEncoding;
+        const name = value[name_start..pos];
+        skipTransferOws(value, &pos);
+
+        var has_parameters = false;
+        while (pos < value.len and value[pos] == ';') {
+            has_parameters = true;
+            pos += 1;
+            skipTransferOws(value, &pos);
+            const parameter_start = pos;
+            while (pos < value.len and validHeaderNameByte(value[pos])) {
+                pos += 1;
+            }
+            if (pos == parameter_start) return error.InvalidTransferEncoding;
+            skipTransferOws(value, &pos);
+            if (pos == value.len or value[pos] != '=') {
+                return error.InvalidTransferEncoding;
+            }
+            pos += 1;
+            skipTransferOws(value, &pos);
+            if (pos == value.len) return error.InvalidTransferEncoding;
+            if (value[pos] == '"') {
+                try consumeTransferQuotedString(value, &pos);
+            } else {
+                const parameter_value_start = pos;
+                while (pos < value.len and validHeaderNameByte(value[pos])) {
+                    pos += 1;
+                }
+                if (pos == parameter_value_start) {
+                    return error.InvalidTransferEncoding;
+                }
+            }
+            skipTransferOws(value, &pos);
+        }
+
+        const is_chunked = std.ascii.eqlIgnoreCase(name, "chunked");
         if (is_chunked) {
             // RFC 9112 allows other transfer codings before chunked, but
-            // chunked itself may only be applied once and must be final.
-            if (saw_chunked.*) return error.InvalidTransferEncoding;
+            // chunked itself may only be applied once, must be final, and has
+            // no parameters.
+            if (saw_chunked.* or has_parameters) {
+                return error.InvalidTransferEncoding;
+            }
             saw_chunked.* = true;
         }
         final_is_chunked.* = is_chunked;
+        saw_coding = true;
+
+        if (pos == value.len) break;
+        if (value[pos] != ',') return error.InvalidTransferEncoding;
+        pos += 1;
+    }
+    if (!saw_coding) return error.InvalidTransferEncoding;
+}
+
+fn skipTransferOws(value: []const u8, pos: *usize) void {
+    while (pos.* < value.len and
+        (value[pos.*] == ' ' or value[pos.*] == '\t'))
+    {
+        pos.* += 1;
     }
 }
 
-fn responseTransferEncodingIsCloseDelimited(headers: []const Header) bool {
+fn consumeTransferQuotedString(
+    value: []const u8,
+    pos: *usize,
+) Error!void {
+    std.debug.assert(pos.* < value.len and value[pos.*] == '"');
+    pos.* += 1;
+    while (pos.* < value.len) {
+        const byte = value[pos.*];
+        pos.* += 1;
+        if (byte == '"') return;
+        if (byte == '\\') {
+            if (pos.* == value.len) return error.InvalidTransferEncoding;
+            const escaped = value[pos.*];
+            if (!(escaped == '\t' or
+                (escaped >= 0x20 and escaped <= 0x7e) or
+                escaped >= 0x80))
+            {
+                return error.InvalidTransferEncoding;
+            }
+            pos.* += 1;
+            continue;
+        }
+        if (!(byte == '\t' or
+            byte == ' ' or
+            byte == 0x21 or
+            (byte >= 0x23 and byte <= 0x5b) or
+            (byte >= 0x5d and byte <= 0x7e) or
+            byte >= 0x80))
+        {
+            return error.InvalidTransferEncoding;
+        }
+    }
+    return error.InvalidTransferEncoding;
+}
+
+fn responseTransferEncodingIsCloseDelimited(headers: []const Header) Error!bool {
     var saw_transfer_encoding = false;
-    var final_coding: ?[]const u8 = null;
+    var saw_chunked = false;
+    var final_is_chunked = false;
     for (headers) |header| {
         if (!header.eqlName("transfer-encoding")) continue;
         saw_transfer_encoding = true;
-        const final = finalTransferCoding(header.value) orelse return false;
-        final_coding = final;
+        try updateTransferEncodingFraming(
+            header.value,
+            &saw_chunked,
+            &final_is_chunked,
+        );
     }
-    return saw_transfer_encoding and !std.ascii.eqlIgnoreCase(final_coding orelse return false, "chunked");
-}
-
-fn finalTransferCoding(value: []const u8) ?[]const u8 {
-    var tokens = std.mem.splitScalar(u8, value, ',');
-    var final: ?[]const u8 = null;
-    while (tokens.next()) |raw| {
-        const token = wire.trimOws(raw);
-        if (token.len == 0) return null;
-        final = token;
-    }
-    return final;
+    return saw_transfer_encoding and !final_is_chunked;
 }
 
 pub fn statusCodeForbidsBody(status: u16) bool {
@@ -3208,6 +3292,71 @@ test "HTTP/1 parser rejects ambiguous body lengths" {
 
     const http10_te = "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, http10_te, .{}));
+}
+
+test "HTTP/1 Transfer-Encoding grammar is quote aware and strict" {
+    const allocator = std.testing.allocator;
+    const parameterized =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Transfer-Encoding: gzip; note=\"one,two\", chunked\r\n" ++
+        "\r\n" ++
+        "2\r\nok\r\n0\r\n\r\n";
+    var request = try parseRequest(allocator, parameterized, .{});
+    defer request.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.chunked, request.body_framing);
+    try std.testing.expectEqualStrings("ok", request.body);
+
+    const close_delimited =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Transfer-Encoding: gzip; note=\"one,two\"\r\n" ++
+        "\r\n" ++
+        "encoded";
+    var response = try parseResponse(allocator, close_delimited, .{});
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(
+        BodyFraming.close_delimited,
+        response.body_framing,
+    );
+    try std.testing.expectEqualStrings("encoded", response.body);
+
+    for ([_][]const u8{
+        "gzip token, chunked",
+        "gzip; level, chunked",
+        "gzip; level=, chunked",
+        "gzip; note=\"unterminated, chunked",
+        "chunked; level=1",
+        "gzi(p, chunked",
+        "gzip,,chunked",
+    }) |value| {
+        const headers = [_]Header{.{
+            .name = "Transfer-Encoding",
+            .value = value,
+        }};
+        try std.testing.expectError(
+            error.InvalidTransferEncoding,
+            bodyFraming(&headers),
+        );
+        try std.testing.expectError(
+            error.InvalidTransferEncoding,
+            responseTransferEncodingIsCloseDelimited(&headers),
+        );
+    }
+
+    const malformed_response =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Transfer-Encoding: gzip token\r\n" ++
+        "\r\n" ++
+        "ambiguous";
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        parseResponse(allocator, malformed_response, .{}),
+    );
+    var header_storage: [2]Header = undefined;
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        parseResponseHead(malformed_response, &header_storage, .{}, .{}),
+    );
 }
 
 test "HTTP/1 response body framing helpers" {
