@@ -76,27 +76,61 @@ pub fn writeEncoderInstruction(
 ) !void {
     switch (instruction) {
         .insert_name_reference => |reference| {
-            try encodePrefixedInteger(
+            const value_plan = try encodedStringPlan(reference.value);
+            const index_len = prefixed_integer.encodedLen(
+                6,
+                reference.name_index,
+            );
+            const instruction_len = std.math.add(
+                usize,
+                index_len,
+                value_plan.wire_len,
+            ) catch return error.IntegerOverflow;
+            try list.ensureUnusedCapacity(allocator, instruction_len);
+            encodePrefixedIntegerAssumeCapacity(
                 list,
-                allocator,
                 6,
                 if (reference.static) 0xc0 else 0x80,
                 reference.name_index,
             );
-            try encodeString(list, allocator, reference.value);
+            encodeStringAssumeCapacity(list, reference.value, value_plan);
         },
         .insert_literal => |literal| {
-            try list.ensureUnusedCapacity(
-                allocator,
-                prefixed_integer.encodedLen(5, literal.name.len) +
-                    literal.name.len,
-            );
+            const value_plan = try encodedStringPlan(literal.value);
+            var instruction_len = std.math.add(
+                usize,
+                prefixed_integer.encodedLen(5, literal.name.len),
+                literal.name.len,
+            ) catch return error.IntegerOverflow;
+            instruction_len = std.math.add(
+                usize,
+                instruction_len,
+                value_plan.wire_len,
+            ) catch return error.IntegerOverflow;
+            try list.ensureUnusedCapacity(allocator, instruction_len);
             encodePrefixedIntegerAssumeCapacity(list, 5, 0x40, literal.name.len);
             list.appendSliceAssumeCapacity(literal.name);
-            try encodeString(list, allocator, literal.value);
+            encodeStringAssumeCapacity(list, literal.value, value_plan);
         },
-        .set_capacity => |capacity| try encodePrefixedInteger(list, allocator, 5, 0x20, capacity),
-        .duplicate => |index| try encodePrefixedInteger(list, allocator, 5, 0x00, index),
+        .set_capacity => |capacity| {
+            try list.ensureUnusedCapacity(
+                allocator,
+                prefixed_integer.encodedLen(5, capacity),
+            );
+            encodePrefixedIntegerAssumeCapacity(
+                list,
+                5,
+                0x20,
+                capacity,
+            );
+        },
+        .duplicate => |index| {
+            try list.ensureUnusedCapacity(
+                allocator,
+                prefixed_integer.encodedLen(5, index),
+            );
+            encodePrefixedIntegerAssumeCapacity(list, 5, 0x00, index);
+        },
     }
 }
 
@@ -1195,20 +1229,19 @@ pub fn encodePrefix(
     encoded_insert_count: u64,
     delta_base: u64,
 ) !void {
-    try encodePrefixedInteger(
+    const wire_len = std.math.add(
+        usize,
+        prefixed_integer.encodedLen(8, encoded_insert_count),
+        prefixed_integer.encodedLen(7, delta_base),
+    ) catch return error.IntegerOverflow;
+    try list.ensureUnusedCapacity(allocator, wire_len);
+    encodePrefixedIntegerAssumeCapacity(
         list,
-        allocator,
         8,
         0x00,
         encoded_insert_count,
     );
-    try encodePrefixedInteger(
-        list,
-        allocator,
-        7,
-        0x00,
-        delta_base,
-    );
+    encodePrefixedIntegerAssumeCapacity(list, 7, 0x00, delta_base);
 }
 
 /// Stateless QPACK encoder for deterministic clients. It uses the static
@@ -1533,28 +1566,53 @@ fn freeFieldStorages(allocator: std.mem.Allocator, fields: []HeaderField) void {
     }
 }
 
+const EncodedStringPlan = struct {
+    payload_len: usize,
+    wire_len: usize,
+    huffman: bool,
+};
+
+fn encodedStringPlan(value: []const u8) !EncodedStringPlan {
+    const huffman_len = if (value.len > 2)
+        try huffmanEncodedLen(value)
+    else
+        value.len;
+    const huffman = value.len > 2 and huffman_len < value.len;
+    const payload_len = if (huffman) huffman_len else value.len;
+    const wire_len = std.math.add(
+        usize,
+        prefixed_integer.encodedLen(7, payload_len),
+        payload_len,
+    ) catch return error.IntegerOverflow;
+    return .{
+        .payload_len = payload_len,
+        .wire_len = wire_len,
+        .huffman = huffman,
+    };
+}
+
+fn encodeStringAssumeCapacity(
+    list: *std.ArrayList(u8),
+    value: []const u8,
+    plan: EncodedStringPlan,
+) void {
+    encodePrefixedIntegerAssumeCapacity(
+        list,
+        7,
+        if (plan.huffman) 0x80 else 0x00,
+        plan.payload_len,
+    );
+    if (plan.huffman) {
+        appendHuffmanAssumeCapacity(list, value, plan.payload_len);
+    } else {
+        list.appendSliceAssumeCapacity(value);
+    }
+}
+
 fn encodeString(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
-    if (value.len == 0) {
-        try list.ensureUnusedCapacity(allocator, 1);
-        list.appendAssumeCapacity(0);
-        return;
-    }
-    if (value.len <= 2) {
-        try list.ensureUnusedCapacity(allocator, 1 + value.len);
-        list.appendAssumeCapacity(@intCast(value.len));
-        list.appendSliceAssumeCapacity(value);
-        return;
-    }
-    const huffman_len = try huffmanEncodedLen(value);
-    if (huffman_len >= value.len) {
-        try list.ensureUnusedCapacity(allocator, prefixed_integer.encodedLen(7, value.len) + value.len);
-        encodePrefixedIntegerAssumeCapacity(list, 7, 0x00, value.len);
-        list.appendSliceAssumeCapacity(value);
-        return;
-    }
-    try list.ensureUnusedCapacity(allocator, prefixed_integer.encodedLen(7, huffman_len) + huffman_len);
-    encodePrefixedIntegerAssumeCapacity(list, 7, 0x80, huffman_len);
-    appendHuffmanAssumeCapacity(list, value, huffman_len);
+    const plan = try encodedStringPlan(value);
+    try list.ensureUnusedCapacity(allocator, plan.wire_len);
+    encodeStringAssumeCapacity(list, value, plan);
 }
 
 const DecodedString = struct {

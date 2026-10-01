@@ -499,7 +499,12 @@ built frame. The standalone SETTINGS frame encoder likewise computes and
 reserves its complete header-plus-payload length before appending either part;
 a fail-first exact-capacity regression proves allocation failure cannot expose
 a partial frame, while a preallocated exact-size frame requires no growth.
-The dynamic-QPACK handshake test records stable critical-scratch
+Standalone QPACK Encoder Stream instructions and the two-integer field-section
+prefix now apply the same rule: Huffman/raw string sizes are planned first and
+the complete logical item is reserved once. Fail-first partial-capacity tests
+prove that an allocation error exposes neither a truncated instruction nor a
+half prefix, and exact-capacity paths perform no allocation. The dynamic-QPACK
+handshake test records stable critical-scratch
 capacity and backing pointers across steady-state instruction/feedback rounds;
 a direct connection test forces the initial SETTINGS allocation to fail and
 verifies settings state, all critical stream offsets, prefix flags, and packet

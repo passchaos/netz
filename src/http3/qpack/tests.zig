@@ -782,6 +782,114 @@ test "HTTP/3 QPACK encoder instructions round trip Huffman strings" {
     }
 }
 
+test "HTTP/3 QPACK compound encoders are transactional and exactly reserved" {
+    const allocator = std.testing.allocator;
+    const prefix = "seed";
+    const compound_cases = [_]struct {
+        instruction: Qpack.EncoderInstruction,
+        first_component_len: usize,
+    }{
+        .{
+            .instruction = .{ .insert_name_reference = .{
+                .static = true,
+                .name_index = 95,
+                .value = "netz/1.0",
+            } },
+            .first_component_len = 2,
+        },
+        .{
+            .instruction = .{ .insert_literal = .{
+                .name = "x-long-custom-header-name",
+                .value = "compressible compressible compressible",
+            } },
+            .first_component_len = 1 + "x-long-custom-header-name".len,
+        },
+    };
+
+    for (compound_cases) |case| {
+        var failure: std.ArrayList(u8) = .empty;
+        defer failure.deinit(allocator);
+        try failure.ensureTotalCapacityPrecise(
+            allocator,
+            prefix.len + case.first_component_len,
+        );
+        failure.appendSliceAssumeCapacity(prefix);
+        var fail_first = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        try std.testing.expectError(
+            error.OutOfMemory,
+            Qpack.writeEncoderInstruction(
+                &failure,
+                fail_first.allocator(),
+                case.instruction,
+            ),
+        );
+        try std.testing.expectEqualStrings(prefix, failure.items);
+
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(allocator);
+        try Qpack.writeEncoderInstruction(
+            &expected,
+            allocator,
+            case.instruction,
+        );
+        var exact: std.ArrayList(u8) = .empty;
+        defer exact.deinit(allocator);
+        try exact.ensureTotalCapacityPrecise(allocator, expected.items.len);
+        var no_alloc = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        try Qpack.writeEncoderInstruction(
+            &exact,
+            no_alloc.allocator(),
+            case.instruction,
+        );
+        try std.testing.expect(!no_alloc.has_induced_failure);
+        try std.testing.expectEqualSlices(u8, expected.items, exact.items);
+    }
+
+    var prefix_failure: std.ArrayList(u8) = .empty;
+    defer prefix_failure.deinit(allocator);
+    try prefix_failure.ensureTotalCapacityPrecise(allocator, prefix.len + 2);
+    prefix_failure.appendSliceAssumeCapacity(prefix);
+    var prefix_fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Qpack.encodePrefix(
+            &prefix_failure,
+            prefix_fail_first.allocator(),
+            255,
+            127,
+        ),
+    );
+    try std.testing.expectEqualStrings(prefix, prefix_failure.items);
+
+    var prefix_storage: [4]u8 = undefined;
+    var exact_prefix = std.ArrayList(u8).initBuffer(&prefix_storage);
+    var prefix_no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try Qpack.encodePrefix(
+        &exact_prefix,
+        prefix_no_alloc.allocator(),
+        255,
+        127,
+    );
+    try std.testing.expect(!prefix_no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0xff, 0x00, 0x7f, 0x00 },
+        exact_prefix.items,
+    );
+}
+
 test "HTTP/3 QPACK Required Insert Count wraps per RFC 9204" {
     try std.testing.expectEqual(@as(u64, 0), try Qpack.encodeRequiredInsertCount(0, 3));
     try std.testing.expectEqual(@as(u64, 3), try Qpack.encodeRequiredInsertCount(2, 6));
