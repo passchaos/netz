@@ -5770,7 +5770,6 @@ pub fn readRequestFromStream(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
-    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -5801,7 +5800,6 @@ pub fn readRequestFromStreamWithDeadline(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
-    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -5836,7 +5834,6 @@ pub fn readRequestFromStreamBuffered(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
-    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -5870,7 +5867,6 @@ pub fn readRequestFromStreamBufferedWithDeadline(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
-    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 
@@ -5935,7 +5931,6 @@ fn readRequestFromTransportBufferedWithStage(
     errdefer allocator.free(bytes);
     var request = try http1.parseRequest(allocator, bytes, options);
     errdefer request.deinit(allocator);
-    try http1.validateRequestHost(request);
     return .{ .bytes = bytes, .request = request };
 }
 

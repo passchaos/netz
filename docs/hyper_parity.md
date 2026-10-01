@@ -140,6 +140,9 @@ benchmark response:
 - CONNECT request authority must agree with Host across borrowed, owned and
   runtime validation, and senders reject request content, Content-Length,
   Transfer-Encoding and trailers as required by RFC 9110;
+- both owned and caller-storage request parsers enforce Host cardinality,
+  syntax, and absolute-/authority-form agreement before body parsing, so a
+  direct codec caller cannot accidentally omit the runtime validation step;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each

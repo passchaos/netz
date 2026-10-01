@@ -618,6 +618,8 @@ fn parseHeadLines(
     }
 }
 
+/// Parse one complete request with strict Host cardinality, syntax, and
+/// request-target authority agreement before allocating or decoding its body.
 pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Request {
     const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
@@ -643,6 +645,12 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
+    try validateRequestHostParts(
+        method,
+        version,
+        request_parts.target,
+        parsed_headers.headers,
+    );
     const consumed_head = head_end + 4;
     const framing = try requestFraming(parsed_headers.headers);
     const parsed_body = try parseBodyWithFraming(
@@ -3590,14 +3598,16 @@ test "HTTP/1 validates Host authority rules" {
     try validateRequestHost(req);
 
     const missing = "GET / HTTP/1.1\r\nUser-Agent: demo\r\n\r\n";
-    var missing_req = try parseRequest(allocator, missing, .{});
-    defer missing_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHost, validateRequestHost(missing_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        parseRequest(allocator, missing, .{}),
+    );
 
     const duplicate = "GET / HTTP/1.1\r\nHost: example.com\r\nHost: other.example\r\n\r\n";
-    var duplicate_req = try parseRequest(allocator, duplicate, .{});
-    defer duplicate_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHost, validateRequestHost(duplicate_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        parseRequest(allocator, duplicate, .{}),
+    );
 
     const matching_connect =
         "CONNECT example.com:443 HTTP/1.1\r\n" ++
@@ -3609,15 +3619,9 @@ test "HTTP/1 validates Host authority rules" {
     const mismatched_connect =
         "CONNECT example.com:443 HTTP/1.1\r\n" ++
         "Host: other.example:443\r\n\r\n";
-    var mismatched_connect_req = try parseRequest(
-        allocator,
-        mismatched_connect,
-        .{},
-    );
-    defer mismatched_connect_req.deinit(allocator);
     try std.testing.expectError(
         error.InvalidHost,
-        validateRequestHost(mismatched_connect_req),
+        parseRequest(allocator, mismatched_connect, .{}),
     );
     var borrowed_headers: [2]Header = undefined;
     try std.testing.expectError(
@@ -3652,9 +3656,10 @@ test "HTTP/1 validates absolute-form authority against Host" {
     try std.testing.expectEqualStrings("example.com:8080", absoluteFormAuthority(req.target).?);
 
     const mismatch = "GET http://example.com/proxy HTTP/1.1\r\nHost: other.example\r\n\r\n";
-    var bad = try parseRequest(allocator, mismatch, .{});
-    defer bad.deinit(allocator);
-    try std.testing.expectError(error.InvalidHost, validateRequestHost(bad));
+    try std.testing.expectError(
+        error.InvalidHost,
+        parseRequest(allocator, mismatch, .{}),
+    );
 
     const invalid_authority = "GET http://user@example.com/proxy HTTP/1.1\r\nHost: user@example.com\r\n\r\n";
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, invalid_authority, .{}));
@@ -4049,34 +4054,34 @@ test "HTTP/1 parser preserves exact chunked trailer field-name spelling" {
 
 test "HTTP/1 parser rejects ambiguous body lengths" {
     const allocator = std.testing.allocator;
-    const conflicting = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
+    const conflicting = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!";
     try std.testing.expectError(error.ConflictingContentLength, parseRequest(allocator, conflicting, .{}));
 
-    const plus_prefixed = "POST / HTTP/1.1\r\nContent-Length: +5\r\n\r\nhello";
+    const plus_prefixed = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: +5\r\n\r\nhello";
     try std.testing.expectError(error.InvalidContentLength, parseRequest(allocator, plus_prefixed, .{}));
 
-    const coalesced = "POST / HTTP/1.1\r\nContent-Length: 5, 5\r\n\r\nhello";
+    const coalesced = "POST / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5, 5\r\n\r\nhello";
     var req = try parseRequest(allocator, coalesced, .{});
     defer req.deinit(allocator);
     try std.testing.expectEqual(BodyFraming.content_length, req.body_framing);
     try std.testing.expectEqualStrings("hello", req.body);
 
-    const stacked_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    const stacked_te = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     var stacked = try parseRequest(allocator, stacked_te, .{});
     defer stacked.deinit(allocator);
     try std.testing.expectEqual(BodyFraming.chunked, stacked.body_framing);
     try std.testing.expectEqualStrings("hello", stacked.body);
 
-    const split_stacked_te = "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+    const split_stacked_te = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
     var split_stacked = try parseRequest(allocator, split_stacked_te, .{});
     defer split_stacked.deinit(allocator);
     try std.testing.expectEqual(BodyFraming.chunked, split_stacked.body_framing);
     try std.testing.expectEqualStrings("hello", split_stacked.body);
 
-    const non_final_chunked = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n";
+    const non_final_chunked = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, non_final_chunked, .{}));
 
-    const split_non_final_chunked = "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n0\r\n\r\n";
+    const split_non_final_chunked = "POST / HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n0\r\n\r\n";
     try std.testing.expectError(error.InvalidTransferEncoding, parseRequest(allocator, split_non_final_chunked, .{}));
 
     const http10_te = "POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";

@@ -2263,6 +2263,12 @@ test "WebSocket handshake validation" {
     var req = try http1.parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
     try validateClientHandshake(req);
+    var constructed_missing_host = req;
+    constructed_missing_host.headers = req.headers[1..];
+    try std.testing.expectError(
+        error.MissingHeader,
+        validateClientHandshake(constructed_missing_host),
+    );
 
     const split_connection = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     var split_req = try http1.parseRequest(allocator, split_connection, .{});
@@ -2280,29 +2286,34 @@ test "WebSocket handshake validation" {
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_key_req));
 
     const missing_host = "GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-    var missing_host_req = try http1.parseRequest(allocator, missing_host, .{});
-    defer missing_host_req.deinit(allocator);
-    try std.testing.expectError(error.MissingHeader, validateClientHandshake(missing_host_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        http1.parseRequest(allocator, missing_host, .{}),
+    );
 
     const empty_host = "GET /chat HTTP/1.1\r\nHost: \t \r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-    var empty_host_req = try http1.parseRequest(allocator, empty_host, .{});
-    defer empty_host_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(empty_host_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        http1.parseRequest(allocator, empty_host, .{}),
+    );
 
     const invalid_host = "GET /chat HTTP/1.1\r\nHost: http://example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-    var invalid_host_req = try http1.parseRequest(allocator, invalid_host, .{});
-    defer invalid_host_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(invalid_host_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        http1.parseRequest(allocator, invalid_host, .{}),
+    );
 
     const unbracketed_ipv6_host = "GET /chat HTTP/1.1\r\nHost: 2001:db8::1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-    var unbracketed_ipv6_host_req = try http1.parseRequest(allocator, unbracketed_ipv6_host, .{});
-    defer unbracketed_ipv6_host_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(unbracketed_ipv6_host_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        http1.parseRequest(allocator, unbracketed_ipv6_host, .{}),
+    );
 
     const duplicate_host = "GET /chat HTTP/1.1\r\nHost: example.com\r\nHost: other.example\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
-    var duplicate_host_req = try http1.parseRequest(allocator, duplicate_host, .{});
-    defer duplicate_host_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(duplicate_host_req));
+    try std.testing.expectError(
+        error.InvalidHost,
+        http1.parseRequest(allocator, duplicate_host, .{}),
+    );
 
     const valid_protocols = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1, super-chat\r\n\r\n";
     var valid_protocols_req = try http1.parseRequest(allocator, valid_protocols, .{});
