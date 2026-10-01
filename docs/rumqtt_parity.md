@@ -1586,6 +1586,8 @@ MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
 - Empty clean-session Client IDs receive secure random UUID-style identities
   with a copied, configurable prefix. MQTT 5 reports the value through Assigned
   Client Identifier and the client runtime preserves it after CONNACK cleanup;
+  successful MQTT 5 handshakes reject a missing or empty assignment for an
+  empty requested ID and reject an unsolicited replacement for a non-empty ID.
   MQTT 3.1.1 uses the unique identity internally without an unavailable
   property. Multiple anonymous clients therefore cannot accidentally take over
   the same empty-string Session, and an MQTT 5 client can reconnect using its

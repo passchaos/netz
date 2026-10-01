@@ -1040,6 +1040,9 @@ pub const AcceptedClient = struct {
 pub const PendingAcceptedClient = struct {
     connection: Connection,
     connect: OwnedConnect,
+    /// Preserve the wire-level Client ID state even if broker admission
+    /// replaces the exposed identifier with its generated value.
+    client_id_was_empty: bool = false,
     /// Effective deadline established while CONNECT was received. Two-phase
     /// admission keeps it so policy and authentication code cannot
     /// accidentally renew or discard the original budget.
@@ -1088,6 +1091,12 @@ pub const PendingAcceptedClient = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!AcceptedClient {
         const resolved = try self.resolvedOptions(options);
+        try validateAssignedClientIdentifierForConnect(
+            self.connection.protocol,
+            self.client_id_was_empty,
+            resolved.reason_code == 0,
+            resolved.assigned_client_identifier,
+        );
         self.connection.peer_topic_alias_maximum = @min(
             self.connection.peer_topic_alias_maximum,
             resolved.max_outgoing_topic_aliases,
@@ -2349,6 +2358,26 @@ fn applyConnAckNegotiation(
     }
 }
 
+fn validateAssignedClientIdentifierForConnect(
+    protocol: mqtt.ProtocolVersion,
+    requested_empty_client_id: bool,
+    accepted: bool,
+    assigned_client_id: ?[]const u8,
+) Error!void {
+    if (protocol != .v5) return;
+    if (!accepted) {
+        if (assigned_client_id != null) return error.InvalidProperty;
+        return;
+    }
+    if (requested_empty_client_id) {
+        if (assigned_client_id == null or assigned_client_id.?.len == 0) {
+            return error.InvalidProperty;
+        }
+    } else if (assigned_client_id != null) {
+        return error.InvalidProperty;
+    }
+}
+
 pub const ConnAckOptions = struct {
     session_present: bool = false,
     reason_code: u8 = 0,
@@ -2871,6 +2900,7 @@ pub const Connection = struct {
             return err;
         };
         errdefer connect.deinit(self.allocator);
+        const client_id_was_empty = connect.connect.client_id.len == 0;
         if (!options.accepted_protocol_versions.allows(
             connect.connect.protocol,
         )) {
@@ -2884,6 +2914,7 @@ pub const Connection = struct {
                 .connect = connect,
                 .admission_deadline = deadline,
                 .protocol_allowed = false,
+                .client_id_was_empty = client_id_was_empty,
             };
         }
         const maximum_qos = options.maximum_qos orelse
@@ -2934,6 +2965,7 @@ pub const Connection = struct {
             .connection = owned_connection,
             .connect = connect,
             .admission_deadline = deadline,
+            .client_id_was_empty = client_id_was_empty,
         };
     }
 
@@ -3133,6 +3165,12 @@ pub const Connection = struct {
                     if (options.clean_start and value.session_present) {
                         return error.InvalidFlags;
                     }
+                    try validateAssignedClientIdentifierForConnect(
+                        self.protocol,
+                        options.client_id.len == 0,
+                        value.reason_code == 0,
+                        mqtt.assignedClientIdentifier(value.properties),
+                    );
                     if (self.authentication.phase ==
                         .authenticating)
                     {
@@ -6726,7 +6764,6 @@ test "MQTT runtime resolves connection acceptance policies" {
         .session_present = true,
     });
     try std.testing.expect(!clean_options.session_present);
-
     const v5_options = try pending.resolvedOptions(.{
         .server_keep_alive_seconds = 20,
         .maximum_keep_alive_seconds = 10,
