@@ -103,6 +103,21 @@ const Input = struct {
             self.offset += 1;
             return byte;
         }
+
+        inline fn remaining(self: *Cursor) []const u8 {
+            while (self.offset == self.chunks[self.chunk_index].len) {
+                self.chunk_index += 1;
+                self.offset = 0;
+            }
+            return self.chunks[self.chunk_index][self.offset..];
+        }
+
+        inline fn advance(self: *Cursor, count: usize) void {
+            std.debug.assert(
+                count <= self.chunks[self.chunk_index].len - self.offset,
+            );
+            self.offset += count;
+        }
     };
 };
 
@@ -452,13 +467,12 @@ pub const RawFixedSyncFlushEncoder = struct {
                     bytes[pos..][0..maximum],
                 );
             } else {
-                var previous_cursor = Input.Cursor.init(input, previous_pos);
-                var current_cursor = Input.Cursor.init(input, pos);
-                while (len < maximum and
-                    previous_cursor.next() == current_cursor.next())
-                {
-                    len += 1;
-                }
+                len = matchingChunkedPrefixLen(
+                    input,
+                    previous_pos,
+                    pos,
+                    maximum,
+                );
             }
             if (len >= min_match and len > best.len) {
                 best = .{ .len = len, .distance = distance };
@@ -502,7 +516,7 @@ pub const RawFixedSyncFlushEncoder = struct {
 /// searches cap these slices at 258 bytes, so comparing two vector blocks per
 /// loop removes most branch and bounds-check overhead without reading beyond
 /// either candidate.
-fn matchingPrefixLen(a: []const u8, b: []const u8) usize {
+inline fn matchingPrefixLen(a: []const u8, b: []const u8) usize {
     std.debug.assert(a.len == b.len);
     var index: usize = 0;
     if (std.simd.suggestVectorLength(u8)) |block_len| {
@@ -532,6 +546,41 @@ fn matchingPrefixLen(a: []const u8, b: []const u8) usize {
     return index;
 }
 
+/// Match two logical positions without joining discontiguous input. Each pair
+/// of current chunk spans uses the same vector prefix scan as contiguous
+/// input, then advances independently when either side crosses a boundary.
+/// Keeping the cursor dispatcher out of line lets the contiguous encoder keep
+/// its prefix scanner inlined; fixed-binary controls verify that path remains
+/// neutral.
+noinline fn matchingChunkedPrefixLen(
+    input: Input,
+    left_position: usize,
+    right_position: usize,
+    maximum: usize,
+) usize {
+    var left = Input.Cursor.init(input, left_position);
+    var right = Input.Cursor.init(input, right_position);
+    var matched: usize = 0;
+    while (matched < maximum) {
+        const left_remaining = left.remaining();
+        const right_remaining = right.remaining();
+        const span_len = @min(
+            maximum - matched,
+            @min(left_remaining.len, right_remaining.len),
+        );
+        std.debug.assert(span_len != 0);
+        const span_matched = matchingPrefixLen(
+            left_remaining[0..span_len],
+            right_remaining[0..span_len],
+        );
+        matched += span_matched;
+        if (span_matched != span_len) return matched;
+        left.advance(span_len);
+        right.advance(span_len);
+    }
+    return matched;
+}
+
 test "focused match prefix finds differences across vector boundaries" {
     const block_len = std.simd.suggestVectorLength(u8) orelse
         @sizeOf(usize);
@@ -558,6 +607,55 @@ test "focused match prefix finds differences across vector boundaries" {
         @as(usize, 2),
         matchingPrefixLen(left[0..2], right[0..2]),
     );
+}
+
+test "focused chunked match prefix crosses unequal and empty slices" {
+    const pattern = "sensor=42;status=nominal;";
+    var storage: [160]u8 = undefined;
+    for (&storage, 0..) |*byte, index| {
+        byte.* = pattern[index % pattern.len];
+    }
+    storage[33] = '!';
+    storage[119] = '?';
+    const chunks = [_][]const u8{
+        storage[0..7],
+        storage[7..7],
+        storage[7..31],
+        storage[31..32],
+        storage[32..73],
+        storage[73..73],
+        storage[73..121],
+        storage[121..],
+    };
+    var offsets: std.ArrayList(usize) = .empty;
+    defer offsets.deinit(std.testing.allocator);
+    const input = try Input.init(std.testing.allocator, &offsets, &chunks);
+    try std.testing.expect(input.contiguous == null);
+
+    for (0..storage.len - 1) |left_position| {
+        for (left_position + 1..storage.len) |right_position| {
+            const maximum = @min(
+                max_match,
+                storage.len - right_position,
+            );
+            var expected: usize = 0;
+            while (expected < maximum and
+                input.byteAt(left_position + expected) ==
+                    input.byteAt(right_position + expected))
+            {
+                expected += 1;
+            }
+            try std.testing.expectEqual(
+                expected,
+                matchingChunkedPrefixLen(
+                    input,
+                    left_position,
+                    right_position,
+                    maximum,
+                ),
+            );
+        }
+    }
 }
 
 pub fn encodeRawFixedSyncFlushAppend(

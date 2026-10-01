@@ -409,11 +409,34 @@ wire payload: 4096 -> 69 bytes; checksum: 8351760000 in every run
 16-slice control medians: 10.102 us baseline, 10.100 us candidate
 ```
 
-The unchanged chunked control is expected because discontiguous matching uses
-slice cursors rather than the contiguous prefix scanner. The fixed binaries
-and paired log are retained under `zig-out/websocket-vort-match-ab/`; their
-SHA-256 identities are `8224fa43e4b178284c26f7d2d62ad42377b3f934cee3d69c147133ae378f37ab`
+At that checkpoint the chunked control remained unchanged because
+discontiguous matching still used byte-at-a-time slice cursors. The fixed
+binaries and paired log are retained under
+`zig-out/websocket-vort-match-ab/`; their SHA-256 identities are
+`8224fa43e4b178284c26f7d2d62ad42377b3f934cee3d69c147133ae378f37ab`
 and `c12e8a08229218e57c7eafa1cad9d86ede228980697e0e4706fe3afdd4f8db36`.
+
+The follow-up keeps each plaintext slice borrowed, but compares the largest
+currently contiguous span from both match cursors with the same SIMD scanner.
+The cursors advance independently when either span reaches a slice boundary;
+empty slices and a scalar tail remain covered without an aggregate plaintext
+buffer. Seven alternating CPU-0 fixed-binary pairs measured:
+
+```text
+16-slice baseline:  10.101-10.120 us/message, median 10.112 us
+16-slice candidate:  5.814-5.908 us/message, median  5.818 us
+paired candidate/baseline median: 0.5758 (-42.4%)
+contiguous control medians: 4.200 us baseline, 4.201 us candidate
+contiguous paired median ratio: 1.0000
+wire payload: 4096 -> 69 bytes; checksum: 8351760000 in every run
+```
+
+The fixed binaries and final paired log live under
+`zig-out/websocket-vort-chunk-match-ab/`. Their SHA-256 identities are
+`c12e8a08229218e57c7eafa1cad9d86ede228980697e0e4706fe3afdd4f8db36`
+and `8a7f7bc3bc9a55a335f37c5471d9432aca8e9e1b0b7abf873f08dd48b458d97e`;
+the log hash is
+`70d549525df781433c18cfdf6abda7c3d67d932db4c419df20165f80549fd47b`.
 
 ## Persistent echo evidence
 

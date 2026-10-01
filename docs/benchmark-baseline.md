@@ -4853,12 +4853,37 @@ candidate/baseline paired ratio                  0.7605
 
 All seven complete-message pairs favored the candidate, a 23.9% median
 reduction. Every run retained the 69-byte wire payload and checksum
-`8351760000`; the 16-slice control is intentionally unaffected because it
-uses the discontiguous cursor path. The ignored evidence directory
+`8351760000`; this first A/B left the 16-slice discontiguous cursor path
+unchanged. The ignored evidence directory
 `zig-out/websocket-vort-match-ab/` contains the paired log and the exact
 5,546,296-byte baseline plus 5,548,344-byte candidate binaries. Their SHA-256
 identities are `8224fa43e4b178284c26f7d2d62ad42377b3f934cee3d69c147133ae378f37ab`
 and `c12e8a08229218e57c7eafa1cad9d86ede228980697e0e4706fe3afdd4f8db36`.
+
+A second 2026-09-30 fixed-binary A/B applies the same SIMD prefix comparison
+to each pair of currently contiguous spans in the chunk cursors. It does not
+join plaintext, and it advances the two cursors independently across unequal
+slice boundaries and empty slices. Seven alternating CPU-0 pairs produced:
+
+```text
+                              range (us/message)  median
+16-slice baseline             10.101-10.120       10.112
+16-slice SIMD span scan        5.814-5.908         5.818
+candidate/baseline paired ratio                   0.5758
+
+contiguous baseline            4.197-4.222         4.200
+contiguous candidate           4.199-4.204         4.201
+contiguous paired ratio                            1.0000
+```
+
+All seven fragmented pairs favored the candidate, a 42.4% median reduction,
+while the previously optimized contiguous control remained neutral. Every run
+retained the 69-byte wire payload and checksum `8351760000`. The exact
+5,548,344-byte baseline, 5,550,616-byte candidate, and final paired log are in
+`zig-out/websocket-vort-chunk-match-ab/`; their SHA-256 identities are
+`c12e8a08229218e57c7eafa1cad9d86ede228980697e0e4706fe3afdd4f8db36`,
+`8a7f7bc3bc9a55a335f37c5471d9432aca8e9e1b0b7abf873f08dd48b458d97e`,
+and `70d549525df781433c18cfdf6abda7c3d67d932db4c419df20165f80549fd47b`.
 
 The caller-buffer path copies and masks in one SIMD pass and preserves the
 caller's `[]const u8`. Binary sends additionally accept arbitrary borrowed
