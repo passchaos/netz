@@ -582,6 +582,12 @@ implementation and focused white-box tests are grouped under
 The runtime maps
 WebTransport's 32-bit application error space into HTTP/3 codes while skipping
 reserved codepoints and exposes both mapped and raw values on receive.
+Whole-stream polling treats QUIC's final size as the authoritative wire bound:
+it converts the complete prefix-plus-payload size to `usize` before subtracting
+the association prefix, then reuses that checked total for availability,
+copying, and flow-credit release. This prevents a representable payload length
+from overflowing when its prefix is added back on narrow targets; focused tests
+cover valid bounds, prefix underflow, and target-width overflow.
 
 The real-handshake test sends 96 KiB through an 8 KiB advertised stream window,
 reads it with 2-3 KiB caller buffers before FIN, verifies payload and flow

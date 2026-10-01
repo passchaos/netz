@@ -143,6 +143,45 @@ fn slicesLength(parts: []const []const u8) Error!usize {
     return total;
 }
 
+const WholeStreamLengths = struct {
+    wire: usize,
+    payload: usize,
+};
+
+fn wholeStreamLengths(
+    final_size: u64,
+    prefix_len: usize,
+) Error!WholeStreamLengths {
+    // `final_size` covers both the WebTransport association prefix and the
+    // application payload. Convert that authoritative total before
+    // subtracting the prefix: on narrow targets the payload alone can fit
+    // `usize` even though adding the prefix back would overflow.
+    const wire_len = std.math.cast(usize, final_size) orelse
+        return error.IntegerOverflow;
+    if (wire_len < prefix_len) return error.InvalidStreamState;
+    return .{
+        .wire = wire_len,
+        .payload = wire_len - prefix_len,
+    };
+}
+
+test "WebTransport whole-stream lengths preserve checked final size" {
+    const lengths = try wholeStreamLengths(13, 5);
+    try std.testing.expectEqual(@as(usize, 13), lengths.wire);
+    try std.testing.expectEqual(@as(usize, 8), lengths.payload);
+    try std.testing.expectError(
+        error.InvalidStreamState,
+        wholeStreamLengths(4, 5),
+    );
+
+    if (comptime @bitSizeOf(usize) < 64) {
+        try std.testing.expectError(
+            error.IntegerOverflow,
+            wholeStreamLengths(@as(u64, std.math.maxInt(usize)) + 1, 8),
+        );
+    }
+}
+
 /// Send the complete payload with bounded consecutive same-stream packet
 /// batches, waiting for flow-control, congestion, or pacing progress between
 /// batches. `write` retains its one-packet fairness contract.
@@ -1607,12 +1646,11 @@ fn takeHandshakeSessionStream(
     if (stream.stop_sent != null) return null;
     const prefix_len = stream.receive_prefix_len;
 
-    const final_size = stats.final_size orelse return null;
-    if (final_size < prefix_len) return error.InvalidStreamState;
-    const payload_len_u64 = final_size - prefix_len;
-    const payload_len = std.math.cast(usize, payload_len_u64) orelse
-        return error.IntegerOverflow;
-    if (payload_len > max_stream_bytes) {
+    const lengths = try wholeStreamLengths(
+        stats.final_size orelse return null,
+        prefix_len,
+    );
+    if (lengths.payload > max_stream_bytes) {
         // The aggregate limit belongs to this API, not to the protocol or the
         // peer. Leave every byte unconsumed and release only the whole-stream
         // claim so the application can drain the stream incrementally. Keep
@@ -1621,24 +1659,24 @@ fn takeHandshakeSessionStream(
         saw_stream_limit.* = true;
         return null;
     }
-    if (!stream.prefix_received or available.len < prefix_len + payload_len) {
+    if (!stream.prefix_received or available.len < lengths.wire) {
         return null;
     }
     const payload = try connection.endpoint.allocator.dupe(
         u8,
-        available[prefix_len .. prefix_len + payload_len],
+        available[prefix_len..lengths.wire],
     );
     var payload_owned = true;
     defer if (payload_owned) connection.endpoint.allocator.free(payload);
     const release_result = if (single_attempt)
         connection.tryReleaseReceivedCapacity(
             stream_id,
-            prefix_len + payload_len,
+            lengths.wire,
         )
     else
         connection.releaseReceivedCapacity(
             stream_id,
-            prefix_len + payload_len,
+            lengths.wire,
         );
     release_result catch |err| switch (err) {
         error.PacingLimited,
@@ -1648,7 +1686,7 @@ fn takeHandshakeSessionStream(
         else => return err,
     };
     _ = try association.requestTransportRetirement(connection, stream);
-    try registry.recordReceived(stream_id, payload_len, true);
+    try registry.recordReceived(stream_id, lengths.payload, true);
     payload_owned = false;
     return .{
         .allocator = connection.endpoint.allocator,

@@ -1121,7 +1121,10 @@ receive calls if the peer did not negotiate the matching capabilities.
 Handshake-backed sessions additionally expose caller-buffer incremental stream
 reads before FIN, flow-credit return after every delivered prefix, mapped
 32-bit WebTransport RESET_STREAM/STOP_SENDING APIs, and typed data/reset/stopped
-events while retaining the whole-FIN receive helper for compatibility. Once a
+events while retaining the whole-FIN receive helper for compatibility. That
+helper converts QUIC's authoritative final size before subtracting the
+association prefix, so narrow targets reject unrepresentable complete streams
+without overflowing while reconstructing their buffer range. Once a
 client application runs an explicit transport pump,
 `serviceTransportWithTimeout` and `serviceTransportWithDeadline` provide
 timer-aware bounded receive intervals so a worker can observe a stop condition
