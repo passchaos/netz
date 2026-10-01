@@ -511,13 +511,10 @@ pub fn parseResponseHead(
             .ignore_invalid = options.ignore_invalid_headers_in_responses,
         },
     );
-    var parts = std.mem.splitScalar(u8, parsed.start_line, ' ');
-    const version_s = parts.next() orelse return error.MalformedStartLine;
-    const status_s = parts.next() orelse return error.MalformedStartLine;
-    const reason = parts.rest();
-    const version = try Version.parse(version_s);
-    const status = try parseStatusCode(status_s);
-    try validateReasonPhrase(reason);
+    const status_line = try parseStatusLine(parsed.start_line);
+    const version = try Version.parse(status_line.version);
+    const status = try parseStatusCode(status_line.status_code);
+    try validateReasonPhrase(status_line.reason);
     try validateTransferEncodingForVersion(version, parsed.headers);
     const declared_content_length = try contentLength(parsed.headers);
 
@@ -539,7 +536,7 @@ pub fn parseResponseHead(
     return .{
         .version = version,
         .status = status,
-        .reason = reason,
+        .reason = status_line.reason,
         .headers = parsed.headers,
         .body_framing = framing,
         .content_length = declared_content_length,
@@ -757,13 +754,10 @@ pub fn parseResponseWithContext(
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const status_line = lines.next() orelse return error.MalformedStartLine;
 
-    var parts = std.mem.splitScalar(u8, status_line, ' ');
-    const version_s = parts.next() orelse return error.MalformedStartLine;
-    const status_s = parts.next() orelse return error.MalformedStartLine;
-    const reason = if (parts.rest().len > 0) parts.rest() else "";
-    const status = try parseStatusCode(status_s);
-    const version = try Version.parse(version_s);
-    try validateReasonPhrase(reason);
+    const status_parts = try parseStatusLine(status_line);
+    const version = try Version.parse(status_parts.version);
+    const status = try parseStatusCode(status_parts.status_code);
+    try validateReasonPhrase(status_parts.reason);
 
     var parsed_headers = try parseHeaderLines(
         allocator,
@@ -793,7 +787,7 @@ pub fn parseResponseWithContext(
     return .{
         .version = version,
         .status = status,
-        .reason = reason,
+        .reason = status_parts.reason,
         .headers = parsed_headers.headers,
         .body = parsed_body.body,
         .body_framing = parsed_body.framing,
@@ -1048,6 +1042,29 @@ const RequestLineParts = struct {
     target: []const u8,
     version: []const u8,
 };
+
+const StatusLineParts = struct {
+    version: []const u8,
+    status_code: []const u8,
+    reason: []const u8,
+};
+
+fn parseStatusLine(line: []const u8) Error!StatusLineParts {
+    const version_end = std.mem.indexOfScalar(u8, line, ' ') orelse
+        return error.MalformedStartLine;
+    const status_start = version_end + 1;
+    const status_end = std.mem.indexOfScalarPos(
+        u8,
+        line,
+        status_start,
+        ' ',
+    ) orelse return error.MalformedStartLine;
+    return .{
+        .version = line[0..version_end],
+        .status_code = line[status_start..status_end],
+        .reason = line[status_end + 1 ..],
+    };
+}
 
 fn parseRequestLine(
     line: []const u8,
@@ -1537,10 +1554,8 @@ pub fn writeResponse(
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimal(list, allocator, status);
-    if (reason.len > 0) {
-        try list.append(allocator, ' ');
-        try list.appendSlice(allocator, reason);
-    }
+    try list.append(allocator, ' ');
+    try list.appendSlice(allocator, reason);
     try list.appendSlice(allocator, "\r\n");
     try writeHeaders(list, allocator, headers);
     try list.appendSlice(allocator, "\r\n");
@@ -1564,10 +1579,8 @@ pub fn writeResponseChecked(
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
     try appendDecimalChecked(list, allocator, status);
-    if (reason.len > 0) {
-        try list.append(allocator, ' ');
-        try list.appendSlice(allocator, reason);
-    }
+    try list.append(allocator, ' ');
+    try list.appendSlice(allocator, reason);
     try list.appendSlice(allocator, "\r\n");
     try writeHeadersChecked(list, allocator, headers);
     try list.appendSlice(allocator, "\r\n");
@@ -1578,10 +1591,8 @@ fn responseWireLen(version: Version, status: u16, reason: []const u8, headers: [
     var len = version.string().len;
     len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
     len = std.math.add(usize, len, decimalDigitLen(status)) catch return error.RenderBufferTooSmall;
-    if (reason.len > 0) {
-        len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
-        len = std.math.add(usize, len, reason.len) catch return error.RenderBufferTooSmall;
-    }
+    len = std.math.add(usize, len, 1) catch return error.RenderBufferTooSmall;
+    len = std.math.add(usize, len, reason.len) catch return error.RenderBufferTooSmall;
     len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
     len = std.math.add(usize, len, try headerBlockWireLen(headers)) catch return error.RenderBufferTooSmall;
     len = std.math.add(usize, len, 2) catch return error.RenderBufferTooSmall;
@@ -2558,6 +2569,47 @@ test "HTTP/1 validates start-line components" {
     try std.testing.expectError(error.MalformedStartLine, writeRequestChecked(&encoded, allocator, .GET, "/\r\nHost: evil", .http_1_1, &.{}, ""));
     try std.testing.expectError(error.MalformedStartLine, writeResponseChecked(&encoded, allocator, .http_1_1, 200, "OK\r\nX: evil", &.{}, ""));
     try std.testing.expectError(error.InvalidStatus, writeResponseChecked(&encoded, allocator, .http_1_1, 42, "Nope", &.{}, ""));
+}
+
+test "HTTP/1 response status lines require the reason separator" {
+    const allocator = std.testing.allocator;
+    const canonical = "HTTP/1.1 204 \r\n\r\n";
+
+    var response = try parseResponse(allocator, canonical, .{});
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), response.status);
+    try std.testing.expectEqualStrings("", response.reason);
+
+    var header_storage: [1]Header = undefined;
+    const head = try parseResponseHead(canonical, &header_storage, .{}, .{});
+    try std.testing.expectEqual(@as(u16, 204), head.status);
+    try std.testing.expectEqualStrings("", head.reason);
+
+    const missing_separator = "HTTP/1.1 204\r\n\r\n";
+    try std.testing.expectError(
+        error.MalformedStartLine,
+        parseResponse(allocator, missing_separator, .{}),
+    );
+    try std.testing.expectError(
+        error.MalformedStartLine,
+        parseResponseHead(missing_separator, &header_storage, .{}, .{}),
+    );
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeResponse(&encoded, allocator, .http_1_1, 204, "", &.{}, "");
+    try std.testing.expectEqualStrings(canonical, encoded.items);
+    encoded.clearRetainingCapacity();
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        204,
+        "",
+        &.{},
+        "",
+    );
+    try std.testing.expectEqualStrings(canonical, encoded.items);
 }
 
 test "HTTP/1 request target length is caller-configurable" {

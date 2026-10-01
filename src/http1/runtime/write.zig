@@ -640,6 +640,34 @@ test "HTTP/1 response writers enforce empty 205 content" {
     );
 }
 
+test "HTTP/1 runtime response writers preserve an empty reason separator" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    const aggregate = try prepareResponse(allocator, .{
+        .status = 204,
+        .reason = "",
+    }, &scratch);
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 204 \r\n\r\n",
+        aggregate.header,
+    );
+
+    const streaming_head = try prepareStreamingResponse(allocator, .{
+        .status = 204,
+        .reason = "",
+    }, &scratch);
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 204 \r\n\r\n",
+        streaming_head.head,
+    );
+    try std.testing.expectEqual(
+        StreamingFraming.suppressed,
+        streaming_head.framing,
+    );
+}
+
 test "HTTP/1 writer preserves or title-cases request and response fields" {
     const allocator = std.testing.allocator;
     var scratch: Scratch = .{};
@@ -1100,10 +1128,8 @@ fn encodeResponseHead(
     try encoded.appendSlice(allocator, options.version.string());
     try encoded.append(allocator, ' ');
     try appendDecimal(encoded, allocator, options.status);
-    if (options.reason.len != 0) {
-        try encoded.append(allocator, ' ');
-        try encoded.appendSlice(allocator, options.reason);
-    }
+    try encoded.append(allocator, ' ');
+    try encoded.appendSlice(allocator, options.reason);
     try encoded.appendSlice(allocator, "\r\n");
     try writeHeaderLines(
         encoded,
@@ -1144,10 +1170,8 @@ fn encodeStreamingResponseHead(
     try encoded.appendSlice(allocator, options.version.string());
     try encoded.append(allocator, ' ');
     try appendDecimal(encoded, allocator, options.status);
-    if (options.reason.len != 0) {
-        try encoded.append(allocator, ' ');
-        try encoded.appendSlice(allocator, options.reason);
-    }
+    try encoded.append(allocator, ' ');
+    try encoded.appendSlice(allocator, options.reason);
     try encoded.appendSlice(allocator, "\r\n");
     try writeHeaderLines(
         encoded,

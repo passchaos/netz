@@ -118,6 +118,10 @@ benchmark response:
   deliberately sends a real `Connection: close` trailer over cleartext and
   TLS; netz reports `InvalidTrailer` and closes that connection without a
   response;
+- response codecs and both owned/caller-storage parsers share the RFC 9112
+  status-line grammar. Even an empty optional reason phrase retains its
+  mandatory separating SP, while a peer line that omits that delimiter is
+  rejected instead of being normalized differently by separate parser paths;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each
