@@ -128,6 +128,10 @@ benchmark response:
 - Transfer-Encoding parsing validates coding and parameter tokens without
   allocation, honors commas inside quoted parameter values, rejects malformed
   or unterminated parameters, and rejects parameters on `chunked` itself;
+- low-level request/response writers apply the same Host, HTTP-version and
+  Transfer-Encoding grammar before reserving output; requests additionally
+  reject missing or mismatched framing and both directions reject simultaneous
+  Content-Length plus Transfer-Encoding instead of emitting ambiguous bytes;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each

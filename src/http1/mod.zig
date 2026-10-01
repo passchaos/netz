@@ -1576,8 +1576,7 @@ pub fn writeRequest(
     headers: []const Header,
     body: []const u8,
 ) !void {
-    if (version == .http_0_9) return error.InvalidVersion;
-    try validateRequestTargetForMethod(method, target);
+    try validateRequestForWrite(method, target, version, headers, body);
     try list.ensureUnusedCapacity(allocator, try requestWireLen(method, target, version, headers, body));
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
@@ -1599,8 +1598,7 @@ pub fn writeRequestChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
-    if (version == .http_0_9) return error.InvalidVersion;
-    try validateRequestTargetForMethod(method, target);
+    try validateRequestForWrite(method, target, version, headers, body);
     try list.ensureUnusedCapacity(allocator, try requestWireLen(method, target, version, headers, body));
     try list.appendSlice(allocator, method.string());
     try list.append(allocator, ' ');
@@ -1611,6 +1609,32 @@ pub fn writeRequestChecked(
     try writeHeadersChecked(list, allocator, headers);
     try list.appendSlice(allocator, "\r\n");
     try list.appendSlice(allocator, body);
+}
+
+fn validateRequestForWrite(
+    method: Method,
+    target: []const u8,
+    version: Version,
+    headers: []const Header,
+    body: []const u8,
+) Error!void {
+    if (version == .http_0_9) return error.InvalidVersion;
+    try validateRequestTargetForMethod(method, target);
+    try validateTransferEncodingForVersion(version, headers);
+    try validateRequestHostParts(version, target, headers);
+    const framing = try requestFraming(headers);
+    if (framing.must_close) return error.InvalidContentLength;
+    switch (framing.body) {
+        .none => if (body.len != 0) return error.InvalidContentLength,
+        .content_length => if (framing.content_length.? != body.len) {
+            return error.InvalidContentLength;
+        },
+        // This low-level serializer accepts an already transfer-coded body.
+        // Callers that have unencoded chunks should use the runtime writer or
+        // `encodeChunked` first.
+        .chunked => {},
+        .close_delimited => unreachable,
+    }
 }
 
 fn requestWireLen(method: Method, target: []const u8, version: Version, headers: []const Header, body: []const u8) Error!usize {
@@ -1634,10 +1658,7 @@ pub fn writeResponse(
     headers: []const Header,
     body: []const u8,
 ) !void {
-    if (version == .http_0_9) return error.InvalidVersion;
-    try validateReasonPhrase(reason);
-    try validateStatusCode(status);
-    try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
+    try validateResponseForWrite(version, status, reason, headers, body);
     try list.ensureUnusedCapacity(allocator, try responseWireLen(version, status, reason, headers, body));
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
@@ -1659,10 +1680,7 @@ pub fn writeResponseChecked(
     headers: []const Header,
     body: []const u8,
 ) Error!void {
-    if (version == .http_0_9) return error.InvalidVersion;
-    try validateReasonPhrase(reason);
-    try validateStatusCode(status);
-    try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
+    try validateResponseForWrite(version, status, reason, headers, body);
     try list.ensureUnusedCapacity(allocator, try responseWireLen(version, status, reason, headers, body));
     try list.appendSlice(allocator, version.string());
     try list.append(allocator, ' ');
@@ -1673,6 +1691,31 @@ pub fn writeResponseChecked(
     try writeHeadersChecked(list, allocator, headers);
     try list.appendSlice(allocator, "\r\n");
     try list.appendSlice(allocator, body);
+}
+
+fn validateResponseForWrite(
+    version: Version,
+    status: u16,
+    reason: []const u8,
+    headers: []const Header,
+    body: []const u8,
+) Error!void {
+    if (version == .http_0_9) return error.InvalidVersion;
+    try validateReasonPhrase(reason);
+    try validateStatusCode(status);
+    try validateTransferEncodingForVersion(version, headers);
+    try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
+    const has_transfer_encoding = hasHeaderNamed(
+        headers,
+        "transfer-encoding",
+    );
+    const declared_content_length = try contentLength(headers);
+    if (has_transfer_encoding) {
+        _ = try responseTransferEncodingIsCloseDelimited(headers);
+        if (declared_content_length != null) {
+            return error.InvalidContentLength;
+        }
+    }
 }
 
 fn responseWireLen(version: Version, status: u16, reason: []const u8, headers: []const Header, body: []const u8) Error!usize {
@@ -2241,6 +2284,272 @@ test "HTTP/1 request parse and serialize" {
     try writeRequest(&one_alloc_out, one_alloc_allocator, req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expect(!one_alloc.has_induced_failure);
     try std.testing.expectEqualStrings(raw, one_alloc_out.items);
+}
+
+test "HTTP/1 low-level request writers validate framing before output" {
+    const allocator = std.testing.allocator;
+    const prefix = "already-written";
+    const invalid_cases = [_]struct {
+        expected: Error,
+        version: Version,
+        headers: []const Header,
+        body: []const u8,
+    }{
+        .{
+            .expected = error.InvalidHost,
+            .version = .http_1_1,
+            .headers = &.{},
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidHost,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Host", .value = "example.com" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_0,
+            .headers = &.{.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            }},
+            .body = "0\r\n\r\n",
+        },
+        .{
+            .expected = error.InvalidContentLength,
+            .version = .http_1_1,
+            .headers = &.{.{ .name = "Host", .value = "example.com" }},
+            .body = "body",
+        },
+        .{
+            .expected = error.InvalidContentLength,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Content-Length", .value = "5" },
+            },
+            .body = "body",
+        },
+        .{
+            .expected = error.InvalidContentLength,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Content-Length", .value = "5" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+            .body = "0\r\n\r\n",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "gzip token" },
+            },
+            .body = "",
+        },
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (invalid_cases) |case| {
+        encoded.clearRetainingCapacity();
+        try encoded.appendSlice(allocator, prefix);
+        try std.testing.expectError(
+            case.expected,
+            writeRequest(
+                &encoded,
+                allocator,
+                .POST,
+                "/upload",
+                case.version,
+                case.headers,
+                case.body,
+            ),
+        );
+        try std.testing.expectEqualStrings(prefix, encoded.items);
+
+        try std.testing.expectError(
+            case.expected,
+            writeRequestChecked(
+                &encoded,
+                allocator,
+                .POST,
+                "/upload",
+                case.version,
+                case.headers,
+                case.body,
+            ),
+        );
+        try std.testing.expectEqualStrings(prefix, encoded.items);
+    }
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .GET,
+        "/legacy",
+        .http_1_0,
+        &.{},
+        "",
+    );
+    try std.testing.expectEqualStrings(
+        "GET /legacy HTTP/1.0\r\n\r\n",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .POST,
+        "/upload",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Content-Length", .value = "5" },
+        },
+        "hello",
+    );
+    try std.testing.expectEqualStrings(
+        "POST /upload HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Content-Length: 5\r\n" ++
+            "\r\n" ++
+            "hello",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeRequest(
+        &encoded,
+        allocator,
+        .POST,
+        "/upload",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Transfer-Encoding", .value = "chunked" },
+        },
+        "5\r\nhello\r\n0\r\n\r\n",
+    );
+    try std.testing.expectEqualStrings(
+        "POST /upload HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Transfer-Encoding: chunked\r\n" ++
+            "\r\n" ++
+            "5\r\nhello\r\n0\r\n\r\n",
+        encoded.items,
+    );
+}
+
+test "HTTP/1 low-level response writers validate framing before output" {
+    const allocator = std.testing.allocator;
+    const prefix = "already-written";
+    const invalid_cases = [_]struct {
+        expected: Error,
+        version: Version,
+        headers: []const Header,
+    }{
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_0,
+            .headers = &.{.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            }},
+        },
+        .{
+            .expected = error.InvalidContentLength,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Content-Length", .value = "0" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_1,
+            .headers = &.{.{
+                .name = "Transfer-Encoding",
+                .value = "gzip; note=\"unterminated",
+            }},
+        },
+        .{
+            .expected = error.InvalidContentLength,
+            .version = .http_1_1,
+            .headers = &.{.{
+                .name = "Content-Length",
+                .value = "not-a-number",
+            }},
+        },
+        .{
+            .expected = error.ConflictingContentLength,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Content-Length", .value = "4" },
+                .{ .name = "Content-Length", .value = "5" },
+            },
+        },
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (invalid_cases) |case| {
+        encoded.clearRetainingCapacity();
+        try encoded.appendSlice(allocator, prefix);
+        try std.testing.expectError(
+            case.expected,
+            writeResponse(
+                &encoded,
+                allocator,
+                case.version,
+                200,
+                "OK",
+                case.headers,
+                "",
+            ),
+        );
+        try std.testing.expectEqualStrings(prefix, encoded.items);
+
+        try std.testing.expectError(
+            case.expected,
+            writeResponseChecked(
+                &encoded,
+                allocator,
+                case.version,
+                200,
+                "OK",
+                case.headers,
+                "",
+            ),
+        );
+        try std.testing.expectEqualStrings(prefix, encoded.items);
+    }
+
+    encoded.clearRetainingCapacity();
+    // Without request-method context this can be a HEAD response describing
+    // the selected GET representation, so its metadata length need not equal
+    // the bytes supplied to this serializer.
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        200,
+        "OK",
+        &.{.{ .name = "Content-Length", .value = "5" }},
+        "",
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n",
+        encoded.items,
+    );
 }
 
 test "HTTP/1 owned headers cross the single-pass stack boundary" {
