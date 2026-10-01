@@ -2,6 +2,9 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const broker_mod = @import("../broker.zig");
+const packet_transport = @import("packet_transport.zig");
+
+const net = std.Io.net;
 
 const Error = runtime.Error;
 const Server = runtime.Server;
@@ -591,6 +594,101 @@ test "MQTT enhanced auth cannot finish before explicit authorization" {
     );
     pending.connection.authentication.deinit(allocator);
     pending.connection = undefined;
+}
+
+test "MQTT client rejects an Authentication Method omitted from CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        listener: *net.Server,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            runFallible(self) catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var peer = packet_transport.Transport.initTcp(
+                self.io,
+                try self.listener.accept(self.io),
+            );
+            defer peer.close(self.allocator);
+            var connect_packet = try peer.readPacket(self.allocator, 4096);
+            defer connect_packet.deinit(self.allocator);
+            var connect = try mqtt.Connect.parse(
+                self.allocator,
+                connect_packet.bytes,
+            );
+            defer connect.deinit(self.allocator);
+            try std.testing.expect(
+                mqtt.authenticationMethod(connect.properties) == null,
+            );
+
+            var response: std.ArrayList(u8) = .empty;
+            defer response.deinit(self.allocator);
+            try mqtt.ConnAck.write(
+                &response,
+                self.allocator,
+                .v5,
+                false,
+                0,
+                &.{.{ .utf8 = .{
+                    .id = .authentication_method,
+                    .value = "unsolicited",
+                } }},
+            );
+            try peer.writePacket(response.items);
+
+            var disconnect_packet = try peer.readPacket(
+                self.allocator,
+                4096,
+            );
+            defer disconnect_packet.deinit(self.allocator);
+            var disconnect = try mqtt.Disconnect.parse(
+                self.allocator,
+                .v5,
+                disconnect_packet.bytes,
+            );
+            defer disconnect.deinit(self.allocator);
+            try std.testing.expectEqual(
+                @as(u8, 0x82),
+                disconnect.reason_code,
+            );
+        }
+    };
+    var shared = Shared{
+        .listener = &listener,
+        .io = io,
+        .allocator = allocator,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    try std.testing.expectError(
+        error.AuthenticationMethodMismatch,
+        Client.connectAttempt(allocator, io, listener.socket.address, .{
+            .protocol = .v5,
+            .client_id = "no-auth-method",
+            .limits = .{ .max_packet_size = 4096 },
+        }),
+    );
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
 }
 
 test "MQTT broker event exposes and gates reauthentication" {

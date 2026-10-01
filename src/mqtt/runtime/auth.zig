@@ -71,6 +71,24 @@ test "MQTT auth state rejects mismatched methods and traffic" {
     try std.testing.expectEqual(Phase.active, state.phase);
 }
 
+test "MQTT auth state rejects a method introduced by CONNACK" {
+    var state: State = .{};
+    try state.beginConnect(std.testing.allocator, &.{});
+    try std.testing.expectEqual(Phase.active, state.phase);
+    try std.testing.expectError(
+        error.AuthenticationMethodMismatch,
+        state.receiveInitialConnAck(.{
+            .session_present = false,
+            .reason_code = 0,
+            .properties = @constCast(&[_]mqtt.Property{.{ .utf8 = .{
+                .id = .authentication_method,
+                .value = "unsolicited",
+            } }}),
+        }),
+    );
+    try std.testing.expectEqual(Phase.active, state.phase);
+}
+
 pub const State = struct {
     method: ?[]u8 = null,
     phase: Phase = .inactive,
@@ -123,9 +141,15 @@ pub const State = struct {
         self: *State,
         connack: mqtt.ConnAck,
     ) Error!void {
-        if (self.phase != .authenticating) {
-            return error.InvalidAuthenticationState;
+        if (self.phase == .active) {
+            // A server cannot introduce Enhanced Authentication when the
+            // CONNECT did not select a method.
+            if (mqtt.authenticationMethod(connack.properties) != null) {
+                return error.AuthenticationMethodMismatch;
+            }
+            return;
         }
+        if (self.phase != .authenticating) return error.InvalidAuthenticationState;
         // Failed CONNACK may omit Authentication Method. If it is present it
         // must still match, but refusal reporting must not be hidden behind a
         // synthetic method-mismatch error.

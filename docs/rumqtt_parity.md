@@ -1594,6 +1594,9 @@ MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
   assigned value.
 - MQTT 5 Application Message properties are preserved for MQTT 5 destinations
   and omitted when encoding the same fanout for an MQTT 3.1.1 destination.
+- Clients reject unsolicited CONNACK Response Information and Authentication
+  Method properties before committing negotiated or authentication state;
+  servers emit Response Information only after an explicit CONNECT request.
 - MQTT 3.1.1 CleanSession=0 resumes subscriptions and offline QoS 1/2 state
   indefinitely, while CleanSession=1 discards that Session.
 - CONNACK Session Present, SUBACK, UNSUBACK and QoS ACK packets use each

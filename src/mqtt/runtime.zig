@@ -3171,19 +3171,19 @@ pub const Connection = struct {
                         value.reason_code == 0,
                         mqtt.assignedClientIdentifier(value.properties),
                     );
-                    if (self.authentication.phase ==
-                        .authenticating)
+                    if (mqtt.responseInformation(value.properties) != null and
+                        mqtt.requestResponseInformation(options.properties) !=
+                            true)
                     {
-                        self.authentication
-                            .receiveInitialConnAck(value) catch |err| {
-                            if (err ==
-                                error.AuthenticationMethodMismatch)
-                            {
-                                self.sendAuthenticationProtocolError();
-                            }
-                            return err;
-                        };
+                        return error.InvalidProperty;
                     }
+                    self.authentication
+                        .receiveInitialConnAck(value) catch |err| {
+                        if (err == error.AuthenticationMethodMismatch) {
+                            self.sendAuthenticationProtocolError();
+                        }
+                        return err;
+                    };
                     break OwnedConnAck{
                         .packet = packet,
                         .connack = value,
