@@ -122,6 +122,9 @@ benchmark response:
   status-line grammar. Even an empty optional reason phrase retains its
   mandatory separating SP, while a peer line that omits that delimiter is
   rejected instead of being normalized differently by separate parser paths;
+- 304 responses can preserve an explicit Transfer-Encoding as representation
+  metadata, as permitted by RFC 9112, while aggregate and streaming writers
+  suppress both content and the otherwise-required terminating chunk;
 - Transfer-Encoding parsing validates coding and parameter tokens without
   allocation, honors commas inside quoted parameter values, rejects malformed
   or unterminated parameters, and rejects parameters on `chunked` itself;

@@ -329,7 +329,11 @@ fn prepareStreamingResponseWithDefaultDate(
         return error.InvalidTrailer;
     }
     const head_response = options.request_method == .HEAD;
-    if (suppress_body and explicit_chunked and !head_response) {
+    const metadata_only_transfer_encoding =
+        (head_response or options.status == 304) and explicit_chunked;
+    if (suppress_body and explicit_chunked and
+        !metadata_only_transfer_encoding)
+    {
         return error.InvalidTransferEncoding;
     }
     if (head_response and trailers_requested) return error.InvalidTrailer;
@@ -349,7 +353,7 @@ fn prepareStreamingResponseWithDefaultDate(
     // would use, but no chunk terminator follows the head. Preserve an
     // explicitly supplied coding while still returning suppressed framing.
     const header_uses_chunked = use_chunked or
-        (head_response and explicit_chunked);
+        metadata_only_transfer_encoding;
     if (use_chunked and options.version == .http_1_0) {
         return error.InvalidVersion;
     }
@@ -638,6 +642,64 @@ test "HTTP/1 response writers enforce empty 205 content" {
         @as(?usize, 0),
         reset_streaming.expected_length,
     );
+}
+
+test "HTTP/1 304 response writers preserve metadata transfer coding" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+    const headers = [_]http1.Header{
+        .{ .name = "Content-Length", .value = "123" },
+        .{ .name = "Transfer-Encoding", .value = "gzip, chunked" },
+    };
+
+    const aggregate = try prepareResponse(allocator, .{
+        .status = 304,
+        .reason = "Not Modified",
+        .headers = &headers,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        aggregate.header,
+        "Transfer-Encoding: gzip, chunked\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        aggregate.header,
+        "Content-Length:",
+    ) == null);
+    try std.testing.expect(std.mem.endsWith(u8, aggregate.header, "\r\n\r\n"));
+    try std.testing.expect(!std.mem.endsWith(
+        u8,
+        aggregate.header,
+        "\r\n0\r\n\r\n",
+    ));
+    try std.testing.expectEqualStrings("", aggregate.body);
+
+    const streaming_head = try prepareStreamingResponse(allocator, .{
+        .status = 304,
+        .reason = "Not Modified",
+        .headers = &headers,
+    }, &scratch);
+    try std.testing.expectEqual(
+        StreamingFraming.suppressed,
+        streaming_head.framing,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        streaming_head.head,
+        "Transfer-Encoding: gzip, chunked\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        streaming_head.head,
+        "Content-Length:",
+    ) == null);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        streaming_head.head,
+        "\r\n\r\n",
+    ));
 }
 
 test "HTTP/1 runtime response writers preserve an empty reason separator" {

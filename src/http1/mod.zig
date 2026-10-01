@@ -1527,11 +1527,15 @@ pub fn validateResponseBodyForStatus(status: u16, headers: []const Header, body:
     if (!statusCodeForbidsBody(status)) return;
     if (body.len != 0 or trailers.len != 0) return error.InvalidContentLength;
     const declared_content_length = try contentLength(headers);
-    for (headers) |header| {
-        if (header.eqlName("transfer-encoding")) return error.InvalidTransferEncoding;
+    if (status != 304) {
+        for (headers) |header| {
+            if (header.eqlName("transfer-encoding")) {
+                return error.InvalidTransferEncoding;
+            }
+        }
     }
-    // 304 may carry Content-Length to describe the selected representation;
-    // 1xx and 204 terminate at the header section and must not carry one.
+    // A 304 may carry Content-Length or Transfer-Encoding to describe the
+    // selected representation. 1xx and 204 permit neither field.
     if (status != 304 and declared_content_length != null) return error.InvalidContentLength;
 }
 
@@ -2998,6 +3002,55 @@ test "HTTP/1 writers reject forbidden response bodies" {
         .value = "123",
     }}, "");
     try std.testing.expect(std.mem.indexOf(u8, encoded.items, "Content-Length: 123\r\n") != null);
+}
+
+test "HTTP/1 304 responses may describe transfer coding without a body" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    const expected =
+        "HTTP/1.1 304 Not Modified\r\n" ++
+        "Transfer-Encoding: gzip, chunked\r\n" ++
+        "\r\n";
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        304,
+        "Not Modified",
+        &.{.{
+            .name = "Transfer-Encoding",
+            .value = "gzip, chunked",
+        }},
+        "",
+    );
+    try std.testing.expectEqualStrings(expected, encoded.items);
+
+    var response = try parseResponse(
+        allocator,
+        expected ++ "next response",
+        .{},
+    );
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(BodyFraming.none, response.body_framing);
+    try std.testing.expectEqual(expected.len, response.consumed);
+    try std.testing.expectEqualStrings("", response.body);
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        writeResponseChecked(
+            &encoded,
+            allocator,
+            .http_1_1,
+            304,
+            "Not Modified",
+            &.{.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            }},
+            "body",
+        ),
+    );
 }
 
 test "HTTP/1 chunked codec" {
