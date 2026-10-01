@@ -147,8 +147,13 @@ pub const FixedHeader = struct {
     }
 
     pub fn write(self: FixedHeader, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
-        try list.append(allocator, (@as(u8, @intFromEnum(self.packet_type)) << 4) | self.flags);
-        try encodeRemainingLength(list, allocator, self.remaining_len);
+        return writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            self.packet_type,
+            self.flags,
+            self.remaining_len,
+        );
     }
 };
 
@@ -172,6 +177,38 @@ test "MQTT fixed header distinguishes reserved packet type zero" {
         error.ReservedPacketType,
         FixedHeader.parse(&.{ 0x0f, 0x00 }),
     );
+}
+
+test "MQTT fixed header write is transactional" {
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(std.testing.allocator);
+    try encoded.ensureTotalCapacityPrecise(std.testing.allocator, 1);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        (FixedHeader{
+            .packet_type = .publish,
+            .flags = 0,
+            .remaining_len = 0,
+            .header_len = 0,
+        }).write(&encoded, failing.allocator()),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    try encoded.appendBounded(0xa5);
+    try std.testing.expectError(
+        error.RemainingLengthTooLarge,
+        (FixedHeader{
+            .packet_type = .publish,
+            .flags = 0,
+            .remaining_len = 268_435_456,
+            .header_len = 0,
+        }).write(&encoded, std.testing.allocator),
+    );
+    try std.testing.expectEqualSlices(u8, &.{0xa5}, encoded.items);
 }
 
 fn validateControlFlags(fixed: FixedHeader) Error!void {
