@@ -278,7 +278,12 @@ Quarter Stream ID, and, for protected packets, short-header CID, fixed
 four-byte packet number, and AEAD tag. Real UDP tests send the exact 4092-byte
 development and 4067-byte protected limits for 4096-byte endpoints, then prove
 that limit-plus-one is rejected before a socket call; protected rejection also
-leaves the packet number unchanged.
+leaves the packet number unchanged. The public WebTransport Capsule,
+unidirectional-stream header, bidirectional-stream header, and HTTP/3 DATAGRAM
+payload writers precompute their exact wire size and reserve once before
+emitting any varint or payload byte. Short caller storage and fail-first
+allocation tests verify that these primitive encoders leave their destinations
+unchanged, while existing round trips cover all resulting wire forms.
 `sendSessionDataSlicesWithTimeout` / `sendSessionDataSlicesWithDeadline`
 methods submit borrowed Capsule Protocol slices directly through HTTP/3 DATA
 packetization without first joining them. `BodyWriteProgress.committed_bytes`

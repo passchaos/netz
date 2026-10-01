@@ -40,12 +40,20 @@ pub const BidirectionalStreamHeader = struct {
         session_id: webtransport.SessionId,
     ) webtransport.Error!void {
         try validateSessionId(session_id);
-        try quic.varint.encode(
+        const stream_type: u64 = FrameType.webtransport_stream;
+        const type_len = try quic.varint.length(stream_type);
+        const session_len = try quic.varint.length(session_id.value);
+        try list.ensureUnusedCapacity(allocator, type_len + session_len);
+        quic.varint.encodeWithLenAssumeCapacity(
             list,
-            allocator,
-            FrameType.webtransport_stream,
+            stream_type,
+            type_len,
         );
-        try quic.varint.encode(list, allocator, session_id.value);
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            session_id.value,
+            session_len,
+        );
     }
 
     pub fn writeInto(
@@ -53,15 +61,21 @@ pub const BidirectionalStreamHeader = struct {
         session_id: webtransport.SessionId,
     ) webtransport.Error![]const u8 {
         try validateSessionId(session_id);
-        const frame_type = try quic.varint.encodeInto(
-            storage,
+        const type_len = try quic.varint.length(
             FrameType.webtransport_stream,
         );
-        const session = try quic.varint.encodeInto(
-            storage[frame_type.len..],
+        const session_len = try quic.varint.length(session_id.value);
+        const total_len = type_len + session_len;
+        if (storage.len < total_len) return error.BufferTooShort;
+        const frame_type = try quic.varint.encodeInto(
+            storage[0..type_len],
+            FrameType.webtransport_stream,
+        );
+        _ = try quic.varint.encodeInto(
+            storage[frame_type.len..total_len],
             session_id.value,
         );
-        return storage[0 .. frame_type.len + session.len];
+        return storage[0..total_len];
     }
 };
 
@@ -599,6 +613,35 @@ test "WebTransport stream priority validates send direction and lifecycle" {
         error.UnknownStream,
         registry.setPriority(100, 1),
     );
+}
+
+test "WebTransport bidirectional stream header writes transactionally" {
+    const allocator = std.testing.allocator;
+    const session_id: webtransport.SessionId = .init(256);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encoded.ensureTotalCapacityPrecise(allocator, 2);
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        BidirectionalStreamHeader.write(
+            &encoded,
+            failing.allocator(),
+            session_id,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    var short = [_]u8{0xa5} ** 3;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        BidirectionalStreamHeader.writeInto(&short, session_id),
+    );
+    try std.testing.expectEqualSlices(u8, &.{ 0xa5, 0xa5, 0xa5 }, &short);
 }
 
 test "WebTransport stream registry batch epochs track membership" {

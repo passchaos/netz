@@ -163,6 +163,52 @@ pub const Capsule = union(enum) {
         reason: []const u8,
     };
 
+    const WireLayout = struct {
+        capsule_type: u64,
+        value_len: usize,
+        type_len: u8,
+        length_len: u8,
+        total_len: usize,
+    };
+
+    fn wireLayout(self: Capsule) Error!WireLayout {
+        const capsule_type: u64, const value_len: usize = switch (self) {
+            .datagram => |payload| .{ CapsuleType.datagram, payload.len },
+            .close_session => |close| blk: {
+                if (!std.unicode.utf8ValidateSlice(close.reason)) {
+                    return error.InvalidCapsule;
+                }
+                break :blk .{
+                    CapsuleType.close_webtransport_session,
+                    std.math.add(usize, 4, close.reason.len) catch
+                        return error.IntegerOverflow,
+                };
+            },
+            .drain_session => .{ CapsuleType.drain_webtransport_session, 0 },
+            .unknown => |unknown| .{
+                unknown.capsule_type,
+                unknown.payload.len,
+            },
+        };
+        const value_len_u64 = std.math.cast(u64, value_len) orelse
+            return error.IntegerOverflow;
+        const type_len = try quic.varint.length(capsule_type);
+        const length_len = try quic.varint.length(value_len_u64);
+        const prefix_len = std.math.add(
+            usize,
+            type_len,
+            length_len,
+        ) catch return error.IntegerOverflow;
+        return .{
+            .capsule_type = capsule_type,
+            .value_len = value_len,
+            .type_len = type_len,
+            .length_len = length_len,
+            .total_len = std.math.add(usize, prefix_len, value_len) catch
+                return error.IntegerOverflow,
+        };
+    }
+
     pub fn parse(bytes: []const u8) Error!struct { capsule: Capsule, consumed: usize } {
         var cursor = wire.Cursor.init(bytes);
         const capsule_type = try quic.varint.decode(&cursor);
@@ -187,27 +233,36 @@ pub const Capsule = union(enum) {
     }
 
     pub fn write(self: Capsule, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
+        const layout = try self.wireLayout();
+        try list.ensureUnusedCapacity(allocator, layout.total_len);
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            layout.capsule_type,
+            layout.type_len,
+        );
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            layout.value_len,
+            layout.length_len,
+        );
         switch (self) {
             .datagram => |payload| {
-                try quic.varint.encode(list, allocator, CapsuleType.datagram);
-                try quic.varint.encode(list, allocator, payload.len);
-                try list.appendSlice(allocator, payload);
+                list.appendSliceAssumeCapacity(payload);
             },
             .close_session => |close| {
-                if (!std.unicode.utf8ValidateSlice(close.reason)) return error.InvalidCapsule;
-                try quic.varint.encode(list, allocator, CapsuleType.close_webtransport_session);
-                try quic.varint.encode(list, allocator, 4 + close.reason.len);
-                try wire.appendInt(list, allocator, u32, close.code, .big);
-                try list.appendSlice(allocator, close.reason);
+                const code_start = list.items.len;
+                list.items.len += 4;
+                std.mem.writeInt(
+                    u32,
+                    list.items[code_start..][0..4],
+                    close.code,
+                    .big,
+                );
+                list.appendSliceAssumeCapacity(close.reason);
             },
-            .drain_session => {
-                try quic.varint.encode(list, allocator, CapsuleType.drain_webtransport_session);
-                try quic.varint.encode(list, allocator, 0);
-            },
+            .drain_session => {},
             .unknown => |unknown| {
-                try quic.varint.encode(list, allocator, unknown.capsule_type);
-                try quic.varint.encode(list, allocator, unknown.payload.len);
-                try list.appendSlice(allocator, unknown.payload);
+                list.appendSliceAssumeCapacity(unknown.payload);
             },
         }
     }
@@ -227,8 +282,18 @@ pub const UnidirectionalStreamHeader = struct {
 
     pub fn writeWebTransport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, session_id: SessionId) !void {
         try validateSessionId(session_id);
-        try quic.varint.encode(list, allocator, @intFromEnum(http3.StreamType.webtransport_unidirectional));
-        try quic.varint.encode(list, allocator, session_id.value);
+        const stream_type: u64 = @intFromEnum(
+            http3.StreamType.webtransport_unidirectional,
+        );
+        const type_len = try quic.varint.length(stream_type);
+        const session_len = try quic.varint.length(session_id.value);
+        try list.ensureUnusedCapacity(allocator, type_len + session_len);
+        quic.varint.encodeWithLenAssumeCapacity(list, stream_type, type_len);
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            session_id.value,
+            session_len,
+        );
     }
 };
 
@@ -245,8 +310,17 @@ pub const Datagram = struct {
 
     pub fn write(self: Datagram, list: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
         try validateSessionId(self.session_id);
-        try quic.varint.encode(list, allocator, self.session_id.quarterStreamId());
-        try list.appendSlice(allocator, self.payload);
+        const quarter_stream_id = self.session_id.quarterStreamId();
+        const prefix_len = try quic.varint.length(quarter_stream_id);
+        const total_len = std.math.add(usize, prefix_len, self.payload.len) catch
+            return error.IntegerOverflow;
+        try list.ensureUnusedCapacity(allocator, total_len);
+        quic.varint.encodeWithLenAssumeCapacity(
+            list,
+            quarter_stream_id,
+            prefix_len,
+        );
+        list.appendSliceAssumeCapacity(self.payload);
     }
 };
 
@@ -379,6 +453,62 @@ test "WebTransport capsule and stream headers" {
     try std.testing.expectEqual(@as(usize, 6), headers.len);
     try std.testing.expectEqualStrings("capsule-protocol", headers[5].name);
     try std.testing.expect(try http3.capsule.protocolEnabled(&headers));
+}
+
+test "WebTransport list encoders are transactional on allocation failure" {
+    const allocator = std.testing.allocator;
+
+    var capsule_bytes: std.ArrayList(u8) = .empty;
+    defer capsule_bytes.deinit(allocator);
+    try capsule_bytes.ensureTotalCapacityPrecise(allocator, 2);
+    var capsule_failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        (Capsule{ .datagram = "x" }).write(
+            &capsule_bytes,
+            capsule_failing.allocator(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), capsule_bytes.items.len);
+
+    var unidirectional_bytes: std.ArrayList(u8) = .empty;
+    defer unidirectional_bytes.deinit(allocator);
+    try unidirectional_bytes.ensureTotalCapacityPrecise(allocator, 2);
+    var unidirectional_failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        UnidirectionalStreamHeader.writeWebTransport(
+            &unidirectional_bytes,
+            unidirectional_failing.allocator(),
+            .init(0),
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        unidirectional_bytes.items.len,
+    );
+
+    var datagram_bytes: std.ArrayList(u8) = .empty;
+    defer datagram_bytes.deinit(allocator);
+    try datagram_bytes.ensureTotalCapacityPrecise(allocator, 1);
+    var datagram_failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        (Datagram{ .session_id = .init(0), .payload = "x" }).write(
+            &datagram_bytes,
+            datagram_failing.allocator(),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), datagram_bytes.items.len);
 }
 
 test "DRAIN_WEBTRANSPORT_SESSION capsule requires an empty payload" {
