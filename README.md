@@ -889,7 +889,8 @@ Current protocol coverage includes:
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel
 - MQTT 3.1.1/5 fixed headers with transactional Remaining Length preflight and
-  exact header-only capacity reservation, CONNECT/CONNACK with Last Will,
+  exact header-only capacity reservation, plus single-reservation transactional
+  Remaining Length, UTF-8 string, and Binary Data primitives, CONNECT/CONNACK with Last Will,
   version-scoped username/password flag validation and payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,

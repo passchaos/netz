@@ -1377,6 +1377,11 @@ or allocation failure therefore leaves existing output intact instead of
 exposing a partial Control Packet byte, while even the maximum Remaining Length
 does not reserve its unsupplied 256-MiB body. One-byte-capacity fail-first and
 exact five-byte-capacity regressions lock both boundaries.
+The public Remaining Length, UTF-8 string, and Binary Data writers now also
+validate and reserve their complete encoded field before appending any byte.
+Exact-capacity fail-first tests force the allocation boundary after the first
+legacy write would have succeeded and verify that all three outputs remain
+empty, while the existing round trips preserve their wire representation.
 CONNECT itself now applies the same direct path across MQTT 3.1.1/5 Client ID,
 Will properties/topic/payload and username/password instead of assembling and
 copying a whole temporary variable payload. CONNACK and QoS PUBACK/PUBREC/

@@ -264,14 +264,8 @@ fn validatePacketBounds(packet: []const u8, fixed: FixedHeader) Error!void {
 
 pub fn encodeRemainingLength(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: usize) Error!void {
     if (value > 268_435_455) return error.RemainingLengthTooLarge;
-    var x = value;
-    while (true) {
-        var encoded: u8 = @intCast(x % 128);
-        x /= 128;
-        if (x > 0) encoded |= 128;
-        try list.append(allocator, encoded);
-        if (x == 0) break;
-    }
+    try list.ensureUnusedCapacity(allocator, remainingLengthEncodedLen(value));
+    encodeRemainingLengthAssumeCapacity(list, value);
 }
 
 fn encodeRemainingLengthInto(out: []u8, value: usize) Error!usize {
@@ -315,8 +309,8 @@ fn remainingLengthEncodedLen(value: usize) usize {
 pub fn writeUtf8(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
     try validateMqttUtf8String(value);
-    try wire.appendInt(list, allocator, u16, @intCast(value.len), .big);
-    try list.appendSlice(allocator, value);
+    try list.ensureUnusedCapacity(allocator, 2 + value.len);
+    appendLengthPrefixedAssumeCapacity(list, value);
 }
 
 pub fn readUtf8(cursor: *wire.Cursor) Error![]const u8 {
@@ -367,13 +361,61 @@ pub fn validateStrictUtf8String(value: []const u8) Error!void {
 
 pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     if (value.len > std.math.maxInt(u16)) return error.InvalidProperty;
-    try wire.appendInt(list, allocator, u16, @intCast(value.len), .big);
-    try list.appendSlice(allocator, value);
+    try list.ensureUnusedCapacity(allocator, 2 + value.len);
+    appendLengthPrefixedAssumeCapacity(list, value);
 }
 
 pub fn readBinary(cursor: *wire.Cursor) Error![]const u8 {
     const len = try cursor.readInt(u16, .big);
     return cursor.readSlice(len);
+}
+
+test "MQTT primitive encoders are transactional on allocation failure" {
+    var remaining: std.ArrayList(u8) = .empty;
+    defer remaining.deinit(std.testing.allocator);
+    try remaining.ensureTotalCapacityPrecise(std.testing.allocator, 1);
+    try std.testing.expectEqual(@as(usize, 1), remaining.capacity);
+    var failing_remaining = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        encodeRemainingLength(
+            &remaining,
+            failing_remaining.allocator(),
+            128,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), remaining.items.len);
+
+    var utf8: std.ArrayList(u8) = .empty;
+    defer utf8.deinit(std.testing.allocator);
+    try utf8.ensureTotalCapacityPrecise(std.testing.allocator, 2);
+    try std.testing.expectEqual(@as(usize, 2), utf8.capacity);
+    var failing_utf8 = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeUtf8(&utf8, failing_utf8.allocator(), "x"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), utf8.items.len);
+
+    var binary: std.ArrayList(u8) = .empty;
+    defer binary.deinit(std.testing.allocator);
+    try binary.ensureTotalCapacityPrecise(std.testing.allocator, 2);
+    try std.testing.expectEqual(@as(usize, 2), binary.capacity);
+    var failing_binary = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeBinary(&binary, failing_binary.allocator(), "x"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), binary.items.len);
 }
 
 pub const QoS = enum(u2) {
