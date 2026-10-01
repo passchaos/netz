@@ -996,6 +996,11 @@ fn writeFrameHeaderForLengthAssumeValid(
     payload_len: usize,
     options: WriteFrameOptions,
 ) Error![]const u8 {
+    const payload_len_u64 = std.math.cast(u64, payload_len) orelse
+        return error.PayloadTooLarge;
+    if (payload_len_u64 > max_frame_payload_len) {
+        return error.PayloadTooLarge;
+    }
     storage[0] = (if (options.fin) @as(u8, 0x80) else 0) |
         (if (options.rsv1) @as(u8, 0x40) else 0) |
         (if (options.rsv2) @as(u8, 0x20) else 0) |
@@ -1010,11 +1015,6 @@ fn writeFrameHeaderForLengthAssumeValid(
         std.mem.writeInt(u16, storage[2..4], @intCast(payload_len), .big);
         pos = 4;
     } else {
-        const payload_len_u64 = std.math.cast(u64, payload_len) orelse
-            return error.PayloadTooLarge;
-        if (payload_len_u64 > max_frame_payload_len) {
-            return error.PayloadTooLarge;
-        }
         storage[1] = masked_bit | 127;
         std.mem.writeInt(u64, storage[2..10], payload_len_u64, .big);
         pos = 10;
@@ -2169,6 +2169,7 @@ test "WebSocket length-only frame header matches payload-based encoder" {
         );
         const parsed = try FrameHeader.parse(largest);
         try std.testing.expectEqual(max_frame_payload_len, parsed.payload_len);
+        @memset(&storage, 0xa5);
         try std.testing.expectError(
             error.PayloadTooLarge,
             writeFrameHeaderForLengthInto(
@@ -2177,6 +2178,11 @@ test "WebSocket length-only frame header matches payload-based encoder" {
                 @as(usize, @intCast(max_frame_payload_len)) + 1,
                 .{},
             ),
+        );
+        try std.testing.expectEqualSlices(
+            u8,
+            &([_]u8{0xa5} ** max_frame_header_len),
+            &storage,
         );
     }
     try std.testing.expectError(

@@ -342,8 +342,9 @@ caller-buffer, and in-place decode entry points.
 The shared length-only frame-header encoder also enforces RFC 6455's 63-bit
 payload ceiling before writing any extended length. Boundary tests round-trip
 the maximum legal value and reject the first value whose wire high bit would
-make the frame invalid, so slice and fragmented send paths cannot produce a
-frame that the decoder must reject.
+make the frame invalid without modifying caller header storage, so slice and
+fragmented send paths cannot produce a frame that the decoder must reject and
+failed preflight remains retry-safe.
 Aggregate H1, RFC 8441, and RFC 9220 receives now transfer the transport's
 incremental UTF-8 state into `MessageAssembler`: both frame parsing and message
 assembly skip their otherwise-repeated payload scans, and finalization trusts
