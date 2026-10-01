@@ -4837,6 +4837,29 @@ internal baseline rather than a reference ratio:
 the audited websocket.zig 0.16 outbound compression paths currently force
 `compressed = false`.
 
+On 2026-09-30, a CPU-0-pinned `ReleaseFast` fixed-binary A/B measured the
+package-local encoder after replacing its byte-at-a-time contiguous match
+scan with a two-block SIMD prefix scan. Seven alternating pairs produced:
+
+```text
+                              range (us/message)  median
+baseline                      5.516-5.549         5.526
+SIMD contiguous match scan    4.195-4.215         4.203
+candidate/baseline paired ratio                  0.7605
+
+16-slice control baseline     10.090-10.116       10.102
+16-slice control candidate    10.098-10.119       10.100
+```
+
+All seven complete-message pairs favored the candidate, a 23.9% median
+reduction. Every run retained the 69-byte wire payload and checksum
+`8351760000`; the 16-slice control is intentionally unaffected because it
+uses the discontiguous cursor path. The ignored evidence directory
+`zig-out/websocket-vort-match-ab/` contains the paired log and the exact
+5,546,296-byte baseline plus 5,548,344-byte candidate binaries. Their SHA-256
+identities are `8224fa43e4b178284c26f7d2d62ad42377b3f934cee3d69c147133ae378f37ab`
+and `c12e8a08229218e57c7eafa1cad9d86ede228980697e0e4706fe3afdd4f8db36`.
+
 The caller-buffer path copies and masks in one SIMD pass and preserves the
 caller's `[]const u8`. Binary sends additionally accept arbitrary borrowed
 application slices while retaining one FIN-terminated WebSocket frame. The

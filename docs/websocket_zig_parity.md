@@ -396,6 +396,25 @@ internal encoder baseline and compression-ratio example, not a cross-library
 speed ratio: the audited websocket.zig 0.16 send paths currently hard-code
 `compressed = false`, so no equal compressed-send workload exists there.
 
+A 2026-09-30 zio-era fixed-binary A/B isolates the contiguous LZ77 match scan.
+The candidate compares two SIMD blocks at a time and locates the first unequal
+lane only when a block differs; match selection and fixed-DEFLATE output remain
+unchanged. Seven alternating CPU-0 pairs all favored the candidate:
+
+```text
+baseline:  5.516-5.549 us/message, median 5.526 us
+candidate: 4.195-4.215 us/message, median 4.203 us
+paired candidate/baseline median: 0.7605 (-23.9%)
+wire payload: 4096 -> 69 bytes; checksum: 8351760000 in every run
+16-slice control medians: 10.102 us baseline, 10.100 us candidate
+```
+
+The unchanged chunked control is expected because discontiguous matching uses
+slice cursors rather than the contiguous prefix scanner. The fixed binaries
+and paired log are retained under `zig-out/websocket-vort-match-ab/`; their
+SHA-256 identities are `8224fa43e4b178284c26f7d2d62ad42377b3f934cee3d69c147133ae378f37ab`
+and `c12e8a08229218e57c7eafa1cad9d86ede228980697e0e4706fe3afdd4f8db36`.
+
 ## Persistent echo evidence
 
 The end-to-end benchmark uses one real HTTP/1 upgraded connection, 20 untimed

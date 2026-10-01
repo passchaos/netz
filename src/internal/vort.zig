@@ -447,11 +447,10 @@ pub const RawFixedSyncFlushEncoder = struct {
             if (distance > options.lz77_options.window_len) break;
             var len: usize = 0;
             if (input.contiguous) |bytes| {
-                while (len < maximum and
-                    bytes[previous_pos + len] == bytes[pos + len])
-                {
-                    len += 1;
-                }
+                len = matchingPrefixLen(
+                    bytes[previous_pos..][0..maximum],
+                    bytes[pos..][0..maximum],
+                );
             } else {
                 var previous_cursor = Input.Cursor.init(input, previous_pos);
                 var current_cursor = Input.Cursor.init(input, pos);
@@ -498,6 +497,68 @@ pub const RawFixedSyncFlushEncoder = struct {
         self.epochs.items[bucket] = self.epoch;
     }
 };
+
+/// Return the shared prefix length of equal-sized byte slices. DEFLATE match
+/// searches cap these slices at 258 bytes, so comparing two vector blocks per
+/// loop removes most branch and bounds-check overhead without reading beyond
+/// either candidate.
+fn matchingPrefixLen(a: []const u8, b: []const u8) usize {
+    std.debug.assert(a.len == b.len);
+    var index: usize = 0;
+    if (std.simd.suggestVectorLength(u8)) |block_len| {
+        const Block = @Vector(block_len, u8);
+        while (a.len - index >= 2 * block_len) {
+            inline for (0..2) |_| {
+                const left: Block = a[index..][0..block_len].*;
+                const right: Block = b[index..][0..block_len].*;
+                const different = left != right;
+                if (@reduce(.Or, different)) {
+                    return index + std.simd.firstTrue(different).?;
+                }
+                index += block_len;
+            }
+        }
+        if (a.len - index >= block_len) {
+            const left: Block = a[index..][0..block_len].*;
+            const right: Block = b[index..][0..block_len].*;
+            const different = left != right;
+            if (@reduce(.Or, different)) {
+                return index + std.simd.firstTrue(different).?;
+            }
+            index += block_len;
+        }
+    }
+    while (index < a.len and a[index] == b[index]) : (index += 1) {}
+    return index;
+}
+
+test "focused match prefix finds differences across vector boundaries" {
+    const block_len = std.simd.suggestVectorLength(u8) orelse
+        @sizeOf(usize);
+    var left: [2 * block_len + 3]u8 = undefined;
+    for (&left, 0..) |*byte, index| byte.* = @truncate(index *% 37);
+    var right = left;
+
+    try std.testing.expectEqual(left.len, matchingPrefixLen(&left, &right));
+    for ([_]usize{
+        0,
+        block_len - 1,
+        block_len,
+        2 * block_len - 1,
+        left.len - 1,
+    }) |difference| {
+        right[difference] +%= 1;
+        try std.testing.expectEqual(
+            difference,
+            matchingPrefixLen(&left, &right),
+        );
+        right[difference] -%= 1;
+    }
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        matchingPrefixLen(left[0..2], right[0..2]),
+    );
+}
 
 pub fn encodeRawFixedSyncFlushAppend(
     allocator: std.mem.Allocator,
