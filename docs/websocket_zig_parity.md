@@ -1379,3 +1379,6 @@ direct address attempt returns. `requireAccepted` keeps the established API's
 after the 101 head and transfer them without another copy into the WebSocket
 receive buffer. Bodyless interim 1xx responses are skipped under the same
 absolute deadline and `Limits.max_informational_responses` bound.
+Successful 101 responses reject `Content-Length`, `Transfer-Encoding`, and
+`Trailer` on both the server writer and client validator; caller-supplied
+server fields are checked before the transactional writer changes its output.

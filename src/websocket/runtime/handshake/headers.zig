@@ -79,7 +79,9 @@ pub fn validateHttp1Server(
         return error.InvalidHandshake;
     }
     for (response.headers) |header| {
-        if (header.eqlName("transfer-encoding")) {
+        if (header.eqlName("transfer-encoding") or
+            header.eqlName("trailer"))
+        {
             return error.InvalidHandshake;
         }
     }

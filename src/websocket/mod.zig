@@ -1308,10 +1308,13 @@ fn validateServerHandshakeHeaders(headers: []const wire.Header) !void {
         try http1.validateHeader(header);
         if (header.eqlName("upgrade") or
             header.eqlName("connection") or
-            header.eqlName("sec-websocket-accept"))
+            header.eqlName("sec-websocket-accept") or
+            header.eqlName("content-length") or
+            header.eqlName("transfer-encoding") or
+            header.eqlName("trailer"))
         {
-            // The writer owns these mandatory fields.  Rejecting caller-provided
-            // duplicates keeps the 101 response unambiguous for RFC 6455 clients.
+            // The writer owns the mandatory fields, while a 101 response cannot
+            // carry HTTP/1 message framing. Reject both groups before output.
             return error.InvalidHandshake;
         }
         if (header.eqlName("sec-websocket-protocol")) {
@@ -2919,6 +2922,8 @@ test "WebSocket server handshake writer validates generated response" {
     const allocator = std.testing.allocator;
     var response: std.ArrayList(u8) = .empty;
     defer response.deinit(allocator);
+    const original = "existing output";
+    try response.appendSlice(allocator, original);
 
     try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
         &response,
@@ -2926,12 +2931,14 @@ test "WebSocket server handshake writer validates generated response" {
         "not-base64",
         &.{},
     ));
+    try std.testing.expectEqualStrings(original, response.items);
     try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
         &response,
         allocator,
         "dGhlIHNhbXBsZSBub25jZQ==",
         &.{.{ .name = "Sec-WebSocket-Accept", .value = "duplicate" }},
     ));
+    try std.testing.expectEqualStrings(original, response.items);
     try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
         &response,
         allocator,
@@ -2941,18 +2948,35 @@ test "WebSocket server handshake writer validates generated response" {
             .{ .name = "Sec-WebSocket-Protocol", .value = "chat.v2" },
         },
     ));
+    try std.testing.expectEqualStrings(original, response.items);
     try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
         &response,
         allocator,
         "dGhlIHNhbXBsZSBub25jZQ==",
         &.{.{ .name = "Sec-WebSocket-Protocol", .value = "bad protocol" }},
     ));
+    try std.testing.expectEqualStrings(original, response.items);
     try std.testing.expectError(error.MalformedHeader, writeServerHandshake(
         &response,
         allocator,
         "dGhlIHNhbXBsZSBub25jZQ==",
         &.{.{ .name = "X-Test", .value = "ok\r\nInjected: yes" }},
     ));
+    try std.testing.expectEqualStrings(original, response.items);
+
+    for ([_]wire.Header{
+        .{ .name = "cOnTeNt-LeNgTh", .value = "0" },
+        .{ .name = "TrAnSfEr-EnCoDiNg", .value = "chunked" },
+        .{ .name = "TrAiLeR", .value = "X-Checksum" },
+    }) |header| {
+        try std.testing.expectError(error.InvalidHandshake, writeServerHandshake(
+            &response,
+            allocator,
+            "dGhlIHNhbXBsZSBub25jZQ==",
+            &.{header},
+        ));
+        try std.testing.expectEqualStrings(original, response.items);
+    }
 }
 
 test "WebSocket server handshake write is transactional and exactly reserved" {

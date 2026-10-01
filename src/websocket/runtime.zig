@@ -12123,6 +12123,21 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     );
     defer transfer_encoding_response.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, transfer_encoding_response, client_key, &.{}));
+
+    const trailer_101 =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "TrAiLeR: X-Checksum\r\n" ++
+        "\r\n";
+    var trailer_response = try http1.parseResponse(
+        allocator,
+        trailer_101,
+        http1HandshakeResponseParseOptions(.{}),
+    );
+    defer trailer_response.deinit(allocator);
+    try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, trailer_response, client_key, &.{}));
 }
 
 test "WebSocket server negotiates split subprotocol request headers" {
