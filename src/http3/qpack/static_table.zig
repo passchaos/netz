@@ -193,6 +193,31 @@ pub fn findMatch(name: []const u8, value: []const u8) ?StaticMatch {
     return .{ .index = indexes[0], .full_match = false };
 }
 
+/// Match an HTTP field name after applying the lowercase normalization
+/// required on HTTP/3 wire representations. Lowercase names retain the
+/// indexed fast path; uncommon mixed-case input uses one allocation-free scan.
+pub fn findMatchNormalizedName(
+    name: []const u8,
+    value: []const u8,
+) ?StaticMatch {
+    for (name) |byte| {
+        if (byte >= 'A' and byte <= 'Z') break;
+    } else return findMatch(name, value);
+
+    var first_name_index: ?u64 = null;
+    for (entries, 0..) |entry, index| {
+        if (!std.ascii.eqlIgnoreCase(entry.name, name)) continue;
+        if (first_name_index == null) first_name_index = @intCast(index);
+        if (std.mem.eql(u8, entry.value, value)) {
+            return .{ .index = @intCast(index), .full_match = true };
+        }
+    }
+    return if (first_name_index) |index|
+        .{ .index = index, .full_match = false }
+    else
+        null;
+}
+
 pub fn findName(name: []const u8) ?u64 {
     if (fastPseudoHeaderName(name)) |index| return index;
     const indexes = name_index.get(name) orelse return null;

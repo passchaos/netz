@@ -520,6 +520,11 @@ literal-name representations. Exact static matches are deliberately encoded
 as literals with a static name reference because an Indexed Field Line has no
 N bit; both allocating and single-allocation decoders retain the flag, and a
 round-trip regression also covers lowercase normalization of literal names.
+Its common path now plans up to 64 field representations on the stack, computes
+the complete encoded length, and reserves output once before writing. Mixed-
+case names use an allocation-free folded static-table lookup and are lowercased
+directly into literal-name output; partial-capacity and exact-capacity tests
+prove OOM rollback and zero-allocation encoding for representative blocks.
 
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992

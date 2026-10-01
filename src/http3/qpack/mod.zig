@@ -1248,51 +1248,110 @@ pub fn encodePrefix(
 /// table and literal fields only, so it remains safe with zero dynamic-table
 /// capacity while interoperating with peers that expect common static refs.
 pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator, fields: []const HeaderField) !void {
-    try encodePrefix(list, allocator, 0, 0);
-    for (fields) |field| {
-        var lower_name_storage: ?[]u8 = null;
-        defer if (lower_name_storage) |storage| allocator.free(storage);
-        const name = try normalizedFieldName(allocator, field.name, &lower_name_storage);
-        if (static_table_module.findMatch(name, field.value)) |match| {
-            if (match.full_match and !field.never_indexed) {
-                try encodePrefixedInteger(list, allocator, 6, 0xc0, match.index);
-            } else {
-                try encodePrefixedInteger(
+    const stack_plan_capacity = 64;
+    var stack_plans: [stack_plan_capacity]LiteralFieldPlan = undefined;
+    const plans = if (fields.len <= stack_plans.len)
+        stack_plans[0..fields.len]
+    else
+        try allocator.alloc(LiteralFieldPlan, fields.len);
+    defer if (fields.len > stack_plans.len) allocator.free(plans);
+
+    var block_len: usize = 2;
+    for (fields, plans) |field, *plan| {
+        plan.* = try planLiteralField(field);
+        block_len = std.math.add(usize, block_len, plan.wire_len) catch
+            return error.IntegerOverflow;
+    }
+    try list.ensureUnusedCapacity(allocator, block_len);
+    encodePrefixedIntegerAssumeCapacity(list, 8, 0x00, 0);
+    encodePrefixedIntegerAssumeCapacity(list, 7, 0x00, 0);
+    for (fields, plans) |field, plan| {
+        switch (plan.representation) {
+            .indexed_static => |index| encodePrefixedIntegerAssumeCapacity(
+                list,
+                6,
+                0xc0,
+                index,
+            ),
+            .static_name => |static_name| {
+                encodePrefixedIntegerAssumeCapacity(
                     list,
-                    allocator,
                     4,
                     0x50 | if (field.never_indexed) @as(u8, 0x20) else 0,
-                    match.index,
+                    static_name.index,
                 );
-                try encodeString(list, allocator, field.value);
-            }
-        } else {
-            try list.ensureUnusedCapacity(
-                allocator,
-                prefixed_integer.encodedLen(3, name.len) + name.len,
-            );
-            encodePrefixedIntegerAssumeCapacity(
-                list,
-                3,
-                0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
-                name.len,
-            );
-            list.appendSliceAssumeCapacity(name);
-            try encodeString(list, allocator, field.value);
+                encodeStringAssumeCapacity(
+                    list,
+                    field.value,
+                    static_name.value,
+                );
+            },
+            .literal_name => |value_plan| {
+                encodePrefixedIntegerAssumeCapacity(
+                    list,
+                    3,
+                    0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
+                    field.name.len,
+                );
+                const name = list.addManyAsSliceAssumeCapacity(field.name.len);
+                for (field.name, name) |byte, *out| {
+                    out.* = std.ascii.toLower(byte);
+                }
+                encodeStringAssumeCapacity(list, field.value, value_plan);
+            },
         }
     }
 }
 
-fn normalizedFieldName(allocator: std.mem.Allocator, name: []const u8, storage: *?[]u8) ![]const u8 {
-    for (name) |byte| {
-        if (byte >= 'A' and byte <= 'Z') {
-            const lowered = try allocator.dupe(u8, name);
-            for (lowered) |*out| out.* = std.ascii.toLower(out.*);
-            storage.* = lowered;
-            return lowered;
+const LiteralFieldPlan = struct {
+    representation: union(enum) {
+        indexed_static: u64,
+        static_name: struct {
+            index: u64,
+            value: EncodedStringPlan,
+        },
+        literal_name: EncodedStringPlan,
+    },
+    wire_len: usize,
+};
+
+fn planLiteralField(field: HeaderField) !LiteralFieldPlan {
+    if (static_table_module.findMatchNormalizedName(
+        field.name,
+        field.value,
+    )) |match| {
+        if (match.full_match and !field.never_indexed) {
+            return .{
+                .representation = .{ .indexed_static = match.index },
+                .wire_len = prefixed_integer.encodedLen(6, match.index),
+            };
         }
+        const value = try encodedStringPlan(field.value);
+        return .{
+            .representation = .{ .static_name = .{
+                .index = match.index,
+                .value = value,
+            } },
+            .wire_len = std.math.add(
+                usize,
+                prefixed_integer.encodedLen(4, match.index),
+                value.wire_len,
+            ) catch return error.IntegerOverflow,
+        };
     }
-    return name;
+
+    const value = try encodedStringPlan(field.value);
+    var wire_len = std.math.add(
+        usize,
+        prefixed_integer.encodedLen(3, field.name.len),
+        field.name.len,
+    ) catch return error.IntegerOverflow;
+    wire_len = std.math.add(usize, wire_len, value.wire_len) catch
+        return error.IntegerOverflow;
+    return .{
+        .representation = .{ .literal_name = value },
+        .wire_len = wire_len,
+    };
 }
 
 pub fn decodeLiteralBlock(allocator: std.mem.Allocator, block: []const u8) ![]HeaderField {

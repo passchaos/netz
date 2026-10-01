@@ -143,6 +143,65 @@ test "HTTP/3 QPACK literal encoder preserves never-indexed fields" {
     for (owned) |actual| try std.testing.expect(actual.never_indexed);
 }
 
+test "HTTP/3 QPACK literal block write is transactional and exactly reserved" {
+    const allocator = std.testing.allocator;
+    const prefix = "seed";
+    const fields = [_]Qpack.HeaderField{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{
+            .name = "X-Private-Trace",
+            .value = "compressible compressible compressible",
+            .never_indexed = true,
+        },
+    };
+
+    // The initial capacity can hold only the QPACK prefix and first indexed
+    // field. A whole-block reservation must fail before either is appended.
+    var failure: std.ArrayList(u8) = .empty;
+    defer failure.deinit(allocator);
+    try failure.ensureTotalCapacityPrecise(allocator, prefix.len + 3);
+    failure.appendSliceAssumeCapacity(prefix);
+    var fail_first = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        Qpack.encodeLiteralBlock(
+            &failure,
+            fail_first.allocator(),
+            &fields,
+        ),
+    );
+    try std.testing.expectEqualStrings(prefix, failure.items);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&expected, allocator, &fields);
+
+    var exact: std.ArrayList(u8) = .empty;
+    defer exact.deinit(allocator);
+    try exact.ensureTotalCapacityPrecise(allocator, expected.items.len);
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try Qpack.encodeLiteralBlock(
+        &exact,
+        no_alloc.allocator(),
+        &fields,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, expected.items, exact.items);
+
+    const decoded = try Qpack.decodeLiteralBlock(allocator, exact.items);
+    defer Qpack.freeDecodedFields(allocator, decoded);
+    try std.testing.expectEqualStrings("content-type", decoded[1].name);
+    try std.testing.expectEqualStrings("x-private-trace", decoded[2].name);
+    try std.testing.expect(decoded[2].never_indexed);
+}
+
 test "HTTP/3 QPACK static table name index preserves RFC lookup order" {
     for (static_table.entries, 0..) |entry, index| {
         const match = static_table.findMatch(entry.name, entry.value) orelse
