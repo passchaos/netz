@@ -95,6 +95,54 @@ test "HTTP/3 QPACK static name references and literal fallback" {
     try std.testing.expectEqualSlices(u8, &raw_preferred, raw_decoded[0].value);
 }
 
+test "HTTP/3 QPACK literal encoder preserves never-indexed fields" {
+    const allocator = std.testing.allocator;
+    const fields = [_]Qpack.HeaderField{
+        .{
+            .name = "authorization",
+            .value = "",
+            .never_indexed = true,
+        },
+        .{
+            .name = "content-type",
+            .value = "application/private",
+            .never_indexed = true,
+        },
+        .{
+            .name = "X-Private-Credential",
+            .value = "secret",
+            .never_indexed = true,
+        },
+    };
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&block, allocator, &fields);
+
+    // An exact static match cannot carry the N bit as an Indexed Field Line,
+    // so the encoder must deliberately use a static-name literal instead.
+    try std.testing.expectEqual(@as(u8, 0x60), block.items[2] & 0xe0);
+
+    const decoded = try Qpack.decodeLiteralBlock(allocator, block.items);
+    defer Qpack.freeDecodedFields(allocator, decoded);
+    try std.testing.expectEqual(fields.len, decoded.len);
+    for (fields, decoded) |expected, actual| {
+        try std.testing.expect(actual.never_indexed);
+        try std.testing.expectEqualStrings(expected.value, actual.value);
+    }
+    try std.testing.expectEqualStrings("authorization", decoded[0].name);
+    try std.testing.expectEqualStrings("content-type", decoded[1].name);
+    try std.testing.expectEqualStrings("x-private-credential", decoded[2].name);
+
+    const owned = try Qpack.decodeLiteralBlockOwnedWithLimit(
+        allocator,
+        block.items,
+        1024,
+    );
+    defer Qpack.freeDecodedFields(allocator, owned);
+    try std.testing.expectEqual(fields.len, owned.len);
+    for (owned) |actual| try std.testing.expect(actual.never_indexed);
+}
+
 test "HTTP/3 QPACK static table name index preserves RFC lookup order" {
     for (static_table.entries, 0..) |entry, index| {
         const match = static_table.findMatch(entry.name, entry.value) orelse

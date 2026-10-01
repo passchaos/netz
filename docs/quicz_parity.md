@@ -514,6 +514,13 @@ native wtransport matrix remain green. Five CPU-0 real-handshake 1-MiB upload
 runs measured 104.96-109.62 MiB/s (108.17 MiB/s mean); this transfer-dominated
 sample is a regression guard rather than a critical-stream speed claim.
 
+The stateless literal field-section codec preserves an application's explicit
+Never Indexed choice across exact static matches, static-name references, and
+literal-name representations. Exact static matches are deliberately encoded
+as literals with a static name reference because an Indexed Field Line has no
+N bit; both allocating and single-allocation decoders retain the flag, and a
+round-trip regression also covers lowercase normalization of literal names.
+
 The benchmark keeps UDP GSO/GRO disabled and defaults to one submitted packet
 per userspace batch because this host clamps `net.core.rmem_max` to 212,992
 bytes. Larger same-process loopback bursts overflow that kernel queue and

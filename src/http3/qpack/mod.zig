@@ -1254,10 +1254,16 @@ pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator
         defer if (lower_name_storage) |storage| allocator.free(storage);
         const name = try normalizedFieldName(allocator, field.name, &lower_name_storage);
         if (static_table_module.findMatch(name, field.value)) |match| {
-            if (match.full_match) {
+            if (match.full_match and !field.never_indexed) {
                 try encodePrefixedInteger(list, allocator, 6, 0xc0, match.index);
             } else {
-                try encodePrefixedInteger(list, allocator, 4, 0x50, match.index);
+                try encodePrefixedInteger(
+                    list,
+                    allocator,
+                    4,
+                    0x50 | if (field.never_indexed) @as(u8, 0x20) else 0,
+                    match.index,
+                );
                 try encodeString(list, allocator, field.value);
             }
         } else {
@@ -1265,7 +1271,12 @@ pub fn encodeLiteralBlock(list: *std.ArrayList(u8), allocator: std.mem.Allocator
                 allocator,
                 prefixed_integer.encodedLen(3, name.len) + name.len,
             );
-            encodePrefixedIntegerAssumeCapacity(list, 3, 0x20, name.len);
+            encodePrefixedIntegerAssumeCapacity(
+                list,
+                3,
+                0x20 | if (field.never_indexed) @as(u8, 0x10) else 0,
+                name.len,
+            );
             list.appendSliceAssumeCapacity(name);
             try encodeString(list, allocator, field.value);
         }
@@ -1316,6 +1327,7 @@ pub fn decodeLiteralBlockWithLimit(
             try budget.charge(entry.name.len, entry.value.len);
             try fields.append(allocator, entry);
         } else if ((first & 0xc0) == 0x40) {
+            const never_indexed = (first & 0x20) != 0;
             const is_static = (first & 0x10) != 0;
             const index = try decodePrefixedInteger(&cursor, 4, first);
             if (!is_static) return error.QpackDynamicTableUnsupported;
@@ -1324,9 +1336,15 @@ pub fn decodeLiteralBlockWithLimit(
             try budget.charge(entry.name.len, value_plan.decoded_len);
             var value = try value_plan.decode(allocator);
             errdefer if (value.storage) |storage| allocator.free(storage);
-            try fields.append(allocator, .{ .name = entry.name, .value = value.value, .value_storage = value.storage });
+            try fields.append(allocator, .{
+                .name = entry.name,
+                .value = value.value,
+                .never_indexed = never_indexed,
+                .value_storage = value.storage,
+            });
             value.storage = null;
         } else if ((first & 0xe0) == 0x20) {
+            const never_indexed = (first & 0x10) != 0;
             const name_len = try decodePrefixedInteger(&cursor, 3, first);
             const name_plan = try scanMaybeHuffman(
                 try cursor.readSlice(name_len),
@@ -1341,6 +1359,7 @@ pub fn decodeLiteralBlockWithLimit(
             try fields.append(allocator, .{
                 .name = name.value,
                 .value = value.value,
+                .never_indexed = never_indexed,
                 .name_storage = name.storage,
                 .value_storage = value.storage,
             });
