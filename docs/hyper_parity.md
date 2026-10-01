@@ -134,7 +134,9 @@ benchmark response:
   Content-Length plus Transfer-Encoding instead of emitting ambiguous bytes.
   Non-empty response bodies must match a declared Content-Length, while empty
   HEAD-style metadata remains valid; pre-encoded chunked bodies must contain
-  one complete body with valid trailers and no ambiguous suffix bytes;
+  one complete body with valid trailers and no ambiguous suffix bytes, and
+  explicit Trailer declarations must use permitted names, select chunked
+  framing, and cover every emitted trailer field;
 - CONNECT request authority must agree with Host across borrowed, owned and
   runtime validation, and senders reject request content, Content-Length,
   Transfer-Encoding and trailers as required by RFC 9110;

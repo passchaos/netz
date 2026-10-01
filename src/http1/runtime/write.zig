@@ -561,6 +561,108 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
     );
 }
 
+test "HTTP/1 aggregate framing honors explicit Trailer declarations" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    const request = try prepareRequest(
+        allocator,
+        .{
+            .method = .POST,
+            .host = "localhost",
+            .headers = &.{.{ .name = "Trailer", .value = "Digest" }},
+            .body = "ok",
+            .trailers = &.{.{
+                .name = "Digest",
+                .value = "sha-256=request",
+            }},
+        },
+        &scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 0), request.body.len);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "Transfer-Encoding: chunked\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        request.header,
+        "2\r\nok\r\n0\r\nDigest: sha-256=request\r\n\r\n",
+    ));
+
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareRequest(
+            allocator,
+            .{
+                .method = .POST,
+                .host = "localhost",
+                .headers = &.{.{ .name = "Trailer", .value = "Digest" }},
+                .trailers = &.{.{ .name = "X-Other", .value = "value" }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareRequest(
+            allocator,
+            .{
+                .method = .POST,
+                .host = "localhost",
+                .headers = &.{.{
+                    .name = "Trailer",
+                    .value = "Content-Length",
+                }},
+            },
+            &scratch,
+        ),
+    );
+
+    const response = try prepareResponse(
+        allocator,
+        .{
+            .headers = &.{.{ .name = "Trailer", .value = "Digest" }},
+            .body = "ok",
+            .trailers = &.{.{
+                .name = "Digest",
+                .value = "sha-256=response",
+            }},
+            .request_accepts_trailers = true,
+        },
+        &scratch,
+    );
+    try std.testing.expectEqual(@as(usize, 0), response.body.len);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        response.header,
+        "Transfer-Encoding: chunked\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        response.header,
+        "2\r\nok\r\n0\r\nDigest: sha-256=response\r\n\r\n",
+    ));
+
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        prepareResponse(
+            allocator,
+            .{
+                .headers = &.{
+                    .{ .name = "Transfer-Encoding", .value = "chunked" },
+                    .{ .name = "Trailer", .value = "Digest" },
+                },
+                .trailers = &.{.{ .name = "X-Other", .value = "value" }},
+                .request_accepts_trailers = true,
+            },
+            &scratch,
+        ),
+    );
+}
+
 test "HTTP/1 response writers enforce empty 205 content" {
     const allocator = std.testing.allocator;
     var scratch: Scratch = .{};
@@ -893,6 +995,10 @@ pub fn prepareRequest(
         options.body,
         options.trailers,
     );
+    try http1.validateTrailerDeclarations(
+        scratch.request_headers.items,
+        options.trailers,
+    );
     const use_chunked = try chunkedWriteFraming(
         options.version,
         scratch.request_headers.items,
@@ -1136,6 +1242,10 @@ fn prepareResponseFraming(
         options.status,
         options.headers,
         options.body,
+        options.trailers,
+    );
+    try http1.validateTrailerDeclarations(
+        options.headers,
         options.trailers,
     );
     if ((options.trailers.len != 0 or
@@ -1548,7 +1658,7 @@ fn chunkedWriteFraming(
         if (version == .http_1_0) return error.InvalidVersion;
         return true;
     }
-    if (trailers.len == 0) return false;
+    if (trailers.len == 0 and !hasHeader(headers, "trailer")) return false;
     if (version == .http_1_0) return error.InvalidVersion;
     return true;
 }

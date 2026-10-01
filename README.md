@@ -163,8 +163,8 @@ for the private `passchaos/vail` checkout.
 Current protocol coverage includes:
 
 - HTTP/1.1 requests, responses, preallocated request/response/header-block writes with Host and CONNECT-authority agreement, version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT request framing rejection, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
-  transfer writing with preallocated chunks plus fully syntax-validated and
-  repeated-value-merged trailer fields, server response trailers gated by the
+  transfer writing with preallocated chunks plus fully syntax-validated,
+  declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the
   request's explicit `TE: trailers` capability, opt-in obsolete folded-field
   unfolding, exact-allocation/empty-header owned-parse fast paths, strict allocation-free borrowed request/response head parsing into
   caller header storage with exact Content-Length pipeline offsets and

@@ -1658,6 +1658,11 @@ fn validateRequestForWrite(
     );
     const framing = try requestFraming(headers);
     if (framing.must_close) return error.InvalidContentLength;
+    const has_trailer_declaration = hasHeaderNamed(headers, "trailer");
+    try validateTrailerDeclarations(headers, &.{});
+    if (has_trailer_declaration and framing.body != .chunked) {
+        return error.InvalidTrailer;
+    }
     switch (framing.body) {
         .none => if (body.len != 0) return error.InvalidContentLength,
         .content_length => if (framing.content_length.? != body.len) {
@@ -1666,7 +1671,7 @@ fn validateRequestForWrite(
         // This low-level serializer accepts an already transfer-coded body.
         // Callers that have unencoded chunks should use the runtime writer or
         // `encodeChunked` first.
-        .chunked => try validateChunkedBodyForWrite(body),
+        .chunked => try validateChunkedBodyForWrite(body, headers),
         .close_delimited => unreachable,
     }
 }
@@ -1743,6 +1748,8 @@ fn validateResponseForWrite(
         headers,
         "transfer-encoding",
     );
+    const has_trailer_declaration = hasHeaderNamed(headers, "trailer");
+    try validateTrailerDeclarations(headers, &.{});
     const declared_content_length = try contentLength(headers);
     if (has_transfer_encoding) {
         const close_delimited = try responseTransferEncodingIsCloseDelimited(
@@ -1751,14 +1758,19 @@ fn validateResponseForWrite(
         if (declared_content_length != null) {
             return error.InvalidContentLength;
         }
+        if (has_trailer_declaration and close_delimited) {
+            return error.InvalidTrailer;
+        }
         // An empty representation can be metadata for a HEAD response (and a
         // 304 is already constrained to empty above). For an emitted body,
         // however, a final chunked coding must contain exactly one complete
         // chunked wire body so no suffix can be interpreted as another message.
         if (!close_delimited and body.len != 0) {
-            try validateChunkedBodyForWrite(body);
+            try validateChunkedBodyForWrite(body, headers);
         }
-    } else if (body.len != 0) {
+    } else {
+        if (has_trailer_declaration) return error.InvalidTrailer;
+        if (body.len == 0) return;
         if (declared_content_length) |declared| {
             if (declared != body.len) return error.InvalidContentLength;
         }
@@ -2198,13 +2210,26 @@ fn scanChunkedWireBody(bytes: []const u8) Error!ChunkedWireLayout {
     };
 }
 
-fn validateChunkedBodyForWrite(bytes: []const u8) Error!void {
+fn validateChunkedBodyForWrite(
+    bytes: []const u8,
+    headers: []const Header,
+) Error!void {
     const layout = try scanChunkedWireBody(bytes);
     if (layout.consumed != bytes.len) return error.InvalidChunk;
+    const trailer_fields = bytes[layout.trailer_start..layout.trailer_fields_end];
     try validateTrailerFields(
-        bytes[layout.trailer_start..layout.trailer_fields_end],
+        trailer_fields,
         .{ .max_headers = std.math.maxInt(usize) },
     );
+    if (!hasHeaderNamed(headers, "trailer")) return;
+    var lines = std.mem.splitSequence(u8, trailer_fields, "\r\n");
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const trailer = try parseHeaderLine(line, false);
+        if (!trailerNameDeclared(headers, trailer.name)) {
+            return error.InvalidTrailer;
+        }
+    }
 }
 
 fn copyChunkedBody(bytes: []const u8, out: []u8) Error!void {
@@ -2280,6 +2305,49 @@ pub fn validateTrailers(trailers: []const Header) Error!void {
         try validateHeader(trailer);
         if (!validTrailerFieldName(trailer.name)) return error.InvalidTrailer;
     }
+}
+
+/// Validate every field-name advertised by repeated Trailer fields and, when
+/// a declaration is present, require each supplied trailer to be announced.
+/// A declaration may list fields that are ultimately omitted.
+pub fn validateTrailerDeclarations(
+    headers: []const Header,
+    trailers: []const Header,
+) Error!void {
+    var has_declaration = false;
+    for (headers) |header| {
+        if (!header.eqlName("trailer")) continue;
+        has_declaration = true;
+        var names = std.mem.splitScalar(u8, header.value, ',');
+        while (names.next()) |raw_name| {
+            const name = wire.trimOws(raw_name);
+            try validateHeaderName(name);
+            if (!validTrailerFieldName(name)) return error.InvalidTrailer;
+        }
+    }
+    try validateTrailers(trailers);
+    if (!has_declaration) return;
+    for (trailers) |trailer| {
+        if (!trailerNameDeclared(headers, trailer.name)) {
+            return error.InvalidTrailer;
+        }
+    }
+}
+
+fn trailerNameDeclared(
+    headers: []const Header,
+    name: []const u8,
+) bool {
+    for (headers) |header| {
+        if (!header.eqlName("trailer")) continue;
+        var names = std.mem.splitScalar(u8, header.value, ',');
+        while (names.next()) |raw_name| {
+            if (std.ascii.eqlIgnoreCase(wire.trimOws(raw_name), name)) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn validateChunkExtension(extension: []const u8) Error!void {
@@ -2486,6 +2554,35 @@ test "HTTP/1 low-level request writers validate framing before output" {
             .body = "0\r\nContent-Length: 0\r\n\r\n",
         },
         .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Trailer", .value = "Digest" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+                .{ .name = "Trailer", .value = "Digest" },
+            },
+            .body = "0\r\nX-Other: value\r\n\r\n",
+        },
+        .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+                .{ .name = "Trailer", .value = "Content-Length" },
+            },
+            .body = "0\r\n\r\n",
+        },
+        .{
             .expected = error.InvalidHost,
             .method = .CONNECT,
             .target = "example.com:443",
@@ -2628,6 +2725,26 @@ test "HTTP/1 low-level request writers validate framing before output" {
             "5\r\nhello\r\n0\r\n\r\n",
         encoded.items,
     );
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .POST,
+        "/upload",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Transfer-Encoding", .value = "chunked" },
+            .{ .name = "Trailer", .value = "Digest" },
+        },
+        "5\r\nhello\r\n0\r\nDigest: sha-256=demo\r\n\r\n",
+    );
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        encoded.items,
+        "5\r\nhello\r\n0\r\nDigest: sha-256=demo\r\n\r\n",
+    ));
 }
 
 test "HTTP/1 low-level response writers validate framing before output" {
@@ -2703,6 +2820,28 @@ test "HTTP/1 low-level response writers validate framing before output" {
             }},
             .body = "0\r\n\r\nnext",
         },
+        .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{.{ .name = "Trailer", .value = "Digest" }},
+        },
+        .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Transfer-Encoding", .value = "gzip" },
+                .{ .name = "Trailer", .value = "Digest" },
+            },
+        },
+        .{
+            .expected = error.InvalidTrailer,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+                .{ .name = "Trailer", .value = "Digest" },
+            },
+            .body = "0\r\nX-Other: value\r\n\r\n",
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -2774,6 +2913,25 @@ test "HTTP/1 low-level response writers validate framing before output" {
             "4\r\npong\r\n0\r\n\r\n",
         encoded.items,
     );
+
+    encoded.clearRetainingCapacity();
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        200,
+        "OK",
+        &.{
+            .{ .name = "Transfer-Encoding", .value = "chunked" },
+            .{ .name = "Trailer", .value = "Digest" },
+        },
+        "4\r\npong\r\n0\r\nDigest: sha-256=demo\r\n\r\n",
+    );
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        encoded.items,
+        "4\r\npong\r\n0\r\nDigest: sha-256=demo\r\n\r\n",
+    ));
 
     encoded.clearRetainingCapacity();
     try writeResponseChecked(
