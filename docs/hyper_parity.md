@@ -300,6 +300,10 @@ application slices. Since a zero-sized HTTP/1 chunk is the message terminator,
 emitting one for an empty slice would truncate any later chunks and trailers.
 Mixed empty/non-empty and all-empty regressions verify one final terminator,
 correct trailer placement, and exact-capacity allocation-free output.
+The shared trailer validator now checks complete field-name and field-value
+syntax before applying the forbidden-name policy. Array-based callers and the
+streaming terminator therefore reject empty/invalid names and CR/LF value
+injection before any terminator bytes are staged.
 
 The aggregate HTTP/1 readers apply `Limits.max_body_bytes` to decoded chunk
 payload only, not chunk-size lines, extensions, CRLF framing, trailers, or

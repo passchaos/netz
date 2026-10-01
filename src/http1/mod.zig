@@ -2032,6 +2032,7 @@ fn freeHeaderValueStorage(allocator: std.mem.Allocator, storage: [][]u8) void {
 
 pub fn validateTrailers(trailers: []const Header) Error!void {
     for (trailers) |trailer| {
+        try validateHeader(trailer);
         if (!validTrailerFieldName(trailer.name)) return error.InvalidTrailer;
     }
 }
@@ -2947,6 +2948,17 @@ test "HTTP/1 chunked trailers reject forbidden fields" {
         .{ .name = "ETag", .value = "\"dynamic\"" },
         .{ .name = "X-Application-Digest", .value = "sha-256=demo" },
     });
+    const malformed = [_]Header{
+        .{ .name = "", .value = "empty-name" },
+        .{ .name = "Bad Trailer", .value = "space-in-name" },
+        .{ .name = "X-Injected", .value = "ok\r\nInjected: yes" },
+    };
+    for (malformed) |trailer| {
+        try std.testing.expectError(
+            error.MalformedHeader,
+            validateTrailers(&.{trailer}),
+        );
+    }
     const invalid = [_]Header{
         .{ .name = "Content-Length", .value = "5" },
         .{ .name = "Transfer-Encoding", .value = "chunked" },

@@ -741,6 +741,26 @@ test "HTTP/1 title-case policy applies to merged chunked trailers" {
     );
 }
 
+test "HTTP/1 streaming terminator rejects malformed trailers before encoding" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+    try scratch.encoded.appendSlice(allocator, "stale");
+
+    try std.testing.expectError(
+        error.MalformedHeader,
+        streaming.prepareEnd(
+            allocator,
+            &.{.{
+                .name = "X-Trace",
+                .value = "ok\r\nInjected: yes",
+            }},
+            &scratch,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), scratch.encoded.items.len);
+}
+
 /// Validate and encode a request, borrowing an unframed body when possible.
 pub fn prepareRequest(
     allocator: std.mem.Allocator,
