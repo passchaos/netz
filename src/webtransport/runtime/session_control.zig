@@ -13,7 +13,7 @@ const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const association = @import("stream_association.zig");
 
-pub const max_close_reason: usize = 1024;
+pub const max_close_reason: usize = webtransport.max_close_reason;
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidSessionState,

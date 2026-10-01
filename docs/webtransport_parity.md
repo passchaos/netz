@@ -765,6 +765,12 @@ that stream:
   every non-terminal associated stream direction.
 - malformed close length/UTF-8 resets the CONNECT stream with H3_MESSAGE_ERROR.
 
+The 1024-byte reason limit now belongs to the core WebTransport capsule codec
+and is reused by the incremental runtime, so standalone writers and parsers
+cannot create or accept a CLOSE capsule that the session state machine would
+later reject. Direct boundary tests accept 1024 bytes, reject 1025 bytes in
+both directions, and preserve existing output on an oversized write.
+
 Local session close now treats CONNECT as a bidirectional stream rather than
 retiring its association when the local FIN is submitted. Client, standalone
 server, and shared-endpoint server sessions retain receive routing until the

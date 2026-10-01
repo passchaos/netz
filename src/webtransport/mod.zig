@@ -26,6 +26,9 @@ pub const CapsuleType = struct {
     pub const drain_webtransport_session: u64 = 0x78ae;
 };
 
+/// Maximum UTF-8 reason length in CLOSE_WEBTRANSPORT_SESSION.
+pub const max_close_reason: usize = 1024;
+
 pub const ApplicationErrorCode = webtransport_error.ApplicationErrorCode;
 
 /// WebTransport maps its 32-bit application stream errors into an HTTP/3
@@ -175,7 +178,9 @@ pub const Capsule = union(enum) {
         const capsule_type: u64, const value_len: usize = switch (self) {
             .datagram => |payload| .{ CapsuleType.datagram, payload.len },
             .close_session => |close| blk: {
-                if (!std.unicode.utf8ValidateSlice(close.reason)) {
+                if (close.reason.len > max_close_reason or
+                    !std.unicode.utf8ValidateSlice(close.reason))
+                {
                     return error.InvalidCapsule;
                 }
                 break :blk .{
@@ -218,7 +223,11 @@ pub const Capsule = union(enum) {
         const capsule: Capsule = switch (capsule_type) {
             CapsuleType.datagram => .{ .datagram = payload },
             CapsuleType.close_webtransport_session => blk: {
-                if (payload.len < 4) return error.InvalidCapsule;
+                if (payload.len < 4 or
+                    payload.len > 4 + max_close_reason)
+                {
+                    return error.InvalidCapsule;
+                }
                 const code = std.mem.readInt(u32, payload[0..4], .big);
                 if (!std.unicode.utf8ValidateSlice(payload[4..])) return error.InvalidCapsule;
                 break :blk .{ .close_session = .{ .code = code, .reason = payload[4..] } };
@@ -453,6 +462,53 @@ test "WebTransport capsule and stream headers" {
     try std.testing.expectEqual(@as(usize, 6), headers.len);
     try std.testing.expectEqualStrings("capsule-protocol", headers[5].name);
     try std.testing.expect(try http3.capsule.protocolEnabled(&headers));
+}
+
+test "WebTransport close capsule enforces the reason byte limit" {
+    const allocator = std.testing.allocator;
+    const maximum_reason = [_]u8{'x'} ** max_close_reason;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (Capsule{ .close_session = .{
+        .code = 42,
+        .reason = &maximum_reason,
+    } }).write(&encoded, allocator);
+    const parsed = try Capsule.parse(encoded.items);
+    try std.testing.expectEqual(@as(u32, 42), parsed.capsule.close_session.code);
+    try std.testing.expectEqualSlices(
+        u8,
+        &maximum_reason,
+        parsed.capsule.close_session.reason,
+    );
+
+    const oversized_reason = [_]u8{'y'} ** (max_close_reason + 1);
+    var rejected: std.ArrayList(u8) = .empty;
+    defer rejected.deinit(allocator);
+    try rejected.appendSlice(allocator, "prefix");
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        (Capsule{ .close_session = .{
+            .code = 43,
+            .reason = &oversized_reason,
+        } }).write(&rejected, allocator),
+    );
+    try std.testing.expectEqualStrings("prefix", rejected.items);
+
+    var oversized_value: [4 + max_close_reason + 1]u8 = undefined;
+    std.mem.writeInt(u32, oversized_value[0..4], 44, .big);
+    @memset(oversized_value[4..], 'z');
+    var malformed: std.ArrayList(u8) = .empty;
+    defer malformed.deinit(allocator);
+    try http3.capsule.write(
+        &malformed,
+        allocator,
+        CapsuleType.close_webtransport_session,
+        &oversized_value,
+    );
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        Capsule.parse(malformed.items),
+    );
 }
 
 test "WebTransport list encoders are transactional on allocation failure" {

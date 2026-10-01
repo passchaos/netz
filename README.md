@@ -1032,8 +1032,9 @@ Current protocol coverage includes:
   CONNACK redirects for TCP/TLS/WS/WSS with per-hop authorization and fresh
   TLS authority verification, and
   QoS 2 exactly-once publish handshakes with unsolicited PUBREL rejection and negative-PUBREC receive-slot release, including MQTT v5 PUBACK/PUBREC/PUBREL/PUBCOMP reason-code/property validation with minimal reason-only encoding, dedicated UNSUBACK parsing, and negative publish acknowledgement propagation
-- WebTransport capsules, unidirectional and bidirectional stream headers, and
-  HTTP/3 DATAGRAM payloads with transactional single-reservation encoding,
+- WebTransport capsules with core and incremental UTF-8/1024-byte close-reason
+  enforcement, unidirectional and bidirectional stream headers, and HTTP/3
+  DATAGRAM payloads with transactional single-reservation encoding,
   CONNECT metadata with client-bidi session-id validation and
   `Capsule-Protocol` request/response advertisement, and
   stack-first CONNECT metadata assembly with exact allocation fallback rather
