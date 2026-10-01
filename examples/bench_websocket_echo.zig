@@ -472,6 +472,8 @@ pub fn main(init: std.process.Init) !void {
         .{
             if (mostly_idle)
                 "mostly-idle-buffer-retention"
+            else if (options.fragmented)
+                "fragmented-frame-echo"
             else if (options.parts == 1)
                 "single-buffer-echo"
             else
@@ -617,9 +619,6 @@ fn parseOptions(init: std.process.Init) !Options {
     }
     if (options.active_connections) |active| {
         if (active == 0 or active > options.connections) return error.InvalidArgument;
-    }
-    if (options.fragmented and !options.compression) {
-        return error.InvalidArgument;
     }
     try send_shape.validatePartCount(options.parts);
     if (options.iterations == 0) return error.InvalidArgument;

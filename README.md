@@ -863,7 +863,9 @@ Current protocol coverage includes:
   compressed fragmented sends that stream discontiguous plaintext directly
   into DEFLATE with constant-space cross-fragment UTF-8 validation, plus
   batched secure-random fills that retain a fresh mask key per frame without a
-  CSPRNG backend call per fragment, serialized connection writes, a blocking TCP
+  CSPRNG backend call per fragment; bounded H1 masked and unmasked fragment
+  sequences also share one transport submission instead of one write per
+  frame. Connection writes remain serialized, with a blocking TCP
   client/server runtime over HTTP/1 Upgrade, Unix-domain listener/client
   transports using the same handshake and framing state machine, optional absolute WS/WSS
   opening-handshake deadlines, shared absolute TLS 1.3 handshake budgets for

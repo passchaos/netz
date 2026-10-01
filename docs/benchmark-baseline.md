@@ -5154,6 +5154,29 @@ for H2, and
 `489871a713a53442a140759c7cef6f7d4244795dd5d7dcdb321a6803a649f03d`
 for H3.
 
+The H1 batch was then extended to uncompressed fragmented messages. Masked
+client frames whose conservative header bound plus payload fits the existing
+16 KiB scratch are encoded into one bounded buffer; unmasked server frames use
+borrowed payloads and groups of at most sixteen header/payload vectors. Larger
+messages retain the streaming fallback. The benchmark now accepts
+`--fragmented` without `--compression` and directly exercises this path.
+
+Seven alternating CPU-0 fixed-binary pairs with fifty warmups and 1,000
+measured 4 KiB round trips produced 143.041-146.236 us (144.530 us median) for
+the baseline and 53.681-54.944 us (54.664 us median) for the candidate. Every
+pair favored the candidate; the paired median ratio was 0.3768, a 62.3%
+reduction, and every run retained checksum 255,000. Compressed-fragmented and
+ordinary uncompressed single-frame controls had paired median ratios 1.0021
+and 0.9987. A five-warmup, twenty-message `strace` run reduced `getrandom`
+calls from 403 to 28.
+
+The exact baseline/candidate SHA-256 identities are
+`de75d747ccb06475155edd07fe5dd0d3b389ecbc3c357de251b703898cc29cdb`
+and `b25278fc3c47df867d567f00be12a6632ab68f5eed0ea64f5dc46cbed54addfb`.
+The ignored `zig-out/websocket-h1-fragment-batch-ab/paired-final.log` evidence has
+SHA-256
+`2dcaff447dd51d7a28d516c2cb8b9d7ddf55bee6af4939625d2c22d7b1d77833`.
+
 The cross-process `bench-websocket-hyper-h2` harness runs a persistent RFC
 8441 binary echo against Hyper 1.11.0 (`084473f7`) in both client/server role
 pairings. Client and server are pinned to separate CPUs; h2c setup, peer

@@ -5367,18 +5367,13 @@ pub const Connection = struct {
                 }
                 self.discardCompressionPreviewLocked();
             }
-            for (fragments, 0..) |fragment, index| {
-                const frame_opcode: websocket.Opcode =
-                    if (index == 0) opcode else .continuation;
-                self.writeFrameLocked(
-                    frame_opcode,
-                    fragment,
-                    index + 1 == fragments.len,
-                ) catch |err| {
-                    self.abortAfterUnboundedMessageWriteLocked();
-                    return err;
-                };
-            }
+            self.writeUncompressedFragmentsLocked(
+                opcode,
+                fragments,
+            ) catch |err| {
+                self.abortAfterUnboundedMessageWriteLocked();
+                return err;
+            };
             return;
         }
 
@@ -5393,18 +5388,13 @@ pub const Connection = struct {
         }
         if (!self.canSendOpcodeLocked(opcode)) return error.ConnectionClosed;
 
-        for (fragments, 0..) |fragment, index| {
-            const frame_opcode: websocket.Opcode =
-                if (index == 0) opcode else .continuation;
-            self.writeFrameLocked(
-                frame_opcode,
-                fragment,
-                index + 1 == fragments.len,
-            ) catch |err| {
-                self.abortAfterUnboundedMessageWriteLocked();
-                return err;
-            };
-        }
+        self.writeUncompressedFragmentsLocked(
+            opcode,
+            fragments,
+        ) catch |err| {
+            self.abortAfterUnboundedMessageWriteLocked();
+            return err;
+        };
     }
 
     pub fn sendFragmentedWithTimeout(
@@ -6253,6 +6243,115 @@ pub const Connection = struct {
             parts[index * 2 + 1] = payload;
         }
         try self.transport().writeAllSlices(parts[0 .. frame_count * 2]);
+    }
+
+    fn writeUncompressedFragmentsLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        fragments: []const []const u8,
+    ) Error!void {
+        if (self.role == .client and
+            try self.writeMaskedUncompressedFragmentsBatchLocked(
+                opcode,
+                fragments,
+            ))
+        {
+            return;
+        }
+        if (self.role == .server) {
+            try self.writeUnmaskedFragmentsLocked(opcode, fragments);
+            return;
+        }
+        for (fragments, 0..) |fragment, index| {
+            try self.writeFrameLocked(
+                if (index == 0) opcode else .continuation,
+                fragment,
+                index + 1 == fragments.len,
+            );
+        }
+    }
+
+    fn writeMaskedUncompressedFragmentsBatchLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        fragments: []const []const u8,
+    ) Error!bool {
+        var required = std.math.mul(
+            usize,
+            fragments.len,
+            websocket.max_frame_header_len,
+        ) catch return false;
+        for (fragments) |fragment| {
+            required = std.math.add(
+                usize,
+                required,
+                fragment.len,
+            ) catch return false;
+        }
+        if (required > masked_write_scratch_len) return false;
+
+        var encoded: [masked_write_scratch_len]u8 align(64) = undefined;
+        const max_mask_key_batch: usize = 16;
+        var mask_keys: [max_mask_key_batch][4]u8 = undefined;
+        var cursor: usize = 0;
+        for (fragments, 0..) |fragment, index| {
+            const mask_key_index = index % max_mask_key_batch;
+            if (mask_key_index == 0) {
+                const key_count = @min(
+                    max_mask_key_batch,
+                    fragments.len - index,
+                );
+                try common.randomMaskKeys(
+                    self.io,
+                    mask_keys[0..key_count],
+                );
+            }
+            const frame = try websocket.writeFrameInto(
+                encoded[cursor..],
+                if (index == 0) opcode else .continuation,
+                fragment,
+                .{
+                    .fin = index + 1 == fragments.len,
+                    .mask_key = mask_keys[mask_key_index],
+                },
+            );
+            cursor += frame.len;
+        }
+        try self.transport().writeAll(encoded[0..cursor]);
+        return true;
+    }
+
+    fn writeUnmaskedFragmentsLocked(
+        self: *Connection,
+        opcode: websocket.Opcode,
+        fragments: []const []const u8,
+    ) Error!void {
+        const max_batched_frames: usize = 16;
+        var frame_index: usize = 0;
+        while (frame_index < fragments.len) {
+            const batch_count = @min(
+                max_batched_frames,
+                fragments.len - frame_index,
+            );
+            var headers: [max_batched_frames][websocket.max_frame_header_len]u8 = undefined;
+            var parts: [max_batched_frames * 2][]const u8 = undefined;
+            for (0..batch_count) |batch_index| {
+                const index = frame_index + batch_index;
+                const fragment = fragments[index];
+                parts[batch_index * 2] =
+                    try websocket.writeFrameHeaderInto(
+                        &headers[batch_index],
+                        if (index == 0) opcode else .continuation,
+                        fragment,
+                        .{ .fin = index + 1 == fragments.len },
+                    );
+                parts[batch_index * 2 + 1] = fragment;
+            }
+            try self.transport().writeAllSlices(
+                parts[0 .. batch_count * 2],
+            );
+            frame_index += batch_count;
+        }
     }
 
     fn ensureBuffered(self: *Connection, len: usize) Error!void {
@@ -15201,6 +15300,11 @@ test "WebSocket receiveMessage assembles fragments and handles control frames" {
             try std.testing.expectEqual(websocket.Opcode.text, message.opcode);
             try std.testing.expectEqualStrings("hello fragmented", message.payload);
 
+            try connection.sendFragmented(
+                .text,
+                &.{ "server ", "", "fragmented" },
+            );
+
             try std.testing.expectError(error.ConnectionClosed, connection.receiveMessage());
             try std.testing.expect(connection.close_received.load(.acquire));
             try std.testing.expect(connection.close_sent.load(.acquire));
@@ -15218,13 +15322,21 @@ test "WebSocket receiveMessage assembles fragments and handles control frames" {
     defer client.close();
 
     try client.sendPing("?");
-    const fragments = [_][]const u8{ "hello ", "fragmented" };
+    const fragments = [_][]const u8{
+        "h", "e", "l", "l", "o", " ", "f", "r",
+        "a", "g", "m", "e", "n", "t", "e", "d",
+    };
     try client.sendFragmented(.text, &fragments);
 
     var pong = try client.receiveFrame();
     defer pong.deinit(allocator);
     try std.testing.expectEqual(websocket.Opcode.pong, pong.header.opcode);
     try std.testing.expectEqualStrings("?", pong.payload);
+
+    var response = try client.receiveMessage();
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(websocket.Opcode.text, response.opcode);
+    try std.testing.expectEqualStrings("server fragmented", response.payload);
 
     try client.sendClose(.normal_closure, "bye");
     var close = try client.receiveFrame();

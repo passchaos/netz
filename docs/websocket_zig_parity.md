@@ -509,6 +509,32 @@ those paths do not execute the new batch helper, so no single-frame performance
 claim is made. Exact binaries and logs are retained under
 `zig-out/websocket-fragmented-echo-ab/`.
 
+HTTP/1 now applies the same bounded batching to uncompressed fragmented
+messages instead of issuing one random request and one transport write per
+client frame. A masked message whose worst-case headers plus payload fit the
+existing 16 KiB stack scratch is encoded once and submitted once; unmasked
+servers keep payload slices borrowed and submit up to sixteen header/payload
+pairs per vectored write. Larger messages retain the prior streaming fallback.
+The H1 echo benchmark now permits `--fragmented` without compression so this
+path remains directly measurable. Seven alternating CPU-0 fixed-binary pairs
+with fifty warmups and 1,000 measured 4 KiB round trips produced:
+
+```text
+baseline:  143.041-146.236 us/roundtrip, median 144.530 us
+candidate:  53.681-54.944 us/roundtrip, median  54.664 us
+paired candidate/baseline median: 0.3768 (-62.3%)
+```
+
+All seven pairs favored the candidate and retained checksum 255,000. The
+compressed-fragmented and ordinary uncompressed single-frame controls had
+paired medians 1.0021 and 0.9987, respectively. A five-warmup, twenty-message
+`strace` control reduced `getrandom` calls from 403 to 28. Exact binaries and
+the paired log are retained in `zig-out/websocket-h1-fragment-batch-ab/`; the
+baseline, candidate, and log SHA-256 values are
+`de75d747ccb06475155edd07fe5dd0d3b389ecbc3c357de251b703898cc29cdb`,
+`b25278fc3c47df867d567f00be12a6632ab68f5eed0ea64f5dc46cbed54addfb`,
+and `2dcaff447dd51d7a28d516c2cb8b9d7ddf55bee6af4939625d2c22d7b1d77833`.
+
 The HTTP/2 Extended CONNECT, traditional CONNECT, and tunnel-response builders
 now stage their pseudo-headers and ordinary headers in 16-entry stack buffers,
 matching the ordinary HTTP/2 request/response path. Larger application header
