@@ -344,6 +344,7 @@ pub const BorrowedFrame = struct {
 };
 
 pub const max_frame_header_len: usize = 14;
+pub const max_frame_payload_len: u64 = std.math.maxInt(u63);
 
 pub fn parseFrame(allocator: std.mem.Allocator, bytes: []const u8) Error!Frame {
     return parseFrameOptions(allocator, bytes, .{});
@@ -1011,6 +1012,9 @@ fn writeFrameHeaderForLengthAssumeValid(
     } else {
         const payload_len_u64 = std.math.cast(u64, payload_len) orelse
             return error.PayloadTooLarge;
+        if (payload_len_u64 > max_frame_payload_len) {
+            return error.PayloadTooLarge;
+        }
         storage[1] = masked_bit | 127;
         std.mem.writeInt(u64, storage[2..10], payload_len_u64, .big);
         pos = 10;
@@ -2156,6 +2160,25 @@ test "WebSocket length-only frame header matches payload-based encoder" {
         }
     }
     var storage: [max_frame_header_len]u8 = undefined;
+    if (comptime @bitSizeOf(usize) >= 64) {
+        const largest = try writeFrameHeaderForLengthInto(
+            &storage,
+            .binary,
+            @intCast(max_frame_payload_len),
+            .{},
+        );
+        const parsed = try FrameHeader.parse(largest);
+        try std.testing.expectEqual(max_frame_payload_len, parsed.payload_len);
+        try std.testing.expectError(
+            error.PayloadTooLarge,
+            writeFrameHeaderForLengthInto(
+                &storage,
+                .binary,
+                @as(usize, @intCast(max_frame_payload_len)) + 1,
+                .{},
+            ),
+        );
+    }
     try std.testing.expectError(
         error.InvalidControlFrame,
         writeFrameHeaderForLengthInto(
