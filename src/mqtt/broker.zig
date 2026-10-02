@@ -527,9 +527,9 @@ const ClientSlot = struct {
     /// Client ID. Ordinary clients do not pay for the maximum 86-byte value.
     assigned_client_id: ?[]u8 = null,
     graceful_disconnect: bool = false,
-    /// Borrowed from the active listener descriptor. It is cleared before the
-    /// slot can be reused and is never persisted with a durable Session.
-    listener_access_control: ?ListenerAccessControlHandler = null,
+    /// Allocated only when a listener contributes an ACL overlay. Callback
+    /// contexts remain borrowed from the listener for the connection lifetime.
+    listener_access_control: ?*ListenerAccessControlHandler = null,
     retained_source_id: ?u64 = null,
     /// Borrowed from `ClientTask.connect` while this slot is active.
     username: ?[]const u8 = null,
@@ -635,6 +635,30 @@ const ClientSlot = struct {
     ) void {
         if (self.assigned_client_id) |client_id| allocator.free(client_id);
         self.assigned_client_id = null;
+    }
+
+    fn setListenerAccessControl(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+        access_control: ?ListenerAccessControlHandler,
+    ) std.mem.Allocator.Error!void {
+        std.debug.assert(self.listener_access_control == null);
+        const value = access_control orelse return;
+        const owned = try allocator.create(ListenerAccessControlHandler);
+        owned.* = value;
+        self.listener_access_control = owned;
+    }
+
+    fn accessControl(self: ClientSlot) ?ListenerAccessControlHandler {
+        return if (self.listener_access_control) |value| value.* else null;
+    }
+
+    fn clearListenerAccessControl(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.listener_access_control) |value| allocator.destroy(value);
+        self.listener_access_control = null;
     }
 
     fn releaseOversizedSessionScratch(
@@ -758,6 +782,10 @@ test "MQTT broker capacity slots keep connection state out of line" {
     try std.testing.expect(
         @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
     );
+    try std.testing.expectEqual(
+        @sizeOf(?*ListenerAccessControlHandler),
+        @sizeOf(@FieldType(ClientSlot, "listener_access_control")),
+    );
 }
 
 test "MQTT broker allocates assigned client identifiers on demand" {
@@ -789,6 +817,41 @@ test "MQTT broker allocates assigned client identifiers on demand" {
     broker.abortRegistration(slot_index, 0, false);
     try std.testing.expect(slot.assigned_client_id == null);
     broker.releaseClaimedSlot(slot_index);
+}
+
+test "MQTT broker allocates listener ACL metadata on demand" {
+    var slot: ClientSlot = .{};
+    var marker: u8 = 0;
+    const access_control = ListenerAccessControlHandler{
+        .context = &marker,
+    };
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try slot.setListenerAccessControl(failing.allocator(), null);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expect(slot.accessControl() == null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        slot.setListenerAccessControl(
+            failing.allocator(),
+            access_control,
+        ),
+    );
+    try std.testing.expect(slot.accessControl() == null);
+
+    try slot.setListenerAccessControl(
+        std.testing.allocator,
+        access_control,
+    );
+    try std.testing.expectEqual(
+        access_control.context,
+        slot.accessControl().?.context,
+    );
+    slot.clearListenerAccessControl(std.testing.allocator);
+    try std.testing.expect(slot.accessControl() == null);
 }
 
 fn shouldScheduleTransientDelivery(
@@ -1467,6 +1530,7 @@ pub const Broker = struct {
             slot.session_property_scratch.deinit(self.allocator);
             slot.transient_inflight_payloads.deinit(self.allocator);
             slot.clearAssignedClientId(self.allocator);
+            slot.clearListenerAccessControl(self.allocator);
             if (slot.connection) |connection| {
                 connection.close();
                 self.allocator.destroy(connection);
@@ -3384,8 +3448,11 @@ pub const Broker = struct {
         std.debug.assert(slot.assigned_client_id == null);
         errdefer slot.clearAssignedClientId(self.allocator);
         slot.graceful_disconnect = false;
-        slot.listener_access_control = listener_access_control;
-        errdefer slot.listener_access_control = null;
+        try slot.setListenerAccessControl(
+            self.allocator,
+            listener_access_control,
+        );
+        errdefer slot.clearListenerAccessControl(self.allocator);
         slot.retained_source_id = retained_source_id;
         errdefer slot.retained_source_id = null;
         // `preparePending` passes the effective CONNECT after any
@@ -3802,10 +3869,10 @@ pub const Broker = struct {
         slot.session_handle = null;
         slot.session_present = false;
         slot.session_persistent = false;
-        slot.listener_access_control = null;
         slot.retained_source_id = null;
         slot.username = null;
         slot.will_handle = null;
+        slot.clearListenerAccessControl(self.allocator);
         slot.clearAssignedClientId(self.allocator);
         slot.clearTransientInflight();
         self.recordPersistentChangeLocked(persistent_changed);
@@ -3976,6 +4043,7 @@ pub const Broker = struct {
         // mutex, so it can never reserve a slot that still owns a connection.
         const connection = slot.connection;
         const assigned_client_id = slot.assigned_client_id;
+        const listener_access_control = slot.listener_access_control;
         slot.connection = null;
         slot.assigned_client_id = null;
         slot.will_handle = null;
@@ -3993,6 +4061,9 @@ pub const Broker = struct {
         self.deadline_driver.notify(self.io);
         defer if (assigned_client_id) |client_id| {
             self.allocator.free(client_id);
+        };
+        defer if (listener_access_control) |access_control| {
+            self.allocator.destroy(access_control);
         };
         defer if (connection) |value| {
             value.close();
@@ -4135,7 +4206,7 @@ pub const Broker = struct {
         const slot = try self.slotForSubscriber(id);
         for (mapped_subscriptions, reasons) |subscription, *reason| {
             reason.* = if (self.subscribeAuthorized(
-                slot.listener_access_control,
+                slot.accessControl(),
                 connect,
                 subscription,
             )) 0xff else subscriptionDeniedReason(connection.protocol);
@@ -4318,7 +4389,7 @@ pub const Broker = struct {
                 .properties = properties.items,
                 .payload = delivery.payload,
             };
-            if (!self.deliveryAuthorized(slot.listener_access_control, .{
+            if (!self.deliveryAuthorized(slot.accessControl(), .{
                 .client_id = client_id,
                 .username = slot.username,
                 .topic = publish.topic,
@@ -4409,7 +4480,7 @@ pub const Broker = struct {
         };
         for (mapped_filters, 0..) |filter, index| {
             if (!self.unsubscribeAuthorized(
-                slot.listener_access_control,
+                slot.accessControl(),
                 connect,
                 filter,
             )) {
@@ -4512,7 +4583,7 @@ pub const Broker = struct {
             );
         }
         if (!self.publishAuthorized(
-            publisher_slot.listener_access_control,
+            publisher_slot.accessControl(),
             connect,
             canonical_publish,
         )) {
@@ -5030,7 +5101,7 @@ pub const Broker = struct {
                 );
             }
             if (!self.deliveryAuthorized(if (online)
-                destination.?.listener_access_control
+                destination.?.accessControl()
             else
                 null, .{
                 .client_id = try self.sessions.clientId(handle),
@@ -6093,7 +6164,7 @@ pub const Broker = struct {
             }
             const transmission = transmissions[0];
             if (transmission == .publish and
-                !self.deliveryAuthorized(slot.listener_access_control, .{
+                !self.deliveryAuthorized(slot.accessControl(), .{
                     .client_id = client_id,
                     .username = slot.username,
                     .topic = transmission.publish.topic,
