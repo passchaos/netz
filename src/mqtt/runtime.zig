@@ -92,13 +92,11 @@ pub const Limits = struct {
 const ConnectionLimits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
     max_pending_ping_packets: usize = 256,
-    proxy_v2_require_client_certificate: bool = false,
 
     fn from(limits: Limits) ConnectionLimits {
         return .{
             .max_packet_size = limits.max_packet_size,
             .max_pending_ping_packets = limits.max_pending_ping_packets,
-            .proxy_v2_require_client_certificate = limits.proxy_v2_require_client_certificate,
         };
     }
 };
@@ -343,6 +341,7 @@ pub const Server = struct {
             .transport = .initTcp(self.io, stream),
             .protocol = options.protocol,
             .limits = .from(self.limits),
+            .proxy_v2_require_client_certificate = self.limits.proxy_v2_require_client_certificate,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
@@ -548,6 +547,7 @@ pub const UnixServer = struct {
             .transport = .initTcp(self.io, stream),
             .protocol = options.protocol,
             .limits = .from(self.limits),
+            .proxy_v2_require_client_certificate = self.limits.proxy_v2_require_client_certificate,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
@@ -2198,6 +2198,7 @@ fn connectStreamAttemptBefore(
         .transport = .initTcp(io, stream),
         .protocol = options.protocol,
         .limits = .from(limits),
+        .proxy_v2_require_client_certificate = limits.proxy_v2_require_client_certificate,
         .max_outgoing_inflight = options.max_outgoing_inflight,
         .max_incoming_inflight = mqtt.receiveMaximum(
             options.properties,
@@ -2517,6 +2518,7 @@ pub const Connection = struct {
     local_wildcard_subscription_available: bool = true,
     local_subscription_identifier_available: bool = true,
     local_shared_subscription_available: bool = true,
+    proxy_v2_require_client_certificate: bool = false,
     packet_identifiers: packet_identifiers.State = .{},
     /// Incoming and outgoing aliases have independent concurrency owners and
     /// are allocated only when their direction first registers a mapping.
@@ -2527,7 +2529,8 @@ pub const Connection = struct {
     /// or write may reuse connection-scoped state (especially Topic Alias)
     /// after that ambiguity. The owner must close this Network Connection.
     transport_unusable: std.atomic.Value(bool) = .init(false),
-    assigned_client_id: ?[]u8 = null,
+    assigned_client_id_ptr: ?[*]u8 = null,
+    assigned_client_id_len: u16 = 0,
     authentication: auth_runtime.State = .{},
     /// Shared packet-output storage. MQTT writes are synchronous and a
     /// Connection permits only one writer at a time, so control packets and
@@ -2573,6 +2576,7 @@ pub const Connection = struct {
             .transport = try .initWebSocket(allocator, ws),
             .protocol = protocol,
             .limits = .from(limits),
+            .proxy_v2_require_client_certificate = limits.proxy_v2_require_client_certificate,
             .max_outgoing_inflight = max_outgoing_inflight,
             .incoming_topic_alias_maximum = topic_alias_maximum,
         };
@@ -2602,6 +2606,7 @@ pub const Connection = struct {
             .transport = undefined,
             .protocol = options.protocol,
             .limits = .from(options.limits),
+            .proxy_v2_require_client_certificate = options.limits.proxy_v2_require_client_certificate,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse
                 options.max_outgoing_inflight,
@@ -2642,6 +2647,7 @@ pub const Connection = struct {
             .transport = .initTlsServer(tls_connection),
             .protocol = protocol,
             .limits = .from(limits),
+            .proxy_v2_require_client_certificate = limits.proxy_v2_require_client_certificate,
             .max_outgoing_inflight = max_outgoing_inflight,
             .incoming_topic_alias_maximum = topic_alias_maximum,
         };
@@ -2650,9 +2656,7 @@ pub const Connection = struct {
     pub fn close(self: *Connection) void {
         self.packet_identifiers.deinit(self.allocator);
         self.clearTopicAliases();
-        if (self.assigned_client_id) |client_id| {
-            self.allocator.free(client_id);
-        }
+        self.clearAssignedClientId();
         self.authentication.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
         self.write_property_scratch.deinit(self.allocator);
@@ -2780,7 +2784,7 @@ pub const Connection = struct {
     pub fn authenticatedProxyCommonName(
         self: *const Connection,
     ) ?[]const u8 {
-        if (!self.limits.proxy_v2_require_client_certificate) return null;
+        if (!self.proxy_v2_require_client_certificate) return null;
         const metadata = self.proxyMetadata() orelse return null;
         if (metadata.version != .v2 or metadata.command != .proxy) return null;
         const tls = metadata.tls orelse return null;
@@ -2949,7 +2953,27 @@ pub const Connection = struct {
     pub fn assignedClientId(
         self: *const Connection,
     ) ?[]const u8 {
-        return self.assigned_client_id;
+        const ptr = self.assigned_client_id_ptr orelse return null;
+        return ptr[0..self.assigned_client_id_len];
+    }
+
+    fn setAssignedClientId(
+        self: *Connection,
+        client_id: []const u8,
+    ) Error!void {
+        std.debug.assert(self.assigned_client_id_ptr == null);
+        const len = std.math.cast(u16, client_id.len) orelse
+            return error.InvalidClientId;
+        const owned = try self.allocator.dupe(u8, client_id);
+        self.assigned_client_id_ptr = owned.ptr;
+        self.assigned_client_id_len = len;
+    }
+
+    fn clearAssignedClientId(self: *Connection) void {
+        const ptr = self.assigned_client_id_ptr orelse return;
+        self.allocator.free(ptr[0..self.assigned_client_id_len]);
+        self.assigned_client_id_ptr = null;
+        self.assigned_client_id_len = 0;
     }
 
     /// Complete the broker side of MQTT CONNECT on an already-open transport.
@@ -3321,10 +3345,7 @@ pub const Connection = struct {
         if (mqtt.assignedClientIdentifier(
             connack.connack.properties,
         )) |client_id| {
-            self.assigned_client_id = try allocator.dupe(
-                u8,
-                client_id,
-            );
+            try self.setAssignedClientId(client_id);
         }
 
         const owned_connection = self.*;
@@ -7047,7 +7068,7 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 888), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 872), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*proxy_protocol.Metadata),
             @sizeOf(@FieldType(Connection, "proxy_metadata")),
@@ -7113,9 +7134,53 @@ test "MQTT Connection retains only post-admission limits" {
         configured.max_pending_ping_packets,
         active.max_pending_ping_packets,
     );
-    try std.testing.expect(active.proxy_v2_require_client_certificate);
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 24), @sizeOf(ConnectionLimits));
+        try std.testing.expectEqual(@as(usize, 16), @sizeOf(ConnectionLimits));
+    }
+
+    const connection = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+        .limits = active,
+        .proxy_v2_require_client_certificate = configured.proxy_v2_require_client_certificate,
+    };
+    try std.testing.expect(connection.proxy_v2_require_client_certificate);
+}
+
+test "MQTT Connection stores assigned Client ID with wire length" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var connection = Connection{
+        .allocator = failing.allocator(),
+        .transport = undefined,
+    };
+    try std.testing.expect(connection.assignedClientId() == null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.setAssignedClientId("generated-client"),
+    );
+    try std.testing.expect(connection.assignedClientId() == null);
+
+    connection.allocator = std.testing.allocator;
+    try connection.setAssignedClientId("generated-client");
+    try std.testing.expectEqualStrings(
+        "generated-client",
+        connection.assignedClientId().?,
+    );
+    connection.clearAssignedClientId();
+    try std.testing.expect(connection.assignedClientId() == null);
+
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(
+            @sizeOf(?[*]u8),
+            @sizeOf(@FieldType(Connection, "assigned_client_id_ptr")),
+        );
+        try std.testing.expectEqual(
+            @sizeOf(u16),
+            @sizeOf(@FieldType(Connection, "assigned_client_id_len")),
+        );
     }
 }
 

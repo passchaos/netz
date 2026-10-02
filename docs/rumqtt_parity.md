@@ -3485,15 +3485,17 @@ proxy evidence for the entire suite.
    lazy pointers, matching the runtime's concurrent-reader/serialized-writer
    ownership while avoiding each structure until its direction first sees QoS
    1/2 traffic or an alias mapping. Finally, each established connection keeps
-   a 24-byte projection of the 64-byte public `Limits`: socket tuning, PROXY
+   a 16-byte projection of the 64-byte public `Limits`: socket tuning, PROXY
    parsing policy, and admission timeout remain in listener/connector state,
-   while packet size, blocking-PING queue size, and certificate-identity policy
-   survive for runtime use. Connection-owned mount prefixes now omit the
-   general Namespace ownership flag, and Enhanced Authentication stores its
-   already allocated method using the protocol's u16 string length instead of
-   a second machine word. Neither change adds an allocation. Together these
-   changes reduce the audited 64-bit `runtime.Connection` from 1,408 to 888
-   bytes (520 bytes per ordinary QoS 0 live connection without aliases). The
+   while packet size and blocking-PING queue size survive in that projection;
+   the remaining certificate-identity bit joins the connection's existing
+   flags. Connection-owned mount prefixes omit the general Namespace ownership
+   flag, Enhanced Authentication stores its already allocated method using the
+   protocol's u16 string length instead of a second machine word, and an
+   assigned Client ID likewise reuses its allocation with a u16 length rather
+   than an optional slice. None adds an allocation. Together these changes
+   reduce the audited 64-bit `runtime.Connection` from 1,408 to 872 bytes (536
+   bytes per ordinary QoS 0 live connection without aliases). The
    four delivery/route/Session
    scratch lists, transient QoS map, counters, and optional delivery-writer
    pointer now share one 152-byte `ClientBuffers` descriptor allocated only
