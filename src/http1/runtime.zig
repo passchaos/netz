@@ -165,10 +165,12 @@ pub const InformationalObserver = struct {
 
 pub const UriEndpoint = struct {
     allocator: std.mem.Allocator,
-    /// Owned host text exactly as it belongs in HTTP authority syntax.  IPv6
-    /// literals intentionally keep their RFC 3986 brackets so synthesized Host
-    /// / `:authority` fields are valid.
+    /// Host text exactly as it belongs in HTTP authority syntax. This slice
+    /// aliases the prefix of `authority`; IPv6 literals intentionally keep
+    /// their RFC 3986 brackets so synthesized Host / `:authority` fields are
+    /// valid.
     host_storage: []u8,
+    /// Owns the single allocation backing `host_storage` and `tls_host`.
     authority: []u8,
     port: u16,
     target: Target,
@@ -184,7 +186,6 @@ pub const UriEndpoint = struct {
 
     pub fn deinit(self: *UriEndpoint) void {
         self.allocator.free(self.authority);
-        self.allocator.free(self.host_storage);
         self.* = undefined;
     }
 
@@ -199,16 +200,33 @@ pub const UriEndpoint = struct {
 pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri, default_port: u16) Error!UriEndpoint {
     if (uri.user != null or uri.password != null) return error.InvalidUri;
     const host_component = uri.host orelse return error.InvalidUri;
-    const host_storage = try uriHostToOwned(allocator, host_component);
-    errdefer allocator.free(host_storage);
+    var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
+    const raw_host = host_component.toRaw(&host_buffer) catch
+        return error.InvalidUri;
+    if (raw_host.len == 0) return error.InvalidUri;
 
     const port = uri.port orelse default_port;
     const authority = if (uri.port == null)
-        try allocator.dupe(u8, host_storage)
-    else
-        try std.fmt.allocPrint(allocator, "{s}:{d}", .{ host_storage, port });
+        try allocator.dupe(u8, raw_host)
+    else blk: {
+        var port_buffer: [5]u8 = undefined;
+        const port_text = std.fmt.bufPrint(
+            &port_buffer,
+            "{d}",
+            .{port},
+        ) catch unreachable;
+        const value = try allocator.alloc(
+            u8,
+            raw_host.len + 1 + port_text.len,
+        );
+        @memcpy(value[0..raw_host.len], raw_host);
+        value[raw_host.len] = ':';
+        @memcpy(value[raw_host.len + 1 ..], port_text);
+        break :blk value;
+    };
     errdefer allocator.free(authority);
 
+    const host_storage = authority[0..raw_host.len];
     const target, const tls_host = try uriTargetForHost(host_storage, port);
     return .{
         .allocator = allocator,
@@ -218,13 +236,6 @@ pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri, default_port: u16
         .target = target,
         .tls_host = tls_host,
     };
-}
-
-fn uriHostToOwned(allocator: std.mem.Allocator, host: std.Uri.Component) Error![]u8 {
-    var buffer: [net.HostName.max_len + 2]u8 = undefined;
-    const raw = host.toRaw(&buffer) catch return error.InvalidUri;
-    if (raw.len == 0) return error.InvalidUri;
-    return allocator.dupe(u8, raw);
 }
 
 fn uriTargetForHost(host: []const u8, port: u16) Error!struct { UriEndpoint.Target, []const u8 } {
@@ -265,6 +276,45 @@ test "URI endpoint handles bracketed IPv6 literals" {
     defer default_endpoint.deinit();
     try std.testing.expectEqualStrings("example.com", default_endpoint.authority);
     try std.testing.expectEqual(@as(u16, 80), default_endpoint.port);
+}
+
+test "URI endpoint retains host and authority in one allocation" {
+    const allocator = std.testing.allocator;
+
+    var implicit_one_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 1,
+    });
+    const implicit = try std.Uri.parse("http://example.com/path");
+    var implicit_endpoint = try uriEndpoint(
+        implicit_one_alloc.allocator(),
+        implicit,
+        80,
+    );
+    defer implicit_endpoint.deinit();
+    try std.testing.expect(!implicit_one_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        @intFromPtr(implicit_endpoint.host_storage.ptr),
+        @intFromPtr(implicit_endpoint.authority.ptr),
+    );
+
+    var explicit_one_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 1,
+    });
+    const explicit = try std.Uri.parse("https://[::1]:8443/path");
+    var explicit_endpoint = try uriEndpoint(
+        explicit_one_alloc.allocator(),
+        explicit,
+        443,
+    );
+    defer explicit_endpoint.deinit();
+    try std.testing.expect(!explicit_one_alloc.has_induced_failure);
+    try std.testing.expectEqualStrings("[::1]", explicit_endpoint.host_storage);
+    try std.testing.expectEqualStrings("[::1]:8443", explicit_endpoint.authority);
+    try std.testing.expectEqualStrings("::1", explicit_endpoint.tls_host);
+    try std.testing.expectEqual(
+        @intFromPtr(explicit_endpoint.host_storage.ptr),
+        @intFromPtr(explicit_endpoint.authority.ptr),
+    );
 }
 
 test "HTTP/1 TLS server exchanges persistent requests" {
