@@ -192,7 +192,7 @@ pub const Server = struct {
         );
         errdefer connection.close();
         if (proxy_metadata) |metadata| {
-            connection.attachProxyMetadata(metadata);
+            try connection.attachProxyMetadata(metadata);
             proxy_metadata = null;
         }
         return if (deadline) |absolute|

@@ -3471,11 +3471,15 @@ proxy evidence for the entire suite.
    five shapes, including 10,948 to 10,236 KiB for balanced 32×32. Mosquitto
    still uses materially less memory in every shape, so connection-state
    sizing remains active work.
-   Broker admission now also keeps the 1,408-byte runtime Connection out of
-   the preallocated capacity table and allocates the maximum 86-byte generated
+   Broker admission now also keeps the runtime Connection out of the
+   preallocated capacity table and allocates the maximum 86-byte generated
    Client ID only for clients that actually connect with an empty ID. The
    48-byte listener ACL descriptor is likewise allocated only for connections
-   whose listener configures an overlay. The four delivery/route/Session
+   whose listener configures an overlay. A trusted PROXY listener now owns its
+   296-byte parsed metadata descriptor out of line; direct TCP, TLS, WebSocket,
+   and WSS connections retain only an optional pointer, reducing the audited
+   64-bit `runtime.Connection` from 1,408 to 1,120 bytes (288 bytes per live
+   non-PROXY connection). The four delivery/route/Session
    scratch lists, transient QoS map, counters, and optional delivery-writer
    pointer now share one 152-byte `ClientBuffers` descriptor allocated only
    when a connection first subscribes, publishes through the router, or writes
@@ -3490,10 +3494,11 @@ proxy evidence for the entire suite.
    borrowed policy/CONNECT views, and all optional storage is freed on
    rollback, disconnect, or broker destruction. Raw TCP, TLS, WebSocket,
    Client ID takeover, generated-ID reuse, ACL denial, buffer-allocation
-   rollback, and allocator leak tests cover the ownership paths. Fully occupied
-   brokers that publish or subscribe still retain the required Connection and
-   buffer state, so this is deterministic capacity-headroom plus disconnected
-   retention evidence rather than a steady-state payload-memory claim.
+   rollback, PROXY allocation failure/transfer, and allocator leak tests cover
+   the ownership paths. Fully occupied brokers that publish or subscribe still
+   retain the required Connection and buffer state, so the slot result is
+   deterministic capacity-headroom plus disconnected-retention evidence; the
+   Connection reduction also applies to steady-state non-PROXY clients.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

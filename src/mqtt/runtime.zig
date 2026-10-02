@@ -328,14 +328,16 @@ pub const Server = struct {
             .limits = self.limits,
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
-            .proxy_metadata = proxy_metadata,
         };
-        proxy_metadata = null;
         stream_owned = false;
         // After construction, `connection` is the sole stream owner. Its
         // cleanup subsumes the raw accepted-stream cleanup above.
         var connection_owned = true;
         defer if (connection_owned) connection.close();
+        if (proxy_metadata) |metadata| {
+            try connection.attachProxyMetadata(metadata);
+            proxy_metadata = null;
+        }
         const pending = try connection.acceptPendingBefore(
             options,
             connect_deadline,
@@ -2518,7 +2520,10 @@ pub const Connection = struct {
     /// Owned metadata from an explicitly trusted PROXY protocol listener.
     /// Keeping it beside rather than inside the transport allows the same
     /// identity model to span raw TCP, TLS, WS, and WSS adapters.
-    proxy_metadata: ?proxy_protocol.Metadata = null,
+    /// Present only for listeners which explicitly enabled trusted PROXY
+    /// protocol parsing. The 296-byte descriptor remains out of line for the
+    /// overwhelmingly common direct-connection path.
+    proxy_metadata: ?*proxy_protocol.Metadata = null,
     /// Broker listener namespace. Empty means the global topic space. This is
     /// owned by the Connection so Session takeover and asynchronous delivery
     /// can always project canonical topics through the destination listener.
@@ -2632,7 +2637,7 @@ pub const Connection = struct {
         if (self.pending_ping_overflow) |*packet| {
             packet.deinit(self.allocator);
         }
-        if (self.proxy_metadata) |*metadata| metadata.deinit();
+        self.clearProxyMetadata();
         self.topic_namespace.deinit(self.allocator);
         self.transport.close(self.allocator);
         self.* = undefined;
@@ -2745,7 +2750,7 @@ pub const Connection = struct {
     pub fn proxyMetadata(
         self: *const Connection,
     ) ?*const proxy_protocol.Metadata {
-        return if (self.proxy_metadata) |*metadata| metadata else null;
+        return self.proxy_metadata;
     }
 
     /// Return a PROXY v2 SSL commonName only when this connection's listener
@@ -2770,13 +2775,23 @@ pub const Connection = struct {
 
     /// Transfer owned trusted-proxy metadata into this connection. This may be
     /// called at most once, after the preface is consumed and before the
-    /// connection escapes its transport adapter.
+    /// connection escapes its transport adapter. Allocation failure leaves the
+    /// caller-owned value unchanged; success transfers its nested allocations.
     pub fn attachProxyMetadata(
         self: *Connection,
         metadata: proxy_protocol.Metadata,
-    ) void {
+    ) std.mem.Allocator.Error!void {
         std.debug.assert(self.proxy_metadata == null);
-        self.proxy_metadata = metadata;
+        const owned = try self.allocator.create(proxy_protocol.Metadata);
+        owned.* = metadata;
+        self.proxy_metadata = owned;
+    }
+
+    fn clearProxyMetadata(self: *Connection) void {
+        const metadata = self.proxy_metadata orelse return;
+        metadata.deinit();
+        self.allocator.destroy(metadata);
+        self.proxy_metadata = null;
     }
 
     pub fn setTopicNamespace(
@@ -6864,6 +6879,49 @@ test "MQTT runtime resolves connection acceptance policies" {
         error.InvalidProperty,
         pending.resolvedOptions(.{ .maximum_keep_alive_seconds = 0 }),
     );
+}
+
+test "MQTT Connection allocates PROXY metadata on demand" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var connection = Connection{
+        .allocator = failing.allocator(),
+        .transport = undefined,
+    };
+    const metadata = proxy_protocol.Metadata{
+        .allocator = std.testing.allocator,
+        .version = .v2,
+        .command = .local,
+        .source_unix = try std.testing.allocator.dupe(u8, "source.sock"),
+    };
+
+    try std.testing.expect(connection.proxyMetadata() == null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.attachProxyMetadata(metadata),
+    );
+    try std.testing.expect(connection.proxyMetadata() == null);
+    try std.testing.expectEqual(proxy_protocol.Version.v2, metadata.version);
+    try std.testing.expectEqualStrings("source.sock", metadata.source_unix.?);
+
+    connection.allocator = std.testing.allocator;
+    try connection.attachProxyMetadata(metadata);
+    try std.testing.expectEqual(
+        proxy_protocol.Version.v2,
+        connection.proxyMetadata().?.version,
+    );
+    connection.clearProxyMetadata();
+    try std.testing.expect(connection.proxyMetadata() == null);
+
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 1_120), @sizeOf(Connection));
+        try std.testing.expectEqual(
+            @sizeOf(?*proxy_protocol.Metadata),
+            @sizeOf(@FieldType(Connection, "proxy_metadata")),
+        );
+    }
 }
 
 test "MQTT client rejects Session Present after Clean Start" {
