@@ -359,6 +359,19 @@ pub fn validateStrictUtf8String(value: []const u8) Error!void {
     }
 }
 
+/// Apply the strict UTF-8 policy to every UTF-8 Encoded String carried by an
+/// MQTT 5 property list. Binary Data remains opaque by definition.
+pub fn validateStrictUtf8Properties(properties: []const Property) Error!void {
+    for (properties) |property| switch (property) {
+        .utf8 => |value| try validateStrictUtf8String(value.value),
+        .utf8_pair => |value| {
+            try validateStrictUtf8String(value.key);
+            try validateStrictUtf8String(value.value);
+        },
+        else => {},
+    };
+}
+
 pub fn writeBinary(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
     if (value.len > std.math.maxInt(u16)) return error.InvalidProperty;
     try list.ensureUnusedCapacity(allocator, 2 + value.len);
@@ -3460,6 +3473,45 @@ test "MQTT strict UTF-8 policy rejects controls and noncharacters" {
         );
     }
     try validateStrictUtf8String("valid\xf0\xaa\x9b\x94value");
+
+    try validateStrictUtf8Properties(&.{
+        .{ .utf8 = .{
+            .id = .reason_string,
+            .value = "valid reason",
+        } },
+        .{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "trace",
+            .value = "valid value",
+        } },
+        .{ .binary = .{
+            .id = .correlation_data,
+            .value = "opaque\x00\xff",
+        } },
+    });
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateStrictUtf8Properties(&.{.{ .utf8 = .{
+            .id = .reason_string,
+            .value = "bad\x7freason",
+        } }}),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateStrictUtf8Properties(&.{.{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "bad\xef\xb7\x90key",
+            .value = "value",
+        } }}),
+    );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateStrictUtf8Properties(&.{.{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "key",
+            .value = "bad\xc2\x9fvalue",
+        } }}),
+    );
 }
 
 test "MQTT ping packets reject trailing bytes" {

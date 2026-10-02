@@ -3282,6 +3282,13 @@ default runtime policy continues to accept the specification's discouraged
 control characters. Both formerly configuration-dependent PUBLISH scenarios
 and the DISCONNECT Session Expiry transition therefore execute instead of
 being excluded.
+Strict connection validation now applies the same control/noncharacter policy
+to every MQTT 5 UTF-8 property string and User Property key/value in CONNECT,
+Will, CONNACK, PUBLISH, acknowledgements, subscription controls, DISCONNECT,
+and AUTH; Binary Data remains opaque. This closes the previous gap where only
+identity, Will Topic, Topic Name, and Topic Filter fields received the
+configured Mosquitto-compatible check. Both client connect and server accept
+options expose the policy, so every peer direction has the same boundary.
 The adapter preserves the upstream payload DSL, group/test inheritance,
 explicit response bytes, connection-liveness expectations, and MQTT 3.1.1
 helper publications with full QoS 0/1/2 handshakes; it rejects other

@@ -921,10 +921,10 @@ pub const AcceptOptions = struct {
     /// Protocol versions admitted after CONNECT auto-detection. The protocol
     /// field above remains only the initial parsing/encoding hint.
     accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
-    /// Reject the UTF-8 control characters and noncharacters that MQTT marks
-    /// as unsuitable for interchange. The default keeps the wire codec's
-    /// interoperable MUST-level validation; enable this for Mosquitto-style
-    /// broker admission.
+    /// Reject control characters and Unicode noncharacters in every UTF-8
+    /// Encoded String received from the client. The default keeps the wire
+    /// codec's interoperable MUST-level validation; enable this for
+    /// Mosquitto-style broker admission.
     strict_utf8: bool = false,
     /// Optional process-wide wire counter sink. Every complete MQTT Control
     /// Packet is charged after a successful transport read or write, including
@@ -2232,6 +2232,10 @@ pub const ConnectResult = struct {
 pub const ConnectOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     client_id: []const u8,
+    /// Reject control characters and Unicode noncharacters in every UTF-8
+    /// Encoded String received from the broker. The default retains MQTT's
+    /// interoperable MUST-level validation.
+    strict_utf8: bool = false,
     /// Absolute receive budget from the transmitted CONNECT through the final
     /// CONNACK. Interim Enhanced Authentication packets do not renew it.
     connect_timeout: ?std.Io.Duration = null,
@@ -3033,6 +3037,7 @@ pub const Connection = struct {
         // Alive, but an omitted property must retain the requested interval.
         self.keep_alive_seconds = options.keep_alive_seconds;
         self.endpoint_role = .client;
+        self.strict_utf8 = options.strict_utf8;
         self.connect_session_expiry = mqtt.sessionExpiryInterval(
             options.properties,
         ) orelse 0;
@@ -3162,6 +3167,7 @@ pub const Connection = struct {
                         packet.bytes,
                     );
                     errdefer value.deinit(allocator);
+                    try self.validateIncomingProperties(value.properties);
                     if (options.clean_start and value.session_present) {
                         return error.InvalidFlags;
                     }
@@ -3473,6 +3479,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .connack) return error.UnexpectedPacket;
         var connack = try mqtt.ConnAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer connack.deinit(self.allocator);
+        try self.validateIncomingProperties(connack.properties);
         return .{ .packet = packet, .connack = connack };
     }
 
@@ -3920,6 +3927,7 @@ pub const Connection = struct {
         var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
         errdefer publish_packet.deinit(self.allocator);
         try self.validateIncomingUtf8(publish_packet.topic);
+        try self.validateIncomingProperties(publish_packet.properties);
         try self.commitIncomingPublish(&publish_packet);
         return .{ .packet = packet, .publish = publish_packet };
     }
@@ -4210,6 +4218,7 @@ pub const Connection = struct {
         try self.validateIncomingSubscriptionsUtf8(
             subscribe_packet.subscriptions,
         );
+        try self.validateIncomingProperties(subscribe_packet.properties);
         try self.validateIncomingSubscribe(subscribe_packet.subscriptions, subscribe_packet.properties);
         return .{ .packet = packet, .subscribe = subscribe_packet };
     }
@@ -4256,6 +4265,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .suback) return error.UnexpectedPacket;
         var suback = try mqtt.SubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer suback.deinit(self.allocator);
+        try self.validateIncomingProperties(suback.properties);
         return .{ .packet = packet, .suback = suback };
     }
 
@@ -4281,6 +4291,7 @@ pub const Connection = struct {
         try self.validateIncomingTopicFiltersUtf8(
             unsubscribe_packet.topic_filters,
         );
+        try self.validateIncomingProperties(unsubscribe_packet.properties);
         return .{ .packet = packet, .unsubscribe = unsubscribe_packet };
     }
 
@@ -4326,6 +4337,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != .unsuback) return error.UnexpectedPacket;
         var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
         errdefer unsuback.deinit(self.allocator);
+        try self.validateIncomingProperties(unsuback.properties);
         return .{ .packet = packet, .unsuback = unsuback };
     }
 
@@ -4540,6 +4552,7 @@ pub const Connection = struct {
             packet,
         );
         errdefer disconnect_packet.deinit(self.allocator);
+        try self.validateIncomingProperties(disconnect_packet.properties);
         try self.validateIncomingDisconnect(disconnect_packet);
         return disconnect_packet;
     }
@@ -4630,6 +4643,7 @@ pub const Connection = struct {
             packet,
         );
         errdefer auth.deinit(self.allocator);
+        try self.validateIncomingProperties(auth.properties);
         switch (self.endpoint_role) {
             .unestablished => {},
             .client => try mqtt.validateAuthReasonForSender(
@@ -5020,6 +5034,7 @@ pub const Connection = struct {
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingUtf8(value.topic);
+                try self.validateIncomingProperties(value.properties);
                 try self.commitIncomingPublish(&value);
                 break :blk .{ .publish = .{
                     .packet = packet,
@@ -5033,6 +5048,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingProperties(value.properties);
                 const owned = OwnedAck{ .packet = packet, .ack = value };
                 break :blk switch (packet_type) {
                     .puback => .{ .puback = owned },
@@ -5165,6 +5181,7 @@ pub const Connection = struct {
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingUtf8(value.topic);
+                try self.validateIncomingProperties(value.properties);
                 try self.commitIncomingPublish(&value);
                 break :blk .{ .publish = .{
                     .packet = packet,
@@ -5181,6 +5198,7 @@ pub const Connection = struct {
                 try self.validateIncomingSubscriptionsUtf8(
                     value.subscriptions,
                 );
+                try self.validateIncomingProperties(value.properties);
                 try self.validateIncomingSubscribe(
                     value.subscriptions,
                     value.properties,
@@ -5200,6 +5218,7 @@ pub const Connection = struct {
                 try self.validateIncomingTopicFiltersUtf8(
                     value.topic_filters,
                 );
+                try self.validateIncomingProperties(value.properties);
                 break :blk .{ .unsubscribe = .{
                     .packet = packet,
                     .unsubscribe = value,
@@ -5212,6 +5231,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingProperties(value.properties);
                 break :blk .{ .puback = .{
                     .packet = packet,
                     .ack = value,
@@ -5224,6 +5244,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingProperties(value.properties);
                 break :blk .{ .pubrec = .{
                     .packet = packet,
                     .ack = value,
@@ -5236,6 +5257,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingProperties(value.properties);
                 // Unlike the strict synchronous `readPubRel`, a broker must
                 // see unknown/repeated identifiers so it can answer PUBCOMP
                 // 0x92 rather than converting an idempotent control packet
@@ -5252,6 +5274,7 @@ pub const Connection = struct {
                     packet.bytes,
                 );
                 errdefer value.deinit(self.allocator);
+                try self.validateIncomingProperties(value.properties);
                 break :blk .{ .pubcomp = .{
                     .packet = packet,
                     .ack = value,
@@ -5377,11 +5400,13 @@ pub const Connection = struct {
     ) Error!void {
         if (!self.strict_utf8) return;
         try mqtt.validateStrictUtf8String(connect.client_id);
+        try mqtt.validateStrictUtf8Properties(connect.properties);
         if (connect.username) |username| {
             try mqtt.validateStrictUtf8String(username);
         }
         if (connect.will) |will| {
             try mqtt.validateStrictUtf8String(will.topic);
+            try mqtt.validateStrictUtf8Properties(will.properties);
         }
     }
 
@@ -5390,6 +5415,15 @@ pub const Connection = struct {
         value: []const u8,
     ) Error!void {
         if (self.strict_utf8) try mqtt.validateStrictUtf8String(value);
+    }
+
+    fn validateIncomingProperties(
+        self: Connection,
+        properties: []const mqtt.Property,
+    ) Error!void {
+        if (self.strict_utf8) {
+            try mqtt.validateStrictUtf8Properties(properties);
+        }
     }
 
     fn validateIncomingSubscriptionsUtf8(
@@ -5863,6 +5897,7 @@ pub const Connection = struct {
         if (packet.fixed.packet_type != packet_type) return error.UnexpectedPacket;
         var ack = try mqtt.AckPacket.parse(self.allocator, self.protocol, packet.bytes);
         errdefer ack.deinit(self.allocator);
+        try self.validateIncomingProperties(ack.properties);
         return .{ .packet = packet, .ack = ack };
     }
 
@@ -6112,9 +6147,27 @@ test "MQTT runtime strict UTF-8 policy covers broker input fields" {
         .topic_filter = accepted_control,
     }};
     const filters = [_][]const u8{accepted_control};
+    const properties = [_]mqtt.Property{
+        .{ .utf8 = .{
+            .id = .reason_string,
+            .value = accepted_control,
+        } },
+    };
+    const valid_properties = [_]mqtt.Property{
+        .{ .utf8_pair = .{
+            .id = .user_property,
+            .key = "trace",
+            .value = "accepted",
+        } },
+        .{ .binary = .{
+            .id = .correlation_data,
+            .value = "opaque\x00\xff",
+        } },
+    };
 
     try connection.validateIncomingConnectUtf8(connect);
     try connection.validateIncomingUtf8(accepted_control);
+    try connection.validateIncomingProperties(&properties);
     try connection.validateIncomingSubscriptionsUtf8(&subscriptions);
     try connection.validateIncomingTopicFiltersUtf8(&filters);
 
@@ -6127,6 +6180,11 @@ test "MQTT runtime strict UTF-8 policy covers broker input fields" {
         error.InvalidUtf8,
         connection.validateIncomingUtf8(accepted_control),
     );
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        connection.validateIncomingProperties(&properties),
+    );
+    try connection.validateIncomingProperties(&valid_properties);
     try std.testing.expectError(
         error.InvalidUtf8,
         connection.validateIncomingSubscriptionsUtf8(&subscriptions),
