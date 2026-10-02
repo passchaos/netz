@@ -1307,6 +1307,17 @@ applying TCP-only socket options.
    4,128-byte receive buffer per connection, while netz uses zio tasks and grows
    retained receive storage on demand. The two memory scopes remain separately
    labeled rather than being combined into one ratio.
+   HTTP/1 connection state now also stores its mutually exclusive resumable
+   application message, Ping, and Close transactions in one tagged union. On
+   64-bit targets this reduces `runtime.Connection` from 1,968 to 1,568 bytes,
+   a 400-byte (20.3%) fixed-state reduction per live connection, or 51,200
+   bytes across the 128-connection mostly-idle shape. Automatic Pong/Close
+   state remains separate because a receive owner may queue it behind an older
+   application write. A layout assertion and the existing exact-suffix,
+   queued-auto-Pong, control-frame, and fatal-cleanup regressions guard both the
+   reduction and that concurrency contract. This is inline connection-state
+   evidence; it is not folded into the explicit-allocator or throughput ratios
+   above.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    digest-locked Autobahn Testsuite 25.10.1 fuzzing client against the dedicated

@@ -95,23 +95,27 @@ pub const PendingAutomaticControl = struct {
 /// been aborted. Callers must hold their send mutex so a bounded writer cannot
 /// concurrently update a cursor or borrowed-payload descriptor.
 pub fn clearPendingOutboundLocked(connection: anytype) void {
-    if (connection.pending_message) |*pending| {
-        std.crypto.secureZero(u8, &pending.header);
-        if (pending.mask_key) |*mask| {
-            std.crypto.secureZero(u8, mask);
+    if (comptime @hasField(@TypeOf(connection.*), "pending_write")) {
+        connection.pending_write.clear();
+    } else {
+        if (connection.pending_message) |*pending| {
+            std.crypto.secureZero(u8, &pending.header);
+            if (pending.mask_key) |*mask| {
+                std.crypto.secureZero(u8, mask);
+            }
         }
+        connection.pending_message = null;
+        if (connection.pending_ping) |*pending| {
+            std.crypto.secureZero(u8, &pending.bytes);
+            std.crypto.secureZero(u8, &pending.payload);
+        }
+        connection.pending_ping = null;
+        if (connection.pending_close) |*pending| {
+            std.crypto.secureZero(u8, &pending.bytes);
+            std.crypto.secureZero(u8, &pending.payload);
+        }
+        connection.pending_close = null;
     }
-    connection.pending_message = null;
-    if (connection.pending_ping) |*pending| {
-        std.crypto.secureZero(u8, &pending.bytes);
-        std.crypto.secureZero(u8, &pending.payload);
-    }
-    connection.pending_ping = null;
-    if (connection.pending_close) |*pending| {
-        std.crypto.secureZero(u8, &pending.bytes);
-        std.crypto.secureZero(u8, &pending.payload);
-    }
-    connection.pending_close = null;
     if (connection.pending_auto_control) |*pending| {
         pending.deinit(connection.allocator);
     }
