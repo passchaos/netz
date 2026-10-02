@@ -792,17 +792,27 @@ Authenticated client and standalone-server sessions additionally expose
 `closeWithTimeout` and `closeWithDeadline`. One absolute awake-clock deadline
 now covers the encoded CLOSE capsule, CONNECT FIN, and every associated-stream
 `WT_SESSION_GONE` RESET_STREAM/STOP_SENDING submission. The capsule is encoded
-once into fixed storage and retains its exact socket-visible offset across a
-timeout; FIN commits `local_close_sent`, and later calls resume only unfinished
-stream cleanup. Completed terminal frames remain recorded per stream, so they
-are not submitted twice. While a partial CLOSE is pending, application sends,
-stream creation, drain, reset, and stop calls fail with `InvalidSessionState`
-instead of interleaving bytes after the capsule prefix. Dispatcher-bound
-client sessions deliberately retain their existing nonblocking one-shot close
-path; dispatcher-fed standalone server sessions reject blocking close deadlines
+once into retained storage and keeps its exact socket-visible offset across a
+timeout; encoded values through 128 bytes stay inline, while longer close
+reasons allocate only their exact encoded length. FIN commits
+`local_close_sent`, and later calls resume only unfinished stream cleanup.
+Completed terminal frames remain recorded per stream, so they are not
+submitted twice. While a partial CLOSE is pending, application sends, stream
+creation, drain, reset, and stop calls fail with `InvalidSessionState` instead
+of interleaving bytes after the capsule prefix. Dispatcher-bound client
+sessions deliberately retain their existing nonblocking one-shot close path;
+dispatcher-fed standalone server sessions reject blocking close deadlines
 instead of competing for the shared UDP socket. Terminal events are retained
 until automatic FIN and stream cleanup succeeds, so transient backpressure
 cannot consume the only observable close/reset notification.
+On 64-bit targets the pending-Close state falls from 1,064 to 160 bytes. All
+six public accepted/client Session layouts therefore shed exactly 904 bytes:
+development server/client become 2,832/9,120 bytes, lightweight protected
+server/client become 2,640/10,728 bytes, and authenticated server/client become
+18,184/18,728 bytes. Layout tests pin those values; allocation-failure tests
+prove a 120-byte reason stays allocation-free and the first over-inline reason
+uses the exact fallback. Session teardown and every terminal send branch free
+that fallback.
 If the CONNECT send direction is already permanently cancelled, rejected,
 stopped, retired, or the connection is closed, a bounded CLOSE drops its
 unreplayable capsule cursor and records a terminal local-close failure. Later

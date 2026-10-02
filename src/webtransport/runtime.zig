@@ -16,6 +16,66 @@ const protected_control =
 const stream_batch = @import("runtime/stream/batch.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
+test "WebTransport sessions keep pending close storage compact" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(
+            @as(usize, 160),
+            @sizeOf(PendingSessionClose),
+        );
+        try std.testing.expectEqual(@as(usize, 2_832), @sizeOf(AcceptedSession));
+        try std.testing.expectEqual(
+            @as(usize, 2_640),
+            @sizeOf(AcceptedProtectedSession),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 18_184),
+            @sizeOf(AcceptedHandshakeSession),
+        );
+        try std.testing.expectEqual(@as(usize, 9_120), @sizeOf(ClientSession));
+        try std.testing.expectEqual(
+            @as(usize, 18_728),
+            @sizeOf(HandshakeClientSession),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 10_728),
+            @sizeOf(ProtectedClientSession),
+        );
+    }
+}
+
+test "WebTransport pending close uses inline then exact heap storage" {
+    const short_reason = [_]u8{'s'} ** 120;
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var short = try PendingSessionClose.init(
+        no_alloc.allocator(),
+        17,
+        &short_reason,
+    );
+    defer short.deinit();
+    try std.testing.expect(short.storage == .local);
+    try std.testing.expectEqual(@as(usize, 128), short.len);
+    try std.testing.expect(try short.matches(17, &short_reason));
+
+    const long_reason = [_]u8{'l'} ** 121;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        PendingSessionClose.init(no_alloc.allocator(), 18, &long_reason),
+    );
+    var long = try PendingSessionClose.init(
+        std.testing.allocator,
+        18,
+        &long_reason,
+    );
+    defer long.deinit();
+    try std.testing.expect(long.storage == .heap);
+    try std.testing.expectEqual(@as(usize, 129), long.len);
+    try std.testing.expect(try long.matches(18, &long_reason));
+    try std.testing.expect(!try long.matches(19, &long_reason));
+}
+
 test {
     _ = @import("runtime/connect/admission_tests.zig");
     _ = @import("runtime/connect/capacity_tests.zig");
@@ -57,20 +117,68 @@ pub const Limits = struct {
 pub const max_connection_close_reason: usize = 1024;
 
 const PendingSessionClose = struct {
-    bytes: [4 + session_control.max_close_reason + 16]u8 = undefined,
+    const inline_capacity: usize = 128;
+    const Storage = union(enum) {
+        local: [inline_capacity]u8,
+        heap: struct {
+            allocator: std.mem.Allocator,
+            bytes: []u8,
+        },
+    };
+
+    storage: Storage = .{ .local = undefined },
     len: usize = 0,
     committed: usize = 0,
     code: u32 = 0,
 
-    fn init(code: u32, reason: []const u8) Error!PendingSessionClose {
+    fn init(
+        allocator: std.mem.Allocator,
+        code: u32,
+        reason: []const u8,
+    ) Error!PendingSessionClose {
         var pending: PendingSessionClose = .{ .code = code };
+        var encoded_storage: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
         const encoded = try session_control.writeCloseInto(
-            &pending.bytes,
+            &encoded_storage,
             code,
             reason,
         );
         pending.len = encoded.len;
+        if (encoded.len <= inline_capacity) {
+            @memcpy(pending.storage.local[0..encoded.len], encoded);
+        } else {
+            pending.storage = .{ .heap = .{
+                .allocator = allocator,
+                .bytes = try allocator.dupe(u8, encoded),
+            } };
+        }
         return pending;
+    }
+
+    fn bytes(self: *const PendingSessionClose) []const u8 {
+        return switch (self.storage) {
+            .local => |*storage| storage[0..self.len],
+            .heap => |owned| owned.bytes,
+        };
+    }
+
+    fn remaining(self: *const PendingSessionClose) []const u8 {
+        return self.bytes()[self.committed..];
+    }
+
+    fn deinit(self: *PendingSessionClose) void {
+        switch (self.storage) {
+            .local => |*storage| std.crypto.secureZero(
+                u8,
+                storage[0..self.len],
+            ),
+            .heap => |owned| {
+                std.crypto.secureZero(u8, owned.bytes);
+                owned.allocator.free(owned.bytes);
+            },
+        }
+        self.* = undefined;
     }
 
     fn matches(
@@ -78,15 +186,21 @@ const PendingSessionClose = struct {
         code: u32,
         reason: []const u8,
     ) Error!bool {
-        const candidate = try init(code, reason);
-        return self.len == candidate.len and
-            std.mem.eql(
-                u8,
-                self.bytes[0..self.len],
-                candidate.bytes[0..candidate.len],
-            );
+        var candidate_storage: [4 + session_control.max_close_reason + 16]u8 =
+            undefined;
+        const candidate = try session_control.writeCloseInto(
+            &candidate_storage,
+            code,
+            reason,
+        );
+        return std.mem.eql(u8, self.bytes(), candidate);
     }
 };
+
+fn clearPendingSessionClose(slot: *?PendingSessionClose) void {
+    if (slot.*) |*pending| pending.deinit();
+    slot.* = null;
+}
 
 const PendingSessionDrain = struct {
     bytes: [16]u8 = undefined,
@@ -3905,6 +4019,7 @@ pub const AcceptedSession = struct {
         );
         self.request.deinit(allocator);
         self.streams.deinit();
+        clearPendingSessionClose(&self.pending_close);
         self.* = undefined;
     }
 
@@ -3993,18 +4108,18 @@ pub const AcceptedSession = struct {
         self.server.sendSessionData(
             self.request.from,
             self.session_id,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
         ) catch |err| {
             if (terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
         };
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -4039,21 +4154,21 @@ pub const AcceptedSession = struct {
         self.server.sendSessionDataWithDeadline(
             self.request.from,
             self.session_id,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
             &progress,
             deadline,
         ) catch |err| {
             if (progress.send_attempted or terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
         };
         std.debug.assert(progress.completed);
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -4069,7 +4184,12 @@ pub const AcceptedSession = struct {
             }
             return;
         }
-        const pending = try PendingSessionClose.init(code, reason);
+        var pending = try PendingSessionClose.init(
+            self.server.h3.quic_server.endpoint.allocator,
+            code,
+            reason,
+        );
+        errdefer pending.deinit();
         try self.control.control.beginLocalClose();
         self.pending_close = pending;
     }
@@ -4146,6 +4266,7 @@ pub const AcceptedProtectedSession = struct {
     pending_session_event: ?SessionEvent = null,
 
     pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
+        clearPendingSessionClose(&self.pending_close);
         self.request.deinit(allocator);
         self.* = undefined;
     }
@@ -4349,23 +4470,23 @@ pub const AcceptedProtectedSession = struct {
     ) Error!void {
         if (self.control.control.local_close_sent or
             self.control.control.local_close_failed) return;
-        try self.preparePendingClose(code, reason);
+        try self.preparePendingClose(server, code, reason);
         const pending = &self.pending_close.?;
         server.sendSessionData(
             self.request.from,
             self.session_id,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
         ) catch |err| {
             if (terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
         };
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -4396,13 +4517,13 @@ pub const AcceptedProtectedSession = struct {
         );
         if (self.control.control.local_close_sent or
             self.control.control.local_close_failed) return;
-        try self.preparePendingClose(code, reason);
+        try self.preparePendingClose(server, code, reason);
         const pending = &self.pending_close.?;
         var progress: http3.runtime.BodyWriteProgress = .{};
         server.sendSessionDataWithDeadline(
             self.request.from,
             self.session_id,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
             &progress,
             deadline,
@@ -4410,11 +4531,11 @@ pub const AcceptedProtectedSession = struct {
             pending.committed += progress.committed_bytes;
             if (progress.fin_committed) {
                 const committed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 try self.control.control.recordLocalClose(committed_code);
             } else if (terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
@@ -4424,12 +4545,13 @@ pub const AcceptedProtectedSession = struct {
             pending.committed == pending.len and progress.fin_committed,
         );
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
     fn preparePendingClose(
         self: *AcceptedProtectedSession,
+        server: *ProtectedServer,
         code: u32,
         reason: []const u8,
     ) Error!void {
@@ -4440,7 +4562,12 @@ pub const AcceptedProtectedSession = struct {
             }
             return;
         }
-        const pending = try PendingSessionClose.init(code, reason);
+        var pending = try PendingSessionClose.init(
+            server.h3.quic_server.endpoint.allocator,
+            code,
+            reason,
+        );
+        errdefer pending.deinit();
         try self.control.control.beginLocalClose();
         self.pending_close = pending;
     }
@@ -4832,6 +4959,7 @@ pub const AcceptedHandshakeSession = struct {
 
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
+        clearPendingSessionClose(&self.pending_close);
         self.h3.closeConnectDatagramAssociation(
             self.session_id.value,
         ) catch {};
@@ -6244,7 +6372,7 @@ pub const AcceptedHandshakeSession = struct {
             var progress: http3.runtime.BodyWriteProgress = .{};
             self.h3.sendResponseBodyPacedWithDeadline(
                 self.session_id.value,
-                pending.bytes[pending.committed..pending.len],
+                pending.remaining(),
                 true,
                 &progress,
                 deadline,
@@ -6252,11 +6380,11 @@ pub const AcceptedHandshakeSession = struct {
                 pending.committed += progress.committed_bytes;
                 if (progress.fin_committed) {
                     const committed_code = pending.code;
-                    self.pending_close = null;
+                    clearPendingSessionClose(&self.pending_close);
                     try self.control.recordLocalClose(committed_code);
                 } else if (terminalSessionBodySendError(err)) {
                     const failed_code = pending.code;
-                    self.pending_close = null;
+                    clearPendingSessionClose(&self.pending_close);
                     self.control.recordLocalCloseFailure(failed_code);
                 }
                 return err;
@@ -6266,7 +6394,7 @@ pub const AcceptedHandshakeSession = struct {
                 pending.committed == pending.len and progress.fin_committed,
             );
             const committed_code = pending.code;
-            self.pending_close = null;
+            clearPendingSessionClose(&self.pending_close);
             try self.control.recordLocalClose(committed_code);
         }
         try session_control.terminateStreamsWithDeadline(
@@ -6288,7 +6416,12 @@ pub const AcceptedHandshakeSession = struct {
             }
             return;
         }
-        const pending = try PendingSessionClose.init(code, reason);
+        var pending = try PendingSessionClose.init(
+            self.h3.established.connection.endpoint.allocator,
+            code,
+            reason,
+        );
+        errdefer pending.deinit();
         try self.control.beginLocalClose();
         self.pending_close = pending;
     }
@@ -6656,6 +6789,7 @@ pub const ClientSession = struct {
     }
 
     pub fn deinit(self: *ClientSession) void {
+        clearPendingSessionClose(&self.pending_close);
         // Accepted development clients own their H3 transport, but notifying
         // the shared server also lets it retire the CONNECT immediately rather
         // than retaining a dead peer until endpoint shutdown.
@@ -7218,18 +7352,18 @@ pub const ClientSession = struct {
         const pending = &self.pending_close.?;
         self.h3.sendRequestBody(
             self.session_id.value,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
         ) catch |err| {
             if (terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
         };
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -7263,21 +7397,21 @@ pub const ClientSession = struct {
         var progress: http3.runtime.DevelopmentBodyWriteProgress = .{};
         self.h3.sendRequestBodyWithDeadline(
             self.session_id.value,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
             &progress,
             deadline,
         ) catch |err| {
             if (progress.send_attempted or terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
         };
         std.debug.assert(progress.completed);
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -7293,7 +7427,12 @@ pub const ClientSession = struct {
             }
             return;
         }
-        const pending = try PendingSessionClose.init(code, reason);
+        var pending = try PendingSessionClose.init(
+            self.h3.quic_client.endpoint.allocator,
+            code,
+            reason,
+        );
+        errdefer pending.deinit();
         try self.control.control.beginLocalClose();
         self.pending_close = pending;
     }
@@ -8103,6 +8242,7 @@ pub const HandshakeClientSession = struct {
     }
 
     pub fn deinit(self: *HandshakeClientSession) void {
+        clearPendingSessionClose(&self.pending_close);
         if (self.dispatcher) |dispatcher| {
             _ = dispatcher.unregisterConnection(
                 self.dispatcher_handle.?,
@@ -9835,7 +9975,7 @@ pub const HandshakeClientSession = struct {
             var progress: http3.runtime.BodyWriteProgress = .{};
             self.h3.sendRequestBodyPacedWithDeadline(
                 self.session_id.value,
-                pending.bytes[pending.committed..pending.len],
+                pending.remaining(),
                 true,
                 &progress,
                 deadline,
@@ -9843,11 +9983,11 @@ pub const HandshakeClientSession = struct {
                 pending.committed += progress.committed_bytes;
                 if (progress.fin_committed) {
                     const committed_code = pending.code;
-                    self.pending_close = null;
+                    clearPendingSessionClose(&self.pending_close);
                     try self.control.recordLocalClose(committed_code);
                 } else if (terminalSessionBodySendError(err)) {
                     const failed_code = pending.code;
-                    self.pending_close = null;
+                    clearPendingSessionClose(&self.pending_close);
                     self.control.recordLocalCloseFailure(failed_code);
                 }
                 return err;
@@ -9857,7 +9997,7 @@ pub const HandshakeClientSession = struct {
                 pending.committed == pending.len and progress.fin_committed,
             );
             const committed_code = pending.code;
-            self.pending_close = null;
+            clearPendingSessionClose(&self.pending_close);
             try self.control.recordLocalClose(committed_code);
         }
         try session_control.terminateStreamsWithDeadline(
@@ -9879,7 +10019,12 @@ pub const HandshakeClientSession = struct {
             }
             return;
         }
-        const pending = try PendingSessionClose.init(code, reason);
+        var pending = try PendingSessionClose.init(
+            self.h3.allocator,
+            code,
+            reason,
+        );
+        errdefer pending.deinit();
         try self.control.beginLocalClose();
         self.pending_close = pending;
     }
@@ -10773,6 +10918,7 @@ pub const ProtectedClientSession = struct {
     }
 
     pub fn deinit(self: *ProtectedClientSession) void {
+        clearPendingSessionClose(&self.pending_close);
         self.datagram_batch_scratch.deinit(
             self.h3.quic_client.endpoint.allocator,
         );
@@ -11230,18 +11376,18 @@ pub const ProtectedClientSession = struct {
         const pending = &self.pending_close.?;
         self.h3.sendRequestBody(
             self.session_id.value,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
         ) catch |err| {
             if (terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
         };
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -11275,7 +11421,7 @@ pub const ProtectedClientSession = struct {
         var progress: http3.runtime.BodyWriteProgress = .{};
         self.h3.sendRequestBodyPacedWithDeadline(
             self.session_id.value,
-            pending.bytes[pending.committed..pending.len],
+            pending.remaining(),
             true,
             &progress,
             deadline,
@@ -11283,11 +11429,11 @@ pub const ProtectedClientSession = struct {
             pending.committed += progress.committed_bytes;
             if (progress.fin_committed) {
                 const committed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 try self.control.control.recordLocalClose(committed_code);
             } else if (terminalSessionBodySendError(err)) {
                 const failed_code = pending.code;
-                self.pending_close = null;
+                clearPendingSessionClose(&self.pending_close);
                 self.control.control.recordLocalCloseFailure(failed_code);
             }
             return err;
@@ -11297,7 +11443,7 @@ pub const ProtectedClientSession = struct {
             pending.committed == pending.len and progress.fin_committed,
         );
         const committed_code = pending.code;
-        self.pending_close = null;
+        clearPendingSessionClose(&self.pending_close);
         try self.control.control.recordLocalClose(committed_code);
     }
 
@@ -11313,7 +11459,12 @@ pub const ProtectedClientSession = struct {
             }
             return;
         }
-        const pending = try PendingSessionClose.init(code, reason);
+        var pending = try PendingSessionClose.init(
+            self.h3.quic_client.endpoint.allocator,
+            code,
+            reason,
+        );
+        errdefer pending.deinit();
         try self.control.control.beginLocalClose();
         self.pending_close = pending;
     }

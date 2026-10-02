@@ -5611,6 +5611,19 @@ WebTransport datagram runtime benchmark
   datagrams/s: 151031
 ```
 
+WebTransport's resumable CLOSE storage now keeps encoded capsules through 128
+bytes inline and allocates longer reasons at their exact encoded size. This
+reduces `PendingSessionClose` from 1,064 to 160 bytes and removes 904 bytes of
+fixed state from each development, lightweight protected, and authenticated
+client/server Session type on 64-bit targets. The resulting sizes are 2,832 B
+for `AcceptedSession`, 2,640 B for `AcceptedProtectedSession`, 18,184 B for
+`AcceptedHandshakeSession`, 9,120 B for `ClientSession`, 18,728 B for
+`HandshakeClientSession`, and 10,728 B for `ProtectedClientSession`.
+The ordinary short-close path remains allocation-free; tests force the first
+over-inline allocation to fail, exercise successful heap ownership, and retain
+the existing maximum-reason timeout/cleanup coverage. These are deterministic
+layout and allocation-path results rather than throughput measurements.
+
 The stream smoke uses real QUIC/TLS and HTTP/3 CONNECT rather than the
 cleartext development transport. It validates modern bidirectional association
 (`0x41 + Session ID`), both unidirectional directions, reverse-direction bidi
