@@ -2163,24 +2163,35 @@ fn parseExtensionQuotedToken(value: []const u8, offset: *usize) Error!void {
 fn parseWindowBitsValue(raw_value: []const u8) u8 {
     // Sec-WebSocket-Extensions uses the generic extension-param grammar from
     // RFC 6455: parameter values may be either tokens or quoted-strings.  The
-    // permessage-deflate window-bit value itself is still a decimal integer, so
-    // accept a quoted integer like server_max_window_bits=\"15\" but reject
-    // escapes/empty strings instead of silently normalizing ambiguous values.
-    const value = if (raw_value.len >= 2 and raw_value[0] == '"') blk: {
+    // permessage-deflate window-bit value itself is still a decimal integer.
+    // Decode quoted-pairs while scanning instead of allocating a temporary
+    // string, then apply the same leading-zero and range rules as token form.
+    const quoted = raw_value.len >= 2 and raw_value[0] == '"';
+    const value = if (quoted) blk: {
         if (raw_value[raw_value.len - 1] != '"') return 0;
-        const inner = raw_value[1 .. raw_value.len - 1];
-        if (std.mem.indexOfScalar(u8, inner, '\\') != null or std.mem.indexOfScalar(u8, inner, '"') != null) return 0;
-        break :blk inner;
+        break :blk raw_value[1 .. raw_value.len - 1];
     } else raw_value;
 
-    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return 0;
-    var parsed: u16 = 0;
-    for (value) |byte| {
+    if (value.len == 0) return 0;
+    var parsed: u8 = 0;
+    var index: usize = 0;
+    var digits: usize = 0;
+    var first_digit: u8 = 0;
+    while (index < value.len) : (index += 1) {
+        var byte = value[index];
+        if (quoted and byte == '\\') {
+            index += 1;
+            if (index == value.len) return 0;
+            byte = value[index];
+        }
         if (!std.ascii.isDigit(byte)) return 0;
+        if (digits == 2) return 0;
+        if (digits == 0) first_digit = byte;
+        digits += 1;
         parsed = parsed * 10 + byte - '0';
-        if (parsed > std.math.maxInt(u8)) return 0;
     }
-    return @intCast(parsed);
+    if (digits > 1 and first_digit == '0') return 0;
+    return parsed;
 }
 
 test "WebSocket accept key matches RFC example" {
@@ -2905,8 +2916,15 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
             7,
         ),
     );
-    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+    const escaped_window_response = try ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"1\\5\"",
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 15),
+        escaped_window_response.client_max_window_bits,
+    );
+    try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"1\\ 5\"",
     ));
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.validateResponse(
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover, x-unknown",
@@ -2969,6 +2987,13 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expectEqual(
         @as(?u8, 12),
         valid_unknown_then_known.server_max_window_bits,
+    );
+    const escaped_window_offer = try ExtensionNegotiation.parseOffer(
+        "permessage-deflate; server_max_window_bits=\"\\1\\2\"",
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 12),
+        escaped_window_offer.server_max_window_bits,
     );
 
     const complete_headers = [_]http1.Header{

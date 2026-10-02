@@ -992,6 +992,10 @@ Client response validation also combines repeated extension field lines before
 checking the exact offer. A null list member beside one negotiated extension is
 tolerated, while an unknown server selection or a repeated
 `permessage-deflate` selection remains a fatal handshake error.
+Quoted extension parameter values are unescaped without allocation before
+their RFC 7692 window-size semantics are applied, so legal quoted-pairs remain
+interoperable while decoded non-token, non-decimal, leading-zero, and out-of-
+range values stay rejected.
 The dedicated `fuzz-websocket-compression` target feeds arbitrary bounded bytes
 to the RFC 7692 inflater and verifies exact round trips through the standard and
 Vort compressors, including fragmented plaintext and every negotiated 8-15 bit

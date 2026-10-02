@@ -861,7 +861,7 @@ Current protocol coverage includes:
   with SIMD longest-match prefix scans within contiguous input spans, including
   independently advancing discontiguous fragment cursors without joining
   plaintext, and uncompressed fallback when compression expands the message,
-  plus quoted window-bit parsing and rejection of
+  plus quoted/quoted-pair window-bit parsing and rejection of
   unsupported extension parameters/window sizes, framed 101 upgrade responses,
   compressed fragmented sends that stream discontiguous plaintext directly
   into DEFLATE with constant-space cross-fragment UTF-8 validation, plus
