@@ -200,7 +200,10 @@ benchmark response:
 - small response pipelines remain coalesced for minimal syscall/iovec overhead,
   while pipelines above 16 KiB validate every response first, retain only
   encoded heads/chunk framing, and borrow fixed bodies into one writev instead
-  of copying the entire batch;
+  of copying the entire batch. The batch-only encoded bytes, descriptor list,
+  and iovec list are allocated together on first pipeline use, removing three
+  empty containers from ordinary client and server connections while retaining
+  their warmed capacity;
 - complete requests, single responses, and both coalesced and borrowed response
   batches finish all validation and allocation before transport I/O. Once a
   write begins, any transport error permanently retires the HTTP/1 connection:

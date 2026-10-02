@@ -102,15 +102,37 @@ pub const StreamingHead = struct {
 /// allowing the transport to use vectored I/O. A response batch is different:
 /// it must be fully materialized before the first socket write so validation of
 /// a later response cannot expose a valid prefix on the wire.
+const BatchPart = union(enum) {
+    encoded: struct { start: usize, len: usize },
+    borrowed: []const u8,
+};
+
+const BatchScratch = struct {
+    encoded: std.ArrayList(u8) = .empty,
+    parts: std.ArrayList([]const u8) = .empty,
+    part_descriptors: std.ArrayList(BatchPart) = .empty,
+
+    fn reset(self: *BatchScratch) void {
+        self.encoded.clearRetainingCapacity();
+        self.parts.clearRetainingCapacity();
+        self.part_descriptors.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *BatchScratch, allocator: std.mem.Allocator) void {
+        self.encoded.deinit(allocator);
+        self.parts.deinit(allocator);
+        self.part_descriptors.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     /// Independent contiguous transport staging. This cannot share `encoded`:
     /// prepared message heads and streaming terminators may still borrow that
     /// storage while a connection-level flatten policy copies all parts.
     flattened: std.ArrayList(u8) = .empty,
-    batch_encoded: std.ArrayList(u8) = .empty,
-    batch_parts: std.ArrayList([]const u8) = .empty,
-    batch_part_descriptors: std.ArrayList(BatchPart) = .empty,
+    batch: ?*BatchScratch = null,
     headers: std.ArrayList(http1.Header) = .empty,
     request_headers: std.ArrayList(http1.Header) = .empty,
     trailer_headers: std.ArrayList(http1.Header) = .empty,
@@ -134,9 +156,10 @@ pub const Scratch = struct {
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         self.encoded.deinit(allocator);
         self.flattened.deinit(allocator);
-        self.batch_encoded.deinit(allocator);
-        self.batch_parts.deinit(allocator);
-        self.batch_part_descriptors.deinit(allocator);
+        if (self.batch) |batch| {
+            batch.deinit(allocator);
+            allocator.destroy(batch);
+        }
         self.headers.deinit(allocator);
         self.request_headers.deinit(allocator);
         self.trailer_headers.deinit(allocator);
@@ -146,11 +169,17 @@ pub const Scratch = struct {
         self.streaming_parts.deinit(allocator);
         self.* = undefined;
     }
-};
 
-const BatchPart = union(enum) {
-    encoded: struct { start: usize, len: usize },
-    borrowed: []const u8,
+    fn batchScratch(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!*BatchScratch {
+        if (self.batch) |batch| return batch;
+        const batch = try allocator.create(BatchScratch);
+        batch.* = .{};
+        self.batch = batch;
+        return batch;
+    }
 };
 
 pub const MessageParts = struct {
@@ -1452,7 +1481,7 @@ fn prepareResponseWithDefaultDate(
 
 /// Validate a complete response pipeline and prepare borrowed write slices.
 ///
-/// Heads and chunked messages are retained in `batch_encoded`; ordinary
+/// Heads and chunked messages are retained in `batch.encoded`; ordinary
 /// fixed bodies remain borrowed. Descriptors use offsets while encoded storage
 /// grows, then resolve to stable slices only after every response validates.
 pub fn prepareResponseParts(
@@ -1493,10 +1522,9 @@ fn prepareResponsePartsWithDefaultDate(
     default_date: ?[]const u8,
     scratch: *Scratch,
 ) Error![]const []const u8 {
-    scratch.batch_encoded.clearRetainingCapacity();
-    scratch.batch_parts.clearRetainingCapacity();
-    scratch.batch_part_descriptors.clearRetainingCapacity();
-    try scratch.batch_part_descriptors.ensureTotalCapacity(
+    const batch = try scratch.batchScratch(allocator);
+    batch.reset();
+    try batch.part_descriptors.ensureTotalCapacity(
         allocator,
         responses.len *| 2,
     );
@@ -1516,12 +1544,12 @@ fn prepareResponsePartsWithDefaultDate(
             scratch,
         );
         try encodeResponseHead(allocator, response, scratch);
-        const head_start = scratch.batch_encoded.items.len;
-        try scratch.batch_encoded.appendSlice(
+        const head_start = batch.encoded.items.len;
+        try batch.encoded.appendSlice(
             allocator,
             scratch.encoded.items,
         );
-        scratch.batch_part_descriptors.appendAssumeCapacity(.{
+        batch.part_descriptors.appendAssumeCapacity(.{
             .encoded = .{
                 .start = head_start,
                 .len = scratch.encoded.items.len,
@@ -1538,35 +1566,92 @@ fn prepareResponsePartsWithDefaultDate(
                     response.trailers,
                     response.header_name_casing,
                 );
-                const chunk_start = scratch.batch_encoded.items.len;
-                try scratch.batch_encoded.appendSlice(
+                const chunk_start = batch.encoded.items.len;
+                try batch.encoded.appendSlice(
                     allocator,
                     scratch.encoded.items,
                 );
-                scratch.batch_part_descriptors.appendAssumeCapacity(.{
+                batch.part_descriptors.appendAssumeCapacity(.{
                     .encoded = .{
                         .start = chunk_start,
                         .len = scratch.encoded.items.len,
                     },
                 });
             } else {
-                scratch.batch_part_descriptors.appendAssumeCapacity(.{
+                batch.part_descriptors.appendAssumeCapacity(.{
                     .borrowed = response.body,
                 });
             }
         }
     }
-    try scratch.batch_parts.ensureTotalCapacity(
+    try batch.parts.ensureTotalCapacity(
         allocator,
-        scratch.batch_part_descriptors.items.len,
+        batch.part_descriptors.items.len,
     );
-    for (scratch.batch_part_descriptors.items) |descriptor| {
-        scratch.batch_parts.appendAssumeCapacity(switch (descriptor) {
-            .encoded => |range| scratch.batch_encoded.items[range.start .. range.start + range.len],
+    for (batch.part_descriptors.items) |descriptor| {
+        batch.parts.appendAssumeCapacity(switch (descriptor) {
+            .encoded => |range| batch.encoded.items[range.start .. range.start + range.len],
             .borrowed => |body| body,
         });
     }
-    return scratch.batch_parts.items;
+    return batch.parts.items;
+}
+
+test "HTTP/1 write scratch allocates batch state lazily" {
+    const allocator = std.testing.allocator;
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 72), @sizeOf(BatchScratch));
+        try std.testing.expectEqual(@as(usize, 256), @sizeOf(Scratch));
+        try std.testing.expectEqual(
+            @as(usize, 8),
+            @sizeOf(@FieldType(Scratch, "batch")),
+        );
+    }
+
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+    try std.testing.expect(scratch.batch == null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        scratch.batchScratch(failing.allocator()),
+    );
+    try std.testing.expect(scratch.batch == null);
+
+    const batch = try scratch.batchScratch(allocator);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectEqual(
+        @intFromPtr(batch),
+        @intFromPtr(try scratch.batchScratch(no_alloc.allocator())),
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 warmed response batch reuses lazy scratch" {
+    const allocator = std.testing.allocator;
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+    const responses = [_]ResponseOptions{
+        .{ .body = "one" },
+        .{ .body = "two" },
+    };
+    _ = try prepareResponseParts(allocator, &responses, &scratch);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    const parts = try prepareResponseParts(
+        no_alloc.allocator(),
+        &responses,
+        &scratch,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 4), parts.len);
 }
 
 const ResponseFraming = struct {

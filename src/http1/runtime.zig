@@ -27,6 +27,14 @@ const informationalResponseToSkip = message_framing.informationalResponseToSkip;
 const requestShouldSendContinue = message_framing.requestShouldSendContinue;
 const RequestReadStage = enum { head, continue_write, body };
 
+test "HTTP/1 connection keeps response batch scratch lazy" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 656), @sizeOf(Client));
+        try std.testing.expectEqual(@as(usize, 592), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 256), @sizeOf(WriteScratch));
+    }
+}
+
 pub const Error = http1.Error || tls_stream.Error || error{
     HeadersTooLarge,
     BodyTooLarge,
@@ -12352,6 +12360,7 @@ test "HTTP/1 native nonblocking peek distinguishes idle data and EOF" {
 }
 
 test {
+    _ = runtime_write;
     _ = @import("runtime/message/batch.zig");
     _ = @import("runtime/message/tests/framing.zig");
     _ = @import("runtime/unix_tests.zig");

@@ -177,6 +177,15 @@ a focused HTTP/1 pipeline result, not a whole-library superiority claim. The
 implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 `docs/hyper_parity.md`.
 
+The response-batch encoded bytes, slice list, and offset descriptors now share
+one state allocated on first batch use instead of three empty `ArrayList`s in
+every connection. On 64-bit targets this reduces `runtime_write.Scratch` from
+320 to 256 bytes, `Client` from 720 to 656 bytes, and `Connection` from 656 to
+592 bytes. A fail-first test keeps the state absent after allocation failure,
+and an identical warmed batch completes with a failing allocator without a new
+allocation. These are fixed-layout and allocation-lifetime results rather than
+a latency claim.
+
 The pipeline runner now accepts
 `--write-strategy=auto|vectored|flatten` and reports the selected policy, so
 the same payload/checksum can compare the connection-level I/O shape without
