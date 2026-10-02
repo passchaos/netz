@@ -216,7 +216,7 @@ test "MQTT persistent change autosave retains threshold across SnapshotBusy" {
     );
     defer broker.deinit();
 
-    broker.slots[0].active = true;
+    broker.slots[0].state.active = true;
     try broker.publishLocal(.{
         .dup = false,
         .qos = .at_most_once,
@@ -231,7 +231,7 @@ test "MQTT persistent change autosave retains threshold across SnapshotBusy" {
         tmp.dir.statFile(io, "busy.db", .{}),
     );
 
-    broker.slots[0].active = false;
+    broker.slots[0].state.active = false;
     try broker.publishLocal(.{
         .dup = false,
         .qos = .at_most_once,
@@ -1375,7 +1375,7 @@ test "MQTT snapshot save rejects live transient broker state" {
     const io = threaded.io();
     var broker = try createBroker(allocator, io);
     defer broker.deinit();
-    broker.slots[0].active = true;
+    broker.slots[0].state.active = true;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try std.testing.expectError(
@@ -1687,7 +1687,7 @@ test "MQTT live snapshot rejects provisional registrations" {
     const io = threaded.io();
     var broker = try createBroker(allocator, io);
     defer broker.deinit();
-    broker.slots[0].active = true;
+    broker.slots[0].state.active = true;
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

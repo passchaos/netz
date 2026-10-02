@@ -5440,6 +5440,14 @@ range. The median netz-minus-Mosquitto gap fell from 2,284 to 2,124 KiB
 narrows but does not close the independent-peer memory gap and remains memory
 evidence rather than a throughput claim.
 
+The broker slot's generated Client ID now reuses its allocation through a
+pointer plus the generator's bounded u8 length. Packing the 31-bit connection
+generation with its active bit then removes the final alignment hole, reducing
+the audited 64-bit `ClientSlot` from 136 to 128 bytes. Relative to the original
+1,824-byte slot, the default 1,024-slot broker now reserves 1,736,704 fewer
+bytes before connections arrive. This is a compile-time layout result; it does
+not claim a separately measurable RSS or throughput change.
+
 Transient QoS 1/2 broker fanout now uses one lazy writer per subscribed
 connection instead of making a publisher wait for every unrelated subscriber
 socket. The writer starts only after a QoS 1/2 subscription is processed,
