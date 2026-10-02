@@ -978,6 +978,12 @@ HTTP/1 Upgrade validation combines repeated field lines and comma-separated
 protocol lists, accepts the case-insensitive `websocket` token wherever it
 appears, rejects malformed protocol or Connection members, and requires status
 101 on the client response path.
+Extension offers are likewise scanned to the end across repeated fields on
+HTTP/1, HTTP/2, and HTTP/3 before selecting the first supported
+`permessage-deflate` alternative. Unknown extensions remain ignorable only
+when their token, parameter, and quoted-token grammar is valid; malformed
+members after a usable offer and malformed offers presented while compression
+is disabled now fail the handshake instead of escaping validation.
 The dedicated `fuzz-websocket-compression` target feeds arbitrary bounded bytes
 to the RFC 7692 inflater and verifies exact round trips through the standard and
 Vort compressors, including fragmented plaintext and every negotiated 8-15 bit

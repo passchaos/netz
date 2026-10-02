@@ -280,19 +280,11 @@ pub fn acceptH2Extensions(
     headers: []const http2.Hpack.HeaderField,
     policy: websocket.ExtensionNegotiation.Policy,
 ) !?[]u8 {
-    if (!policy.enable_permessage_deflate) return null;
-    for (headers) |header| {
-        if (!std.ascii.eqlIgnoreCase(
-            header.name,
-            "sec-websocket-extensions",
-        )) continue;
-        if (try websocket.ExtensionNegotiation.acceptWithPolicy(
-            allocator,
-            header.value,
-            policy,
-        )) |accepted| return accepted;
-    }
-    return null;
+    return websocket.ExtensionNegotiation.acceptClientHeadersWithPolicy(
+        allocator,
+        headers,
+        policy,
+    );
 }
 
 pub fn selectHttp1Subprotocol(

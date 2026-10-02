@@ -164,14 +164,53 @@ pub const ExtensionNegotiation = struct {
     }
 
     pub fn parseOffer(header_value: []const u8) Error!ExtensionNegotiation {
-        var offers = std.mem.splitScalar(u8, header_value, ',');
-        while (offers.next()) |raw_offer| {
-            if (try parseExtension(
-                wire.trimOws(raw_offer),
-                .offer,
-            )) |offer| return offer;
+        const parsed = try parseOfferPart(header_value);
+        if (!parsed.saw_member) return error.InvalidExtension;
+        return parsed.negotiation;
+    }
+
+    const ParsedOffer = struct {
+        negotiation: ExtensionNegotiation,
+        saw_member: bool,
+    };
+
+    fn parseOfferPart(header_value: []const u8) Error!ParsedOffer {
+        var parser = ExtensionListParser.init(header_value);
+        var selected = ExtensionNegotiation{};
+        while (try parser.next(.offer)) |extension| {
+            switch (extension) {
+                .unknown => {},
+                .permessage_deflate => |offer| {
+                    if (!selected.permessage_deflate) selected = offer;
+                },
+            }
         }
-        return .{};
+        return .{
+            .negotiation = selected,
+            .saw_member = parser.saw_member,
+        };
+    }
+
+    fn parseClientHeaders(headers: anytype) Error!ExtensionNegotiation {
+        var saw_field = false;
+        var saw_member = false;
+        var selected = ExtensionNegotiation{};
+        for (headers) |header| {
+            if (!std.ascii.eqlIgnoreCase(
+                header.name,
+                "sec-websocket-extensions",
+            )) continue;
+            saw_field = true;
+            const parsed = try parseOfferPart(header.value);
+            saw_member = saw_member or parsed.saw_member;
+            if (!selected.permessage_deflate and
+                parsed.negotiation.permessage_deflate)
+            {
+                selected = parsed.negotiation;
+            }
+        }
+        if (saw_field and !saw_member) return error.InvalidExtension;
+        return selected;
     }
 
     pub fn accept(allocator: std.mem.Allocator, offer_header: ?[]const u8, enable_permessage_deflate: bool) Error!?[]u8 {
@@ -185,9 +224,17 @@ pub const ExtensionNegotiation = struct {
         offer_header: ?[]const u8,
         policy: Policy,
     ) Error!?[]u8 {
-        if (!policy.enable_permessage_deflate) return null;
         const raw = offer_header orelse return null;
         const offer = try parseOffer(raw);
+        return acceptParsedWithPolicy(allocator, offer, policy);
+    }
+
+    fn acceptParsedWithPolicy(
+        allocator: std.mem.Allocator,
+        offer: ExtensionNegotiation,
+        policy: Policy,
+    ) Error!?[]u8 {
+        if (!policy.enable_permessage_deflate) return null;
         if (!offer.permessage_deflate) return null;
 
         var value: std.ArrayList(u8) = .empty;
@@ -219,7 +266,7 @@ pub const ExtensionNegotiation = struct {
 
     pub fn acceptClientHeaders(
         allocator: std.mem.Allocator,
-        headers: []const http1.Header,
+        headers: anytype,
         enable_permessage_deflate: bool,
     ) Error!?[]u8 {
         return acceptClientHeadersWithPolicy(allocator, headers, .{
@@ -229,15 +276,11 @@ pub const ExtensionNegotiation = struct {
 
     pub fn acceptClientHeadersWithPolicy(
         allocator: std.mem.Allocator,
-        headers: []const http1.Header,
+        headers: anytype,
         policy: Policy,
     ) Error!?[]u8 {
-        if (!policy.enable_permessage_deflate) return null;
-        for (headers) |header| {
-            if (!header.eqlName("sec-websocket-extensions")) continue;
-            if (try acceptWithPolicy(allocator, header.value, policy)) |accepted| return accepted;
-        }
-        return null;
+        const selected = try parseClientHeaders(headers);
+        return acceptParsedWithPolicy(allocator, selected, policy);
     }
 
     pub fn validateResponse(header_value: ?[]const u8) Error!ExtensionNegotiation {
@@ -253,23 +296,21 @@ pub const ExtensionNegotiation = struct {
         const raw = header_value orelse return .{};
         if (!policy.enable_permessage_deflate) return error.InvalidExtension;
         var negotiated: ?ExtensionNegotiation = null;
-        var responses = std.mem.splitScalar(u8, raw, ',');
-        while (responses.next()) |response| {
-            const trimmed = wire.trimOws(response);
-            if (trimmed.len == 0) return error.InvalidExtension;
-            const parsed = (try parseExtension(
-                trimmed,
-                .response,
-            )) orelse return error.InvalidExtension;
-            if (!parsed.permessage_deflate) return error.InvalidExtension;
-            if (negotiated != null) return error.InvalidExtension;
-            if (!policy.allow_context_takeover and
-                (!parsed.client_no_context_takeover or
-                    !parsed.server_no_context_takeover))
-            {
-                return error.InvalidExtension;
+        var parser = ExtensionListParser.init(raw);
+        while (try parser.next(.response)) |extension| {
+            switch (extension) {
+                .unknown => return error.InvalidExtension,
+                .permessage_deflate => |parsed| {
+                    if (negotiated != null) return error.InvalidExtension;
+                    if (!policy.allow_context_takeover and
+                        (!parsed.client_no_context_takeover or
+                            !parsed.server_no_context_takeover))
+                    {
+                        return error.InvalidExtension;
+                    }
+                    negotiated = parsed;
+                },
             }
-            negotiated = parsed;
         }
         return negotiated orelse error.InvalidExtension;
     }
@@ -289,28 +330,29 @@ pub const ExtensionNegotiation = struct {
         if (!response.permessage_deflate) return response;
 
         const raw_offer = offer_header orelse return error.InvalidExtension;
-        var offers = std.mem.splitScalar(u8, raw_offer, ',');
-        while (offers.next()) |raw| {
-            const offer = (try parseExtension(
-                wire.trimOws(raw),
-                .offer,
-            )) orelse
-                continue;
-            if (response.client_max_window_bits != null and
-                offer.client_max_window_bits == null)
-            {
-                continue;
+        var matched = false;
+        var parser = ExtensionListParser.init(raw_offer);
+        while (try parser.next(.offer)) |extension| {
+            switch (extension) {
+                .unknown => {},
+                .permessage_deflate => |offer| {
+                    if (response.client_max_window_bits != null and
+                        offer.client_max_window_bits == null)
+                    {
+                        continue;
+                    }
+                    if (response.server_max_window_bits) |selected| {
+                        if (offer.server_max_window_bits) |maximum| {
+                            if (selected > maximum) continue;
+                        }
+                    } else if (offer.server_max_window_bits != null) {
+                        continue;
+                    }
+                    matched = true;
+                },
             }
-            if (response.server_max_window_bits) |selected| {
-                if (offer.server_max_window_bits) |maximum| {
-                    if (selected > maximum) continue;
-                }
-            } else if (offer.server_max_window_bits != null) {
-                continue;
-            }
-            return response;
         }
-        return error.InvalidExtension;
+        return if (matched) response else error.InvalidExtension;
     }
 };
 
@@ -1182,6 +1224,7 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
     const key = try requiredSingletonHeader(req.headers, "sec-websocket-key");
     try validateClientKey(key);
     try validateClientSubprotocolHeaders(req.headers);
+    try validateClientExtensionHeaders(req.headers);
 }
 
 fn requiredSingletonHeader(headers: []const http1.Header, name: []const u8) Error![]const u8 {
@@ -1279,6 +1322,10 @@ fn validateClientSubprotocolHeaders(headers: []const http1.Header) Error!void {
             token_index += 1;
         }
     }
+}
+
+fn validateClientExtensionHeaders(headers: []const http1.Header) Error!void {
+    _ = try ExtensionNegotiation.parseClientHeaders(headers);
 }
 
 fn subprotocolTokenSeenBefore(headers: []const http1.Header, before_index: usize, candidate: []const u8) bool {
@@ -1866,66 +1913,185 @@ pub fn decompressMessageInto(
 
 const ExtensionHeaderRole = enum { offer, response };
 
-fn parseExtension(
+const ParsedExtension = union(enum) {
+    unknown,
+    permessage_deflate: ExtensionNegotiation,
+};
+
+const ExtensionListParser = struct {
     value: []const u8,
+    offset: usize = 0,
+    saw_member: bool = false,
+
+    fn init(value: []const u8) ExtensionListParser {
+        return .{ .value = value };
+    }
+
+    fn next(
+        self: *ExtensionListParser,
+        role: ExtensionHeaderRole,
+    ) Error!?ParsedExtension {
+        while (true) {
+            skipExtensionOws(self.value, &self.offset);
+            if (self.offset == self.value.len) return null;
+            if (self.value[self.offset] != ',') break;
+            self.offset += 1;
+        }
+
+        const extension = try parseExtensionMember(
+            self.value,
+            &self.offset,
+            role,
+        );
+        self.saw_member = true;
+        skipExtensionOws(self.value, &self.offset);
+        if (self.offset == self.value.len) return extension;
+        if (self.value[self.offset] != ',') return error.InvalidExtension;
+        self.offset += 1;
+        return extension;
+    }
+};
+
+fn parseExtensionMember(
+    value: []const u8,
+    offset: *usize,
     role: ExtensionHeaderRole,
-) Error!?ExtensionNegotiation {
-    if (value.len == 0) return null;
-    var parts = std.mem.splitScalar(u8, value, ';');
-    const name = wire.trimOws(parts.next() orelse return null);
-    if (!std.ascii.eqlIgnoreCase(name, "permessage-deflate")) return null;
-    var out = ExtensionNegotiation{ .permessage_deflate = true };
+) Error!ParsedExtension {
+    const name = try parseExtensionToken(value, offset);
+    const is_permessage_deflate =
+        std.ascii.eqlIgnoreCase(name, "permessage-deflate");
+    var out = ExtensionNegotiation{
+        .permessage_deflate = is_permessage_deflate,
+    };
     var saw_client_no_context_takeover = false;
     var saw_server_no_context_takeover = false;
     var saw_client_max_window_bits = false;
     var saw_server_max_window_bits = false;
-    while (parts.next()) |raw_param| {
-        const param = wire.trimOws(raw_param);
-        if (param.len == 0) return error.InvalidExtension;
-        if (std.ascii.eqlIgnoreCase(param, "client_no_context_takeover")) {
+
+    while (true) {
+        skipExtensionOws(value, offset);
+        if (offset.* == value.len or value[offset.*] == ',') break;
+        if (value[offset.*] != ';') return error.InvalidExtension;
+        offset.* += 1;
+        skipExtensionOws(value, offset);
+        const param_name = try parseExtensionToken(value, offset);
+        skipExtensionOws(value, offset);
+
+        var param_value: ?[]const u8 = null;
+        if (offset.* < value.len and value[offset.*] == '=') {
+            offset.* += 1;
+            skipExtensionOws(value, offset);
+            if (offset.* == value.len) return error.InvalidExtension;
+            const start = offset.*;
+            if (value[offset.*] == '"') {
+                try parseExtensionQuotedToken(value, offset);
+            } else {
+                _ = try parseExtensionToken(value, offset);
+            }
+            param_value = value[start..offset.*];
+            skipExtensionOws(value, offset);
+        }
+        if (offset.* < value.len and
+            value[offset.*] != ';' and
+            value[offset.*] != ',')
+        {
+            return error.InvalidExtension;
+        }
+
+        if (!is_permessage_deflate) continue;
+        if (std.ascii.eqlIgnoreCase(
+            param_name,
+            "client_no_context_takeover",
+        )) {
+            if (param_value != null) return error.InvalidExtension;
             if (saw_client_no_context_takeover) return error.InvalidExtension;
             saw_client_no_context_takeover = true;
             out.client_no_context_takeover = true;
-        } else if (std.ascii.eqlIgnoreCase(param, "server_no_context_takeover")) {
+        } else if (std.ascii.eqlIgnoreCase(
+            param_name,
+            "server_no_context_takeover",
+        )) {
+            if (param_value != null) return error.InvalidExtension;
             if (saw_server_no_context_takeover) return error.InvalidExtension;
             saw_server_no_context_takeover = true;
             out.server_no_context_takeover = true;
-        } else if (parseWindowBitsParam(
-            param,
+        } else if (std.ascii.eqlIgnoreCase(
+            param_name,
             "client_max_window_bits",
-            role == .offer,
-        )) |bits| {
+        )) {
             if (saw_client_max_window_bits) return error.InvalidExtension;
             saw_client_max_window_bits = true;
+            const bits: u8 = if (param_value) |raw|
+                parseWindowBitsValue(raw)
+            else if (role == .offer)
+                15
+            else
+                0;
+            if (bits < 8 or bits > 15) return error.InvalidExtension;
             out.client_max_window_bits = bits;
-        } else if (parseWindowBitsParam(
-            param,
+        } else if (std.ascii.eqlIgnoreCase(
+            param_name,
             "server_max_window_bits",
-            false,
-        )) |bits| {
+        )) {
             if (saw_server_max_window_bits) return error.InvalidExtension;
             saw_server_max_window_bits = true;
+            const bits: u8 = if (param_value) |raw|
+                parseWindowBitsValue(raw)
+            else
+                0;
+            if (bits < 8 or bits > 15) return error.InvalidExtension;
             out.server_max_window_bits = bits;
         } else {
             return error.InvalidExtension;
         }
     }
-    if (out.client_max_window_bits) |bits| if (bits < 8 or bits > 15) return error.InvalidExtension;
-    if (out.server_max_window_bits) |bits| if (bits < 8 or bits > 15) return error.InvalidExtension;
-    return out;
+
+    return if (is_permessage_deflate)
+        .{ .permessage_deflate = out }
+    else
+        .unknown;
 }
 
-fn parseWindowBitsParam(
-    param: []const u8,
-    name: []const u8,
-    allow_implicit_value: bool,
-) ?u8 {
-    if (std.ascii.eqlIgnoreCase(param, name)) {
-        return if (allow_implicit_value) 15 else 0;
+fn skipExtensionOws(value: []const u8, offset: *usize) void {
+    while (offset.* < value.len and
+        (value[offset.*] == ' ' or value[offset.*] == '\t'))
+    {
+        offset.* += 1;
     }
-    if (param.len <= name.len or param[name.len] != '=') return null;
-    if (!std.ascii.eqlIgnoreCase(param[0..name.len], name)) return null;
-    return parseWindowBitsValue(param[name.len + 1 ..]);
+}
+
+fn parseExtensionToken(value: []const u8, offset: *usize) Error![]const u8 {
+    const start = offset.*;
+    while (offset.* < value.len and isTchar(value[offset.*])) {
+        offset.* += 1;
+    }
+    if (offset.* == start) return error.InvalidExtension;
+    return value[start..offset.*];
+}
+
+fn parseExtensionQuotedToken(value: []const u8, offset: *usize) Error!void {
+    std.debug.assert(offset.* < value.len and value[offset.*] == '"');
+    offset.* += 1;
+    var decoded_len: usize = 0;
+    while (offset.* < value.len) {
+        var byte = value[offset.*];
+        if (byte == '"') {
+            if (decoded_len == 0) return error.InvalidExtension;
+            offset.* += 1;
+            return;
+        }
+        if (byte == '\\') {
+            offset.* += 1;
+            if (offset.* == value.len) return error.InvalidExtension;
+            byte = value[offset.*];
+        }
+        // RFC 6455 uses quoted-string only as transport syntax here: after
+        // unescaping, every extension parameter value must still be a token.
+        if (!isTchar(byte)) return error.InvalidExtension;
+        decoded_len += 1;
+        offset.* += 1;
+    }
+    return error.InvalidExtension;
 }
 
 fn parseWindowBitsValue(raw_value: []const u8) u8 {
@@ -2420,6 +2586,27 @@ test "WebSocket handshake validation" {
     defer split_duplicate_protocol_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(split_duplicate_protocol_req));
 
+    const valid_extensions = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: x-example; mode=\"safe\", permessage-deflate\r\n\r\n";
+    var valid_extensions_req = try http1.parseRequest(
+        allocator,
+        valid_extensions,
+        .{},
+    );
+    defer valid_extensions_req.deinit(allocator);
+    try validateClientHandshake(valid_extensions_req);
+
+    const malformed_trailing_extension = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Extensions: permessage-deflate\r\nSec-WebSocket-Extensions: broken extension\r\n\r\n";
+    var malformed_trailing_extension_req = try http1.parseRequest(
+        allocator,
+        malformed_trailing_extension,
+        .{},
+    );
+    defer malformed_trailing_extension_req.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidExtension,
+        validateClientHandshake(malformed_trailing_extension_req),
+    );
+
     const request_body = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nContent-Length: 4\r\n\r\nbody";
     var request_body_req = try http1.parseRequest(allocator, request_body, .{});
     defer request_body_req.deinit(allocator);
@@ -2587,6 +2774,98 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expectError(error.InvalidExtension, ExtensionNegotiation.parseOffer(
         "permessage-deflate; server_max_window_bits=15; server_max_window_bits=15",
     ));
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.parseOffer(
+            "permessage-deflate, broken extension",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.parseOffer(
+            "x-example; mode=\"not a token\"",
+        ),
+    );
+    const empty_members = try ExtensionNegotiation.parseOffer(
+        ", permessage-deflate,,",
+    );
+    try std.testing.expect(empty_members.permessage_deflate);
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.parseOffer(", ,"),
+    );
+
+    const valid_unknown_then_known = try ExtensionNegotiation.parseOffer(
+        "x-example; mode=\"safe\", permessage-deflate; server_max_window_bits=12",
+    );
+    try std.testing.expect(valid_unknown_then_known.permessage_deflate);
+    try std.testing.expectEqual(
+        @as(?u8, 12),
+        valid_unknown_then_known.server_max_window_bits,
+    );
+
+    const complete_headers = [_]http1.Header{
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "",
+        },
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "permessage-deflate",
+        },
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "x-example; mode=\"safe\"",
+        },
+    };
+    const complete_accept = try ExtensionNegotiation
+        .acceptClientHeadersWithPolicy(
+        allocator,
+        &complete_headers,
+        .{ .enable_permessage_deflate = true },
+    );
+    defer if (complete_accept) |value| allocator.free(value);
+    try std.testing.expect(complete_accept != null);
+
+    const empty_headers = [_]http1.Header{
+        .{ .name = "Sec-WebSocket-Extensions", .value = "" },
+        .{ .name = "Sec-WebSocket-Extensions", .value = ", ," },
+    };
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.acceptClientHeadersWithPolicy(
+            allocator,
+            &empty_headers,
+            .{ .enable_permessage_deflate = false },
+        ),
+    );
+
+    const malformed_later_headers = [_]http1.Header{
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "permessage-deflate",
+        },
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "x-example; mode=\"not a token\"",
+        },
+    };
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.acceptClientHeadersWithPolicy(
+            allocator,
+            &malformed_later_headers,
+            .{ .enable_permessage_deflate = true },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.acceptWithPolicy(
+            allocator,
+            "permessage-deflate, broken extension",
+            .{ .enable_permessage_deflate = false },
+        ),
+    );
 
     try std.testing.expect(ExtensionNegotiation.offerValue(.{}) == null);
     try std.testing.expectEqualStrings(
