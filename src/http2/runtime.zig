@@ -3154,7 +3154,7 @@ pub const Connection = struct {
     active_local_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     active_peer_streams: std.ArrayList(u31) = .empty,
     active_peer_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
-    push_state: push.State = .{},
+    push_state: push.LazyState = .{},
     priority_state: priority_runtime.State = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
     response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
@@ -3381,10 +3381,7 @@ pub const Connection = struct {
             self.duplex_pending_frame == null and
             self.borrowed_pending_frame == null and
             self.response_semantics.items.len == 0 and
-            self.push_state.pending.items.len ==
-                self.push_state.pending_head and
-            self.push_state.local.items.len == 0 and
-            self.push_state.remote.items.len == 0 and
+            self.push_state.isQuiescent() and
             !self.limits.enable_push;
     }
 
@@ -12161,16 +12158,16 @@ pub const Connection = struct {
 
         if (self.role == .server) {
             if (self.push_state.localStatus(stream_id) != null) return false;
-            return stream_id >= self.push_state.next_local_stream_id;
+            return stream_id >= self.push_state.nextLocalStreamId();
         }
         if (self.push_state.isRemoteReserved(stream_id)) return false;
-        const last = self.push_state.last_peer_stream_id orelse return true;
+        const last = self.push_state.lastPeerStreamId() orelse return true;
         return stream_id > last;
     }
 
     fn lastPeerProcessedStreamId(self: Connection) u31 {
         if (self.role == .server) return self.last_peer_processed_stream_id;
-        return self.push_state.last_peer_stream_id orelse 0;
+        return self.push_state.lastPeerStreamId() orelse 0;
     }
 
     fn releaseLocalStream(self: *Connection, stream_id: u31) void {
@@ -13811,7 +13808,7 @@ pub const Connection = struct {
                         !self.outboundStreamIsActive(stream_id))
                     {
                         if (stream_id <
-                            self.push_state.next_local_stream_id)
+                            self.push_state.nextLocalStreamId())
                         {
                             // A previously promised push is already closed;
                             // RFC 9218 permits discarding this late update.
@@ -19067,7 +19064,7 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 
 test "HTTP/2 connection keeps peer metadata cold" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 2_144), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 1_984), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*peer_metadata.Origins),
             @sizeOf(@FieldType(Connection, "peer_origins")),
@@ -19084,6 +19081,10 @@ test "HTTP/2 connection keeps peer metadata cold" {
             @sizeOf(?*http2.Hpack.Encoder),
             @sizeOf(@FieldType(Connection, "hpack_encoder_staging")),
         );
+        try std.testing.expectEqual(
+            @as(usize, 8),
+            @sizeOf(@FieldType(Connection, "push_state")),
+        );
     }
 
     const connection = Connection{
@@ -19096,6 +19097,7 @@ test "HTTP/2 connection keeps peer metadata cold" {
     try std.testing.expect(connection.alternative_services == null);
     try std.testing.expect(connection.graceful_preadmit_decoder == null);
     try std.testing.expect(connection.hpack_encoder_staging == null);
+    try std.testing.expect(connection.push_state.state == null);
     try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
     try std.testing.expectEqual(
         @as(usize, 0),
@@ -25232,6 +25234,7 @@ test "HTTP/2 client rejects PUSH_PROMISE after disabling push" {
         .authority = "localhost",
     }));
     try std.testing.expect(!client.isReusable());
+    try std.testing.expect(client.push_state.state == null);
 
     thread.join();
     if (shared.err) |err| return err;

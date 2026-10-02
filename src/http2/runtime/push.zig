@@ -271,6 +271,132 @@ pub const State = struct {
     }
 };
 
+/// Keeps server-push bookkeeping out of connections that never negotiate or
+/// use push. Once created, the state and all of its retained capacities are
+/// reused for the remainder of the connection.
+pub const LazyState = struct {
+    state: ?*State = null,
+
+    pub fn deinit(self: *LazyState, allocator: std.mem.Allocator) void {
+        if (self.state) |state| {
+            state.deinit(allocator);
+            allocator.destroy(state);
+        }
+        self.* = undefined;
+    }
+
+    pub fn isQuiescent(self: *const LazyState) bool {
+        const state = self.state orelse return true;
+        return state.pending.items.len == state.pending_head and
+            state.local.items.len == 0 and state.remote.items.len == 0;
+    }
+
+    pub fn take(self: *LazyState) ?PromisedRequest {
+        const state = self.state orelse return null;
+        return state.take();
+    }
+
+    pub fn hasPending(self: *const LazyState, stream_id: u31) bool {
+        const state = self.state orelse return false;
+        return state.hasPending(stream_id);
+    }
+
+    pub fn isRemoteReserved(self: *const LazyState, stream_id: u31) bool {
+        const state = self.state orelse return false;
+        return state.isRemoteReserved(stream_id);
+    }
+
+    pub fn releaseRemote(self: *LazyState, stream_id: u31) bool {
+        const state = self.state orelse return false;
+        return state.releaseRemote(stream_id);
+    }
+
+    pub fn cancelRemote(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+    ) bool {
+        const state = self.state orelse return false;
+        return state.cancelRemote(allocator, stream_id);
+    }
+
+    pub fn localStatus(
+        self: *const LazyState,
+        stream_id: u31,
+    ) ?LocalStatus {
+        const state = self.state orelse return null;
+        return state.localStatus(stream_id);
+    }
+
+    pub fn isLocalReserved(self: *const LazyState, stream_id: u31) bool {
+        return self.localStatus(stream_id) == .reserved;
+    }
+
+    pub fn cancelLocal(self: *LazyState, stream_id: u31) bool {
+        const state = self.state orelse return false;
+        return state.cancelLocal(stream_id);
+    }
+
+    pub fn releaseLocal(self: *LazyState, stream_id: u31) bool {
+        const state = self.state orelse return false;
+        return state.releaseLocal(stream_id);
+    }
+
+    pub fn validatePeerStreamId(
+        self: *const LazyState,
+        stream_id: u31,
+    ) error{InvalidStreamId}!void {
+        if (self.state) |state| return state.validatePeerStreamId(stream_id);
+        if ((stream_id & 1) != 0 or stream_id == 0) {
+            return error.InvalidStreamId;
+        }
+    }
+
+    pub fn nextLocalStreamId(self: *const LazyState) u31 {
+        const state = self.state orelse return 2;
+        return state.next_local_stream_id;
+    }
+
+    pub fn lastPeerStreamId(self: *const LazyState) ?u31 {
+        const state = self.state orelse return null;
+        return state.last_peer_stream_id;
+    }
+
+    pub fn reserveLocal(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+    ) (error{InvalidStreamId} || std.mem.Allocator.Error)!u31 {
+        if (self.state) |state| return state.reserveLocal(allocator);
+
+        const state = try allocator.create(State);
+        state.* = .{};
+        errdefer {
+            state.deinit(allocator);
+            allocator.destroy(state);
+        }
+        const stream_id = try state.reserveLocal(allocator);
+        self.state = state;
+        return stream_id;
+    }
+
+    pub fn queue(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        promise: PromisedRequest,
+    ) std.mem.Allocator.Error!void {
+        if (self.state) |state| return state.queue(allocator, promise);
+
+        const state = try allocator.create(State);
+        state.* = .{};
+        errdefer {
+            state.deinit(allocator);
+            allocator.destroy(state);
+        }
+        try state.queue(allocator, promise);
+        self.state = state;
+    }
+};
+
 fn freeHeaders(
     allocator: std.mem.Allocator,
     headers: []http2.Hpack.HeaderField,
@@ -321,6 +447,35 @@ test "push reservations use monotonic even stream IDs" {
         error.InvalidStreamId,
         state.validatePeerStreamId(3),
     );
+}
+
+test "lazy push state allocates transactionally on first reservation" {
+    const allocator = std.testing.allocator;
+    var state: LazyState = .{};
+    defer state.deinit(allocator);
+
+    try std.testing.expect(state.isQuiescent());
+    try std.testing.expectEqual(@as(u31, 2), state.nextLocalStreamId());
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        // The state allocation succeeds, then the reservation index fails.
+        .fail_index = 1,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        state.reserveLocal(failing.allocator()),
+    );
+    try std.testing.expect(state.state == null);
+
+    try std.testing.expectEqual(@as(u31, 2), try state.reserveLocal(allocator));
+    try std.testing.expect(state.isLocalReserved(2));
+    try std.testing.expect(state.releaseLocal(2));
+    try std.testing.expect(state.isQuiescent());
+}
+
+test "lazy push state occupies one pointer" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 8), @sizeOf(LazyState));
+    }
 }
 
 test "canceling a queued remote reservation frees its request" {

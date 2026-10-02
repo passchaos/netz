@@ -1299,12 +1299,15 @@ growing while later PING traffic remains usable. Their list/index pairs are
 now allocated independently on first use rather than embedded in every
 connection. The speculative HPACK decoder used only while synchronizing a
 two-phase graceful shutdown and the second HPACK encoder used only for
-transactional batch writes are likewise allocated on first use. On 64-bit
-targets these changes reduce `runtime.Connection` from 2,496 to 2,144 bytes:
-80 bytes from the peer metadata containers, 112 bytes after alignment from the
-cold decoder, and 160 bytes from batch staging. Layout, disabled-limit, retry,
-and exhaustive allocation-failure tests cover the lazy ownership boundaries;
-this is fixed-state evidence, not a throughput claim.
+transactional batch writes are likewise allocated on first use. Server-push
+reservation queues and indexes now use the same lazy ownership model; clients
+that advertise `SETTINGS_ENABLE_PUSH=0` and servers that never initiate push do
+not allocate it. On 64-bit targets these changes reduce `runtime.Connection`
+from 2,496 to 1,984 bytes: 80 bytes from peer metadata, 112 bytes after
+alignment from the cold decoder, 160 bytes from batch staging, and 160 bytes
+from push state. Layout, disabled-limit, retry, and exhaustive
+allocation-failure tests cover the lazy ownership boundaries; this is
+fixed-state evidence, not a throughput claim.
 
 Inbound HPACK decoding now enforces `Limits.max_header_list_size` while walking
 the compressed block rather than after materializing every header. Static,
