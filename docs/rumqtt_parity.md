@@ -3475,18 +3475,25 @@ proxy evidence for the entire suite.
    the preallocated capacity table and allocates the maximum 86-byte generated
    Client ID only for clients that actually connect with an empty ID. The
    48-byte listener ACL descriptor is likewise allocated only for connections
-   whose listener configures an overlay. On the audited 64-bit target these
-   changes reduce each idle `ClientSlot` from 1,824 to 280 bytes; the default
-   1,024-slot broker therefore reserves 1,581,056 fewer bytes before clients
-   connect. Stable Connection storage is allocated before sending a successful
-   CONNACK and transferred to the slot only after that write succeeds.
-   Generated IDs and optional ACL metadata remain owned until the client task
-   releases its borrowed policy/CONNECT views, and all optional storage is
-   freed on rollback, disconnect, or broker destruction. Raw TCP, TLS,
-   WebSocket, Client ID takeover, generated-ID reuse, ACL denial, and allocator
-   leak tests cover the ownership paths. Fully occupied brokers still retain
-   the required Connection state, so this is deterministic capacity-headroom
-   evidence rather than a steady-state payload-memory claim.
+   whose listener configures an overlay. The four delivery/route/Session
+   scratch lists, transient QoS map, counters, and optional delivery-writer
+   pointer now share one 152-byte `ClientBuffers` descriptor allocated only
+   when a connection first subscribes, publishes through the router, or writes
+   Session state. Disconnect destroys that descriptor and all retained queue,
+   scratch, and map capacity instead of leaving it attached to an idle reusable
+   slot. On the audited 64-bit target these changes reduce each idle
+   `ClientSlot` from 1,824 to 136 bytes; the default 1,024-slot broker therefore
+   reserves 1,728,512 fewer bytes before clients connect. Stable Connection
+   storage is allocated before sending a successful CONNACK and transferred to
+   the slot only after that write succeeds. Generated IDs, optional ACL
+   metadata, and client buffers remain owned until the client task releases its
+   borrowed policy/CONNECT views, and all optional storage is freed on
+   rollback, disconnect, or broker destruction. Raw TCP, TLS, WebSocket,
+   Client ID takeover, generated-ID reuse, ACL denial, buffer-allocation
+   rollback, and allocator leak tests cover the ownership paths. Fully occupied
+   brokers that publish or subscribe still retain the required Connection and
+   buffer state, so this is deterministic capacity-headroom plus disconnected
+   retention evidence rather than a steady-state payload-memory claim.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

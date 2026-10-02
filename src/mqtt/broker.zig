@@ -506,6 +506,22 @@ const DeliveryWriter = struct {
     future: std.Io.Future(?anyerror),
 };
 
+/// Storage used only after a connection subscribes, publishes through the
+/// router, or has a Session transmission to write. Keeping these empty
+/// container headers out of every preallocated capacity slot also lets an
+/// idle slot release all retained queue and QoS-map capacity on disconnect.
+const ClientBuffers = struct {
+    delivery_writer: ?*DeliveryWriter = null,
+    queue: std.ArrayList(Delivery) = .empty,
+    queue_head: usize = 0,
+    route_matches: std.ArrayList(router_mod.Match) = .empty,
+    session_write_scratch: std.ArrayList(u8) = .empty,
+    session_property_scratch: std.ArrayList(mqtt.Property) = .empty,
+    transient_inflight_payloads: std.AutoHashMapUnmanaged(u16, usize) = .empty,
+    transient_inflight_payload_bytes: usize = 0,
+    route_reservations: usize = 0,
+};
+
 const ClientSlot = struct {
     generation: u32 = 0,
     active: bool = false,
@@ -537,60 +553,68 @@ const ClientSlot = struct {
     /// A lazily started connection-lifetime writer waits here for routed
     /// deliveries. Pure publishers therefore pay no extra coroutine cost.
     delivery_ready: std.Io.Event = .unset,
-    delivery_writer: ?*DeliveryWriter = null,
-    queue: std.ArrayList(Delivery) = .empty,
-    queue_head: usize = 0,
-    /// Network publishes keep their route plan alive after the broker state
-    /// lock is released. The publishing task is the sole user of its slot, so
-    /// this buffer can retain that plan without a per-PUBLISH allocation.
-    route_matches: std.ArrayList(router_mod.Match) = .empty,
-    /// Complete canonical Session transmissions are detached under
-    /// `state_mutex`, then encoded and written after releasing it. The slot
-    /// writer is serialized, so retaining this detached byte buffer removes
-    /// per-delivery allocation
-    /// churn without borrowing Session memory across the unlock boundary.
-    /// Oversized packets are released after their write so one exceptional
-    /// Application Message cannot pin more than 64 KiB in every live slot.
-    session_write_scratch: std.ArrayList(u8) = .empty,
-    /// Metadata for the detached Session transmission above. Variable-length
-    /// property values point into `session_write_scratch`; the array itself is
-    /// independently retained because MQTT properties are tagged unions.
-    session_property_scratch: std.ArrayList(mqtt.Property) = .empty,
-    /// Connection-local QoS 1/2 payload ownership for transient delivery.
-    ///
-    /// Durable deliveries are accounted by `session.Store`; recording them
-    /// here as well would charge the same payload twice. This map is allocated
-    /// lazily only when the configured byte limit is non-zero.
-    transient_inflight_payloads: std.AutoHashMapUnmanaged(u16, usize) = .empty,
-    transient_inflight_payload_bytes: usize = 0,
-    // Used only while `state_mutex` is held. A route can select the same
-    // client through overlapping subscriptions, so capacity must account for
-    // every delivery in the plan before any queue is mutated.
-    route_reservations: usize = 0,
+    /// Queue, route, Session-write and transient-QoS storage is allocated as
+    /// one descriptor only when the connection first needs any of it.
+    buffers: ?*ClientBuffers = null,
+
+    fn ensureBuffers(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!*ClientBuffers {
+        if (self.buffers) |buffers| return buffers;
+        const buffers = try allocator.create(ClientBuffers);
+        buffers.* = .{};
+        self.buffers = buffers;
+        return buffers;
+    }
+
+    fn clearBuffers(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+    ) void {
+        const buffers = self.buffers orelse return;
+        std.debug.assert(buffers.delivery_writer == null);
+        self.clearQueue();
+        buffers.queue.deinit(allocator);
+        buffers.route_matches.deinit(allocator);
+        buffers.session_write_scratch.deinit(allocator);
+        buffers.session_property_scratch.deinit(allocator);
+        buffers.transient_inflight_payloads.deinit(allocator);
+        allocator.destroy(buffers);
+        self.buffers = null;
+    }
 
     fn ensureDeliveryCapacity(
         self: *ClientSlot,
         allocator: std.mem.Allocator,
         capacity: usize,
     ) Error!void {
-        if (self.queue.capacity >= capacity) return;
-        try self.queue.ensureTotalCapacityPrecise(allocator, capacity);
+        if (self.buffers) |buffers| {
+            if (buffers.queue.capacity >= capacity) return;
+            try buffers.queue.ensureTotalCapacityPrecise(allocator, capacity);
+            return;
+        }
+        const buffers = try self.ensureBuffers(allocator);
+        errdefer self.clearBuffers(allocator);
+        try buffers.queue.ensureTotalCapacityPrecise(allocator, capacity);
     }
 
     fn clearQueue(self: *ClientSlot) void {
-        for (self.queue.items[self.queue_head..]) |*delivery| {
+        const buffers = self.buffers orelse return;
+        for (buffers.queue.items[buffers.queue_head..]) |*delivery| {
             delivery.deinit();
         }
-        self.queue.clearRetainingCapacity();
-        self.queue_head = 0;
+        buffers.queue.clearRetainingCapacity();
+        buffers.queue_head = 0;
     }
 
     fn transientInflightPayloadLimitReached(
         self: ClientSlot,
         limit: usize,
     ) bool {
+        const buffers = self.buffers orelse return false;
         return limit != 0 and
-            self.transient_inflight_payload_bytes >= limit;
+            buffers.transient_inflight_payload_bytes >= limit;
     }
 
     fn recordTransientInflight(
@@ -598,17 +622,18 @@ const ClientSlot = struct {
         packet_id: u16,
         payload_len: usize,
     ) void {
+        const buffers = self.buffers.?;
         std.debug.assert(packet_id != 0);
-        std.debug.assert(!self.transient_inflight_payloads.contains(
+        std.debug.assert(!buffers.transient_inflight_payloads.contains(
             packet_id,
         ));
-        self.transient_inflight_payloads.putAssumeCapacityNoClobber(
+        buffers.transient_inflight_payloads.putAssumeCapacityNoClobber(
             packet_id,
             payload_len,
         );
-        self.transient_inflight_payload_bytes = std.math.add(
+        buffers.transient_inflight_payload_bytes = std.math.add(
             usize,
-            self.transient_inflight_payload_bytes,
+            buffers.transient_inflight_payload_bytes,
             payload_len,
         ) catch unreachable;
     }
@@ -617,16 +642,26 @@ const ClientSlot = struct {
         self: *ClientSlot,
         packet_id: u16,
     ) bool {
-        const removed = self.transient_inflight_payloads.fetchRemove(
+        const buffers = self.buffers orelse return false;
+        const removed = buffers.transient_inflight_payloads.fetchRemove(
             packet_id,
         ) orelse return false;
-        self.transient_inflight_payload_bytes -= removed.value;
+        buffers.transient_inflight_payload_bytes -= removed.value;
         return true;
     }
 
+    fn hasTransientInflight(
+        self: ClientSlot,
+        packet_id: u16,
+    ) bool {
+        const buffers = self.buffers orelse return false;
+        return buffers.transient_inflight_payloads.contains(packet_id);
+    }
+
     fn clearTransientInflight(self: *ClientSlot) void {
-        self.transient_inflight_payloads.clearRetainingCapacity();
-        self.transient_inflight_payload_bytes = 0;
+        const buffers = self.buffers orelse return;
+        buffers.transient_inflight_payloads.clearRetainingCapacity();
+        buffers.transient_inflight_payload_bytes = 0;
     }
 
     fn clearAssignedClientId(
@@ -665,49 +700,53 @@ const ClientSlot = struct {
         self: *ClientSlot,
         allocator: std.mem.Allocator,
     ) void {
-        if (self.session_write_scratch.capacity >
+        const buffers = self.buffers orelse return;
+        if (buffers.session_write_scratch.capacity >
             session_write_scratch_retain_limit)
         {
-            self.session_write_scratch.deinit(allocator);
-            self.session_write_scratch = .empty;
+            buffers.session_write_scratch.deinit(allocator);
+            buffers.session_write_scratch = .empty;
         }
-        if (self.session_property_scratch.capacity >
+        if (buffers.session_property_scratch.capacity >
             session_property_scratch_retain_capacity)
         {
-            self.session_property_scratch.deinit(allocator);
-            self.session_property_scratch = .empty;
+            buffers.session_property_scratch.deinit(allocator);
+            buffers.session_property_scratch = .empty;
         }
     }
 
     fn queuedCount(self: ClientSlot) usize {
-        return self.queue.items.len - self.queue_head;
+        const buffers = self.buffers orelse return 0;
+        return buffers.queue.items.len - buffers.queue_head;
     }
 
     fn popDelivery(self: *ClientSlot) ?Delivery {
-        if (self.queue_head == self.queue.items.len) return null;
-        const delivery = self.queue.items[self.queue_head];
-        self.queue_head += 1;
-        if (self.queue_head >= 64 and
-            self.queue_head * 2 >= self.queue.items.len)
+        const buffers = self.buffers orelse return null;
+        if (buffers.queue_head == buffers.queue.items.len) return null;
+        const delivery = buffers.queue.items[buffers.queue_head];
+        buffers.queue_head += 1;
+        if (buffers.queue_head >= 64 and
+            buffers.queue_head * 2 >= buffers.queue.items.len)
         {
-            const remaining = self.queue.items.len - self.queue_head;
+            const remaining = buffers.queue.items.len - buffers.queue_head;
             if (remaining != 0) {
                 std.mem.copyForwards(
                     Delivery,
-                    self.queue.items[0..remaining],
-                    self.queue.items[self.queue_head..],
+                    buffers.queue.items[0..remaining],
+                    buffers.queue.items[buffers.queue_head..],
                 );
             }
-            self.queue.items.len = remaining;
-            self.queue_head = 0;
+            buffers.queue.items.len = remaining;
+            buffers.queue_head = 0;
         }
         return delivery;
     }
 
     fn pushFront(self: *ClientSlot, delivery: Delivery) void {
-        if (self.queue_head != 0) {
-            self.queue_head -= 1;
-            self.queue.items[self.queue_head] = delivery;
+        const buffers = self.buffers.?;
+        if (buffers.queue_head != 0) {
+            buffers.queue_head -= 1;
+            buffers.queue.items[buffers.queue_head] = delivery;
             return;
         }
 
@@ -715,38 +754,39 @@ const ClientSlot = struct {
         // reports InflightFull. Compaction leaves at least one unused element
         // of capacity, allowing the delivery to be restored without an
         // allocation or a fallible backpressure path.
-        std.debug.assert(self.queue.items.len < self.queue.capacity);
-        const old_len = self.queue.items.len;
-        self.queue.appendAssumeCapacity(delivery);
+        std.debug.assert(buffers.queue.items.len < buffers.queue.capacity);
+        const old_len = buffers.queue.items.len;
+        buffers.queue.appendAssumeCapacity(delivery);
         std.mem.copyBackwards(
             Delivery,
-            self.queue.items[1 .. old_len + 1],
-            self.queue.items[0..old_len],
+            buffers.queue.items[1 .. old_len + 1],
+            buffers.queue.items[0..old_len],
         );
-        self.queue.items[0] = delivery;
+        buffers.queue.items[0] = delivery;
     }
 
     fn appendDeliveryAssumeCapacity(
         self: *ClientSlot,
         delivery: Delivery,
     ) void {
+        const buffers = self.buffers.?;
         // Consumed prefix storage is part of the bounded queue allocation. Use
         // it before growing logical length; this keeps the hot route path
         // allocation-free even if compaction has not reached its threshold.
-        if (self.queue.items.len == self.queue.capacity and
-            self.queue_head != 0)
+        if (buffers.queue.items.len == buffers.queue.capacity and
+            buffers.queue_head != 0)
         {
             const remaining = self.queuedCount();
             std.mem.copyForwards(
                 Delivery,
-                self.queue.items[0..remaining],
-                self.queue.items[self.queue_head..],
+                buffers.queue.items[0..remaining],
+                buffers.queue.items[buffers.queue_head..],
             );
-            self.queue.items.len = remaining;
-            self.queue_head = 0;
+            buffers.queue.items.len = remaining;
+            buffers.queue_head = 0;
         }
-        std.debug.assert(self.queue.items.len < self.queue.capacity);
-        self.queue.appendAssumeCapacity(delivery);
+        std.debug.assert(buffers.queue.items.len < buffers.queue.capacity);
+        buffers.queue.appendAssumeCapacity(delivery);
     }
 
     fn tailDeliveryForPublication(
@@ -754,25 +794,27 @@ const ClientSlot = struct {
         publication: *Publication,
     ) ?*Delivery {
         if (self.queuedCount() == 0) return null;
-        const delivery = &self.queue.items[self.queue.items.len - 1];
+        const buffers = self.buffers.?;
+        const delivery = &buffers.queue.items[buffers.queue.items.len - 1];
         return if (delivery.publication == publication) delivery else null;
     }
 
     fn removePublication(self: *ClientSlot, publication: *Publication) usize {
+        const buffers = self.buffers orelse return 0;
         var removed: usize = 0;
-        var index = self.queue_head;
-        while (index < self.queue.items.len) {
-            if (self.queue.items[index].publication != publication) {
+        var index = buffers.queue_head;
+        while (index < buffers.queue.items.len) {
+            if (buffers.queue.items[index].publication != publication) {
                 index += 1;
                 continue;
             }
-            var delivery = self.queue.orderedRemove(index);
+            var delivery = buffers.queue.orderedRemove(index);
             delivery.deinit();
             removed += 1;
         }
-        if (self.queue_head == self.queue.items.len) {
-            self.queue.clearRetainingCapacity();
-            self.queue_head = 0;
+        if (buffers.queue_head == buffers.queue.items.len) {
+            buffers.queue.clearRetainingCapacity();
+            buffers.queue_head = 0;
         }
         return removed;
     }
@@ -782,10 +824,44 @@ test "MQTT broker capacity slots keep connection state out of line" {
     try std.testing.expect(
         @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
     );
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 136), @sizeOf(ClientSlot));
+        try std.testing.expectEqual(@as(usize, 152), @sizeOf(ClientBuffers));
+    }
     try std.testing.expectEqual(
         @sizeOf(?*ListenerAccessControlHandler),
         @sizeOf(@FieldType(ClientSlot, "listener_access_control")),
     );
+}
+
+test "MQTT broker allocates client buffers on demand" {
+    var slot: ClientSlot = .{};
+    try std.testing.expect(slot.buffers == null);
+
+    var descriptor_failure = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        slot.ensureDeliveryCapacity(descriptor_failure.allocator(), 4),
+    );
+    try std.testing.expect(slot.buffers == null);
+
+    var queue_failure = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        slot.ensureDeliveryCapacity(queue_failure.allocator(), 4),
+    );
+    try std.testing.expect(slot.buffers == null);
+
+    try slot.ensureDeliveryCapacity(std.testing.allocator, 4);
+    try std.testing.expect(slot.buffers.?.queue.capacity >= 4);
+    slot.clearBuffers(std.testing.allocator);
+    try std.testing.expect(slot.buffers == null);
 }
 
 test "MQTT broker allocates assigned client identifiers on demand" {
@@ -915,8 +991,9 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
 test "MQTT live overlap merge uses the current queue tail" {
     const allocator = std.testing.allocator;
     var slot: ClientSlot = .{};
-    defer slot.queue.deinit(allocator);
-    try slot.queue.ensureTotalCapacityPrecise(allocator, 4);
+    defer slot.clearBuffers(allocator);
+    const buffers = try slot.ensureBuffers(allocator);
+    try buffers.queue.ensureTotalCapacityPrecise(allocator, 4);
 
     var prior_publication: Publication = undefined;
     var current_publication: Publication = undefined;
@@ -954,38 +1031,38 @@ test "MQTT live overlap merge uses the current queue tail" {
 test "durable Session write scratch retains only bounded packets" {
     const allocator = std.testing.allocator;
     var slot: ClientSlot = .{};
-    defer slot.session_write_scratch.deinit(allocator);
-    defer slot.session_property_scratch.deinit(allocator);
+    defer slot.clearBuffers(allocator);
+    const buffers = try slot.ensureBuffers(allocator);
 
-    try slot.session_write_scratch.ensureTotalCapacityPrecise(
+    try buffers.session_write_scratch.ensureTotalCapacityPrecise(
         allocator,
         1024,
     );
-    const retained = slot.session_write_scratch.allocatedSlice().ptr;
+    const retained = buffers.session_write_scratch.allocatedSlice().ptr;
     slot.releaseOversizedSessionScratch(allocator);
     try std.testing.expectEqual(
         retained,
-        slot.session_write_scratch.allocatedSlice().ptr,
+        buffers.session_write_scratch.allocatedSlice().ptr,
     );
 
-    try slot.session_write_scratch.ensureTotalCapacityPrecise(
+    try buffers.session_write_scratch.ensureTotalCapacityPrecise(
         allocator,
         session_write_scratch_retain_limit + 1,
     );
     slot.releaseOversizedSessionScratch(allocator);
     try std.testing.expectEqual(
         @as(usize, 0),
-        slot.session_write_scratch.capacity,
+        buffers.session_write_scratch.capacity,
     );
 
-    try slot.session_property_scratch.ensureTotalCapacityPrecise(
+    try buffers.session_property_scratch.ensureTotalCapacityPrecise(
         allocator,
         session_property_scratch_retain_capacity + 1,
     );
     slot.releaseOversizedSessionScratch(allocator);
     try std.testing.expectEqual(
         @as(usize, 0),
-        slot.session_property_scratch.capacity,
+        buffers.session_property_scratch.capacity,
     );
 }
 
@@ -1522,13 +1599,7 @@ pub const Broker = struct {
 
     pub fn deinit(self: *Broker) void {
         for (self.slots) |*slot| {
-            std.debug.assert(slot.delivery_writer == null);
-            slot.clearQueue();
-            slot.queue.deinit(self.allocator);
-            slot.route_matches.deinit(self.allocator);
-            slot.session_write_scratch.deinit(self.allocator);
-            slot.session_property_scratch.deinit(self.allocator);
-            slot.transient_inflight_payloads.deinit(self.allocator);
+            slot.clearBuffers(self.allocator);
             slot.clearAssignedClientId(self.allocator);
             slot.clearListenerAccessControl(self.allocator);
             if (slot.connection) |connection| {
@@ -3446,6 +3517,8 @@ pub const Broker = struct {
         slot.session_present = false;
         slot.session_persistent = false;
         std.debug.assert(slot.assigned_client_id == null);
+        std.debug.assert(slot.buffers == null);
+        errdefer slot.clearBuffers(self.allocator);
         errdefer slot.clearAssignedClientId(self.allocator);
         slot.graceful_disconnect = false;
         try slot.setListenerAccessControl(
@@ -3463,7 +3536,6 @@ pub const Broker = struct {
         // A slot can retain a harmless late notification from its previous
         // generation. No writer exists while the slot is being registered.
         slot.delivery_ready.reset();
-        std.debug.assert(slot.delivery_writer == null);
         const id = subscriberId(slot_index, slot.generation);
         const now = std.Io.Clock.awake.now(self.io);
         // `find` removes an expired Session without exposing its route ID.
@@ -3872,9 +3944,9 @@ pub const Broker = struct {
         slot.retained_source_id = null;
         slot.username = null;
         slot.will_handle = null;
+        slot.clearBuffers(self.allocator);
         slot.clearListenerAccessControl(self.allocator);
         slot.clearAssignedClientId(self.allocator);
-        slot.clearTransientInflight();
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         self.deadline_driver.notify(self.io);
@@ -4030,14 +4102,7 @@ pub const Broker = struct {
         if (slot.session_handle == null) {
             _ = self.pending_qos2.removePublisher(id);
         }
-        slot.clearQueue();
-        slot.route_matches.deinit(self.allocator);
-        slot.route_matches = .empty;
-        slot.session_write_scratch.deinit(self.allocator);
-        slot.session_write_scratch = .empty;
-        slot.session_property_scratch.deinit(self.allocator);
-        slot.session_property_scratch = .empty;
-        slot.clearTransientInflight();
+        slot.clearBuffers(self.allocator);
         // Publish an idle slot only after every field from the old generation
         // has been detached. `claimSlot` observes this state under the same
         // mutex, so it can never reserve a slot that still owns a connection.
@@ -4053,7 +4118,6 @@ pub const Broker = struct {
         slot.listener_access_control = null;
         slot.retained_source_id = null;
         slot.username = null;
-        std.debug.assert(slot.delivery_writer == null);
         slot.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
@@ -5214,8 +5278,9 @@ pub const Broker = struct {
                 continue;
             }
             has_matching_subscriber = true;
+            const destination_buffers = destination.buffers.?;
             if (destination.queuedCount() +
-                destination.route_reservations >=
+                destination_buffers.route_reservations >=
                 self.options.limits
                     .max_queued_deliveries_per_connection)
             {
@@ -5226,7 +5291,7 @@ pub const Broker = struct {
                 self.publish_counters.recordDropped();
                 continue;
             }
-            destination.route_reservations += 1;
+            destination_buffers.route_reservations += 1;
             matches[plan_count] = match;
             plan_count += 1;
         }
@@ -5400,7 +5465,8 @@ pub const Broker = struct {
                     subscriberId(index, slot.generation) == id and
                     match_capacity <= route_match_scratch_capacity)
                 {
-                    const scratch = &slot.route_matches;
+                    const buffers = try slot.ensureBuffers(self.allocator);
+                    const scratch = &buffers.route_matches;
                     std.debug.assert(scratch.items.len == 0);
                     errdefer scratch.clearRetainingCapacity();
                     try scratch.ensureTotalCapacityPrecise(
@@ -5754,8 +5820,9 @@ pub const Broker = struct {
                 self.slots.len,
             ).?;
             const destination = &self.slots[destination_index];
-            std.debug.assert(destination.route_reservations != 0);
-            destination.route_reservations -= 1;
+            const buffers = destination.buffers.?;
+            std.debug.assert(buffers.route_reservations != 0);
+            buffers.route_reservations -= 1;
         }
     }
 
@@ -5991,7 +6058,8 @@ pub const Broker = struct {
             }
             const inflight_payload_limit =
                 self.options.max_inflight_payload_bytes_per_connection;
-            const next_delivery = slot.queue.items[slot.queue_head];
+            const buffers = slot.buffers.?;
+            const next_delivery = buffers.queue.items[buffers.queue_head];
             if (next_delivery.qos != .at_most_once and
                 slot.transientInflightPayloadLimitReached(
                     inflight_payload_limit,
@@ -6006,7 +6074,7 @@ pub const Broker = struct {
             if (delivery.qos != .at_most_once and
                 inflight_payload_limit != 0)
             {
-                slot.transient_inflight_payloads.ensureUnusedCapacity(
+                buffers.transient_inflight_payloads.ensureUnusedCapacity(
                     self.allocator,
                     1,
                 ) catch |err| {
@@ -6214,9 +6282,10 @@ pub const Broker = struct {
                 },
                 .pubrel => 0,
             };
+            const buffers = try slot.ensureBuffers(self.allocator);
             const detached = session_route.detachTransmission(
-                &slot.session_write_scratch,
-                &slot.session_property_scratch,
+                &buffers.session_write_scratch,
+                &buffers.session_property_scratch,
                 self.allocator,
                 wire_transmission,
                 connection.localMaximumQoS(),
@@ -6668,7 +6737,10 @@ test "MQTT delivery queue storage is reserved only for subscribers" {
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        broker.slots[publisher_slot].queue.capacity,
+        if (broker.slots[publisher_slot].buffers) |buffers|
+            buffers.queue.capacity
+        else
+            0,
     );
     broker.abortRegistration(
         publisher_slot,
@@ -6697,7 +6769,7 @@ test "MQTT delivery queue storage is reserved only for subscribers" {
         .id = .session_expiry_interval,
         .value = 60,
     } }};
-    _ = try broker.register(
+    const subscriber_registration = try broker.register(
         subscriber_slot,
         .{
             .protocol = .v5,
@@ -6712,8 +6784,16 @@ test "MQTT delivery queue storage is reserved only for subscribers" {
         &subscriber_progress,
     );
     try std.testing.expect(
-        broker.slots[subscriber_slot].queue.capacity >= queue_capacity,
+        broker.slots[subscriber_slot].buffers.?.queue.capacity >=
+            queue_capacity,
     );
+    broker.abortRegistration(
+        subscriber_slot,
+        subscriber_registration.subscriber_id,
+        subscriber_progress.rollback_changed,
+    );
+    try std.testing.expect(broker.slots[subscriber_slot].buffers == null);
+    broker.releaseClaimedSlot(subscriber_slot);
 }
 
 test "MQTT publisher route plans reuse bounded slot storage" {
@@ -6744,7 +6824,10 @@ test "MQTT publisher route plans reuse bounded slot storage" {
     try std.testing.expectEqual(@as(router_mod.SubscriberId, 10), first.items[1].subscriber_id);
     const scratch_ptr = first.items.ptr;
     first.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), slot.route_matches.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        slot.buffers.?.route_matches.items.len,
+    );
 
     {
         var failing = std.testing.FailingAllocator.init(
@@ -6803,6 +6886,7 @@ test "MQTT publisher route plans reuse bounded slot storage" {
         fallback.items[fallback.items.len - 1].subscriber_id,
     );
 
+    slot.clearBuffers(allocator);
     broker.releaseClaimedSlot(slot_index);
 }
 
@@ -6856,14 +6940,10 @@ test "MQTT failed Clean Start journals the durable deletion" {
     try broker.sessions.disconnect(old.handle, null, now);
     try broker.createCommitLog(tmp.dir, "failed-clean.log", .{});
 
-    // Reserve the connection queue before arming failure so registration
-    // reaches the allocation immediately after Clean Start removes the old
-    // durable Session. The out-progress bit must survive that error.
+    // Arm the next allocation so registration fails immediately after Clean
+    // Start removes the old durable Session. The out-progress bit must survive
+    // that error.
     const slot_index = try broker.claimSlot();
-    try broker.slots[slot_index].queue.ensureTotalCapacity(
-        broker.allocator,
-        broker.options.limits.max_queued_deliveries_per_connection,
-    );
     var progress: RegistrationProgress = .{};
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
@@ -6953,12 +7033,15 @@ const ClientTask = struct {
         task: ClientTask,
         slot: *ClientSlot,
     ) (std.mem.Allocator.Error || std.Io.ConcurrentError)!void {
-        if (slot.delivery_writer != null) return;
+        if (slot.buffers) |buffers| {
+            if (buffers.delivery_writer != null) return;
+        }
         task.broker.state_mutex.lockUncancelable(task.broker.io);
         const session_persistent = slot.session_persistent;
         task.broker.state_mutex.unlock(task.broker.io);
         if (session_persistent) return;
 
+        const buffers = try slot.ensureBuffers(task.broker.allocator);
         const writer = try task.broker.allocator.create(DeliveryWriter);
         errdefer task.broker.allocator.destroy(writer);
         writer.* = .{
@@ -6974,7 +7057,7 @@ const ClientTask = struct {
             },
         );
         task.broker.state_mutex.lockUncancelable(task.broker.io);
-        slot.delivery_writer = writer;
+        buffers.delivery_writer = writer;
         task.broker.state_mutex.unlock(task.broker.io);
     }
 
@@ -6983,11 +7066,15 @@ const ClientTask = struct {
         slot: *ClientSlot,
     ) ?anyerror {
         task.broker.state_mutex.lockUncancelable(task.broker.io);
-        const writer = slot.delivery_writer orelse {
+        const buffers = slot.buffers orelse {
             task.broker.state_mutex.unlock(task.broker.io);
             return null;
         };
-        slot.delivery_writer = null;
+        const writer = buffers.delivery_writer orelse {
+            task.broker.state_mutex.unlock(task.broker.io);
+            return null;
+        };
+        buffers.delivery_writer = null;
         task.broker.state_mutex.unlock(task.broker.io);
         defer task.broker.allocator.destroy(writer);
         writer.stop.store(true, .release);
@@ -7136,10 +7223,9 @@ const ClientTask = struct {
                             owned.ack.packet_id,
                         ))
                     {
-                        const transient_owned =
-                            slot.transient_inflight_payloads.contains(
-                                owned.ack.packet_id,
-                            );
+                        const transient_owned = slot.hasTransientInflight(
+                            owned.ack.packet_id,
+                        );
                         connection.applyPubAck(owned.ack) catch |err|
                             switch (err) {
                                 error.PublishRefused => {},
@@ -7201,10 +7287,9 @@ const ClientTask = struct {
                         if (connection.hasOutgoingPacketIdentifier(
                             owned.ack.packet_id,
                         )) {
-                            const transient_owned =
-                                slot.transient_inflight_payloads.contains(
-                                    owned.ack.packet_id,
-                                );
+                            const transient_owned = slot.hasTransientInflight(
+                                owned.ack.packet_id,
+                            );
                             connection.applyPubRec(owned.ack) catch |err|
                                 switch (err) {
                                     error.PublishRefused => {},
@@ -7296,10 +7381,9 @@ const ClientTask = struct {
                             owned.ack.packet_id,
                         ))
                     {
-                        const transient_owned =
-                            slot.transient_inflight_payloads.contains(
-                                owned.ack.packet_id,
-                            );
+                        const transient_owned = slot.hasTransientInflight(
+                            owned.ack.packet_id,
+                        );
                         connection.applyPubComp(owned.ack) catch |err|
                             switch (err) {
                                 error.PublishRefused => {},
@@ -7802,14 +7886,19 @@ test "broker rejects invalid listener Client Identifier prefixes" {
 
 test "transient inflight payload accounting is lazy and clears safely" {
     var slot: ClientSlot = .{};
-    defer slot.transient_inflight_payloads.deinit(std.testing.allocator);
+    defer slot.clearBuffers(std.testing.allocator);
 
+    try std.testing.expect(slot.buffers == null);
     try std.testing.expectEqual(
         @as(u32, 0),
-        slot.transient_inflight_payloads.capacity(),
+        if (slot.buffers) |buffers|
+            buffers.transient_inflight_payloads.capacity()
+        else
+            0,
     );
     try std.testing.expect(!slot.transientInflightPayloadLimitReached(10));
-    try slot.transient_inflight_payloads.ensureUnusedCapacity(
+    const buffers = try slot.ensureBuffers(std.testing.allocator);
+    try buffers.transient_inflight_payloads.ensureUnusedCapacity(
         std.testing.allocator,
         2,
     );
@@ -7820,16 +7909,16 @@ test "transient inflight payload accounting is lazy and clears safely" {
     try std.testing.expect(slot.releaseTransientInflight(1));
     try std.testing.expectEqual(
         @as(usize, 6),
-        slot.transient_inflight_payload_bytes,
+        buffers.transient_inflight_payload_bytes,
     );
     slot.clearTransientInflight();
     try std.testing.expectEqual(
         @as(usize, 0),
-        slot.transient_inflight_payload_bytes,
+        buffers.transient_inflight_payload_bytes,
     );
     try std.testing.expectEqual(
         @as(usize, 0),
-        slot.transient_inflight_payloads.count(),
+        buffers.transient_inflight_payloads.count(),
     );
 }
 
