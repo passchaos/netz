@@ -3539,11 +3539,12 @@ proxy evidence for the entire suite.
    Session state. Disconnect destroys that descriptor and all retained queue,
    scratch, and map capacity instead of leaving it attached to an idle reusable
    slot. The slot's generated Client ID uses its existing allocation through a
-   pointer plus the generator's bounded u8 length, while its 31-bit connection
-   generation and active bit share one u32. On the audited 64-bit target these
-   changes reduce each idle `ClientSlot` from 1,824 to 128 bytes; the default
-   1,024-slot broker therefore reserves 1,736,704 fewer bytes before clients
-   connect. Stable Connection
+   pointer plus the generator's bounded u7 length, and the borrowed CONNECT
+   username uses a pointer plus its MQTT-native u16 length. Both lengths, the
+   31-bit connection generation, and the active/Session/graceful flags share
+   one u64. On the audited 64-bit target these changes reduce each idle
+   `ClientSlot` from 1,824 to 120 bytes; the default 1,024-slot broker therefore
+   reserves 1,744,896 fewer bytes before clients connect. Stable Connection
    storage is allocated before sending a successful CONNACK and transferred to
    the slot only after that write succeeds. Generated IDs, optional ACL
    metadata, and client buffers remain owned until the client task releases its

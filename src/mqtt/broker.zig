@@ -523,9 +523,15 @@ const ClientBuffers = struct {
 };
 
 const ClientSlot = struct {
-    state: packed struct(u32) {
+    state: packed struct(u64) {
         generation: u31 = 0,
         active: bool = false,
+        assigned_client_id_len: u7 = 0,
+        username_len: u16 = 0,
+        session_present: bool = false,
+        session_persistent: bool = false,
+        graceful_disconnect: bool = false,
+        _padding: u6 = 0,
     } = .{},
     /// Allocated only after policy and Session admission, immediately before a
     /// successful CONNACK. Keeping the large transport/session state out of
@@ -533,25 +539,22 @@ const ClientSlot = struct {
     connection: ?*runtime.Connection = null,
     will_handle: ?will_mod.Handle = null,
     session_handle: ?session_mod.Handle = null,
-    session_present: bool = false,
     /// Whether Server Session State survives loss of this Network Connection.
     ///
     /// Transient sessions still use a stable route while connected, but live
     /// QoS 1/2 fanout can use the connection-local inflight state and one
     /// shared Publication. Durable sessions must instead deep-own each queued
     /// message so reconnect retransmission remains possible.
-    session_persistent: bool = false,
     /// Present only when the broker assigned an identifier for an empty MQTT 5
     /// Client ID. Ordinary clients do not pay for the maximum 86-byte value.
     assigned_client_id_ptr: ?[*]u8 = null,
-    assigned_client_id_len: u8 = 0,
-    graceful_disconnect: bool = false,
     /// Allocated only when a listener contributes an ACL overlay. Callback
     /// contexts remain borrowed from the listener for the connection lifetime.
     listener_access_control: ?*ListenerAccessControlHandler = null,
     retained_source_id: ?u64 = null,
-    /// Borrowed from `ClientTask.connect` while this slot is active.
-    username: ?[]const u8 = null,
+    /// Borrowed from `ClientTask.connect` while this slot is active. MQTT's
+    /// two-byte UTF-8 length bounds the compact descriptor.
+    username_ptr: ?[*]const u8 = null,
     writer_mutex: std.Io.Mutex = .init,
     /// A lazily started connection-lifetime writer waits here for routed
     /// deliveries. Pure publishers therefore pay no extra coroutine cost.
@@ -678,7 +681,7 @@ const ClientSlot = struct {
 
     fn assignedClientId(self: ClientSlot) ?[]u8 {
         const ptr = self.assigned_client_id_ptr orelse return null;
-        return ptr[0..self.assigned_client_id_len];
+        return ptr[0..self.state.assigned_client_id_len];
     }
 
     fn setAssignedClientId(
@@ -693,15 +696,31 @@ const ClientSlot = struct {
         std.debug.assert(client_id.len <= client_id_mod.max_len);
         const owned = try allocator.dupe(u8, client_id);
         self.assigned_client_id_ptr = owned.ptr;
-        self.assigned_client_id_len = @intCast(owned.len);
+        self.state.assigned_client_id_len = @intCast(owned.len);
         return owned;
     }
 
     fn takeAssignedClientId(self: *ClientSlot) ?[]u8 {
         const client_id = self.assignedClientId() orelse return null;
         self.assigned_client_id_ptr = null;
-        self.assigned_client_id_len = 0;
+        self.state.assigned_client_id_len = 0;
         return client_id;
+    }
+
+    fn username(self: ClientSlot) ?[]const u8 {
+        const ptr = self.username_ptr orelse return null;
+        return ptr[0..self.state.username_len];
+    }
+
+    fn setUsername(self: *ClientSlot, maybe_username: ?[]const u8) void {
+        const value = maybe_username orelse {
+            self.username_ptr = null;
+            self.state.username_len = 0;
+            return;
+        };
+        std.debug.assert(value.len <= std.math.maxInt(u16));
+        self.username_ptr = value.ptr;
+        self.state.username_len = @intCast(value.len);
     }
 
     fn setListenerAccessControl(
@@ -857,10 +876,10 @@ test "MQTT broker capacity slots keep connection state out of line" {
         @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
     );
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 128), @sizeOf(ClientSlot));
+        try std.testing.expectEqual(@as(usize, 120), @sizeOf(ClientSlot));
         try std.testing.expectEqual(@as(usize, 152), @sizeOf(ClientBuffers));
         try std.testing.expectEqual(
-            @as(usize, 4),
+            @as(usize, 8),
             @sizeOf(@FieldType(ClientSlot, "state")),
         );
         try std.testing.expectEqual(
@@ -868,8 +887,12 @@ test "MQTT broker capacity slots keep connection state out of line" {
             @sizeOf(@FieldType(ClientSlot, "assigned_client_id_ptr")),
         );
         try std.testing.expectEqual(
-            @sizeOf(u8),
-            @sizeOf(@FieldType(ClientSlot, "assigned_client_id_len")),
+            @sizeOf(?[*]const u8),
+            @sizeOf(@FieldType(ClientSlot, "username_ptr")),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 64),
+            @bitSizeOf(@FieldType(ClientSlot, "state")),
         );
     }
     try std.testing.expectEqual(
@@ -933,7 +956,7 @@ test "MQTT broker allocates assigned client identifiers on demand" {
     broker.allocator = allocator;
     try std.testing.expectError(error.OutOfMemory, failed_assignment);
     try std.testing.expect(slot.assignedClientId() == null);
-    try std.testing.expectEqual(@as(u8, 0), slot.assigned_client_id_len);
+    try std.testing.expectEqual(@as(u7, 0), slot.state.assigned_client_id_len);
 
     broker.state_mutex.lockUncancelable(io);
     const assigned = broker.assignClientIdLocked(
@@ -950,6 +973,23 @@ test "MQTT broker allocates assigned client identifiers on demand" {
     broker.abortRegistration(slot_index, 0, false);
     try std.testing.expect(slot.assignedClientId() == null);
     broker.releaseClaimedSlot(slot_index);
+}
+
+test "MQTT broker stores borrowed username with wire length" {
+    var slot: ClientSlot = .{};
+    try std.testing.expect(slot.username() == null);
+
+    var bytes = [_]u8{ 'u', 's', 'e', 'r' };
+    slot.setUsername(&bytes);
+    try std.testing.expectEqualStrings("user", slot.username().?);
+    bytes[0] = 'U';
+    try std.testing.expectEqualStrings("User", slot.username().?);
+
+    slot.setUsername("");
+    try std.testing.expectEqualStrings("", slot.username().?);
+    slot.setUsername(null);
+    try std.testing.expect(slot.username() == null);
+    try std.testing.expectEqual(@as(u16, 0), slot.state.username_len);
 }
 
 test "MQTT broker allocates listener ACL metadata on demand" {
@@ -3576,7 +3616,7 @@ pub const Broker = struct {
             mapped.deinit();
             mapped_will = null;
         }
-        accept_options.session_present = self.slots[index].session_present;
+        accept_options.session_present = self.slots[index].state.session_present;
         if (self.slots[index].assignedClientId()) |assigned_client_id| {
             effective_connect.client_id = assigned_client_id;
             accept_options.assigned_client_identifier = assigned_client_id;
@@ -3652,13 +3692,13 @@ pub const Broker = struct {
         slot.connection = null;
         slot.will_handle = null;
         slot.session_handle = null;
-        slot.session_present = false;
-        slot.session_persistent = false;
+        slot.state.session_present = false;
+        slot.state.session_persistent = false;
         std.debug.assert(slot.assignedClientId() == null);
         std.debug.assert(slot.buffers == null);
         errdefer slot.clearBuffers(self.allocator);
         errdefer slot.clearAssignedClientId(self.allocator);
-        slot.graceful_disconnect = false;
+        slot.state.graceful_disconnect = false;
         try slot.setListenerAccessControl(
             self.allocator,
             listener_access_control,
@@ -3669,8 +3709,8 @@ pub const Broker = struct {
         // `preparePending` passes the effective CONNECT after any
         // username-as-client-id transformation; its username remains the
         // authenticated wire identity used by listener read ACLs.
-        slot.username = connect.username;
-        errdefer slot.username = null;
+        slot.setUsername(connect.username);
+        errdefer slot.setUsername(null);
         // A slot can retain a harmless late notification from its previous
         // generation. No writer exists while the slot is being registered.
         slot.delivery_ready.reset();
@@ -3761,8 +3801,8 @@ pub const Broker = struct {
             }
         }
         slot.session_handle = opened_session.handle;
-        slot.session_present = opened_session.session_present;
-        slot.session_persistent = (try self.sessions.stats(
+        slot.state.session_present = opened_session.session_present;
+        slot.state.session_persistent = (try self.sessions.stats(
             opened_session.handle,
         )).expiry_interval != 0;
         self.session_owners.putAssumeCapacityNoClobber(
@@ -3825,7 +3865,7 @@ pub const Broker = struct {
             );
         }
         self.deadline_driver.notify(self.io);
-        persistent_changed = persistent_changed or slot.session_persistent or
+        persistent_changed = persistent_changed or slot.state.session_persistent or
             previous_handle != null or accepted_will.current != null;
         return .{
             .subscriber_id = id,
@@ -3928,7 +3968,7 @@ pub const Broker = struct {
             return;
         }
         owner.session_handle = null;
-        owner.session_persistent = false;
+        owner.state.session_persistent = false;
     }
 
     fn disconnectReplacedSessionOwner(
@@ -4064,7 +4104,7 @@ pub const Broker = struct {
                 self.rollbackOpenedSessionLocked(
                     handle,
                     value,
-                    slot.session_present,
+                    slot.state.session_present,
                     std.Io.Clock.awake.now(self.io),
                 );
             }
@@ -4078,10 +4118,10 @@ pub const Broker = struct {
         // concurrent accept can reuse it before that caller releases it.
         slot.connection = null;
         slot.session_handle = null;
-        slot.session_present = false;
-        slot.session_persistent = false;
+        slot.state.session_present = false;
+        slot.state.session_persistent = false;
         slot.retained_source_id = null;
-        slot.username = null;
+        slot.setUsername(null);
         slot.will_handle = null;
         slot.clearBuffers(self.allocator);
         slot.clearListenerAccessControl(self.allocator);
@@ -4182,7 +4222,7 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             self.finishPartialPersistentChange(persistent_changed);
         };
-        if (!slot.graceful_disconnect) {
+        if (!slot.state.graceful_disconnect) {
             if (slot.will_handle) |handle| {
                 const result: ?will_mod.CloseResult = self.wills.close(
                     handle,
@@ -4207,7 +4247,7 @@ pub const Broker = struct {
             }
         }
         if (slot.session_handle) |handle| {
-            persistent_changed = persistent_changed or slot.session_persistent;
+            persistent_changed = persistent_changed or slot.state.session_persistent;
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
                 _ = self.session_owners.remove(value);
@@ -4251,11 +4291,11 @@ pub const Broker = struct {
         slot.connection = null;
         slot.will_handle = null;
         slot.session_handle = null;
-        slot.session_present = false;
-        slot.session_persistent = false;
+        slot.state.session_present = false;
+        slot.state.session_persistent = false;
         slot.listener_access_control = null;
         slot.retained_source_id = null;
-        slot.username = null;
+        slot.setUsername(null);
         slot.state.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
@@ -4333,7 +4373,7 @@ pub const Broker = struct {
             }
         }
         if (slot.session_handle) |handle| {
-            persistent_changed = persistent_changed or slot.session_persistent;
+            persistent_changed = persistent_changed or slot.state.session_persistent;
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
                 _ = self.session_owners.remove(value);
@@ -4359,7 +4399,7 @@ pub const Broker = struct {
             }
             slot.session_handle = null;
         }
-        slot.graceful_disconnect = true;
+        slot.state.graceful_disconnect = true;
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
         state_locked = false;
@@ -4593,7 +4633,7 @@ pub const Broker = struct {
             };
             if (!self.deliveryAuthorized(slot.accessControl(), .{
                 .client_id = client_id,
-                .username = slot.username,
+                .username = slot.username(),
                 .topic = publish.topic,
                 .payload = publish.payload,
                 .qos = publish.qos,
@@ -5309,7 +5349,7 @@ pub const Broker = struct {
             else
                 null, .{
                 .client_id = try self.sessions.clientId(handle),
-                .username = if (online) destination.?.username else null,
+                .username = if (online) destination.?.username() else null,
                 .topic = publish.topic,
                 .payload = publish.payload,
                 .qos = route.qos,
@@ -5326,7 +5366,7 @@ pub const Broker = struct {
             has_matching_subscriber = true;
             if ((route.qos == .at_most_once and
                 (!self.options.queue_qos0_messages or online)) or
-                (online and !destination.?.session_persistent))
+                (online and !destination.?.state.session_persistent))
             {
                 // Mosquitto always delivers QoS 0 directly to an online
                 // persistent client. It drops QoS 0 while offline unless its
@@ -5546,7 +5586,7 @@ pub const Broker = struct {
                     publication.?,
                 ) orelse unreachable;
                 if (shouldScheduleTransientDelivery(
-                    destination.session_persistent,
+                    destination.state.session_persistent,
                     queued_delivery.qos,
                     enqueued_count,
                     destination.queuedCount(),
@@ -6375,7 +6415,7 @@ pub const Broker = struct {
             if (transmission == .publish and
                 !self.deliveryAuthorized(slot.accessControl(), .{
                     .client_id = client_id,
-                    .username = slot.username,
+                    .username = slot.username(),
                     .topic = transmission.publish.topic,
                     .payload = transmission.publish.payload,
                     .qos = transmission.publish.qos,
@@ -7180,7 +7220,7 @@ const ClientTask = struct {
             if (buffers.delivery_writer != null) return;
         }
         task.broker.state_mutex.lockUncancelable(task.broker.io);
-        const session_persistent = slot.session_persistent;
+        const session_persistent = slot.state.session_persistent;
         task.broker.state_mutex.unlock(task.broker.io);
         if (session_persistent) return;
 
