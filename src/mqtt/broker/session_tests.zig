@@ -1096,8 +1096,8 @@ test "broker ignores displaced normal DISCONNECT after Will takeover" {
     try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
 
     var displaced_slot = &broker.slots[0];
-    displaced_slot.will_handle = stale_handle;
-    displaced_slot.session_handle = null;
+    displaced_slot.setWillHandle(stale_handle);
+    displaced_slot.setSessionHandle(null);
     broker.state_mutex.lockUncancelable(io);
     defer broker.state_mutex.unlock(io);
     try broker.closeWillForDisconnectLocked(
@@ -1105,7 +1105,7 @@ test "broker ignores displaced normal DISCONNECT after Will takeover" {
         .{},
         .zero,
     );
-    try std.testing.expect(displaced_slot.will_handle == null);
+    try std.testing.expect(displaced_slot.willHandle() == null);
     try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
 
     // Missing Will state is not generally ignorable. Retaining a Session
@@ -1117,8 +1117,8 @@ test "broker ignores displaced normal DISCONNECT after Will takeover" {
         30,
         .zero,
     );
-    displaced_slot.session_handle = live_session.handle;
-    displaced_slot.will_handle = stale_handle;
+    displaced_slot.setSessionHandle(live_session.handle);
+    displaced_slot.setWillHandle(stale_handle);
     try std.testing.expectError(
         error.WillNotFound,
         broker.closeWillForDisconnectLocked(

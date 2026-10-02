@@ -531,14 +531,18 @@ const ClientSlot = struct {
         session_present: bool = false,
         session_persistent: bool = false,
         graceful_disconnect: bool = false,
-        _padding: u6 = 0,
+        has_will_handle: bool = false,
+        has_session_handle: bool = false,
+        _padding: u4 = 0,
     } = .{},
     /// Allocated only after policy and Session admission, immediately before a
     /// successful CONNACK. Keeping the large transport/session state out of
     /// line prevents every unused capacity slot from reserving a Connection.
     connection: ?*runtime.Connection = null,
-    will_handle: ?will_mod.Handle = null,
-    session_handle: ?session_mod.Handle = null,
+    /// Presence lives in `state`, avoiding an extra machine word for each
+    /// generation-checked handle while retaining their complete value range.
+    will_handle_value: will_mod.Handle = undefined,
+    session_handle_value: session_mod.Handle = undefined,
     /// Whether Server Session State survives loss of this Network Connection.
     ///
     /// Transient sessions still use a stable route while connected, but live
@@ -723,6 +727,44 @@ const ClientSlot = struct {
         self.state.username_len = @intCast(value.len);
     }
 
+    pub fn willHandle(self: ClientSlot) ?will_mod.Handle {
+        return if (self.state.has_will_handle)
+            self.will_handle_value
+        else
+            null;
+    }
+
+    pub fn setWillHandle(
+        self: *ClientSlot,
+        maybe_handle: ?will_mod.Handle,
+    ) void {
+        const handle = maybe_handle orelse {
+            self.state.has_will_handle = false;
+            return;
+        };
+        self.will_handle_value = handle;
+        self.state.has_will_handle = true;
+    }
+
+    pub fn sessionHandle(self: ClientSlot) ?session_mod.Handle {
+        return if (self.state.has_session_handle)
+            self.session_handle_value
+        else
+            null;
+    }
+
+    pub fn setSessionHandle(
+        self: *ClientSlot,
+        maybe_handle: ?session_mod.Handle,
+    ) void {
+        const handle = maybe_handle orelse {
+            self.state.has_session_handle = false;
+            return;
+        };
+        self.session_handle_value = handle;
+        self.state.has_session_handle = true;
+    }
+
     fn setListenerAccessControl(
         self: *ClientSlot,
         allocator: std.mem.Allocator,
@@ -876,7 +918,7 @@ test "MQTT broker capacity slots keep connection state out of line" {
         @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
     );
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 120), @sizeOf(ClientSlot));
+        try std.testing.expectEqual(@as(usize, 104), @sizeOf(ClientSlot));
         try std.testing.expectEqual(@as(usize, 152), @sizeOf(ClientBuffers));
         try std.testing.expectEqual(
             @as(usize, 8),
@@ -990,6 +1032,30 @@ test "MQTT broker stores borrowed username with wire length" {
     slot.setUsername(null);
     try std.testing.expect(slot.username() == null);
     try std.testing.expectEqual(@as(u16, 0), slot.state.username_len);
+}
+
+test "MQTT broker stores optional Session and Will handles without tags" {
+    var slot: ClientSlot = .{};
+    try std.testing.expect(slot.sessionHandle() == null);
+    try std.testing.expect(slot.willHandle() == null);
+
+    const session_handle = session_mod.Handle{
+        .index = 7,
+        .generation = 11,
+    };
+    const will_handle = will_mod.Handle{
+        .index = 13,
+        .generation = 17,
+    };
+    slot.setSessionHandle(session_handle);
+    slot.setWillHandle(will_handle);
+    try std.testing.expectEqualDeep(session_handle, slot.sessionHandle().?);
+    try std.testing.expectEqualDeep(will_handle, slot.willHandle().?);
+
+    slot.setSessionHandle(null);
+    slot.setWillHandle(null);
+    try std.testing.expect(slot.sessionHandle() == null);
+    try std.testing.expect(slot.willHandle() == null);
 }
 
 test "MQTT broker allocates listener ACL metadata on demand" {
@@ -3690,8 +3756,8 @@ pub const Broker = struct {
         ));
         slot.state.active = true;
         slot.connection = null;
-        slot.will_handle = null;
-        slot.session_handle = null;
+        slot.setWillHandle(null);
+        slot.setSessionHandle(null);
         slot.state.session_present = false;
         slot.state.session_persistent = false;
         std.debug.assert(slot.assignedClientId() == null);
@@ -3800,7 +3866,7 @@ pub const Broker = struct {
                 );
             }
         }
-        slot.session_handle = opened_session.handle;
+        slot.setSessionHandle(opened_session.handle);
         slot.state.session_present = opened_session.session_present;
         slot.state.session_persistent = (try self.sessions.stats(
             opened_session.handle,
@@ -3857,7 +3923,7 @@ pub const Broker = struct {
         // already-due Will again, but never misses a cancellation/schedule.
         progress.rollback_changed = progress.rollback_changed or
             accepted_will.previous != .no_will;
-        slot.will_handle = accepted_will.current;
+        slot.setWillHandle(accepted_will.current);
         if (accepted_will.current) |handle| {
             self.will_publishers.putAssumeCapacityNoClobber(
                 handle,
@@ -3967,7 +4033,7 @@ pub const Broker = struct {
         {
             return;
         }
-        owner.session_handle = null;
+        owner.setSessionHandle(null);
         owner.state.session_persistent = false;
     }
 
@@ -3987,7 +4053,7 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         const still_replaced = owner.state.active and
             subscriberId(owner_index, owner.state.generation) == owner_id and
-            owner.session_handle == null and
+            owner.sessionHandle() == null and
             owner.connection != null;
         self.state_mutex.unlock(self.io);
         if (!still_replaced) return;
@@ -4035,7 +4101,7 @@ pub const Broker = struct {
         session_expiry_override: ?u32,
         now: std.Io.Timestamp,
     ) Error!void {
-        const handle = slot.will_handle orelse return;
+        const handle = slot.willHandle() orelse return;
         const result = self.wills.closeDisconnectWithSessionExpiry(
             handle,
             disconnect,
@@ -4043,16 +4109,16 @@ pub const Broker = struct {
             now,
         ) catch |err| {
             if (err == error.WillNotFound and
-                slot.session_handle == null)
+                slot.sessionHandle() == null)
             {
-                slot.will_handle = null;
+                slot.setWillHandle(null);
                 return;
             }
             return err;
         };
         if (result == .canceled) {
             _ = self.will_publishers.remove(handle);
-            slot.will_handle = null;
+            slot.setWillHandle(null);
         }
     }
 
@@ -4098,7 +4164,7 @@ pub const Broker = struct {
         // every provisional owner. A resumed Session is returned offline
         // rather than discarded: its pre-existing subscriptions and inflight
         // QoS state remain valid even though this transport never completed.
-        if (slot.session_handle) |handle| {
+        if (slot.sessionHandle()) |handle| {
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
                 self.rollbackOpenedSessionLocked(
@@ -4109,7 +4175,7 @@ pub const Broker = struct {
                 );
             }
         }
-        if (slot.will_handle) |handle| {
+        if (slot.willHandle()) |handle| {
             _ = self.will_publishers.remove(handle);
             _ = self.wills.close(handle, .normal_disconnect, .zero) catch {};
         }
@@ -4117,12 +4183,12 @@ pub const Broker = struct {
         // ClientTask is returned. Keep it active across this rollback so no
         // concurrent accept can reuse it before that caller releases it.
         slot.connection = null;
-        slot.session_handle = null;
+        slot.setSessionHandle(null);
         slot.state.session_present = false;
         slot.state.session_persistent = false;
         slot.retained_source_id = null;
         slot.setUsername(null);
-        slot.will_handle = null;
+        slot.setWillHandle(null);
         slot.clearBuffers(self.allocator);
         slot.clearListenerAccessControl(self.allocator);
         slot.clearAssignedClientId(self.allocator);
@@ -4223,7 +4289,7 @@ pub const Broker = struct {
             self.finishPartialPersistentChange(persistent_changed);
         };
         if (!slot.state.graceful_disconnect) {
-            if (slot.will_handle) |handle| {
+            if (slot.willHandle()) |handle| {
                 const result: ?will_mod.CloseResult = self.wills.close(
                     handle,
                     .ungraceful,
@@ -4234,7 +4300,7 @@ pub const Broker = struct {
                         // canceled or committed this generation during
                         // takeover. The stale transport close has no remaining
                         // Will lifecycle work.
-                        slot.will_handle = null;
+                        slot.setWillHandle(null);
                         break :blk null;
                     },
                     else => {
@@ -4246,7 +4312,7 @@ pub const Broker = struct {
                 }
             }
         }
-        if (slot.session_handle) |handle| {
+        if (slot.sessionHandle()) |handle| {
             persistent_changed = persistent_changed or slot.state.session_persistent;
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
@@ -4278,7 +4344,7 @@ pub const Broker = struct {
         // A transient connection has no stable Session route. Durable Session
         // transactions are keyed above by route identity and survive this
         // transport generation.
-        if (slot.session_handle == null) {
+        if (slot.sessionHandle() == null) {
             _ = self.pending_qos2.removePublisher(id);
         }
         slot.clearBuffers(self.allocator);
@@ -4289,8 +4355,8 @@ pub const Broker = struct {
         const assigned_client_id = slot.takeAssignedClientId();
         const listener_access_control = slot.listener_access_control;
         slot.connection = null;
-        slot.will_handle = null;
-        slot.session_handle = null;
+        slot.setWillHandle(null);
+        slot.setSessionHandle(null);
         slot.state.session_present = false;
         slot.state.session_persistent = false;
         slot.listener_access_control = null;
@@ -4340,13 +4406,13 @@ pub const Broker = struct {
         // Validate state-dependent DISCONNECT properties before changing the
         // Will, Session owner, router, or persistence state. In particular,
         // MQTT-3.14.2-2 makes zero-to-nonzero Session Expiry a Protocol Error.
-        if (slot.session_handle) |handle| {
+        if (slot.sessionHandle()) |handle| {
             try self.sessions.validateDisconnect(
                 handle,
                 session_expiry_override,
             );
         }
-        if (slot.will_handle) |handle| {
+        if (slot.willHandle()) |handle| {
             const result: ?will_mod.CloseResult = self.wills.closeDisconnectWithSessionExpiry(
                 handle,
                 disconnect,
@@ -4354,10 +4420,10 @@ pub const Broker = struct {
                 now,
             ) catch |err| switch (err) {
                 error.WillNotFound => blk: {
-                    if (slot.session_handle != null) {
+                    if (slot.sessionHandle() != null) {
                         return err;
                     }
-                    slot.will_handle = null;
+                    slot.setWillHandle(null);
                     break :blk null;
                 },
                 else => {
@@ -4368,11 +4434,11 @@ pub const Broker = struct {
                 persistent_changed = close_result != .no_will;
                 if (close_result == .canceled) {
                     _ = self.will_publishers.remove(handle);
-                    slot.will_handle = null;
+                    slot.setWillHandle(null);
                 }
             }
         }
-        if (slot.session_handle) |handle| {
+        if (slot.sessionHandle()) |handle| {
             persistent_changed = persistent_changed or slot.state.session_persistent;
             const route_id = self.sessions.routeId(handle) catch null;
             if (route_id) |value| {
@@ -4397,7 +4463,7 @@ pub const Broker = struct {
                     ) catch {};
                 }
             }
-            slot.session_handle = null;
+            slot.setSessionHandle(null);
         }
         slot.state.graceful_disconnect = true;
         self.recordPersistentChangeLocked(persistent_changed);
@@ -4457,7 +4523,7 @@ pub const Broker = struct {
             subscribe.properties,
         );
         const now = std.Io.Clock.awake.now(self.io);
-        const session_handle = slot.session_handle orelse
+        const session_handle = slot.sessionHandle() orelse
             return error.SessionNotFound;
         const session_route_id = try self.sessions.routeId(
             session_handle,
@@ -4597,7 +4663,7 @@ pub const Broker = struct {
         now: std.Io.Timestamp,
         persistent_changed: *bool,
     ) Error!void {
-        const handle = slot.session_handle orelse
+        const handle = slot.sessionHandle() orelse
             return error.SessionNotFound;
         const client_id = try self.sessions.clientId(handle);
         for (deliveries) |delivery| {
@@ -4731,7 +4797,7 @@ pub const Broker = struct {
                 );
                 continue;
             }
-            const session_handle = slot.session_handle orelse {
+            const session_handle = slot.sessionHandle() orelse {
                 return error.SessionNotFound;
             };
             const session_removed = self.sessions.removeSubscription(
@@ -5827,7 +5893,7 @@ pub const Broker = struct {
         slot: *ClientSlot,
         ack: mqtt.AckPacket,
     ) Error!SessionAckResult {
-        const handle = slot.session_handle orelse return .{
+        const handle = slot.sessionHandle() orelse return .{
             .owned = false,
             .persistent_changed = false,
         };
@@ -5858,7 +5924,7 @@ pub const Broker = struct {
         if (sessionRouteId(id) != null) return id;
         const index = subscriberIndex(id, self.slots.len) orelse return id;
         const slot = &self.slots[index];
-        const handle = slot.session_handle orelse return id;
+        const handle = slot.sessionHandle() orelse return id;
         const route_id = self.sessions.routeId(handle) catch return id;
         return sessionSubscriberId(route_id);
     }
@@ -5875,7 +5941,7 @@ pub const Broker = struct {
         {
             return false;
         }
-        const handle = slot.session_handle orelse return false;
+        const handle = slot.sessionHandle() orelse return false;
         return (self.sessions.routeId(handle) catch return false) == route_id;
     }
 
@@ -6378,7 +6444,7 @@ pub const Broker = struct {
         persistent_changed_out: *bool,
     ) Error!?DetachedSessionPacket {
         persistent_changed_out.* = false;
-        const handle = slot.session_handle orelse return null;
+        const handle = slot.sessionHandle() orelse return null;
         const connection = slot.connection orelse return null;
         const route_id = try self.sessions.routeId(handle);
         const client_id = try self.sessions.clientId(handle);

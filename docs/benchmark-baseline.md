@@ -5443,12 +5443,13 @@ evidence rather than a throughput claim.
 The broker slot's generated Client ID now reuses its allocation through a
 pointer plus the generator's bounded u7 length, while the borrowed CONNECT
 username uses a pointer plus its MQTT-native u16 length. Packing both lengths,
-the 31-bit connection generation, and the active/Session/graceful flags into
-one u64 removes the remaining alignment holes. The audited 64-bit `ClientSlot`
-falls from 136 to 120 bytes. Relative to the original 1,824-byte slot, the
-default 1,024-slot broker now reserves 1,744,896 fewer bytes before connections
-arrive. This is a compile-time layout result; it does not claim a separately
-measurable RSS or throughput change.
+the 31-bit connection generation, the active/Session/graceful flags, and
+presence bits for the 16-byte Session and Will handles into one u64 removes
+their optional tags and the remaining alignment holes. The audited 64-bit
+`ClientSlot` falls from 136 to 104 bytes. Relative to the original 1,824-byte
+slot, the default 1,024-slot broker now reserves 1,761,280 fewer bytes before
+connections arrive. This is a compile-time layout result; it does not claim a
+separately measurable RSS or throughput change.
 
 Transient QoS 1/2 broker fanout now uses one lazy writer per subscribed
 connection instead of making a publisher wait for every unrelated subscriber
