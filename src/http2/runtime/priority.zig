@@ -228,6 +228,124 @@ pub const State = struct {
     }
 };
 
+/// Keeps RFC 9218 bookkeeping out of connections that never receive or send
+/// a priority update. Once allocated, retained state is reused for the rest of
+/// the connection so active priority scheduling does not churn allocations.
+pub const LazyState = struct {
+    state: ?*State = null,
+
+    pub fn deinit(self: *LazyState, allocator: std.mem.Allocator) void {
+        if (self.state) |state| {
+            state.deinit(allocator);
+            allocator.destroy(state);
+        }
+        self.* = undefined;
+    }
+
+    pub fn get(self: LazyState, stream_id: u31) ?StoredUpdate {
+        const state = self.state orelse return null;
+        return state.get(stream_id);
+    }
+
+    pub fn containsIdleRequest(
+        self: LazyState,
+        stream_id: u31,
+    ) bool {
+        const state = self.state orelse return false;
+        return state.containsIdleRequest(stream_id);
+    }
+
+    pub fn idleRequestCount(self: LazyState) usize {
+        const state = self.state orelse return 0;
+        return state.idle_requests.items.len;
+    }
+
+    pub fn reserveIdleRequest(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+        active_stream_count: usize,
+        max_concurrent_streams: ?u32,
+        max_idle_updates: usize,
+    ) (std.mem.Allocator.Error || error{
+        PriorityCapacityExceeded,
+    })!void {
+        if (self.state) |state| {
+            return state.reserveIdleRequest(
+                allocator,
+                stream_id,
+                active_stream_count,
+                max_concurrent_streams,
+                max_idle_updates,
+            );
+        }
+        if (max_idle_updates == 0) return error.PriorityCapacityExceeded;
+        if (max_concurrent_streams) |limit| {
+            if (active_stream_count >= limit) {
+                return error.PriorityCapacityExceeded;
+            }
+        }
+
+        const state = try allocator.create(State);
+        state.* = .{};
+        errdefer {
+            state.deinit(allocator);
+            allocator.destroy(state);
+        }
+        try state.reserveIdleRequest(
+            allocator,
+            stream_id,
+            active_stream_count,
+            max_concurrent_streams,
+            max_idle_updates,
+        );
+        self.state = state;
+    }
+
+    pub fn activateRequest(self: *LazyState, stream_id: u31) bool {
+        const state = self.state orelse return false;
+        return state.activateRequest(stream_id);
+    }
+
+    pub fn openRequest(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+    ) void {
+        const state = self.state orelse return;
+        state.openRequest(allocator, stream_id);
+    }
+
+    pub fn store(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+        field_value: []const u8,
+    ) std.mem.Allocator.Error!void {
+        if (self.state) |state| {
+            return state.store(allocator, stream_id, field_value);
+        }
+
+        const state = try allocator.create(State);
+        state.* = .{};
+        errdefer {
+            state.deinit(allocator);
+            allocator.destroy(state);
+        }
+        try state.store(allocator, stream_id, field_value);
+        self.state = state;
+    }
+
+    pub fn remove(
+        self: *LazyState,
+        allocator: std.mem.Allocator,
+        stream_id: u31,
+    ) bool {
+        const state = self.state orelse return false;
+        return state.remove(allocator, stream_id);
+    }
+};
+
 test "priority updates replace state and bound idle reservations" {
     const allocator = std.testing.allocator;
     var state: State = .{};
@@ -257,6 +375,42 @@ test "priority updates replace state and bound idle reservations" {
     try std.testing.expectEqual(@as(?u31, null), state.lowestIdleRequest());
     try std.testing.expect(state.get(3) == null);
     try std.testing.expect(state.get(5) != null);
+}
+
+test "lazy priority state allocates transactionally" {
+    const allocator = std.testing.allocator;
+    var state: LazyState = .{};
+    defer state.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), state.idleRequestCount());
+    try std.testing.expect(state.get(1) == null);
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        // The state allocation succeeds, then the idle index allocation fails.
+        .fail_index = 1,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        state.reserveIdleRequest(
+            failing.allocator(),
+            1,
+            0,
+            null,
+            1,
+        ),
+    );
+    try std.testing.expect(state.state == null);
+
+    try state.reserveIdleRequest(allocator, 1, 0, null, 1);
+    try state.store(allocator, 1, "u=1, i");
+    try std.testing.expectEqual(@as(usize, 1), state.idleRequestCount());
+    try std.testing.expectEqual(@as(u3, 1), state.get(1).?.priority().urgency);
+    try std.testing.expect(state.get(1).?.priority().incremental);
+}
+
+test "lazy priority state occupies one pointer" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 8), @sizeOf(LazyState));
+    }
 }
 
 test "priority idle capacity rejection does not allocate" {

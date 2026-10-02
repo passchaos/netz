@@ -3155,7 +3155,7 @@ pub const Connection = struct {
     active_peer_streams: std.ArrayList(u31) = .empty,
     active_peer_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     push_state: push.LazyState = .{},
-    priority_state: priority_runtime.State = .{},
+    priority_state: priority_runtime.LazyState = .{},
     response_semantics: std.ArrayList(StreamResponseSemantics) = .empty,
     response_semantics_index: std.AutoHashMapUnmanaged(u31, usize) = .empty,
     hpack_decoder: http2.Hpack.Decoder = .{},
@@ -3426,7 +3426,7 @@ pub const Connection = struct {
         const next_reserved =
             self.priority_state.containsIdleRequest(self.next_client_stream_id);
         return self.active_local_streams.items.len +
-            self.priority_state.idle_requests.items.len -
+            self.priority_state.idleRequestCount() -
             @intFromBool(next_reserved);
     }
 
@@ -10579,7 +10579,7 @@ pub const Connection = struct {
         if (self.role != .server) return error.UnexpectedFrame;
         if (self.active_peer_streams.items.len != 0 or
             self.pendingRequestCount() != 0 or
-            self.priority_state.idle_requests.items.len != 0)
+            self.priority_state.idleRequestCount() != 0)
         {
             return error.InvalidServeOptions;
         }
@@ -12208,7 +12208,7 @@ pub const Connection = struct {
             self.priority_state.containsIdleRequest(stream_id);
         if (self.limits.max_concurrent_streams) |max_streams| {
             const counted = self.active_peer_streams.items.len +
-                self.priority_state.idle_requests.items.len -
+                self.priority_state.idleRequestCount() -
                 @intFromBool(was_priority_reserved);
             if (counted >= max_streams) return error.FlowControlViolation;
         }
@@ -19062,9 +19062,9 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
     }
 }
 
-test "HTTP/2 connection keeps peer metadata cold" {
+test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 1_984), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 1_872), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*peer_metadata.Origins),
             @sizeOf(@FieldType(Connection, "peer_origins")),
@@ -19085,6 +19085,10 @@ test "HTTP/2 connection keeps peer metadata cold" {
             @as(usize, 8),
             @sizeOf(@FieldType(Connection, "push_state")),
         );
+        try std.testing.expectEqual(
+            @as(usize, 8),
+            @sizeOf(@FieldType(Connection, "priority_state")),
+        );
     }
 
     const connection = Connection{
@@ -19098,6 +19102,7 @@ test "HTTP/2 connection keeps peer metadata cold" {
     try std.testing.expect(connection.graceful_preadmit_decoder == null);
     try std.testing.expect(connection.hpack_encoder_staging == null);
     try std.testing.expect(connection.push_state.state == null);
+    try std.testing.expect(connection.priority_state.state == null);
     try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
     try std.testing.expectEqual(
         @as(usize, 0),

@@ -1302,12 +1302,15 @@ two-phase graceful shutdown and the second HPACK encoder used only for
 transactional batch writes are likewise allocated on first use. Server-push
 reservation queues and indexes now use the same lazy ownership model; clients
 that advertise `SETTINGS_ENABLE_PUSH=0` and servers that never initiate push do
-not allocate it. On 64-bit targets these changes reduce `runtime.Connection`
-from 2,496 to 1,984 bytes: 80 bytes from peer metadata, 112 bytes after
-alignment from the cold decoder, 160 bytes from batch staging, and 160 bytes
-from push state. Layout, disabled-limit, retry, and exhaustive
-allocation-failure tests cover the lazy ownership boundaries; this is
-fixed-state evidence, not a throughput claim.
+not allocate it. RFC 9218 update and idle-reservation indexes are also retained
+only after the first priority operation; the ordinary stream lifecycle takes a
+null-state fast path. On 64-bit targets these changes reduce
+`runtime.Connection` from 2,496 to 1,872 bytes: 80 bytes from peer metadata,
+112 bytes after alignment from the cold decoder, 160 bytes from batch staging,
+160 bytes from push state, and 112 bytes after alignment from priority state.
+Layout, disabled-limit, retry, and exhaustive allocation-failure tests cover
+the lazy ownership boundaries; this is fixed-state evidence, not a throughput
+claim.
 
 Inbound HPACK decoding now enforces `Limits.max_header_list_size` while walking
 the compressed block rather than after materializing every header. Static,
