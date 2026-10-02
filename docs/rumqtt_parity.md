@@ -3480,12 +3480,13 @@ proxy evidence for the entire suite.
    and WSS connections retain only an optional pointer. The 88-byte queue,
    cursor, and overflow record used by blocking `ping*` calls is likewise
    allocated before the first PINGREQ, so broker connections and event-loop
-   clients do not reserve it. Incoming and outgoing Topic Alias tables also
-   keep independent lazy pointers, matching the runtime's concurrent-reader/
-   serialized-writer ownership while avoiding both 32-byte table headers until
-   their respective first mapping. Together these changes reduce the audited
-   64-bit `runtime.Connection` from 1,408 to 992 bytes (416 bytes per ordinary
-   live connection). The four delivery/route/Session
+   clients do not reserve it. The two 32-byte Packet Identifier direction
+   descriptors and the two 32-byte Topic Alias tables also keep independent
+   lazy pointers, matching the runtime's concurrent-reader/serialized-writer
+   ownership while avoiding each structure until its direction first sees QoS
+   1/2 traffic or an alias mapping. Together these changes reduce the audited
+   64-bit `runtime.Connection` from 1,408 to 944 bytes (464 bytes per ordinary
+   QoS 0 live connection without aliases). The four delivery/route/Session
    scratch lists, transient QoS map, counters, and optional delivery-writer
    pointer now share one 152-byte `ClientBuffers` descriptor allocated only
    when a connection first subscribes, publishes through the router, or writes
@@ -3500,13 +3501,13 @@ proxy evidence for the entire suite.
    borrowed policy/CONNECT views, and all optional storage is freed on
    rollback, disconnect, or broker destruction. Raw TCP, TLS, WebSocket,
    Client ID takeover, generated-ID reuse, ACL denial, buffer-allocation
-   rollback, PROXY, blocking-PING and two-stage Topic Alias allocation failure/
-   transfer, and allocator leak tests cover the ownership paths. Fully occupied
-   brokers that publish or subscribe still retain the required Connection and
-   buffer state, so the slot result is deterministic capacity-headroom plus
-   disconnected-retention evidence; the Connection reduction also applies to
-   steady-state non-PROXY clients that use the event-driven keep-alive path and
-   have not installed aliases.
+   rollback, PROXY, blocking-PING, Topic Alias and Packet Identifier two-stage
+   allocation failure/transfer, and allocator leak tests cover the ownership
+   paths. Fully occupied brokers that publish or subscribe still retain the
+   required Connection and buffer state, so the slot result is deterministic
+   capacity-headroom plus disconnected-retention evidence; the Connection
+   reduction also applies to steady-state non-PROXY clients that use the
+   event-driven keep-alive path and have not installed aliases or QoS state.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

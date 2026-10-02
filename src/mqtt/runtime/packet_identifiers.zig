@@ -15,27 +15,36 @@ pub const State = struct {
         outgoing_qos2_pubrel,
     };
 
-    // Keep the two MQTT Packet Identifier spaces physically separate. A
+    // Keep the two MQTT Packet Identifier spaces physically separate and
+    // allocate each only when its direction first sees QoS 1/2 traffic. A
     // connection may have one receive owner and one serialized writer active
-    // concurrently; neither direction is allowed to mutate the other's map.
-    incoming: DirectionState = .{},
-    outgoing: DirectionState = .{},
+    // concurrently; neither direction initializes or mutates the other's map.
+    incoming: ?*DirectionState = null,
+    outgoing: ?*DirectionState = null,
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        self.incoming.deinit(allocator);
-        self.outgoing.deinit(allocator);
+        if (self.incoming) |entries| {
+            entries.deinit(allocator);
+            allocator.destroy(entries);
+        }
+        if (self.outgoing) |entries| {
+            entries.deinit(allocator);
+            allocator.destroy(entries);
+        }
         self.* = .{};
     }
 
     pub fn contains(self: *const State, packet_id: u16, stage: Stage) bool {
-        return self.entriesForConst(stage).contains(
+        const entries = self.entriesForConst(stage) orelse return false;
+        return entries.contains(
             packet_id,
             code(stage),
         );
     }
 
     pub fn containsOutgoing(self: *const State, packet_id: u16) bool {
-        return self.outgoing.value(packet_id) != 0;
+        const outgoing = self.outgoing orelse return false;
+        return outgoing.value(packet_id) != 0;
     }
 
     /// Add one stage, returning false when it was already present.
@@ -46,16 +55,22 @@ pub const State = struct {
         stage: Stage,
     ) std.mem.Allocator.Error!bool {
         std.debug.assert(packet_id != 0);
-        return self.entriesFor(stage).add(
-            allocator,
-            packet_id,
-            code(stage),
-        );
+        if (self.entriesFor(stage)) |entries| {
+            return entries.add(allocator, packet_id, code(stage));
+        }
+        const entries = try allocator.create(DirectionState);
+        entries.* = .{};
+        errdefer allocator.destroy(entries);
+        errdefer entries.deinit(allocator);
+        const added = try entries.add(allocator, packet_id, code(stage));
+        self.setEntriesFor(stage, entries);
+        return added;
     }
 
     /// Remove one stage and retire an entry once neither direction owns it.
     pub fn remove(self: *State, packet_id: u16, stage: Stage) bool {
-        return self.entriesFor(stage).remove(packet_id, code(stage));
+        const entries = self.entriesFor(stage) orelse return false;
+        return entries.remove(packet_id, code(stage));
     }
 
     /// Move an existing identifier between QoS stages without allocation.
@@ -66,7 +81,8 @@ pub const State = struct {
         to: Stage,
     ) bool {
         std.debug.assert(direction(from) == direction(to));
-        return self.entriesFor(from).transition(
+        const entries = self.entriesFor(from) orelse return false;
+        return entries.transition(
             packet_id,
             code(from),
             code(to),
@@ -74,26 +90,47 @@ pub const State = struct {
     }
 
     pub fn clearRetainingCapacity(self: *State) void {
-        self.incoming.clearRetainingCapacity();
-        self.outgoing.clearRetainingCapacity();
+        if (self.incoming) |entries| entries.clearRetainingCapacity();
+        if (self.outgoing) |entries| entries.clearRetainingCapacity();
     }
 
     pub fn count(self: *const State, stage: Stage) usize {
-        return self.entriesForConst(stage).count(code(stage));
+        const entries = self.entriesForConst(stage) orelse return 0;
+        return entries.count(code(stage));
     }
 
-    fn entriesFor(self: *State, stage: Stage) *DirectionState {
+    fn entriesFor(self: *State, stage: Stage) ?*DirectionState {
         return switch (direction(stage)) {
-            .incoming => &self.incoming,
-            .outgoing => &self.outgoing,
+            .incoming => self.incoming,
+            .outgoing => self.outgoing,
         };
     }
 
-    fn entriesForConst(self: *const State, stage: Stage) *const DirectionState {
+    fn entriesForConst(
+        self: *const State,
+        stage: Stage,
+    ) ?*const DirectionState {
         return switch (direction(stage)) {
-            .incoming => &self.incoming,
-            .outgoing => &self.outgoing,
+            .incoming => self.incoming,
+            .outgoing => self.outgoing,
         };
+    }
+
+    fn setEntriesFor(
+        self: *State,
+        stage: Stage,
+        entries: *DirectionState,
+    ) void {
+        switch (direction(stage)) {
+            .incoming => {
+                std.debug.assert(self.incoming == null);
+                self.incoming = entries;
+            },
+            .outgoing => {
+                std.debug.assert(self.outgoing == null);
+                self.outgoing = entries;
+            },
+        }
     }
 
     const Direction = enum { incoming, outgoing };
@@ -271,6 +308,11 @@ test "MQTT packet identifier state is sparse and direction independent" {
 
     var state: State = .{};
     defer state.deinit(std.testing.allocator);
+    try std.testing.expect(state.incoming == null);
+    try std.testing.expect(state.outgoing == null);
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 16), @sizeOf(State));
+    }
     try std.testing.expect(!state.contains(65_535, .incoming_qos2));
     try std.testing.expect(try state.add(
         std.testing.allocator,
@@ -298,8 +340,8 @@ test "MQTT packet identifier state is sparse and direction independent" {
     try std.testing.expect(!state.containsOutgoing(65_535));
     try std.testing.expect(state.contains(65_535, .incoming_qos2));
     try std.testing.expect(state.remove(65_535, .incoming_qos2));
-    try std.testing.expectEqual(@as(usize, 0), state.incoming.sparse.count());
-    try std.testing.expectEqual(@as(usize, 0), state.outgoing.sparse.count());
+    try std.testing.expectEqual(@as(usize, 0), state.incoming.?.sparse.count());
+    try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.sparse.count());
 }
 
 test "MQTT packet identifier QoS 2 transition retains allocation" {
@@ -331,23 +373,34 @@ test "MQTT packet identifier QoS 2 transition retains allocation" {
     try std.testing.expect(!state.contains(42, .outgoing_qos2));
     try std.testing.expect(state.contains(42, .outgoing_qos2_pubrel));
     state.clearRetainingCapacity();
-    try std.testing.expectEqual(@as(usize, 0), state.incoming.sparse.count());
-    try std.testing.expectEqual(@as(usize, 0), state.outgoing.sparse.count());
+    try std.testing.expect(state.incoming == null);
+    try std.testing.expectEqual(@as(usize, 0), state.outgoing.?.sparse.count());
 }
 
 test "MQTT packet identifier allocation failure changes no state" {
-    var failing = std.testing.FailingAllocator.init(
+    var descriptor_failure = std.testing.FailingAllocator.init(
         std.testing.allocator,
         .{ .fail_index = 0 },
     );
     var state: State = .{};
-    defer state.deinit(failing.allocator());
+    defer state.deinit(std.testing.allocator);
     try std.testing.expectError(
         error.OutOfMemory,
-        state.add(failing.allocator(), 7, .incoming_qos1),
+        state.add(descriptor_failure.allocator(), 7, .incoming_qos1),
     );
-    try std.testing.expectEqual(@as(usize, 0), state.incoming.sparse.count());
-    try std.testing.expectEqual(@as(usize, 0), state.outgoing.sparse.count());
+    try std.testing.expect(state.incoming == null);
+    try std.testing.expect(state.outgoing == null);
+
+    var map_failure = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 1 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        state.add(map_failure.allocator(), 7, .incoming_qos1),
+    );
+    try std.testing.expect(state.incoming == null);
+    try std.testing.expect(state.outgoing == null);
 }
 
 test "MQTT packet identifier state promotes to bounded dense storage" {
@@ -361,7 +414,7 @@ test "MQTT packet identifier state promotes to bounded dense storage" {
             .incoming_qos1,
         ));
     }
-    try std.testing.expect(state.incoming.dense != null);
+    try std.testing.expect(state.incoming.?.dense != null);
     try std.testing.expectEqual(
         @as(usize, DirectionState.sparse_limit + 1),
         state.count(.incoming_qos1),
@@ -397,7 +450,7 @@ test "MQTT packet identifier dense promotion failure preserves sparse state" {
             .outgoing_qos1,
         ));
     }
-    try std.testing.expect(state.outgoing.dense == null);
+    try std.testing.expect(state.outgoing.?.dense == null);
     const allocations = failing.allocations;
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
@@ -409,7 +462,7 @@ test "MQTT packet identifier dense promotion failure preserves sparse state" {
         ),
     );
     try std.testing.expectEqual(allocations, failing.allocations);
-    try std.testing.expect(state.outgoing.dense == null);
+    try std.testing.expect(state.outgoing.?.dense == null);
     try std.testing.expectEqual(
         @as(usize, DirectionState.sparse_limit),
         state.count(.outgoing_qos1),
