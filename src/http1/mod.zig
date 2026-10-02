@@ -37,7 +37,7 @@ pub const Error = wire.Error || error{
     RenderBufferTooSmall,
 } || std.mem.Allocator.Error;
 
-pub const Method = enum {
+pub const MethodTag = enum {
     GET,
     HEAD,
     POST,
@@ -47,30 +47,114 @@ pub const Method = enum {
     OPTIONS,
     TRACE,
     PATCH,
+    QUERY,
+
+    extension,
+
+    pub fn string(self: MethodTag) []const u8 {
+        return switch (self) {
+            .extension => unreachable,
+            else => @tagName(self),
+        };
+    }
+
+    pub fn safe(self: MethodTag) bool {
+        return switch (self) {
+            .GET, .HEAD, .OPTIONS, .TRACE, .QUERY => true,
+            else => false,
+        };
+    }
+
+    pub fn idempotent(self: MethodTag) bool {
+        return switch (self) {
+            .GET, .HEAD, .PUT, .DELETE, .OPTIONS, .TRACE, .QUERY => true,
+            else => false,
+        };
+    }
+};
+
+/// A case-sensitive HTTP method.
+///
+/// Extension values borrow their input. This keeps request parsing and writing
+/// allocation-free while accepting the complete RFC 9110 `method = token`
+/// grammar instead of restricting HTTP/1 to a fixed registry snapshot.
+pub const Method = union(MethodTag) {
+    GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    CONNECT,
+    OPTIONS,
+    TRACE,
+    PATCH,
+    QUERY,
+    extension: []const u8,
 
     pub fn parse(bytes: []const u8) Error!Method {
-        inline for (std.meta.fields(Method)) |field| {
-            if (std.mem.eql(u8, bytes, field.name)) return @enumFromInt(field.value);
-        }
-        return error.InvalidMethod;
+        if (std.mem.eql(u8, bytes, "GET")) return .GET;
+        if (std.mem.eql(u8, bytes, "HEAD")) return .HEAD;
+        if (std.mem.eql(u8, bytes, "POST")) return .POST;
+        if (std.mem.eql(u8, bytes, "PUT")) return .PUT;
+        if (std.mem.eql(u8, bytes, "DELETE")) return .DELETE;
+        if (std.mem.eql(u8, bytes, "CONNECT")) return .CONNECT;
+        if (std.mem.eql(u8, bytes, "OPTIONS")) return .OPTIONS;
+        if (std.mem.eql(u8, bytes, "TRACE")) return .TRACE;
+        if (std.mem.eql(u8, bytes, "PATCH")) return .PATCH;
+        if (std.mem.eql(u8, bytes, "QUERY")) return .QUERY;
+        try validateBytes(bytes);
+        return .{ .extension = bytes };
     }
 
     pub fn string(self: Method) []const u8 {
-        return @tagName(self);
+        return switch (self) {
+            .GET => "GET",
+            .HEAD => "HEAD",
+            .POST => "POST",
+            .PUT => "PUT",
+            .DELETE => "DELETE",
+            .CONNECT => "CONNECT",
+            .OPTIONS => "OPTIONS",
+            .TRACE => "TRACE",
+            .PATCH => "PATCH",
+            .QUERY => "QUERY",
+            .extension => |bytes| bytes,
+        };
+    }
+
+    pub fn validate(self: Method) Error!void {
+        switch (self) {
+            .extension => |bytes| {
+                try validateBytes(bytes);
+                if (isStandard(bytes)) return error.InvalidMethod;
+            },
+            else => {},
+        }
+    }
+
+    fn validateBytes(bytes: []const u8) Error!void {
+        if (bytes.len == 0) return error.InvalidMethod;
+        for (bytes) |byte| {
+            if (!validHeaderNameByte(byte)) return error.InvalidMethod;
+        }
+    }
+
+    fn isStandard(bytes: []const u8) bool {
+        inline for (.{
+            "GET",     "HEAD",    "POST",  "PUT",   "DELETE",
+            "CONNECT", "OPTIONS", "TRACE", "PATCH", "QUERY",
+        }) |standard| {
+            if (std.mem.eql(u8, bytes, standard)) return true;
+        }
+        return false;
     }
 
     pub fn safe(self: Method) bool {
-        return switch (self) {
-            .GET, .HEAD, .OPTIONS, .TRACE => true,
-            else => false,
-        };
+        return std.meta.activeTag(self).safe();
     }
 
     pub fn idempotent(self: Method) bool {
-        return switch (self) {
-            .GET, .HEAD, .PUT, .DELETE, .OPTIONS, .TRACE => true,
-            else => false,
-        };
+        return std.meta.activeTag(self).idempotent();
     }
 };
 
@@ -2236,6 +2320,7 @@ pub fn validateRequestTarget(target: []const u8) Error!void {
 }
 
 pub fn validateRequestTargetForMethod(method: Method, target: []const u8) Error!void {
+    try method.validate();
     switch (method) {
         .CONNECT => try validateConnectTarget(target),
         .OPTIONS => {
@@ -2793,7 +2878,7 @@ test "HTTP/1 request parse and serialize" {
     const raw = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nContent-Length: 5\r\n\r\nhello";
     var req = try parseRequest(allocator, raw, .{});
     defer req.deinit(allocator);
-    try std.testing.expectEqual(Method.GET, req.method);
+    try std.testing.expect(req.method == .GET);
     try std.testing.expectEqualStrings("/chat", req.target);
     try std.testing.expectEqual(BodyFraming.content_length, req.body_framing);
     try std.testing.expectEqualStrings("hello", req.body);
@@ -2826,6 +2911,76 @@ test "HTTP/1 request parse and serialize" {
     try writeRequest(&one_alloc_out, one_alloc_allocator, req.method, req.target, req.version, req.headers, req.body);
     try std.testing.expect(!one_alloc.has_induced_failure);
     try std.testing.expectEqualStrings(raw, one_alloc_out.items);
+}
+
+test "HTTP/1 methods accept case-sensitive RFC token extensions" {
+    const allocator = std.testing.allocator;
+
+    const query = try Method.parse("QUERY");
+    try std.testing.expect(query == .QUERY);
+    try std.testing.expect(query.safe());
+    try std.testing.expect(query.idempotent());
+
+    const lowercase_get = try Method.parse("get");
+    try std.testing.expectEqualStrings("get", lowercase_get.string());
+    try std.testing.expect(!lowercase_get.safe());
+    try std.testing.expect(!lowercase_get.idempotent());
+    switch (lowercase_get) {
+        .extension => {},
+        else => return error.TestUnexpectedResult,
+    }
+
+    const all_token_symbols = try Method.parse("!#$%&'*+-.^_`|~Az09");
+    try std.testing.expectEqualStrings(
+        "!#$%&'*+-.^_`|~Az09",
+        all_token_symbols.string(),
+    );
+
+    const invalid = [_][]const u8{
+        "",
+        "BAD METHOD",
+        "BAD:METHOD",
+        "BAD/METHOD",
+        "BAD\tMETHOD",
+        "BAD\x7fMETHOD",
+        "M\xc3\x89THOD",
+    };
+    for (invalid) |bytes| {
+        try std.testing.expectError(error.InvalidMethod, Method.parse(bytes));
+    }
+
+    const raw =
+        "PURGE /cache HTTP/1.1\r\n" ++
+        "Host: example.com\r\n\r\n";
+    var request = try parseRequest(allocator, raw, .{});
+    defer request.deinit(allocator);
+    try std.testing.expectEqualStrings("PURGE", request.method.string());
+    switch (request.method) {
+        .extension => |bytes| try std.testing.expectEqualStrings("PURGE", bytes),
+        else => return error.TestUnexpectedResult,
+    }
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        request.method,
+        request.target,
+        request.version,
+        request.headers,
+        request.body,
+    );
+    try std.testing.expectEqualStrings(raw, encoded.items);
+
+    try std.testing.expectError(
+        error.InvalidMethod,
+        validateRequestTargetForMethod(.{ .extension = "GET" }, "/"),
+    );
+    try std.testing.expectError(
+        error.MalformedStartLine,
+        validateRequestTargetForMethod(lowercase_get, "*"),
+    );
 }
 
 test "HTTP/1 low-level request writers validate framing before output" {
@@ -3647,7 +3802,7 @@ test "HTTP/1 borrowed request heads parse pipelines without allocation" {
 
     var headers: [8]Header = undefined;
     const first = try parseRequestHead(pipeline, &headers, .{});
-    try std.testing.expectEqual(Method.POST, first.method);
+    try std.testing.expect(first.method == .POST);
     try std.testing.expectEqualStrings("/one", first.target);
     try std.testing.expectEqualStrings("example.com", first.header("host").?);
     try std.testing.expect(first.keepAlive());
@@ -3657,7 +3812,7 @@ test "HTTP/1 borrowed request heads parse pipelines without allocation" {
 
     var second_headers: [4]Header = undefined;
     const second = try parseRequestHead(pipeline[first_len..], &second_headers, .{});
-    try std.testing.expectEqual(Method.GET, second.method);
+    try std.testing.expect(second.method == .GET);
     try std.testing.expectEqualStrings("/two", second.target);
     try std.testing.expectEqual(BodyFraming.none, second.body_framing);
     try std.testing.expectEqual(second.head_len, (try second.messageLength()).?);
@@ -4089,7 +4244,7 @@ test "HTTP/1 Hyper-shaped parser compatibility switches remain scoped" {
         .allow_multiple_spaces_in_request_line_delimiters = true,
     });
     defer request.deinit(allocator);
-    try std.testing.expectEqual(Method.GET, request.method);
+    try std.testing.expect(request.method == .GET);
     try std.testing.expectEqualStrings("/echo", request.target);
 
     var request_headers: [2]Header = undefined;

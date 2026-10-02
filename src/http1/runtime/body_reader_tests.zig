@@ -347,7 +347,7 @@ test "HTTP/1 streaming request reads fixed body without aggregation" {
                     self: *@This(),
                     head: runtime.StreamingRequestHead,
                 ) !void {
-                    try std.testing.expectEqual(http1.Method.POST, head.method);
+                    try std.testing.expect(head.method == .POST);
                     try std.testing.expectEqualStrings("/fixed", head.target);
                     try std.testing.expectEqual(
                         @as(?usize, self.expected.len),

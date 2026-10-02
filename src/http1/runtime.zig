@@ -7358,9 +7358,9 @@ test "HTTP/1 borrowed pipeline batch preserves bodies until consume" {
         &bodies,
         .{ .max_headers = 4 },
     );
-    try std.testing.expectEqual(http1.Method.GET, heads[0].method);
+    try std.testing.expect(heads[0].method == .GET);
     try std.testing.expectEqualStrings("/one", heads[0].target);
-    try std.testing.expectEqual(http1.Method.POST, heads[1].method);
+    try std.testing.expect(heads[1].method == .POST);
     try std.testing.expectEqualStrings("abc", bodies[1]);
     try std.testing.expectEqualStrings(
         pipeline[0..consumed],
@@ -8683,7 +8683,7 @@ test "HTTP/1 runtime client and server exchange over TCP" {
 
             var request = try connection.readRequest(.{});
             defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqual(http1.Method.POST, request.request.method);
+            try std.testing.expect(request.request.method == .POST);
             try std.testing.expectEqualStrings("/echo", request.request.target);
             try std.testing.expectEqualStrings("127.0.0.1", request.request.header("host").?);
             try std.testing.expectEqualStrings("ping", request.request.body);
@@ -8718,6 +8718,74 @@ test "HTTP/1 runtime client and server exchange over TCP" {
     try std.testing.expectEqualStrings("text/plain", response.response.header("content-type").?);
 }
 
+test "HTTP/1 runtime preserves extension methods end to end" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            runFallible(shared.server) catch |err| {
+                shared.err = err;
+            };
+        }
+
+        fn runFallible(server_ptr: *Server) !void {
+            var connection = try server_ptr.accept();
+            defer connection.close();
+
+            var request = try connection.readRequest(.{});
+            defer request.deinit(server_ptr.allocator);
+            try std.testing.expectEqualStrings(
+                "PURGE",
+                request.request.method.string(),
+            );
+            switch (request.request.method) {
+                .extension => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try connection.writeResponse(.{
+                .body = "purged",
+                .request_method = request.request.method,
+            });
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .max_head_bytes = 4096, .max_body_bytes = 4096 },
+    );
+    defer client.close();
+    var response = try client.request(.{
+        .method = try http1.Method.parse("PURGE"),
+        .target = "/cache",
+        .host = "127.0.0.1",
+    });
+    defer response.deinit(allocator);
+
+    thread.join();
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualStrings("purged", response.response.body);
+}
+
 test "HTTP/1 runtime opens CONNECT tunnel" {
     const allocator = std.testing.allocator;
 
@@ -8749,7 +8817,7 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
 
             var request = try connection.readRequest(.{});
             defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqual(http1.Method.CONNECT, request.request.method);
+            try std.testing.expect(request.request.method == .CONNECT);
             try std.testing.expectEqualStrings("example.com:443", request.request.target);
             try std.testing.expectEqualStrings("example.com:443", request.request.header("host").?);
 
@@ -9512,7 +9580,7 @@ test "HTTP/1 server sends 100 Continue before reading expected body" {
 
             var request = try connection.readRequest(.{});
             defer request.deinit(server_ptr.allocator);
-            try std.testing.expectEqual(http1.Method.POST, request.request.method);
+            try std.testing.expect(request.request.method == .POST);
             try std.testing.expectEqualStrings("/expect", request.request.target);
             try std.testing.expectEqualStrings("ping", request.request.body);
 
@@ -10977,11 +11045,11 @@ test "HTTP/1 client keeps pipelined response after HEAD response headers" {
 
             var first = try connection.readRequest(.{});
             defer first.deinit(server_ptr.allocator);
-            try std.testing.expectEqual(http1.Method.HEAD, first.request.method);
+            try std.testing.expect(first.request.method == .HEAD);
 
             var second = try connection.readRequest(.{});
             defer second.deinit(server_ptr.allocator);
-            try std.testing.expectEqual(http1.Method.GET, second.request.method);
+            try std.testing.expect(second.request.method == .GET);
 
             // A HEAD response can advertise the Content-Length a GET would have
             // returned, but no body bytes follow.  Send the next response
@@ -11058,7 +11126,7 @@ test "HTTP/1 runtime writes request trailers with chunked framing" {
             var request = try connection.readRequest(.{});
             defer request.deinit(server_ptr.allocator);
 
-            try std.testing.expectEqual(http1.Method.POST, request.request.method);
+            try std.testing.expect(request.request.method == .POST);
             try std.testing.expectEqual(http1.BodyFraming.chunked, request.request.body_framing);
             try std.testing.expectEqualStrings("upload", request.request.body);
             try std.testing.expectEqualStrings("chunked", request.request.header("transfer-encoding").?);
@@ -11755,7 +11823,7 @@ test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods"
                 .max_body_bytes = 4096,
             }, .{});
             defer first.deinit(shared.allocator);
-            try std.testing.expectEqual(http1.Method.GET, first.request.method);
+            try std.testing.expect(first.request.method == .GET);
             try std.testing.expect(first.request.header("content-length") == null);
 
             var second = try readRequestFromStream(shared.allocator, shared.io, stream, .{
@@ -11763,7 +11831,7 @@ test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods"
                 .max_body_bytes = 4096,
             }, .{});
             defer second.deinit(shared.allocator);
-            try std.testing.expectEqual(http1.Method.POST, second.request.method);
+            try std.testing.expect(second.request.method == .POST);
             try std.testing.expectEqualStrings("0", second.request.header("content-length").?);
 
             var third = try readRequestFromStream(shared.allocator, shared.io, stream, .{
@@ -11771,7 +11839,7 @@ test "HTTP/1 request writer omits zero Content-Length for bodyless safe methods"
                 .max_body_bytes = 4096,
             }, .{});
             defer third.deinit(shared.allocator);
-            try std.testing.expectEqual(http1.Method.GET, third.request.method);
+            try std.testing.expect(third.request.method == .GET);
             try std.testing.expectEqualStrings("/cache/http://example.com/object", third.request.target);
             try std.testing.expectEqualStrings("proxy.local", third.request.header("host").?);
         }

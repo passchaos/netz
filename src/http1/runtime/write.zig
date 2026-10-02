@@ -364,7 +364,10 @@ fn prepareStreamingResponseWithDefaultDate(
     if (trailers_requested and !explicit_chunked) {
         return error.InvalidTrailer;
     }
-    const head_response = options.request_method == .HEAD;
+    const head_response = if (options.request_method) |method|
+        method == .HEAD
+    else
+        false;
     const metadata_only_transfer_encoding =
         (head_response or options.status == 304) and explicit_chunked;
     if (suppress_body and explicit_chunked and
@@ -393,7 +396,8 @@ fn prepareStreamingResponseWithDefaultDate(
     if (use_chunked and options.version == .http_1_0) {
         return error.InvalidVersion;
     }
-    if (options.request_method == .CONNECT and
+    if (options.request_method != null and
+        options.request_method.? == .CONNECT and
         options.status >= 200 and options.status < 300)
     {
         if (declared_length != null) return error.InvalidContentLength;
@@ -408,7 +412,10 @@ fn prepareStreamingResponseWithDefaultDate(
             }
         }
     }
-    if (suppress_body and options.request_method == .HEAD) {
+    if (suppress_body and
+        options.request_method != null and
+        options.request_method.? == .HEAD)
+    {
         if (declared_length) |declared| {
             if (options.body_length) |length| {
                 if (declared != length) return error.InvalidContentLength;
@@ -445,7 +452,8 @@ fn prepareStreamingResponseWithDefaultDate(
     );
     try encodeStreamingResponseHead(allocator, options, scratch);
 
-    const successful_connect = options.request_method == .CONNECT and
+    const successful_connect = options.request_method != null and
+        options.request_method.? == .CONNECT and
         options.status >= 200 and options.status < 300;
     return .{
         .head = scratch.encoded.items,

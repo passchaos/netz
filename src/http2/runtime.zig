@@ -20774,7 +20774,7 @@ test "HTTP/2 server accepts body-bearing h2c upgrade request" {
             var upgrade = try server_ptr.acceptUpgrade();
             defer upgrade.deinit(server_ptr.allocator);
             try std.testing.expectEqual(@as(u31, 1), upgrade.stream_id);
-            try std.testing.expectEqual(http1.Method.POST, upgrade.request.request.method);
+            try std.testing.expect(upgrade.request.request.method == .POST);
             try std.testing.expectEqualStrings("/server-upgrade", upgrade.request.request.target);
             try std.testing.expectEqualStrings("request-body", upgrade.request.request.body);
             try std.testing.expectEqual(@as(usize, 1), upgrade.request.request.trailers.len);

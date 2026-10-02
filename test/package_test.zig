@@ -2443,6 +2443,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expectEqual(@as(u8, 0x40), netz.quic.varint.prefixForLength(2));
     try std.testing.expect(netz.http1.Method.GET.safe());
+    const extension_method = try netz.http1.Method.parse("PURGE");
+    try std.testing.expectEqualStrings("PURGE", extension_method.string());
+    try std.testing.expect(!extension_method.idempotent());
+    try std.testing.expect(netz.http1.Method.QUERY.safe());
     try std.testing.expect(std.meta.stringToEnum(netz.http1.BodyFraming, "close_delimited") != null);
     try std.testing.expect(@hasDecl(netz.http1, "validateTrailers"));
     try std.testing.expect(@hasDecl(netz.http1, "validateHeader"));
