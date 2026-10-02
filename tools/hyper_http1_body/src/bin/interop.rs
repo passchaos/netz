@@ -159,7 +159,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio");
 }
 
 async fn handle_pool_request(
@@ -427,6 +427,26 @@ async fn handle_request(
     if connection_index == 2 {
         return handle_expected_request(request).await;
     }
+    if request.uri().path_and_query().map(|value| value.as_str()) == Some("/extension?from=netz") {
+        if request.method().as_str() != "PURGE" || request.version() != Version::HTTP_11 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected netz extension method request head",
+            ));
+        }
+        let (body, trailers) = collect_body(request.into_body()).await?;
+        if !body.is_empty() || trailers.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected netz extension method request body",
+            ));
+        }
+        return Ok(Response::new(body_with_trailers(
+            b"hyper-",
+            b"extension",
+            HeaderMap::new(),
+        )));
+    }
     if request.method() != Method::POST
         || request.uri().path_and_query().map(|value| value.as_str()) != Some("/interop?from=netz")
         || request.version() != Version::HTTP_11
@@ -547,6 +567,7 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         .header("x-hyper-request", "request-header")
         .header("trailer", "x-hyper-trailer")
         .header("te", "trailers")
+        .header("connection", "TE")
         .body(body_with_trailers(b"hyper-", b"request", request_trailers))
         .expect("request");
     let response = sender
@@ -570,6 +591,24 @@ async fn run_client(port: u16, ca_path: Option<String>) {
         Some(&HeaderValue::from_static("response-trailer")),
     );
     println!("Hyper HTTP/1 client interoperated with netz: status=201 body=13 trailers=1");
+
+    let extension_request = Request::builder()
+        .method(Method::from_bytes(b"PURGE").expect("extension method"))
+        .uri("/extension?from=hyper")
+        .header("host", "localhost")
+        .body(empty_body())
+        .expect("extension method request");
+    let extension_response = sender
+        .send_request(extension_request)
+        .await
+        .expect("send Hyper extension method request");
+    assert_eq!(extension_response.status(), StatusCode::OK);
+    let (body, trailers) = collect_body(extension_response.into_body())
+        .await
+        .expect("read netz extension method response");
+    assert_eq!(body, b"netz-extension");
+    assert!(trailers.is_none());
+    println!("Hyper HTTP/1 client sent extension method to netz: method=PURGE response_body=14");
 
     let informational_count = Arc::new(AtomicUsize::new(0));
     let observed = informational_count.clone();

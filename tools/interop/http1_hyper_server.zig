@@ -88,6 +88,35 @@ pub fn main(init: std.process.Init) !void {
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 
+    var extension_request = try connection.readRequest(.{});
+    defer extension_request.deinit(allocator);
+    if (!std.mem.eql(
+        u8,
+        extension_request.request.method.string(),
+        "PURGE",
+    ) or
+        !std.mem.eql(
+            u8,
+            extension_request.request.target,
+            "/extension?from=hyper",
+        ) or
+        extension_request.request.body.len != 0)
+    {
+        return error.InvalidExtensionMethodRequest;
+    }
+    switch (extension_request.request.method) {
+        .extension => {},
+        else => return error.InvalidExtensionMethodRequest,
+    }
+    try connection.writeResponse(.{
+        .body = "netz-extension",
+        .request_method = extension_request.request.method,
+    });
+    std.debug.print(
+        "netz HTTP/1 server accepted Hyper extension method: transport={s} method=PURGE response_body=14\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
+
     // Reuse the connection for a second exchange. readRequest() emits the
     // interim response after a valid Expect head and before it blocks for the
     // fixed-size body, which Hyper records through its informational callback.

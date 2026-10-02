@@ -77,6 +77,9 @@ grep -Fq \
   'netz HTTP/1 client observed Hyper informational responses: transport=cleartext statuses=103,102 headers=2 final=200 body=19' \
   "$work/netz-client.log"
 grep -Fq \
+  'netz HTTP/1 client sent extension method to Hyper: transport=cleartext method=PURGE response_body=15' \
+  "$work/netz-client.log"
+grep -Fq \
   'netz HTTP/1 client handled Hyper/Tokio Expect boundaries: transport=cleartext informational=103,100 early_final=417 body_sent=0 connection_reusable=false' \
   "$work/netz-client.log"
 grep -Fq \
@@ -89,7 +92,7 @@ grep -Fq \
   'response_head_timeout=5000ms' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/hyper-server.log"
 grep -Fq \
   'netz HTTP/1 pool reused Hyper connection: transport=cleartext requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio' \
@@ -129,10 +132,16 @@ grep -Fq \
   'Hyper HTTP/1 client interoperated with netz: status=201 body=13 trailers=1' \
   "$work/hyper-client.log"
 grep -Fq \
+  'Hyper HTTP/1 client sent extension method to netz: method=PURGE response_body=14' \
+  "$work/hyper-client.log"
+grep -Fq \
   'Hyper HTTP/1 client observed netz 100 Continue: interim=1 body=12 response_body=14' \
   "$work/hyper-client.log"
 grep -Fq \
   'transport=cleartext method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
+  "$work/netz-server.log"
+grep -Fq \
+  'netz HTTP/1 server accepted Hyper extension method: transport=cleartext method=PURGE response_body=14' \
   "$work/netz-server.log"
 grep -Fq \
   'netz HTTP/1 server completed Hyper Expect exchange: transport=cleartext interim=1 body=12 response_body=14' \
@@ -202,6 +211,9 @@ grep -Fq \
   'netz HTTP/1 client observed Hyper informational responses: transport=tls statuses=103,102 headers=2 final=200 body=19' \
   "$work/tls-netz-client.log"
 grep -Fq \
+  'netz HTTP/1 client sent extension method to Hyper: transport=tls method=PURGE response_body=15' \
+  "$work/tls-netz-client.log"
+grep -Fq \
   'netz HTTP/1 client interoperated with Hyper CONNECT tunnel: transport=tls buffered_server_bytes=18 client_bytes=17 reply_bytes=18' \
   "$work/tls-netz-client.log"
 grep -Fq \
@@ -211,7 +223,7 @@ grep -Fq \
   'response_head_timeout=5000ms' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-hyper-server.log"
 grep -Fq \
   'netz HTTP/1 pool reused Hyper connection: transport=tls requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio' \
@@ -250,6 +262,12 @@ server_pid=
 grep -Fq \
   'netz HTTP/1 server interoperated with Hyper: transport=tls method=POST body=13 trailers=1 status=201 response_body=13 response_trailers=1' \
   "$work/tls-netz-server.log"
+grep -Fq \
+  'netz HTTP/1 server accepted Hyper extension method: transport=tls method=PURGE response_body=14' \
+  "$work/tls-netz-server.log"
+grep -Fq \
+  'Hyper HTTP/1 client sent extension method to netz: method=PURGE response_body=14' \
+  "$work/tls-hyper-client.log"
 grep -Fq \
   'netz HTTP/1 server completed Hyper Expect exchange: transport=tls interim=1 body=12 response_body=14' \
   "$work/tls-netz-server.log"

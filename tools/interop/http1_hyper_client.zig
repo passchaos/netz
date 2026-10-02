@@ -121,6 +121,26 @@ pub fn main(init: std.process.Init) !void {
         );
     }
 
+    var extension_response = try client.request(.{
+        .method = try netz.http1.Method.parse("PURGE"),
+        .target = "/extension?from=netz",
+        .host = "localhost",
+    });
+    defer extension_response.deinit(allocator);
+    if (extension_response.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            extension_response.response.body,
+            "hyper-extension",
+        ))
+    {
+        return error.InvalidExtensionMethodResponse;
+    }
+    std.debug.print(
+        "netz HTTP/1 client sent extension method to Hyper: transport={s} method=PURGE response_body=15\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
+
     // Hyper's public `on_informational` API has a netz counterpart. Exercise
     // more than status skipping: validate both borrowed 103/102 header blocks
     // in order before accepting the final response on the same connection.

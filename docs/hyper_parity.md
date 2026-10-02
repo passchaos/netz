@@ -1002,6 +1002,11 @@ Malformed tokens are rejected before output, and lowercase spellings such as
 semantics. Unit and real TCP client/server tests cover the full token alphabet,
 invalid bytes, exact serialization, and end-to-end PURGE handling, matching
 Hyper's `Method::from_bytes` capability without adding parse-time allocation.
+The bidirectional Hyper process gate sends PURGE in both directions over
+cleartext and certificate-verified TLS, verifies the exact case-sensitive
+method and target at the independent peer, sends it on an already reused
+netz-client connection, and continues with a later Expect exchange on the
+Hyper-client connection.
 The HTTP/1, HTTP/2, and HTTP/3 pool paths now derive safe/idempotent method
 classification from one shared case-sensitive helper. In particular, QUERY is
 eligible for the same single stale-connection retry as GET or PUT on every
