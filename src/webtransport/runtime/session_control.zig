@@ -153,7 +153,10 @@ pub const Control = struct {
         self.close_reason_len = 0;
     }
 
-    fn restore(self: *Control, snapshot: Control) void {
+    /// Restore parser state after a surrounding transport transaction fails.
+    /// Any close-reason allocation created after the snapshot is released;
+    /// bytes appended to an existing allocation are hidden by the old length.
+    pub fn restoreSnapshot(self: *Control, snapshot: Control) void {
         if (self.close_reason_heap) |current| {
             const same_allocation = if (snapshot.close_reason_heap) |previous|
                 current.ptr == previous.ptr
@@ -264,7 +267,7 @@ pub const Control = struct {
         if (available.len != 0) {
             const snapshot = self.*;
             const result = self.consume(available) catch |err| {
-                self.restore(snapshot);
+                self.restoreSnapshot(snapshot);
                 return err;
             };
             const release_result = if (single_attempt)
@@ -278,7 +281,7 @@ pub const Control = struct {
                     result.consumed,
                 );
             release_result catch |err| {
-                self.restore(snapshot);
+                self.restoreSnapshot(snapshot);
                 return err;
             };
             if (result.event) |event| return event;
@@ -371,7 +374,7 @@ pub const Control = struct {
     ) Error!?Event {
         const snapshot = self.*;
         const result = self.consume(bytes) catch |err| {
-            self.restore(snapshot);
+            self.restoreSnapshot(snapshot);
             return err;
         };
         return result.event;
@@ -394,7 +397,7 @@ pub const Control = struct {
         while (offset < bytes.len) {
             if (self.terminal_reported) return error.InvalidCapsule;
             const event = self.feedCapsuleByte(bytes[offset]) catch |err| {
-                self.restore(snapshot);
+                self.restoreSnapshot(snapshot);
                 return err;
             };
             offset += 1;

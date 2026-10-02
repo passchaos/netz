@@ -1844,8 +1844,12 @@ test "Protected session control retains close after drain event" {
     @memcpy(joined[0..drain.len], drain);
     @memcpy(joined[drain.len..][0..close.len], close);
 
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
     var reader = protected.Reader.init(
-        try control_module.Control.init(std.testing.allocator, .init(0)),
+        try control_module.Control.init(no_alloc.allocator(), .init(0)),
     );
     defer reader.deinit();
     const first = (try reader.consume(
@@ -1881,15 +1885,29 @@ test "Protected session control retains maximum close after drain event" {
     @memcpy(joined[0..drain.len], drain);
     @memcpy(joined[drain.len..][0..close.len], close);
 
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
     var reader = protected.Reader.init(
-        try control_module.Control.init(std.testing.allocator, .init(0)),
+        try control_module.Control.init(no_alloc.allocator(), .init(0)),
     );
     defer reader.deinit();
-    const first = (try reader.consume(
-        joined[0 .. drain.len + close.len],
-    )).?;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        reader.consume(joined[0 .. drain.len + close.len]),
+    );
+    try std.testing.expect(!reader.control.peer_drain_reported);
+    try std.testing.expect(reader.pending_heap == null);
+    reader.control.allocator = std.testing.allocator;
+    const first = (try reader.consume(joined[0 .. drain.len + close.len])).?;
     try std.testing.expect(first == .draining);
+    try std.testing.expectEqual(
+        close.len,
+        reader.pending_heap.?.len,
+    );
     const second = (try reader.pollPending()).?;
+    try std.testing.expect(reader.pending_heap == null);
     try std.testing.expect(second == .closed);
     try std.testing.expectEqual(@as(u32, 29), second.closed.code);
     try std.testing.expectEqualSlices(u8, &reason, second.closed.reason);

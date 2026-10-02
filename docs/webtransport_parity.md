@@ -808,23 +808,28 @@ cannot consume the only observable close/reset notification.
 On 64-bit targets the outbound pending-Close state falls from 1,064 to 160
 bytes. The inbound Capsule control parser now applies the same policy to its
 reason storage: `Control` falls from 1,160 to 296 bytes, and the protected
-reader that embeds it falls from 2,224 to 1,360 bytes. Short peer reasons remain
-allocation-free; a longer reason allocates its declared length only after the
-capsule length is validated. Failed allocation and failed QUIC receive-credit
-commit restore the complete parser snapshot and release any allocation made by
-that attempt. Completed reasons remain borrowed and stable until session
-teardown.
+reader that embeds it initially fell from 2,224 to 1,360 bytes. Its separate
+post-event suffix buffer now uses the same 128-byte inline/exact-allocation
+policy, reducing the reader again to 456 bytes. Short peer reasons and short
+event suffixes remain allocation-free; longer values allocate only after their
+bounds are validated. Failed reason allocation, failed suffix allocation, and
+failed QUIC receive-credit commit restore the complete parser snapshot and
+release any allocation made by that attempt. Completed reasons remain borrowed
+and stable until session teardown.
 
-Together the outbound and inbound changes remove exactly 1,768 bytes from all
-six public accepted/client Session layouts: development server/client become
-1,968/8,256 bytes, lightweight protected server/client become 1,776/9,864
-bytes, and authenticated server/client become 17,320/17,864 bytes. Layout tests
-pin those values; allocation-failure tests cover the 128-byte inline boundary,
-retry after OOM, invalid long UTF-8 cleanup, and the existing maximum-reason
-timeout paths. Session teardown and every terminal send branch free owned
-fallback storage. The bidirectional native wtransport gate was reconfirmed on
-2026-10-02 after this change, covering both endpoint-role directions through
-CONNECT, streams, DATAGRAM, cancellation, drain, and terminal close behavior.
+The development and lightweight protected server/client Session layouts, which
+embed that reader, now shed 2,672 bytes relative to the original layout:
+`AcceptedSession` is 1,064 bytes, `AcceptedProtectedSession` is 872 bytes,
+`ClientSession` is 7,352 bytes, and `ProtectedClientSession` is 8,960 bytes.
+The authenticated server/client types use `Control` directly and remain at
+17,320/17,864 bytes, 1,768 bytes below their originals. Layout tests pin those
+values; allocation-failure tests cover both 128-byte inline boundaries, retry
+after OOM, invalid long UTF-8 cleanup, retained-suffix rollback, and the
+existing maximum-reason timeout paths. Session teardown and every terminal
+send branch free owned fallback storage. The bidirectional native wtransport
+gate was reconfirmed on 2026-10-02 after this change, covering both endpoint-
+role directions through CONNECT, streams, DATAGRAM, cancellation, drain, and
+terminal close behavior.
 If the CONNECT send direction is already permanently cancelled, rejected,
 stopped, retired, or the connection is closed, a bounded CLOSE drops its
 unreplayable capsule cursor and records a terminal local-close failure. Later

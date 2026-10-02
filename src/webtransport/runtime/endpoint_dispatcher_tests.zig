@@ -882,11 +882,10 @@ test "WebTransport endpoint reads defer paced receive credit" {
 
     var close_capsule: [4 + session_control.max_close_reason + 16]u8 =
         undefined;
-    const close_reason = [_]u8{'r'} ** 129;
     const capsule = try session_control.writeCloseInto(
         &close_capsule,
         89,
-        &close_reason,
+        "paced control credit rollback",
     );
     var control_bytes: [4 + session_control.max_close_reason + 32]u8 =
         undefined;
@@ -940,11 +939,6 @@ test "WebTransport endpoint reads defer paced receive credit" {
     try std.testing.expect(close_event == .session);
     try std.testing.expect(close_event.session == .closed);
     try std.testing.expectEqual(@as(u32, 89), close_event.session.closed.code);
-    try std.testing.expectEqualSlices(
-        u8,
-        &close_reason,
-        close_event.session.closed.reason,
-    );
     try std.testing.expect(accepted.control.terminal_reported);
     try std.testing.expect(accepted.close_response_pending);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);

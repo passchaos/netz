@@ -5616,15 +5616,17 @@ through 128 bytes inline and allocates longer reasons at their exact encoded
 size. The inbound Capsule parser uses the same threshold for peer close
 reasons, retaining longer values in one exact allocation. This reduces
 `PendingSessionClose` from 1,064 to 160 bytes, `session_control.Control` from
-1,160 to 296 bytes, and `protected_session_control.Reader` from 2,224 to 1,360
-bytes. Together the changes remove 1,768 bytes of fixed state from every
-development, lightweight protected, and authenticated client/server Session
-type on 64-bit targets. The resulting sizes are 1,968 B for `AcceptedSession`,
-1,776 B for `AcceptedProtectedSession`, 17,320 B for
-`AcceptedHandshakeSession`, 8,256 B for `ClientSession`, 17,864 B for
-`HandshakeClientSession`, and 9,864 B for `ProtectedClientSession`.
-The ordinary short-close paths remain allocation-free; tests force the first
-over-inline allocation to fail, retry the same input after rollback, reject
+1,160 to 296 bytes, and initially reduced
+`protected_session_control.Reader` from 2,224 to 1,360 bytes. The reader's own
+post-event suffix storage now also uses 128 inline bytes plus exact fallback,
+reducing it again to 456 bytes. The resulting Session sizes are 1,064 B for
+`AcceptedSession`, 872 B for `AcceptedProtectedSession`, 17,320 B for
+`AcceptedHandshakeSession`, 7,352 B for `ClientSession`, 17,864 B for
+`HandshakeClientSession`, and 8,960 B for `ProtectedClientSession`. Relative
+to the original layout, the four reader-backed Session types save 2,672 bytes
+each and the two direct-Control types save 1,768 bytes each.
+The ordinary short-close paths remain allocation-free; tests force both first
+over-inline allocations to fail, retry the same input after rollback, reject
 invalid long UTF-8 without leaking, and retain the existing maximum-reason
 timeout coverage. These are deterministic layout and allocation-path results
 rather than throughput measurements.
