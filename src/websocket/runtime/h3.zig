@@ -21,31 +21,6 @@ const max_payload_read_chunk: usize = 16 * 1024;
 const fragmented_write_scratch_len: usize = 16 * 1024;
 const max_batched_fragments: usize = 16;
 const max_batched_payload_slices: usize = 64;
-const max_control_frame_len = websocket.max_frame_header_len + 125;
-
-const PendingClose = struct {
-    bytes: [max_control_frame_len]u8 = undefined,
-    len: usize = 0,
-    committed: usize = 0,
-    payload: [125]u8 = undefined,
-    payload_len: usize = 0,
-
-    fn matches(self: *const PendingClose, value: []const u8) bool {
-        return std.mem.eql(u8, self.payload[0..self.payload_len], value);
-    }
-};
-
-const PendingPing = struct {
-    bytes: [max_control_frame_len]u8 = undefined,
-    len: usize = 0,
-    committed: usize = 0,
-    payload: [125]u8 = undefined,
-    payload_len: usize = 0,
-
-    fn matches(self: *const PendingPing, value: []const u8) bool {
-        return std.mem.eql(u8, self.payload[0..self.payload_len], value);
-    }
-};
 
 pub const MessageWriteProgress = common.MessageWriteProgress;
 const PendingAutomaticControl = common.PendingAutomaticControl;
@@ -121,6 +96,9 @@ const PendingMessage = struct {
             self.header_len + self.payload_len;
     }
 };
+
+const PendingControlFrame = common.PendingControlFrame;
+const PendingWrite = common.PendingWriteState(PendingMessage);
 
 fn copyMessagePartsAt(
     destination: []u8,
@@ -490,21 +468,12 @@ pub fn Connection(comptime role: common.Role) type {
         write_aborted: std.atomic.Value(bool) = .init(false),
         application_write_pending: std.atomic.Value(bool) = .init(false),
         automatic_write_pending: std.atomic.Value(bool) = .init(false),
-        /// Present while a deadline-bounded Close frame has only a prefix on
-        /// the HTTP/3 stream. The encoded client mask and bytes remain stable
-        /// across continuation calls.
-        pending_close: ?PendingClose = null,
-        /// Present while a deadline-bounded Ping has only a prefix on the
-        /// HTTP/3 stream. The encoded client mask and bytes remain stable
-        /// across continuation calls.
-        pending_ping: ?PendingPing = null,
+        /// A bounded application message, Ping, or Close may own the HTTP/3
+        /// DATA sequence. These transaction shapes are mutually exclusive.
+        pending_write: PendingWrite = .none,
         /// Automatic Pong/Close bytes plus an optional peer control frame that
         /// remains owned until a bounded reply is fully committed.
         pending_auto_control: ?PendingAutomaticControl = null,
-        /// A bounded application message retains only framing/mask/cursor
-        /// state. The caller keeps the original payload slice alive and stable
-        /// until a retry commits the complete frame.
-        pending_message: ?PendingMessage = null,
         receive_finished: bool = false,
 
         fn init(
@@ -544,20 +513,7 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         pub fn deinit(self: *Self) void {
-            if (self.pending_message) |*pending| {
-                std.crypto.secureZero(u8, &pending.header);
-                if (pending.mask_key) |*mask| {
-                    std.crypto.secureZero(u8, mask);
-                }
-            }
-            if (self.pending_ping) |*pending| {
-                std.crypto.secureZero(u8, &pending.bytes);
-                std.crypto.secureZero(u8, &pending.payload);
-            }
-            if (self.pending_close) |*pending| {
-                std.crypto.secureZero(u8, &pending.bytes);
-                std.crypto.secureZero(u8, &pending.payload);
-            }
+            self.pending_write.clear();
             if (self.pending_auto_control) |*pending| {
                 pending.deinit(self.allocator);
             }
@@ -608,9 +564,7 @@ pub fn Connection(comptime role: common.Role) type {
         pub fn initiateKeyUpdate(self: *Self) Error!void {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.pending_message != null or
-                self.pending_ping != null or
-                self.pending_close != null or
+            if (!self.pending_write.isNone() or
                 self.pending_auto_control != null)
             {
                 return error.WriteInProgress;
@@ -774,9 +728,7 @@ pub fn Connection(comptime role: common.Role) type {
             try self.validateBinaryInPlace(payload.len);
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.pending_message != null) return error.WriteInProgress;
-            if (self.pending_ping != null) return error.WriteInProgress;
-            if (self.pending_close != null) return error.WriteInProgress;
+            if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
@@ -830,10 +782,10 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (self.pending_ping != null or self.pending_close != null) {
+            if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
             }
-            if (self.pending_message) |*pending| {
+            if (self.pending_write.messagePtr()) |pending| {
                 if (!pending.matchesInPlace(payload)) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
@@ -872,7 +824,7 @@ pub fn Connection(comptime role: common.Role) type {
             );
             pending.header_len = header.len;
             websocket.applyMask(payload, key, 0);
-            self.pending_message = pending;
+            self.pending_write = .{ .message = pending };
             self.application_write_pending.store(true, .release);
         }
 
@@ -885,7 +837,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            const pending = &self.pending_message.?;
+            const pending = self.pending_write.messagePtr().?;
             while (pending.committed < pending.totalLen()) {
                 const header_offset = @min(
                     pending.committed,
@@ -922,7 +874,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .total_bytes = pending.totalLen(),
                 .frame_committed = true,
             };
-            self.pending_message = null;
+            self.pending_write = .none;
             self.application_write_pending.store(false, .release);
         }
 
@@ -966,9 +918,7 @@ pub fn Connection(comptime role: common.Role) type {
             );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.pending_message != null) return error.WriteInProgress;
-            if (self.pending_ping != null) return error.WriteInProgress;
-            if (self.pending_close != null) return error.WriteInProgress;
+            if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
@@ -1040,10 +990,10 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (self.pending_ping != null or self.pending_close != null) {
+            if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
             }
-            if (self.pending_message) |*pending| {
+            if (self.pending_write.messagePtr()) |pending| {
                 if (!pending.matchesParts(parts)) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
@@ -1086,9 +1036,7 @@ pub fn Connection(comptime role: common.Role) type {
             );
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.pending_message != null) return error.WriteInProgress;
-            if (self.pending_ping != null) return error.WriteInProgress;
-            if (self.pending_close != null) return error.WriteInProgress;
+            if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
@@ -1156,10 +1104,10 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (self.pending_ping != null or self.pending_close != null) {
+            if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
             }
-            if (self.pending_message) |*pending| {
+            if (self.pending_write.messagePtr()) |pending| {
                 if (!pending.matchesFragments(opcode, fragments)) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
@@ -1193,7 +1141,7 @@ pub fn Connection(comptime role: common.Role) type {
             fragments: []const []const u8,
             plain_len: usize,
         ) Error!void {
-            std.debug.assert(self.pending_message == null);
+            std.debug.assert(self.pending_write.isNone());
             var pending = PendingMessage{
                 .opcode = opcode,
                 .source = .fragmented,
@@ -1220,10 +1168,10 @@ pub fn Connection(comptime role: common.Role) type {
                 if (pending.compressed) pending.fragmented_payload_total else null,
                 role == .client,
             );
-            self.pending_message = pending;
+            self.pending_write = .{ .message = pending };
             self.application_write_pending.store(true, .release);
             errdefer {
-                self.pending_message = null;
+                self.pending_write = .none;
                 self.application_write_pending.store(false, .release);
             }
             try self.preparePendingFragmentLocked(fragments, 0);
@@ -1234,7 +1182,7 @@ pub fn Connection(comptime role: common.Role) type {
             fragments: []const []const u8,
             index: usize,
         ) Error!void {
-            const pending = &self.pending_message.?;
+            const pending = self.pending_write.messagePtr().?;
             std.debug.assert(pending.source == .fragmented);
             const range: FragmentRange = if (pending.compressed)
                 compressedFragmentRange(
@@ -1278,7 +1226,7 @@ pub fn Connection(comptime role: common.Role) type {
                 return error.ConnectionClosed;
             }
             var scratch: [fragmented_write_scratch_len]u8 = undefined;
-            while (self.pending_message) |*pending| {
+            while (self.pending_write.messagePtr()) |pending| {
                 const frame_committed =
                     pending.committed - pending.fragment_start;
                 const header_offset = @min(
@@ -1358,7 +1306,7 @@ pub fn Connection(comptime role: common.Role) type {
                         if (pending.compressed) {
                             self.commitCompressionPreviewLocked();
                         }
-                        self.pending_message = null;
+                        self.pending_write = .none;
                         self.application_write_pending.store(false, .release);
                         return;
                     }
@@ -1383,7 +1331,7 @@ pub fn Connection(comptime role: common.Role) type {
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
 
-            if (self.pending_message) |*pending| {
+            if (self.pending_write.messagePtr()) |pending| {
                 if (!pending.matches(opcode, payload)) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
@@ -1392,8 +1340,7 @@ pub fn Connection(comptime role: common.Role) type {
                     return error.WriteInProgress;
                 }
             } else {
-                if (self.pending_ping != null) return error.WriteInProgress;
-                if (self.pending_close != null) return error.WriteInProgress;
+                if (!self.pending_write.isNone()) return error.WriteInProgress;
                 if (self.pending_auto_control != null) {
                     return error.WriteInProgress;
                 }
@@ -1410,7 +1357,7 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
-            std.debug.assert(self.pending_message == null);
+            std.debug.assert(self.pending_write.isNone());
             var pending = PendingMessage{
                 .opcode = opcode,
                 .original_ptr = @intFromPtr(payload.ptr),
@@ -1445,7 +1392,7 @@ pub fn Connection(comptime role: common.Role) type {
             );
             pending.header_len = header.len;
             pending.payload_len = encoded_payload.len;
-            self.pending_message = pending;
+            self.pending_write = .{ .message = pending };
             self.application_write_pending.store(true, .release);
         }
 
@@ -1453,7 +1400,7 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             payload: []const u8,
         ) Error!void {
-            std.debug.assert(self.pending_message == null);
+            std.debug.assert(self.pending_write.isNone());
             var pending = PendingMessage{
                 .opcode = .pong,
                 .original_ptr = @intFromPtr(payload.ptr),
@@ -1472,7 +1419,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .mask_key = pending.mask_key },
             );
             pending.header_len = header.len;
-            self.pending_message = pending;
+            self.pending_write = .{ .message = pending };
             self.application_write_pending.store(true, .release);
         }
 
@@ -1481,7 +1428,7 @@ pub fn Connection(comptime role: common.Role) type {
             parts: []const []const u8,
             payload_len: usize,
         ) Error!void {
-            std.debug.assert(self.pending_message == null);
+            std.debug.assert(self.pending_write.isNone());
             var pending = PendingMessage{
                 .opcode = .binary,
                 .source = .slices,
@@ -1520,7 +1467,7 @@ pub fn Connection(comptime role: common.Role) type {
             );
             pending.header_len = header.len;
             pending.payload_len = encoded_len;
-            self.pending_message = pending;
+            self.pending_write = .{ .message = pending };
             self.application_write_pending.store(true, .release);
         }
 
@@ -1533,7 +1480,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            const pending = &self.pending_message.?;
+            const pending = self.pending_write.messagePtr().?;
             const encoded_payload = if (pending.compressed)
                 self.compression_send.payload.items[0..pending.payload_len]
             else
@@ -1604,7 +1551,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .frame_committed = true,
             };
             if (pending.compressed) self.commitCompressionPreviewLocked();
-            self.pending_message = null;
+            self.pending_write = .none;
             self.application_write_pending.store(false, .release);
         }
 
@@ -1617,7 +1564,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            const pending = &self.pending_message.?;
+            const pending = self.pending_write.messagePtr().?;
             var scratch: [16 * 1024 + websocket.max_frame_header_len]u8 align(64) = undefined;
 
             while (pending.committed < pending.totalLen()) {
@@ -1695,7 +1642,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .frame_committed = true,
             };
             if (pending.compressed) self.commitCompressionPreviewLocked();
-            self.pending_message = null;
+            self.pending_write = .none;
             self.application_write_pending.store(false, .release);
         }
 
@@ -1734,11 +1681,13 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (self.pending_message != null or self.pending_close != null) {
+            if (self.pending_write.isMessage() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
             }
-            if (self.pending_ping == null) {
-                if (self.pending_auto_control != null) {
+            if (!self.pending_write.isPing()) {
+                if (!self.pending_write.isNone() or
+                    self.pending_auto_control != null)
+                {
                     return error.WriteInProgress;
                 }
                 if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1746,9 +1695,9 @@ pub fn Connection(comptime role: common.Role) type {
                 }
                 try self.beginPendingPingLocked(payload);
             }
-            const total = self.pending_ping.?.len;
+            const total = self.pending_write.pingPtr().?.len;
             self.resumePendingPingLocked(payload, deadline) catch |err| {
-                const pending = self.pending_ping.?;
+                const pending = self.pending_write.pingPtr().?.*;
                 progress.* = .{
                     .committed_bytes = pending.committed,
                     .total_bytes = pending.len,
@@ -1797,10 +1746,10 @@ pub fn Connection(comptime role: common.Role) type {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
             _ = try deadline_policy.usableAwake(self.io(), deadline);
-            if (self.pending_ping != null or self.pending_close != null) {
+            if (self.pending_write.isPing() or self.pending_write.isClose()) {
                 return error.WriteInProgress;
             }
-            if (self.pending_message) |*pending| {
+            if (self.pending_write.messagePtr()) |pending| {
                 if (!pending.matches(.pong, payload)) {
                     progress.* = .{
                         .committed_bytes = pending.committed,
@@ -1861,13 +1810,15 @@ pub fn Connection(comptime role: common.Role) type {
                 self.send_mutex.lockUncancelable(self.io());
                 defer self.send_mutex.unlock(self.io());
                 _ = try deadline_policy.usableAwake(self.io(), deadline);
-                if (self.pending_message != null or
-                    self.pending_close != null)
+                if (self.pending_write.isMessage() or
+                    self.pending_write.isClose())
                 {
                     return error.WriteInProgress;
                 }
-                if (self.pending_ping == null) {
-                    if (self.pending_auto_control != null) {
+                if (!self.pending_write.isPing()) {
+                    if (!self.pending_write.isNone() or
+                        self.pending_auto_control != null)
+                    {
                         return error.WriteInProgress;
                     }
                     if (self.writeAborted() or self.closeSent() or self.closeReceived()) {
@@ -1910,8 +1861,8 @@ pub fn Connection(comptime role: common.Role) type {
             {
                 self.send_mutex.lockUncancelable(self.io());
                 defer self.send_mutex.unlock(self.io());
-                if (self.pending_message != null or
-                    self.pending_close != null)
+                if (self.pending_write.isMessage() or
+                    self.pending_write.isClose())
                 {
                     return error.WriteInProgress;
                 }
@@ -2013,21 +1964,23 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            if (self.pending_message != null or self.pending_ping != null) {
+            if (self.pending_write.isMessage() or self.pending_write.isPing()) {
                 return error.WriteInProgress;
             }
-            if (self.pending_close) |*pending| {
+            if (self.pending_write.closePtr()) |pending| {
                 if (!pending.matches(payload)) return error.WriteInProgress;
             } else {
-                if (self.pending_auto_control != null) {
+                if (!self.pending_write.isNone() or
+                    self.pending_auto_control != null)
+                {
                     return error.WriteInProgress;
                 }
                 if (self.closeSent()) return error.ConnectionClosed;
                 try self.beginPendingCloseLocked(payload);
             }
-            const total = self.pending_close.?.len;
+            const total = self.pending_write.closePtr().?.len;
             self.resumePendingCloseLocked(deadline) catch |err| {
-                const pending = self.pending_close orelse {
+                const pending = self.pending_write.closePtr() orelse {
                     progress.* = .{
                         .committed_bytes = total,
                         .total_bytes = total,
@@ -2151,7 +2104,7 @@ pub fn Connection(comptime role: common.Role) type {
                 _ = try self.pendingAutomaticControlOpcode(.close_wait);
                 return self.readCloseHandshakeEvent(deadline);
             }
-            if (!self.closeSent() or self.pending_close != null) {
+            if (!self.closeSent() or self.pending_write.isClose()) {
                 var storage: [125]u8 = undefined;
                 const payload = try websocket.writeClosePayloadInto(
                     &storage,
@@ -2169,17 +2122,19 @@ pub fn Connection(comptime role: common.Role) type {
                     if (self.receiveFailed() or self.writeAborted()) {
                         return error.ConnectionClosed;
                     }
-                    if (self.pending_message != null or
-                        self.pending_ping != null)
+                    if (self.pending_write.isMessage() or
+                        self.pending_write.isPing())
                     {
                         return error.WriteInProgress;
                     }
-                    if (self.pending_close) |*pending| {
+                    if (self.pending_write.closePtr()) |pending| {
                         if (!pending.matches(payload)) {
                             return error.WriteInProgress;
                         }
                     } else if (!self.closeSent()) {
-                        if (self.pending_auto_control != null) {
+                        if (!self.pending_write.isNone() or
+                            self.pending_auto_control != null)
+                        {
                             return error.WriteInProgress;
                         }
                         try self.beginPendingCloseLocked(payload);
@@ -2223,12 +2178,12 @@ pub fn Connection(comptime role: common.Role) type {
                 if (self.receiveFailed() or self.writeAborted()) {
                     return error.ConnectionClosed;
                 }
-                if (self.pending_message != null or
-                    self.pending_ping != null)
+                if (self.pending_write.isMessage() or
+                    self.pending_write.isPing())
                 {
                     return error.WriteInProgress;
                 }
-                if (!self.closeSent() and self.pending_close == null) {
+                if (!self.closeSent() and !self.pending_write.isClose()) {
                     return error.InvalidFrame;
                 }
                 try self.resumePendingCloseLocked(deadline);
@@ -3198,9 +3153,7 @@ pub fn Connection(comptime role: common.Role) type {
         ) void {
             self.send_mutex.lockUncancelable(self.io());
             defer self.send_mutex.unlock(self.io());
-            if (self.pending_message != null or
-                self.pending_ping != null or
-                self.pending_close != null or
+            if (!self.pending_write.isNone() or
                 self.pending_auto_control != null)
             {
                 self.abortStreamAfterReceiveFailureLocked();
@@ -3253,9 +3206,7 @@ pub fn Connection(comptime role: common.Role) type {
             opcode: websocket.Opcode,
             payload: []const u8,
         ) Error!void {
-            if (self.pending_message != null or
-                self.pending_ping != null or
-                self.pending_close != null or
+            if (!self.pending_write.isNone() or
                 self.pending_auto_control != null)
             {
                 return error.WriteInProgress;
@@ -3310,9 +3261,7 @@ pub fn Connection(comptime role: common.Role) type {
             payload: []const u8,
         ) Error!void {
             if (self.writeAborted()) return error.ConnectionClosed;
-            if (self.pending_message != null) return error.WriteInProgress;
-            if (self.pending_ping != null) return error.WriteInProgress;
-            if (self.pending_close != null) return error.WriteInProgress;
+            if (!self.pending_write.isNone()) return error.WriteInProgress;
             if (self.pending_auto_control != null) {
                 return error.WriteInProgress;
             }
@@ -3378,10 +3327,7 @@ pub fn Connection(comptime role: common.Role) type {
                 value
             else
                 return null;
-            if (self.pending_message != null or
-                self.pending_ping != null or
-                self.pending_close != null)
-            {
+            if (!self.pending_write.isNone()) {
                 return error.WriteInProgress;
             }
             if (self.closeSent()) pending.writes_reply = false;
@@ -3459,8 +3405,8 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             payload: []const u8,
         ) Error!void {
-            std.debug.assert(self.pending_ping == null);
-            var pending: PendingPing = .{};
+            std.debug.assert(self.pending_write.isNone());
+            var pending: PendingControlFrame = .{};
             @memcpy(pending.payload[0..payload.len], payload);
             pending.payload_len = payload.len;
             var mask_key: ?[4]u8 = null;
@@ -3476,7 +3422,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .mask_key = mask_key },
             );
             pending.len = encoded.len;
-            self.pending_ping = pending;
+            self.pending_write = .{ .ping = pending };
             self.application_write_pending.store(true, .release);
         }
 
@@ -3488,10 +3434,7 @@ pub fn Connection(comptime role: common.Role) type {
             if (self.receiveFailed() or self.writeAborted()) {
                 return error.ConnectionClosed;
             }
-            const pending = if (self.pending_ping) |*value|
-                value
-            else
-                return;
+            const pending = self.pending_write.pingPtr() orelse return;
             if (!pending.matches(payload)) return error.WriteInProgress;
             var progress: http3.runtime.BodyWriteProgress = .{};
             switch (role) {
@@ -3518,7 +3461,7 @@ pub fn Connection(comptime role: common.Role) type {
             }
             pending.committed += progress.committed_bytes;
             std.debug.assert(pending.committed == pending.len);
-            self.pending_ping = null;
+            self.pending_write = .none;
             self.application_write_pending.store(false, .release);
         }
 
@@ -3526,8 +3469,8 @@ pub fn Connection(comptime role: common.Role) type {
             self: *Self,
             payload: []const u8,
         ) Error!void {
-            std.debug.assert(self.pending_close == null);
-            var pending: PendingClose = .{};
+            std.debug.assert(self.pending_write.isNone());
+            var pending: PendingControlFrame = .{};
             @memcpy(pending.payload[0..payload.len], payload);
             pending.payload_len = payload.len;
             var mask_key: ?[4]u8 = null;
@@ -3543,7 +3486,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .{ .mask_key = mask_key },
             );
             pending.len = encoded.len;
-            self.pending_close = pending;
+            self.pending_write = .{ .close = pending };
             self.application_write_pending.store(true, .release);
         }
 
@@ -3552,10 +3495,7 @@ pub fn Connection(comptime role: common.Role) type {
             deadline: std.Io.Clock.Timestamp,
         ) Error!void {
             if (self.writeAborted()) return error.ConnectionClosed;
-            const pending = if (self.pending_close) |*value|
-                value
-            else
-                return;
+            const pending = self.pending_write.closePtr() orelse return;
             var progress: http3.runtime.BodyWriteProgress = .{};
             switch (role) {
                 .client => self.h3.sendRequestBodyPacedWithDeadline(
@@ -3567,7 +3507,7 @@ pub fn Connection(comptime role: common.Role) type {
                 ) catch |err| {
                     pending.committed += progress.committed_bytes;
                     if (progress.fin_committed) {
-                        self.pending_close = null;
+                        self.pending_write = .none;
                         self.application_write_pending.store(false, .release);
                         self.close_sent.store(true, .release);
                     }
@@ -3582,7 +3522,7 @@ pub fn Connection(comptime role: common.Role) type {
                 ) catch |err| {
                     pending.committed += progress.committed_bytes;
                     if (progress.fin_committed) {
-                        self.pending_close = null;
+                        self.pending_write = .none;
                         self.application_write_pending.store(false, .release);
                         self.close_sent.store(true, .release);
                     }
@@ -3593,7 +3533,7 @@ pub fn Connection(comptime role: common.Role) type {
             std.debug.assert(
                 pending.committed == pending.len and progress.fin_committed,
             );
-            self.pending_close = null;
+            self.pending_write = .none;
             self.application_write_pending.store(false, .release);
             self.close_sent.store(true, .release);
         }
@@ -3603,7 +3543,7 @@ pub fn Connection(comptime role: common.Role) type {
         }
 
         fn closeFullySent(self: *const Self) bool {
-            return self.closeSent() and self.pending_close == null;
+            return self.closeSent() and !self.pending_write.isClose();
         }
 
         fn closeReceived(self: *const Self) bool {
@@ -5940,20 +5880,30 @@ fn compressedFragmentRange(
     return .{ .start = start, .end = start + len };
 }
 
+test "WebSocket RFC 9220 connections keep resumable writes compact" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
+        try std.testing.expectEqual(@as(usize, 18_544), @sizeOf(ClientConnection));
+        try std.testing.expectEqual(@as(usize, 17_952), @sizeOf(ServerConnection));
+    }
+}
+
 pub const testing = if (builtin.is_test) struct {
     pub const FragmentRangeForTest = FragmentRange;
 
     pub fn pendingCloseProgress(
         connection: anytype,
     ) ?struct { committed: usize, total: usize } {
-        const pending = connection.pending_close orelse return null;
+        const pending = connection.pending_write.closeConst() orelse
+            return null;
         return .{ .committed = pending.committed, .total = pending.len };
     }
 
     pub fn pendingPingProgress(
         connection: anytype,
     ) ?struct { committed: usize, total: usize } {
-        const pending = connection.pending_ping orelse return null;
+        const pending = connection.pending_write.pingConst() orelse
+            return null;
         return .{ .committed = pending.committed, .total = pending.len };
     }
 
@@ -5999,7 +5949,10 @@ pub const testing = if (builtin.is_test) struct {
     pub fn pendingMessageProgress(
         connection: anytype,
     ) ?MessageWriteProgress {
-        const pending = connection.pending_message orelse return null;
+        const pending = switch (connection.pending_write) {
+            .message => |value| value,
+            else => return null,
+        };
         return .{
             .committed_bytes = pending.committed,
             .total_bytes = pending.totalLen(),
@@ -6032,9 +5985,7 @@ pub const testing = if (builtin.is_test) struct {
     }
 
     pub fn outboundStorageReleased(connection: anytype) bool {
-        return connection.pending_message == null and
-            connection.pending_ping == null and
-            connection.pending_close == null and
+        return connection.pending_write.isNone() and
             connection.pending_auto_control == null and
             !connection.application_write_pending.load(.acquire) and
             !connection.automatic_write_pending.load(.acquire) and
@@ -6067,11 +6018,9 @@ pub const testing = if (builtin.is_test) struct {
         connection: anytype,
         committed: usize,
     ) void {
-        std.debug.assert(connection.pending_message != null);
-        std.debug.assert(
-            committed <= connection.pending_message.?.totalLen(),
-        );
-        connection.pending_message.?.committed = committed;
+        const pending = connection.pending_write.messagePtr().?;
+        std.debug.assert(committed <= pending.totalLen());
+        pending.committed = committed;
     }
 
     pub fn markPendingControlCommitted(
@@ -6079,17 +6028,13 @@ pub const testing = if (builtin.is_test) struct {
         opcode: websocket.Opcode,
         committed: usize,
     ) void {
-        switch (opcode) {
-            .ping => {
-                std.debug.assert(committed <= connection.pending_ping.?.len);
-                connection.pending_ping.?.committed = committed;
-            },
-            .close => {
-                std.debug.assert(committed <= connection.pending_close.?.len);
-                connection.pending_close.?.committed = committed;
-            },
+        const pending = switch (opcode) {
+            .ping => connection.pending_write.pingPtr().?,
+            .close => connection.pending_write.closePtr().?,
             else => unreachable,
-        }
+        };
+        std.debug.assert(committed <= pending.len);
+        pending.committed = committed;
     }
 
     pub fn failReceiveAndFinish(

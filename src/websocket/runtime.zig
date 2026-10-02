@@ -38,7 +38,6 @@ pub const h3 = @import("runtime/h3.zig");
 pub const default_compression_threshold: usize = 32;
 const masked_write_scratch_len: usize = 16 * 1024;
 const max_batched_payload_slices: usize = 64;
-const max_control_frame_len = websocket.max_frame_header_len + 125;
 // A 4 KiB application payload occupies 4104 bytes on the masked wire. The old
 // 4096-byte read scratch therefore forced two socket reads for this common
 // frame size. Keep the burst on the call stack (rather than 16 KiB resident per
@@ -294,102 +293,9 @@ fn fragmentedWireLen(
     return total;
 }
 
-const PendingControlFrame = struct {
-    bytes: [max_control_frame_len]u8 = undefined,
-    len: usize = 0,
-    committed: usize = 0,
-    payload: [125]u8 = undefined,
-    payload_len: usize = 0,
-
-    fn matches(self: *const PendingControlFrame, value: []const u8) bool {
-        return std.mem.eql(u8, self.payload[0..self.payload_len], value);
-    }
-};
-
-/// At most one resumable application write owns an HTTP/1 byte stream or
-/// HTTP/2 CONNECT stream. Automatic Pong/Close is retained separately because
-/// it may be queued by a receiver that races an older application write.
-fn PendingWriteState(comptime MessageState: type) type {
-    return union(enum) {
-        none,
-        message: MessageState,
-        ping: PendingControlFrame,
-        close: PendingControlFrame,
-
-        const Self = @This();
-
-        fn isNone(self: *const Self) bool {
-            return self.* == .none;
-        }
-
-        fn isMessage(self: *const Self) bool {
-            return self.* == .message;
-        }
-
-        fn isPing(self: *const Self) bool {
-            return self.* == .ping;
-        }
-
-        fn isClose(self: *const Self) bool {
-            return self.* == .close;
-        }
-
-        fn messagePtr(self: *Self) ?*MessageState {
-            return switch (self.*) {
-                .message => |*pending| pending,
-                else => null,
-            };
-        }
-
-        fn pingPtr(self: *Self) ?*PendingControlFrame {
-            return switch (self.*) {
-                .ping => |*pending| pending,
-                else => null,
-            };
-        }
-
-        fn pingConst(self: *const Self) ?*const PendingControlFrame {
-            return switch (self.*) {
-                .ping => |*pending| pending,
-                else => null,
-            };
-        }
-
-        fn closePtr(self: *Self) ?*PendingControlFrame {
-            return switch (self.*) {
-                .close => |*pending| pending,
-                else => null,
-            };
-        }
-
-        fn closeConst(self: *const Self) ?*const PendingControlFrame {
-            return switch (self.*) {
-                .close => |*pending| pending,
-                else => null,
-            };
-        }
-
-        pub fn clear(self: *Self) void {
-            switch (self.*) {
-                .none => {},
-                .message => |*pending| {
-                    std.crypto.secureZero(u8, &pending.header);
-                    if (pending.mask_key) |*mask| {
-                        std.crypto.secureZero(u8, mask);
-                    }
-                },
-                .ping, .close => |*pending| {
-                    std.crypto.secureZero(u8, &pending.bytes);
-                    std.crypto.secureZero(u8, &pending.payload);
-                },
-            }
-            self.* = .none;
-        }
-    };
-}
-
-const PendingWrite = PendingWriteState(PendingMessage);
-const PendingH2Write = PendingWriteState(PendingH2Message);
+const PendingControlFrame = common.PendingControlFrame;
+const PendingWrite = common.PendingWriteState(PendingMessage);
+const PendingH2Write = common.PendingWriteState(PendingH2Message);
 
 pub const ClientIdentity = tls_client_identity.ClientIdentity;
 pub const ClientCertificateVerifier =

@@ -44,6 +44,104 @@ pub const MessageWriteProgress = struct {
     frame_committed: bool = false,
 };
 
+/// Encoded control frame retained while a bounded write is incomplete.
+pub const PendingControlFrame = struct {
+    bytes: [websocket.max_frame_header_len + 125]u8 = undefined,
+    len: usize = 0,
+    committed: usize = 0,
+    payload: [125]u8 = undefined,
+    payload_len: usize = 0,
+
+    pub fn matches(
+        self: *const PendingControlFrame,
+        value: []const u8,
+    ) bool {
+        return std.mem.eql(u8, self.payload[0..self.payload_len], value);
+    }
+};
+
+/// At most one resumable application write owns a WebSocket byte stream.
+/// Automatic Pong/Close remains separate because a receive owner may queue it
+/// behind an older application write.
+pub fn PendingWriteState(comptime MessageState: type) type {
+    return union(enum) {
+        none,
+        message: MessageState,
+        ping: PendingControlFrame,
+        close: PendingControlFrame,
+
+        const Self = @This();
+
+        pub fn isNone(self: *const Self) bool {
+            return self.* == .none;
+        }
+
+        pub fn isMessage(self: *const Self) bool {
+            return self.* == .message;
+        }
+
+        pub fn isPing(self: *const Self) bool {
+            return self.* == .ping;
+        }
+
+        pub fn isClose(self: *const Self) bool {
+            return self.* == .close;
+        }
+
+        pub fn messagePtr(self: *Self) ?*MessageState {
+            return switch (self.*) {
+                .message => |*pending| pending,
+                else => null,
+            };
+        }
+
+        pub fn pingPtr(self: *Self) ?*PendingControlFrame {
+            return switch (self.*) {
+                .ping => |*pending| pending,
+                else => null,
+            };
+        }
+
+        pub fn pingConst(self: *const Self) ?*const PendingControlFrame {
+            return switch (self.*) {
+                .ping => |*pending| pending,
+                else => null,
+            };
+        }
+
+        pub fn closePtr(self: *Self) ?*PendingControlFrame {
+            return switch (self.*) {
+                .close => |*pending| pending,
+                else => null,
+            };
+        }
+
+        pub fn closeConst(self: *const Self) ?*const PendingControlFrame {
+            return switch (self.*) {
+                .close => |*pending| pending,
+                else => null,
+            };
+        }
+
+        pub fn clear(self: *Self) void {
+            switch (self.*) {
+                .none => {},
+                .message => |*pending| {
+                    std.crypto.secureZero(u8, &pending.header);
+                    if (pending.mask_key) |*mask| {
+                        std.crypto.secureZero(u8, mask);
+                    }
+                },
+                .ping, .close => |*pending| {
+                    std.crypto.secureZero(u8, &pending.bytes);
+                    std.crypto.secureZero(u8, &pending.payload);
+                },
+            }
+            self.* = .none;
+        }
+    };
+}
+
 /// Fill independent RFC 6455 mask keys with one backend CSPRNG request. This
 /// preserves a fresh unpredictable key per frame without paying one I/O
 /// dispatch or `getrandom` syscall for every frame in an encoded batch.

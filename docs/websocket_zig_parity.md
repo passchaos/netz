@@ -1307,18 +1307,23 @@ applying TCP-only socket options.
    4,128-byte receive buffer per connection, while netz uses zio tasks and grows
    retained receive storage on demand. The two memory scopes remain separately
    labeled rather than being combined into one ratio.
-   HTTP/1 and RFC 8441 connection state now store their mutually exclusive
-   resumable application message, Ping, and Close transactions in one shared
-   tagged-union design. On 64-bit targets this reduces `runtime.Connection`
-   from 1,968 to 1,568 bytes and `runtime.H2Connection` from 2,000 to 1,600
-   bytes: 400 bytes less fixed state for every live H1 connection or H2
-   WebSocket tunnel. That is a 20.3% reduction for H1 and 20.0% for H2.
+   HTTP/1, RFC 8441, and RFC 9220 connection state now store their mutually
+   exclusive resumable application message, Ping, and Close transactions in
+   one shared tagged-union design. On 64-bit targets this reduces
+   `runtime.Connection` from 1,968 to 1,568 bytes and `runtime.H2Connection`
+   from 2,000 to 1,600 bytes: 400 bytes less fixed state for every live H1
+   connection or H2 WebSocket tunnel (20.3% and 20.0%, respectively). The H3
+   client/server connection types likewise fall from 18,944/18,352 to
+   18,544/17,952 bytes, saving 400 bytes per RFC 9220 tunnel (2.1%/2.2%).
    Automatic Pong/Close state remains separate because a receive owner may
    queue it behind an older application write. Layout assertions and the
    existing exact-suffix, queued-auto-Pong, control-frame, and fatal-cleanup
-   regressions guard both reductions and that concurrency contract. This is
+   regressions guard these reductions and that concurrency contract. This is
    inline connection-state evidence; it is not folded into the explicit-
    allocator or throughput ratios above.
+   The post-change bidirectional quic-go gate passed the full fragmented-text,
+   no-context-takeover compression, Ping/Pong, Close, key-update, and QUIC
+   v1/v2 matrix on 2026-10-02.
 3. Keep the external Autobahn gate current.
    `zig build interop-websocket-autobahn -Doptimize=ReleaseFast` runs the
    digest-locked Autobahn Testsuite 25.10.1 fuzzing client against the dedicated
