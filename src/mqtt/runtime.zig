@@ -7144,7 +7144,7 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 856), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 792), @sizeOf(Connection));
         try std.testing.expectEqual(
             @as(usize, 2),
             @sizeOf(ConnectionCapabilities),

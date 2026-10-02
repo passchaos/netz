@@ -29,7 +29,7 @@ const WebSocketTransport = struct {
     input: std.ArrayList(u8) = .empty,
 };
 
-const tcp_read_ahead_capacity = 512;
+const tcp_read_ahead_capacity = 448;
 
 /// Partial packet state survives a bounded read timeout. TCP reads request
 /// into a small connection-local buffer so the fixed header and common small
@@ -1797,6 +1797,40 @@ test "TCP packet receive borrows caller storage for complete read-ahead packets"
     try std.testing.expectEqual(@as(usize, 0), transport.tcp.buffered().len);
     packet.deinit(failing.allocator());
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "TCP packet receive borrows an exact read-ahead-capacity packet" {
+    const allocator = std.testing.allocator;
+    var transport = Transport{ .tcp = .{
+        .io = undefined,
+        .stream = undefined,
+    } };
+    var encoded: [tcp_read_ahead_capacity]u8 = @splat(0x5a);
+    encoded[0] = 0x30;
+    const remaining_len = encoded.len - 3;
+    encoded[1] = @as(u8, @truncate(remaining_len)) | 0x80;
+    encoded[2] = @intCast(remaining_len >> 7);
+    @memcpy(transport.tcp.input[0..], &encoded);
+    transport.tcp.input_end = encoded.len;
+    var storage: [tcp_read_ahead_capacity]u8 = undefined;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+
+    var packet = try transport.readPacketInto(
+        failing.allocator(),
+        encoded.len,
+        &storage,
+    );
+    defer packet.deinit(failing.allocator());
+    try std.testing.expect(!packet.owns_bytes);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, &encoded, packet.bytes);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        transport.tcp.buffered().len,
+    );
 }
 
 test "TCP packet receive preserves an aligned prefix on owned fallback" {

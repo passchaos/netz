@@ -5454,11 +5454,21 @@ result; it does not claim a separately measurable RSS or throughput change.
 The active MQTT runtime now stores its owned listener namespace as one pointer
 plus the protocol's u16 length, packs negotiated QoS and publish/subscription
 availability into one 16-bit word, and uses a packed presence bit for the full
-raw u8 CONNECT protocol level. The 64-bit `runtime.Connection` consequently
-falls from 872 to 856 bytes without adding an allocation. At 64 simultaneous
-connections this removes 1,024 bytes of fixed connection state; this exact
-compile-time layout result is intentionally not presented as a process-RSS or
-throughput claim.
+raw u8 CONNECT protocol level. Its TCP parser also keeps a seven-cache-line,
+448-byte read-ahead region: this still holds the benchmark's complete
+four-packet 64-byte-payload publish window, while larger packets retain the
+existing exact-allocation path. Together these changes reduce the audited
+64-bit `runtime.Connection` from 1,408 to 792 bytes (616 bytes per ordinary QoS
+0 live connection without aliases). At 64 simultaneous connections the final
+read-ahead reduction alone removes 4,096 bytes of fixed connection state. The
+compile-time layout result is intentionally not presented as a process-RSS
+claim. A fixed-binary four-sample five-shape comparison against the 512-byte
+read-ahead build completed every expected delivery and checksum; normalized
+throughput moved in both directions within the observed host variance, so it
+is retained as no-regression rather than speedup evidence. The baseline and
+candidate summary SHA-256 values are
+`99fcd5f3a68fa101f84bece5fcd7bf9a3c8aaf0fce82f817e1fac94630794bc0`
+and `cf1bf928ba129239b62149141476e58d221f1e3fbcf8e795980aa9313672954c`.
 
 Delivery authorization now keeps the already-owned global and listener
 callback tables behind borrowed pointers. Before resolving a destination

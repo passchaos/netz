@@ -3533,9 +3533,12 @@ proxy evidence for the entire suite.
    availability flags share one 16-bit capability word; the complete raw
    CONNECT protocol-level byte keeps its optional presence in that same word,
    so malformed values such as zero remain distinguishable from an unread
-   level. None adds an allocation. Together these changes reduce the audited
-   64-bit `runtime.Connection` from 1,408 to 856 bytes (552 bytes per ordinary
-   QoS 0 live connection without aliases). The
+   level. The TCP transport retains a 448-byte, seven-cache-line read-ahead
+   region that still covers the benchmark's complete four-packet small-message
+   window; larger packets keep their exact-allocation fallback. None of these
+   changes adds an allocation. Together they reduce the audited 64-bit
+   `runtime.Connection` from 1,408 to 792 bytes (616 bytes per ordinary QoS 0
+   live connection without aliases). The
    four delivery/route/Session
    scratch lists, transient QoS map, counters, and optional delivery-writer
    pointer now share one 152-byte `ClientBuffers` descriptor allocated only
