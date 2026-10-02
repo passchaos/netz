@@ -3527,11 +3527,15 @@ proxy evidence for the entire suite.
    the remaining certificate-identity bit joins the connection's existing
    flags. Connection-owned mount prefixes omit the general Namespace ownership
    flag, Enhanced Authentication stores its already allocated method using the
-   protocol's u16 string length instead of a second machine word, and an
-   assigned Client ID likewise reuses its allocation with a u16 length rather
-   than an optional slice. None adds an allocation. Together these changes
-   reduce the audited 64-bit `runtime.Connection` from 1,408 to 872 bytes (536
-   bytes per ordinary QoS 0 live connection without aliases). The
+   protocol's u16 string length instead of a second machine word, and assigned
+   Client IDs plus listener mount prefixes likewise reuse their allocations
+   through pointers and MQTT-bounded u16 lengths. Negotiated QoS and
+   availability flags share one 16-bit capability word; the complete raw
+   CONNECT protocol-level byte keeps its optional presence in that same word,
+   so malformed values such as zero remain distinguishable from an unread
+   level. None adds an allocation. Together these changes reduce the audited
+   64-bit `runtime.Connection` from 1,408 to 856 bytes (552 bytes per ordinary
+   QoS 0 live connection without aliases). The
    four delivery/route/Session
    scratch lists, transient QoS map, counters, and optional delivery-writer
    pointer now share one 152-byte `ClientBuffers` descriptor allocated only

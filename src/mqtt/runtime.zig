@@ -101,6 +101,22 @@ const ConnectionLimits = struct {
     }
 };
 
+const ConnectionCapabilities = packed struct(u16) {
+    peer_maximum_qos: mqtt.QoS = .exactly_once,
+    local_maximum_qos: mqtt.QoS = .exactly_once,
+    peer_retain_available: bool = true,
+    local_retain_available: bool = true,
+    peer_wildcard_subscription_available: bool = true,
+    peer_subscription_identifier_available: bool = true,
+    peer_shared_subscription_available: bool = true,
+    peer_requested_problem_information: bool = true,
+    local_wildcard_subscription_available: bool = true,
+    local_subscription_identifier_available: bool = true,
+    local_shared_subscription_available: bool = true,
+    has_incoming_connect_level: bool = false,
+    _padding: u2 = 0,
+};
+
 pub fn proxyHeaderDeadline(
     io: std.Io,
     limits: Limits,
@@ -2204,8 +2220,10 @@ fn connectStreamAttemptBefore(
             options.properties,
         ) orelse options.max_outgoing_inflight,
         .incoming_topic_alias_maximum = options.topic_alias_maximum,
-        .peer_maximum_qos = options.peer_maximum_qos,
-        .peer_retain_available = options.peer_retain_available,
+        .capabilities = .{
+            .peer_maximum_qos = options.peer_maximum_qos,
+            .peer_retain_available = options.peer_retain_available,
+        },
     };
     stream_owned = false;
     errdefer connection.close();
@@ -2366,19 +2384,19 @@ fn applyConnAckNegotiation(
         connection.keep_alive_seconds = server_keep_alive;
     }
     if (mqtt.maximumQoS(connack.properties)) |maximum_qos| {
-        connection.peer_maximum_qos = maximum_qos;
+        connection.capabilities.peer_maximum_qos = maximum_qos;
     }
     if (mqtt.retainAvailable(connack.properties)) |retain_available| {
-        connection.peer_retain_available = retain_available;
+        connection.capabilities.peer_retain_available = retain_available;
     }
     if (mqtt.wildcardSubscriptionAvailable(connack.properties)) |available| {
-        connection.peer_wildcard_subscription_available = available;
+        connection.capabilities.peer_wildcard_subscription_available = available;
     }
     if (mqtt.subscriptionIdentifierAvailable(connack.properties)) |available| {
-        connection.peer_subscription_identifier_available = available;
+        connection.capabilities.peer_subscription_identifier_available = available;
     }
     if (mqtt.sharedSubscriptionAvailable(connack.properties)) |available| {
-        connection.peer_shared_subscription_available = available;
+        connection.capabilities.peer_shared_subscription_available = available;
     }
 }
 
@@ -2492,7 +2510,7 @@ pub const Connection = struct {
     strict_utf8: bool = false,
     endpoint_role: EndpointRole = .unestablished,
     connect_session_expiry: u32 = 0,
-    incoming_connect_level: ?u8 = null,
+    incoming_connect_level_value: u8 = undefined,
     limits: ConnectionLimits = .{},
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
@@ -2503,21 +2521,7 @@ pub const Connection = struct {
     incoming_topic_alias_maximum: u16 = 16,
     peer_topic_alias_maximum: u16 = 0,
     keep_alive_seconds: u16 = 30,
-    peer_maximum_qos: mqtt.QoS = .exactly_once,
-    local_maximum_qos: mqtt.QoS = .exactly_once,
-    peer_retain_available: bool = true,
-    local_retain_available: bool = true,
-    peer_wildcard_subscription_available: bool = true,
-    peer_subscription_identifier_available: bool = true,
-    peer_shared_subscription_available: bool = true,
-    /// CONNECT defaults Request Problem Information to one. A server endpoint
-    /// stores an explicit zero here so later ACK/AUTH writers can suppress
-    /// diagnostic Reason String and User Property fields without every broker
-    /// call site reinterpreting CONNECT.
-    peer_requested_problem_information: bool = true,
-    local_wildcard_subscription_available: bool = true,
-    local_subscription_identifier_available: bool = true,
-    local_shared_subscription_available: bool = true,
+    capabilities: ConnectionCapabilities = .{},
     proxy_v2_require_client_certificate: bool = false,
     packet_identifiers: packet_identifiers.State = .{},
     /// Incoming and outgoing aliases have independent concurrency owners and
@@ -2554,10 +2558,10 @@ pub const Connection = struct {
     /// protocol parsing. The 296-byte descriptor remains out of line for the
     /// overwhelmingly common direct-connection path.
     proxy_metadata: ?*proxy_protocol.Metadata = null,
-    /// Owned broker-listener namespace. Null means the global topic space.
-    /// Session takeover and asynchronous delivery can therefore project
-    /// canonical topics without retaining Namespace's ownership flag.
-    topic_namespace: ?[]u8 = null,
+    /// Owned broker-listener namespace. The optional pointer carries presence;
+    /// MQTT's u16 string bound makes a separate machine-word length needless.
+    topic_namespace_ptr: ?[*]u8 = null,
+    topic_namespace_len: u16 = 0,
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -2611,8 +2615,10 @@ pub const Connection = struct {
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse
                 options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
-            .peer_maximum_qos = options.peer_maximum_qos,
-            .peer_retain_available = options.peer_retain_available,
+            .capabilities = .{
+                .peer_maximum_qos = options.peer_maximum_qos,
+                .peer_retain_available = options.peer_retain_available,
+            },
         };
     }
 
@@ -2662,7 +2668,7 @@ pub const Connection = struct {
         self.write_property_scratch.deinit(self.allocator);
         self.clearPendingPingState();
         self.clearProxyMetadata();
-        if (self.topic_namespace) |prefix| self.allocator.free(prefix);
+        self.clearTopicNamespace();
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -2884,14 +2890,44 @@ pub const Connection = struct {
             null
         else
             try self.allocator.dupe(u8, validated.prefix);
-        if (self.topic_namespace) |previous| self.allocator.free(previous);
-        self.topic_namespace = replacement;
+        self.clearTopicNamespace();
+        if (replacement) |owned| {
+            self.topic_namespace_ptr = owned.ptr;
+            self.topic_namespace_len = @intCast(owned.len);
+        }
     }
 
     pub fn topicNamespace(
         self: *const Connection,
     ) []const u8 {
-        return self.topic_namespace orelse &.{};
+        const ptr = self.topic_namespace_ptr orelse return &.{};
+        return ptr[0..self.topic_namespace_len];
+    }
+
+    fn clearTopicNamespace(self: *Connection) void {
+        const ptr = self.topic_namespace_ptr orelse return;
+        self.allocator.free(ptr[0..self.topic_namespace_len]);
+        self.topic_namespace_ptr = null;
+        self.topic_namespace_len = 0;
+    }
+
+    fn incomingConnectLevel(self: *const Connection) ?u8 {
+        return if (self.capabilities.has_incoming_connect_level)
+            self.incoming_connect_level_value
+        else
+            null;
+    }
+
+    fn setIncomingConnectLevel(
+        self: *Connection,
+        maybe_level: ?u8,
+    ) void {
+        const level = maybe_level orelse {
+            self.capabilities.has_incoming_connect_level = false;
+            return;
+        };
+        self.incoming_connect_level_value = level;
+        self.capabilities.has_incoming_connect_level = true;
     }
 
     pub fn visibleTopic(
@@ -2906,16 +2942,29 @@ pub const Connection = struct {
     /// Server-side Maximum QoS negotiated for this Network Connection.
     /// Listener-aware brokers use it for subscription grants and delivery.
     pub fn localMaximumQoS(self: *const Connection) mqtt.QoS {
-        return self.local_maximum_qos;
+        return self.capabilities.local_maximum_qos;
     }
 
     /// Client-side Maximum QoS advertised by the connected broker.
     pub fn peerMaximumQoS(self: *const Connection) mqtt.QoS {
-        return self.peer_maximum_qos;
+        return self.capabilities.peer_maximum_qos;
     }
 
     pub fn peerRetainAvailable(self: *const Connection) bool {
-        return self.peer_retain_available;
+        return self.capabilities.peer_retain_available;
+    }
+
+    pub fn setPeerPublishCapabilities(
+        self: *Connection,
+        maximum_qos: mqtt.QoS,
+        retain_available: bool,
+    ) void {
+        self.capabilities.peer_maximum_qos = maximum_qos;
+        self.capabilities.peer_retain_available = retain_available;
+    }
+
+    pub fn peerRequestedProblemInformation(self: *const Connection) bool {
+        return self.capabilities.peer_requested_problem_information;
     }
 
     /// Maximum complete MQTT Control Packet the peer advertised it can
@@ -3097,7 +3146,7 @@ pub const Connection = struct {
             self.allocator,
             connect.connect.properties,
         );
-        self.peer_requested_problem_information =
+        self.capabilities.peer_requested_problem_information =
             mqtt.requestProblemInformation(
                 connect.connect.properties,
             ) orelse true;
@@ -3417,10 +3466,11 @@ pub const Connection = struct {
     ) Error!OwnedConnect {
         var packet = packet_value;
         errdefer packet.deinit(self.allocator);
-        self.incoming_connect_level = null;
+        self.setIncomingConnectLevel(null);
         if (packet.fixed.packet_type != .connect) return error.UnexpectedPacket;
-        self.incoming_connect_level =
-            mqtt.connectProtocolLevel(packet.bytes) catch null;
+        self.setIncomingConnectLevel(
+            mqtt.connectProtocolLevel(packet.bytes) catch null,
+        );
         var connect = mqtt.Connect.parse(
             self.allocator,
             packet.bytes,
@@ -3441,7 +3491,7 @@ pub const Connection = struct {
         err: anyerror,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        const raw_level = self.incoming_connect_level orelse return;
+        const raw_level = self.incomingConnectLevel() orelse return;
         const level = raw_level & 0x7f;
         const response_protocol: mqtt.ProtocolVersion =
             if (level == 3 or level == 4) .v3_1_1 else .v5;
@@ -3587,8 +3637,9 @@ pub const Connection = struct {
                 self.write_property_scratch.items,
             ) orelse options.max_outgoing_inflight;
         }
-        self.local_maximum_qos = options.maximum_qos orelse .exactly_once;
-        self.local_retain_available = options.retain_available;
+        self.capabilities.local_maximum_qos =
+            options.maximum_qos orelse .exactly_once;
+        self.capabilities.local_retain_available = options.retain_available;
         if (self.protocol == .v5) {
             // Server Keep Alive replaces the CONNECT value for both peers.
             // Updating the accepting endpoint here is essential now that the
@@ -3600,11 +3651,24 @@ pub const Connection = struct {
             self.incoming_topic_alias_maximum = mqtt.topicAliasMaximum(
                 self.write_property_scratch.items,
             ) orelse options.topic_alias_maximum;
-            self.local_maximum_qos = mqtt.maximumQoS(self.write_property_scratch.items) orelse self.local_maximum_qos;
-            self.local_retain_available = mqtt.retainAvailable(self.write_property_scratch.items) orelse self.local_retain_available;
-            self.local_wildcard_subscription_available = mqtt.wildcardSubscriptionAvailable(self.write_property_scratch.items) orelse options.wildcard_subscription_available;
-            self.local_subscription_identifier_available = mqtt.subscriptionIdentifierAvailable(self.write_property_scratch.items) orelse options.subscription_identifier_available;
-            self.local_shared_subscription_available = mqtt.sharedSubscriptionAvailable(self.write_property_scratch.items) orelse options.shared_subscription_available;
+            self.capabilities.local_maximum_qos = mqtt.maximumQoS(
+                self.write_property_scratch.items,
+            ) orelse self.capabilities.local_maximum_qos;
+            self.capabilities.local_retain_available = mqtt.retainAvailable(
+                self.write_property_scratch.items,
+            ) orelse self.capabilities.local_retain_available;
+            self.capabilities.local_wildcard_subscription_available =
+                mqtt.wildcardSubscriptionAvailable(
+                    self.write_property_scratch.items,
+                ) orelse options.wildcard_subscription_available;
+            self.capabilities.local_subscription_identifier_available =
+                mqtt.subscriptionIdentifierAvailable(
+                    self.write_property_scratch.items,
+                ) orelse options.subscription_identifier_available;
+            self.capabilities.local_shared_subscription_available =
+                mqtt.sharedSubscriptionAvailable(
+                    self.write_property_scratch.items,
+                ) orelse options.shared_subscription_available;
         }
     }
 
@@ -3779,11 +3843,13 @@ pub const Connection = struct {
         return switch (transmission) {
             .publish => |publish_value| {
                 if (@intFromEnum(publish_value.qos) >
-                    @intFromEnum(self.peer_maximum_qos))
+                    @intFromEnum(self.capabilities.peer_maximum_qos))
                 {
                     return error.InvalidQoS;
                 }
-                if (publish_value.retain and !self.peer_retain_available) {
+                if (publish_value.retain and
+                    !self.capabilities.peer_retain_available)
+                {
                     return error.InvalidProperty;
                 }
                 return self.writeSessionPublish(publish_value);
@@ -3943,10 +4009,12 @@ pub const Connection = struct {
     ) Error!void {
         if (!self.isUsable()) return error.ConnectionClosed;
         try self.validatePublishPropertyDirection(properties, .outgoing);
-        if (@intFromEnum(qos) > @intFromEnum(self.peer_maximum_qos)) {
+        if (@intFromEnum(qos) >
+            @intFromEnum(self.capabilities.peer_maximum_qos))
+        {
             return error.InvalidQoS;
         }
-        if (retain and !self.peer_retain_available) {
+        if (retain and !self.capabilities.peer_retain_available) {
             return error.InvalidProperty;
         }
         try self.validateOutgoingTopicAlias(topic, properties);
@@ -4809,7 +4877,7 @@ pub const Connection = struct {
         properties: []const mqtt.Property,
     ) Error![]const mqtt.Property {
         if (self.protocol != .v5 or
-            self.peer_requested_problem_information or
+            self.capabilities.peer_requested_problem_information or
             packet_type == .publish or
             packet_type == .connack or
             packet_type == .disconnect)
@@ -5540,8 +5608,16 @@ pub const Connection = struct {
         // values. The broker can then send the precise MQTT 5 DISCONNECT
         // reason without accidentally classifying every codec InvalidQoS or
         // InvalidProperty failure as an unsupported feature.
-        if (@intFromEnum(publish_packet.qos) > @intFromEnum(self.local_maximum_qos)) return error.QoSNotSupported;
-        if (publish_packet.retain and !self.local_retain_available) return error.RetainNotSupported;
+        if (@intFromEnum(publish_packet.qos) >
+            @intFromEnum(self.capabilities.local_maximum_qos))
+        {
+            return error.QoSNotSupported;
+        }
+        if (publish_packet.retain and
+            !self.capabilities.local_retain_available)
+        {
+            return error.RetainNotSupported;
+        }
     }
 
     fn validateIncomingConnectUtf8(
@@ -5676,9 +5752,9 @@ pub const Connection = struct {
         validateSubscribeCapabilities(
             subscriptions,
             properties,
-            self.peer_wildcard_subscription_available,
-            self.peer_subscription_identifier_available,
-            self.peer_shared_subscription_available,
+            self.capabilities.peer_wildcard_subscription_available,
+            self.capabilities.peer_subscription_identifier_available,
+            self.capabilities.peer_shared_subscription_available,
         ) catch |err| switch (err) {
             error.WildcardSubscriptionsNotSupported,
             error.SubscriptionIdentifiersNotSupported,
@@ -5691,9 +5767,9 @@ pub const Connection = struct {
         try validateSubscribeCapabilities(
             subscriptions,
             properties,
-            self.local_wildcard_subscription_available,
-            self.local_subscription_identifier_available,
-            self.local_shared_subscription_available,
+            self.capabilities.local_wildcard_subscription_available,
+            self.capabilities.local_subscription_identifier_available,
+            self.capabilities.local_shared_subscription_available,
         );
     }
 
@@ -6663,8 +6739,8 @@ test "MQTT runtime client and server exchange over TCP" {
     try std.testing.expectEqual(@as(usize, 4096), client.peer_max_packet_size);
     try std.testing.expectEqual(@as(u16, 4), client.peer_topic_alias_maximum);
     try std.testing.expectEqual(@as(u16, 7), client.keep_alive_seconds);
-    try std.testing.expectEqual(mqtt.QoS.exactly_once, client.peer_maximum_qos);
-    try std.testing.expect(!client.peer_retain_available);
+    try std.testing.expectEqual(mqtt.QoS.exactly_once, client.peerMaximumQoS());
+    try std.testing.expect(!client.peerRetainAvailable());
 
     try client.writeAuth(0x19, &.{
         .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
@@ -7068,7 +7144,11 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 872), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 856), @sizeOf(Connection));
+        try std.testing.expectEqual(
+            @as(usize, 2),
+            @sizeOf(ConnectionCapabilities),
+        );
         try std.testing.expectEqual(
             @sizeOf(?*proxy_protocol.Metadata),
             @sizeOf(@FieldType(Connection, "proxy_metadata")),
@@ -7104,15 +7184,83 @@ test "MQTT Connection owns listener namespace compactly" {
         error.TopicOutsideNamespace,
         connection.visibleTopic("other/sensor"),
     );
+
+    var replacement_failure = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    connection.allocator = replacement_failure.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.setTopicNamespace("replacement/"),
+    );
+    try std.testing.expectEqualStrings("tenant/", connection.topicNamespace());
+    connection.allocator = std.testing.allocator;
+
+    const maximum_prefix = try std.testing.allocator.alloc(
+        u8,
+        std.math.maxInt(u16),
+    );
+    defer std.testing.allocator.free(maximum_prefix);
+    @memset(maximum_prefix, 'a');
+    try connection.setTopicNamespace(maximum_prefix);
+    try std.testing.expectEqual(
+        @as(usize, std.math.maxInt(u16)),
+        connection.topicNamespace().len,
+    );
+
+    const oversized_prefix = try std.testing.allocator.alloc(
+        u8,
+        @as(usize, std.math.maxInt(u16)) + 1,
+    );
+    defer std.testing.allocator.free(oversized_prefix);
+    @memset(oversized_prefix, 'b');
+    try std.testing.expectError(
+        error.InvalidTopic,
+        connection.setTopicNamespace(oversized_prefix),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        maximum_prefix,
+        connection.topicNamespace(),
+    );
+
     try connection.setTopicNamespace("");
-    try std.testing.expect(connection.topic_namespace == null);
+    try std.testing.expect(connection.topic_namespace_ptr == null);
+    try std.testing.expectEqual(@as(u16, 0), connection.topic_namespace_len);
 
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(
-            @sizeOf(?[]u8),
-            @sizeOf(@FieldType(Connection, "topic_namespace")),
+            @sizeOf(?[*]u8),
+            @sizeOf(@FieldType(Connection, "topic_namespace_ptr")),
+        );
+        try std.testing.expectEqual(
+            @sizeOf(u16),
+            @sizeOf(@FieldType(Connection, "topic_namespace_len")),
         );
     }
+}
+
+test "MQTT Connection stores the complete optional CONNECT level" {
+    var connection = Connection{
+        .allocator = std.testing.allocator,
+        .transport = undefined,
+    };
+    try std.testing.expect(connection.incomingConnectLevel() == null);
+
+    connection.setIncomingConnectLevel(0);
+    try std.testing.expectEqual(
+        @as(?u8, 0),
+        connection.incomingConnectLevel(),
+    );
+    connection.setIncomingConnectLevel(std.math.maxInt(u8));
+    try std.testing.expectEqual(
+        @as(?u8, std.math.maxInt(u8)),
+        connection.incomingConnectLevel(),
+    );
+
+    connection.setIncomingConnectLevel(null);
+    try std.testing.expect(connection.incomingConnectLevel() == null);
 }
 
 test "MQTT Connection retains only post-admission limits" {
@@ -8914,7 +9062,7 @@ test "MQTT runtime property-free acknowledgements use fixed caller storage" {
     try connection.writePubRec(0x5678, 0x80);
     try connection.writePubRel(0x9abc, 0);
     try connection.writePubComp(0xdef0, 0x92);
-    connection.peer_requested_problem_information = false;
+    connection.capabilities.peer_requested_problem_information = false;
     try connection.writePubAckWithProperties(0x2468, 0x80, &.{
         .{ .utf8 = .{
             .id = .reason_string,
@@ -9015,7 +9163,7 @@ test "MQTT runtime property-free AUTH uses fixed caller storage" {
         .allocator = allocator,
         .transport = .initTcp(io, client_stream),
         .protocol = .v5,
-        .peer_requested_problem_information = false,
+        .capabilities = .{ .peer_requested_problem_information = false },
     };
     var fail_first = std.testing.FailingAllocator.init(
         allocator,
@@ -9370,9 +9518,11 @@ test "MQTT connection enforces negotiated subscribe capabilities" {
         .allocator = std.testing.allocator,
         .transport = undefined,
         .protocol = .v5,
-        .peer_wildcard_subscription_available = false,
-        .peer_subscription_identifier_available = false,
-        .peer_shared_subscription_available = false,
+        .capabilities = .{
+            .peer_wildcard_subscription_available = false,
+            .peer_subscription_identifier_available = false,
+            .peer_shared_subscription_available = false,
+        },
     };
 
     try connection.validateOutgoingSubscribe(&exact, &.{});
@@ -9380,9 +9530,9 @@ test "MQTT connection enforces negotiated subscribe capabilities" {
     try std.testing.expectError(error.SubscriptionRefused, connection.validateOutgoingSubscribe(&shared, &.{}));
     try std.testing.expectError(error.SubscriptionRefused, connection.validateOutgoingSubscribe(&exact, &sub_id));
 
-    connection.local_wildcard_subscription_available = false;
-    connection.local_subscription_identifier_available = false;
-    connection.local_shared_subscription_available = false;
+    connection.capabilities.local_wildcard_subscription_available = false;
+    connection.capabilities.local_subscription_identifier_available = false;
+    connection.capabilities.local_shared_subscription_available = false;
     try connection.validateIncomingSubscribe(&exact, &.{});
     try std.testing.expectError(error.WildcardSubscriptionsNotSupported, connection.validateIncomingSubscribe(&wildcard, &.{}));
     try std.testing.expectError(error.SharedSubscriptionsNotSupported, connection.validateIncomingSubscribe(&shared, &.{}));
@@ -9889,14 +10039,16 @@ test "MQTT connection enforces peer publish capabilities" {
         .allocator = std.testing.allocator,
         .transport = undefined,
         .protocol = .v5,
-        .peer_maximum_qos = .at_most_once,
-        .peer_retain_available = false,
+        .capabilities = .{
+            .peer_maximum_qos = .at_most_once,
+            .peer_retain_available = false,
+        },
     };
 
     try std.testing.expectError(error.InvalidQoS, connection.publish("topic", "payload", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{ .retain = true }));
 
-    connection.local_maximum_qos = .at_most_once;
+    connection.capabilities.local_maximum_qos = .at_most_once;
     try std.testing.expectError(error.QoSNotSupported, connection.validateIncomingPublishCapabilities(.{
         .dup = false,
         .qos = .at_least_once,
@@ -9906,8 +10058,8 @@ test "MQTT connection enforces peer publish capabilities" {
         .payload = "blocked",
     }));
 
-    connection.local_maximum_qos = .exactly_once;
-    connection.local_retain_available = false;
+    connection.capabilities.local_maximum_qos = .exactly_once;
+    connection.capabilities.local_retain_available = false;
     try std.testing.expectError(error.RetainNotSupported, connection.validateIncomingPublishCapabilities(.{
         .dup = false,
         .qos = .at_most_once,
@@ -10041,8 +10193,8 @@ test "MQTT client applies configured peer publish defaults" {
     });
     defer client.close();
 
-    try std.testing.expectEqual(mqtt.QoS.at_most_once, client.peer_maximum_qos);
-    try std.testing.expect(!client.peer_retain_available);
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, client.peerMaximumQoS());
+    try std.testing.expect(!client.peerRetainAvailable());
     try std.testing.expectError(error.InvalidQoS, client.publish("peer/defaults", "qos1", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidProperty, client.publish("peer/defaults", "retain", .{ .retain = true }));
     try client.disconnect(0);

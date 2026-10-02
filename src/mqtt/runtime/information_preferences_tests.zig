@@ -42,7 +42,7 @@ test "MQTT server honors CONNECT information preferences" {
             });
             defer accepted.deinit(self.server.allocator);
             try std.testing.expect(
-                !accepted.connection.peer_requested_problem_information,
+                !accepted.connection.peerRequestedProblemInformation(),
             );
 
             var publish = try accepted.connection.readPublish();

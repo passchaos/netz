@@ -5451,6 +5451,15 @@ the original 1,824-byte slot, the default 1,024-slot broker now reserves
 1,769,472 fewer bytes before connections arrive. This is a compile-time layout
 result; it does not claim a separately measurable RSS or throughput change.
 
+The active MQTT runtime now stores its owned listener namespace as one pointer
+plus the protocol's u16 length, packs negotiated QoS and publish/subscription
+availability into one 16-bit word, and uses a packed presence bit for the full
+raw u8 CONNECT protocol level. The 64-bit `runtime.Connection` consequently
+falls from 872 to 856 bytes without adding an allocation. At 64 simultaneous
+connections this removes 1,024 bytes of fixed connection state; this exact
+compile-time layout result is intentionally not presented as a process-RSS or
+throughput claim.
+
 Delivery authorization now keeps the already-owned global and listener
 callback tables behind borrowed pointers. Before resolving a destination
 Session's Client ID, live fanout, retained replay, and durable Session drain
