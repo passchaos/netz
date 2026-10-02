@@ -523,8 +523,9 @@ const ClientSlot = struct {
     /// shared Publication. Durable sessions must instead deep-own each queued
     /// message so reconnect retransmission remains possible.
     session_persistent: bool = false,
-    assigned_client_id_len: u8 = 0,
-    assigned_client_id: [client_id_mod.max_len]u8 = undefined,
+    /// Present only when the broker assigned an identifier for an empty MQTT 5
+    /// Client ID. Ordinary clients do not pay for the maximum 86-byte value.
+    assigned_client_id: ?[]u8 = null,
     graceful_disconnect: bool = false,
     /// Borrowed from the active listener descriptor. It is cleared before the
     /// slot can be reused and is never persisted with a durable Session.
@@ -626,6 +627,14 @@ const ClientSlot = struct {
     fn clearTransientInflight(self: *ClientSlot) void {
         self.transient_inflight_payloads.clearRetainingCapacity();
         self.transient_inflight_payload_bytes = 0;
+    }
+
+    fn clearAssignedClientId(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (self.assigned_client_id) |client_id| allocator.free(client_id);
+        self.assigned_client_id = null;
     }
 
     fn releaseOversizedSessionScratch(
@@ -749,6 +758,37 @@ test "MQTT broker capacity slots keep connection state out of line" {
     try std.testing.expect(
         @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
     );
+}
+
+test "MQTT broker allocates assigned client identifiers on demand" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_connections = 1 },
+    });
+    defer broker.deinit();
+
+    const slot_index = try broker.claimSlot();
+    const slot = &broker.slots[slot_index];
+    try std.testing.expect(slot.assigned_client_id == null);
+
+    broker.state_mutex.lockUncancelable(io);
+    const assigned = broker.assignClientIdLocked(
+        slot,
+        "test-",
+    ) catch |err| {
+        broker.state_mutex.unlock(io);
+        return err;
+    };
+    try std.testing.expectEqualStrings(assigned, slot.assigned_client_id.?);
+    try std.testing.expect(std.mem.startsWith(u8, assigned, "test-"));
+    broker.state_mutex.unlock(io);
+
+    broker.abortRegistration(slot_index, 0, false);
+    try std.testing.expect(slot.assigned_client_id == null);
+    broker.releaseClaimedSlot(slot_index);
 }
 
 fn shouldScheduleTransientDelivery(
@@ -1426,6 +1466,7 @@ pub const Broker = struct {
             slot.session_write_scratch.deinit(self.allocator);
             slot.session_property_scratch.deinit(self.allocator);
             slot.transient_inflight_payloads.deinit(self.allocator);
+            slot.clearAssignedClientId(self.allocator);
             if (slot.connection) |connection| {
                 connection.close();
                 self.allocator.destroy(connection);
@@ -3265,8 +3306,7 @@ pub const Broker = struct {
             mapped_will = null;
         }
         accept_options.session_present = self.slots[index].session_present;
-        if (self.slots[index].assigned_client_id_len != 0) {
-            const assigned_client_id = self.slots[index].assigned_client_id[0..self.slots[index].assigned_client_id_len];
+        if (self.slots[index].assigned_client_id) |assigned_client_id| {
             effective_connect.client_id = assigned_client_id;
             accept_options.assigned_client_identifier = assigned_client_id;
         }
@@ -3341,7 +3381,8 @@ pub const Broker = struct {
         slot.session_handle = null;
         slot.session_present = false;
         slot.session_persistent = false;
-        slot.assigned_client_id_len = 0;
+        std.debug.assert(slot.assigned_client_id == null);
+        errdefer slot.clearAssignedClientId(self.allocator);
         slot.graceful_disconnect = false;
         slot.listener_access_control = listener_access_control;
         errdefer slot.listener_access_control = null;
@@ -3521,16 +3562,19 @@ pub const Broker = struct {
         slot: *ClientSlot,
         prefix: []const u8,
     ) Error![]const u8 {
+        std.debug.assert(slot.assigned_client_id == null);
         while (true) {
             var random: [client_id_mod.random_len]u8 = undefined;
             try std.Io.randomSecure(self.io, &random);
-            const id = client_id_mod.format(
-                &slot.assigned_client_id,
+            var storage: [client_id_mod.max_len]u8 = undefined;
+            const candidate = client_id_mod.format(
+                &storage,
                 prefix,
                 random,
             );
-            if (self.sessions.containsClientId(id)) continue;
-            slot.assigned_client_id_len = @intCast(id.len);
+            if (self.sessions.containsClientId(candidate)) continue;
+            const id = try self.allocator.dupe(u8, candidate);
+            slot.assigned_client_id = id;
             return id;
         }
     }
@@ -3762,6 +3806,7 @@ pub const Broker = struct {
         slot.retained_source_id = null;
         slot.username = null;
         slot.will_handle = null;
+        slot.clearAssignedClientId(self.allocator);
         slot.clearTransientInflight();
         self.recordPersistentChangeLocked(persistent_changed);
         self.state_mutex.unlock(self.io);
@@ -3930,7 +3975,9 @@ pub const Broker = struct {
         // has been detached. `claimSlot` observes this state under the same
         // mutex, so it can never reserve a slot that still owns a connection.
         const connection = slot.connection;
+        const assigned_client_id = slot.assigned_client_id;
         slot.connection = null;
+        slot.assigned_client_id = null;
         slot.will_handle = null;
         slot.session_handle = null;
         slot.session_present = false;
@@ -3944,6 +3991,9 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         state_locked = false;
         self.deadline_driver.notify(self.io);
+        defer if (assigned_client_id) |client_id| {
+            self.allocator.free(client_id);
+        };
         defer if (connection) |value| {
             value.close();
             self.allocator.destroy(value);
@@ -6803,7 +6853,6 @@ const ClientTask = struct {
             capacity.release(task.broker.io);
         };
         var connect = task.connect;
-        defer connect.deinit(task.broker.allocator);
         const slot = &task.broker.slots[task.slot_index];
         const connection = slot.connection.?;
         defer task.broker.unregister(
@@ -6812,6 +6861,9 @@ const ClientTask = struct {
         ) catch |err| {
             task.result.* = err;
         };
+        // The effective generated Client ID borrows slot storage, so release
+        // the parsed CONNECT before unregister frees that optional allocation.
+        defer connect.deinit(task.broker.allocator);
 
         var read_error: ?anyerror = null;
         task.runLoop(slot, connection, connect.connect) catch |err| {
