@@ -5451,6 +5451,30 @@ the original 1,824-byte slot, the default 1,024-slot broker now reserves
 1,769,472 fewer bytes before connections arrive. This is a compile-time layout
 result; it does not claim a separately measurable RSS or throughput change.
 
+Delivery authorization now keeps the already-owned global and listener
+callback tables behind borrowed pointers. Before resolving a destination
+Session's Client ID, live fanout, retained replay, and durable Session drain
+first check whether either policy actually supplies a delivery callback. The
+default no-ACL path therefore avoids the otherwise unused identity lookup.
+Retained replay also reuses the connection's existing property scratch instead
+of allocating and freeing a temporary property list for every stored message;
+a fail-on-first-allocation unit check proves that a warmed same-size rebuild
+requires no allocation and still rewrites or removes Message Expiry correctly.
+
+A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
+on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
+large-payload order, netz median throughput was
+28,679 / 49,387 / 4,200 / 3,927 / 25,655 publishes/s before and
+28,887 / 50,209 / 4,158 / 4,208 / 24,792 after. The mixed changes and
+overlapping ranges are recorded as no-regression evidence, not as a throughput
+claim; every arm completed its exact delivery count and checksum. The baseline
+and candidate executable SHA-256 values are
+`33b512935a2d57f777f02f8fbce8f6afe632fc34495b442e16c5f422e3dde5e8`
+and `c93823ed33df1373254fe54074de139de16a1014900f4ce31f54bd4d0efd3bd4`;
+their validated summary hashes are
+`5754259cd3942286551e8611edfb9126e9c85e46b42e27fbf0136b71d1e615a1`
+and `ff2ae72b7c3f7e168da61d75cfd878fc4f9ff0582dd5e2acb91bc8bea684f930`.
+
 Transient QoS 1/2 broker fanout now uses one lazy writer per subscribed
 connection instead of making a publisher wait for every unrelated subscriber
 socket. The writer starts only after a QoS 1/2 subscription is processed,

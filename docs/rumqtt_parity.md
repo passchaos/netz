@@ -3561,6 +3561,15 @@ proxy evidence for the entire suite.
    evidence; the Connection reduction also applies to steady-state non-PROXY
    clients that use the event-driven keep-alive path and have not installed
    aliases or QoS state.
+   Delivery policy dispatch keeps the owned global/listener callback tables
+   behind borrowed pointers and resolves a destination Session's Client ID only
+   when one of those tables actually supplies a delivery callback. Retained
+   replay shares the connection's bounded Session-property scratch rather than
+   allocating and freeing a temporary list for every stored message. A
+   fail-on-first-allocation test proves same-capacity scratch reuse while
+   preserving Message Expiry rewriting; the fixed five-shape broker comparison
+   remained within its existing mixed run-to-run range, so this is allocation
+   and code-path evidence rather than a throughput claim.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

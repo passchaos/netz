@@ -325,6 +325,61 @@ pub const DeliveryAuthorization = struct {
     properties: []const mqtt.Property,
 };
 
+/// The broker and listener delivery callbacks form one mandatory chain when
+/// either level configured a read policy. Keeping borrowed handler pointers
+/// here avoids copying either callback table on every routed destination.
+const DeliveryAuthorizationChain = struct {
+    broker: ?*const AccessControlHandler = null,
+    listener: ?*const ListenerAccessControlHandler = null,
+
+    fn configured(self: DeliveryAuthorizationChain) bool {
+        if (self.broker) |access| {
+            if (access.authorize_delivery != null) return true;
+        }
+        if (self.listener) |access| {
+            if (access.authorize_delivery != null) return true;
+        }
+        return false;
+    }
+
+    fn authorize(
+        self: DeliveryAuthorizationChain,
+        delivery: DeliveryAuthorization,
+    ) bool {
+        if (self.broker) |access| {
+            if (access.authorize_delivery) |callback| {
+                if (!callback(access.context, delivery)) return false;
+            }
+        }
+        const access = self.listener orelse return true;
+        const callback = access.authorize_delivery orelse return true;
+        return callback(access.context, delivery);
+    }
+};
+
+fn prepareRetainedDeliveryProperties(
+    out: *std.ArrayList(mqtt.Property),
+    allocator: std.mem.Allocator,
+    source: []const mqtt.Property,
+    remaining_expiry_interval: ?u32,
+) std.mem.Allocator.Error!void {
+    out.clearRetainingCapacity();
+    try out.ensureTotalCapacity(allocator, source.len);
+    for (source) |property| {
+        if (property == .four_byte and
+            property.four_byte.id == .message_expiry_interval)
+        {
+            const remaining = remaining_expiry_interval orelse continue;
+            out.appendAssumeCapacity(.{ .four_byte = .{
+                .id = .message_expiry_interval,
+                .value = remaining,
+            } });
+        } else {
+            out.appendAssumeCapacity(property);
+        }
+    }
+}
+
 /// Borrowed source and Application Message metadata for a Will write ACL.
 /// The callback runs when the Will becomes due, not when CONNECT registers it,
 /// so a policy update during Will Delay can suppress publication.
@@ -794,8 +849,10 @@ const ClientSlot = struct {
         self.listener_access_control = owned;
     }
 
-    fn accessControl(self: ClientSlot) ?ListenerAccessControlHandler {
-        return if (self.listener_access_control) |value| value.* else null;
+    fn accessControl(
+        self: *const ClientSlot,
+    ) ?*const ListenerAccessControlHandler {
+        return self.listener_access_control;
     }
 
     fn clearListenerAccessControl(
@@ -1124,6 +1181,121 @@ test "MQTT broker allocates listener ACL metadata on demand" {
     );
     slot.clearListenerAccessControl(std.testing.allocator);
     try std.testing.expect(slot.accessControl() == null);
+}
+
+test "MQTT broker detects configured delivery authorization callbacks" {
+    const Callbacks = struct {
+        fn publish(
+            context: *anyopaque,
+            connect: mqtt.Connect,
+            message: mqtt.Publish,
+        ) bool {
+            _ = context;
+            _ = connect;
+            _ = message;
+            return true;
+        }
+
+        fn subscribe(
+            context: *anyopaque,
+            connect: mqtt.Connect,
+            subscription: mqtt.Subscription,
+        ) bool {
+            _ = context;
+            _ = connect;
+            _ = subscription;
+            return true;
+        }
+
+        fn delivery(
+            context: *anyopaque,
+            authorization: DeliveryAuthorization,
+        ) bool {
+            _ = context;
+            _ = authorization;
+            return true;
+        }
+    };
+    var context: u8 = 0;
+    const global_without_delivery = AccessControlHandler{
+        .context = &context,
+        .authorize_publish = Callbacks.publish,
+        .authorize_subscribe = Callbacks.subscribe,
+    };
+    const global_with_delivery = AccessControlHandler{
+        .context = &context,
+        .authorize_publish = Callbacks.publish,
+        .authorize_subscribe = Callbacks.subscribe,
+        .authorize_delivery = Callbacks.delivery,
+    };
+    const listener_without_delivery = ListenerAccessControlHandler{
+        .context = &context,
+    };
+    const listener_with_delivery = ListenerAccessControlHandler{
+        .context = &context,
+        .authorize_delivery = Callbacks.delivery,
+    };
+
+    try std.testing.expect(!(DeliveryAuthorizationChain{}).configured());
+    try std.testing.expect(!(DeliveryAuthorizationChain{
+        .broker = &global_without_delivery,
+        .listener = &listener_without_delivery,
+    }).configured());
+    try std.testing.expect((DeliveryAuthorizationChain{
+        .broker = &global_with_delivery,
+    }).configured());
+    try std.testing.expect((DeliveryAuthorizationChain{
+        .listener = &listener_with_delivery,
+    }).configured());
+}
+
+test "MQTT retained replay reuses property scratch" {
+    const allocator = std.testing.allocator;
+    const source = [_]mqtt.Property{
+        .{ .four_byte = .{
+            .id = .message_expiry_interval,
+            .value = 60,
+        } },
+        .{ .utf8 = .{
+            .id = .content_type,
+            .value = "application/octet-stream",
+        } },
+    };
+    var scratch: std.ArrayList(mqtt.Property) = .empty;
+    defer scratch.deinit(allocator);
+
+    try prepareRetainedDeliveryProperties(
+        &scratch,
+        allocator,
+        &source,
+        59,
+    );
+    const allocation = scratch.allocatedSlice().ptr;
+    try std.testing.expectEqual(@as(?u32, 59), mqtt.messageExpiryInterval(scratch.items));
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try prepareRetainedDeliveryProperties(
+        &scratch,
+        failing.allocator(),
+        &source,
+        58,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(allocation, scratch.allocatedSlice().ptr);
+    try std.testing.expectEqual(@as(?u32, 58), mqtt.messageExpiryInterval(scratch.items));
+
+    try prepareRetainedDeliveryProperties(
+        &scratch,
+        failing.allocator(),
+        &source,
+        null,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), scratch.items.len);
+    try std.testing.expect(scratch.items[0] == .utf8);
 }
 
 fn shouldScheduleTransientDelivery(
@@ -4698,29 +4870,22 @@ pub const Broker = struct {
     ) Error!void {
         const handle = slot.sessionHandle() orelse
             return error.SessionNotFound;
-        const client_id = try self.sessions.clientId(handle);
+        const authorizers = self.deliveryAuthorizers(slot.accessControl());
+        const client_id = if (authorizers.configured())
+            try self.sessions.clientId(handle)
+        else
+            &.{};
+        const buffers = try slot.ensureBuffers(self.allocator);
+        const properties = &buffers.session_property_scratch;
+        defer properties.clearRetainingCapacity();
         for (deliveries) |delivery| {
             if (!self.retainedSourceAuthorized(delivery)) continue;
-            var properties: std.ArrayList(mqtt.Property) = .empty;
-            defer properties.deinit(self.allocator);
-            try properties.ensureTotalCapacity(
+            try prepareRetainedDeliveryProperties(
+                properties,
                 self.allocator,
-                delivery.properties.len,
+                delivery.properties,
+                delivery.message_expiry_interval,
             );
-            for (delivery.properties) |property| {
-                if (property == .four_byte and
-                    property.four_byte.id == .message_expiry_interval)
-                {
-                    const remaining =
-                        delivery.message_expiry_interval orelse continue;
-                    properties.appendAssumeCapacity(.{ .four_byte = .{
-                        .id = .message_expiry_interval,
-                        .value = remaining,
-                    } });
-                } else {
-                    properties.appendAssumeCapacity(property);
-                }
-            }
             const publish = mqtt.Publish{
                 .dup = false,
                 .qos = delivery.qos,
@@ -4730,7 +4895,7 @@ pub const Broker = struct {
                 .properties = properties.items,
                 .payload = delivery.payload,
             };
-            if (!self.deliveryAuthorized(slot.accessControl(), .{
+            if (authorizers.configured() and !authorizers.authorize(.{
                 .client_id = client_id,
                 .username = slot.username(),
                 .topic = publish.topic,
@@ -5443,18 +5608,21 @@ pub const Broker = struct {
                     destination.?.connection.?.localMaximumQoS(),
                 );
             }
-            if (!self.deliveryAuthorized(if (online)
+            const authorizers = self.deliveryAuthorizers(if (online)
                 destination.?.accessControl()
             else
-                null, .{
-                .client_id = try self.sessions.clientId(handle),
-                .username = if (online) destination.?.username() else null,
-                .topic = publish.topic,
-                .payload = publish.payload,
-                .qos = route.qos,
-                .retain = route.retain,
-                .properties = publish.properties,
-            })) {
+                null);
+            if (authorizers.configured() and
+                !authorizers.authorize(.{
+                    .client_id = try self.sessions.clientId(handle),
+                    .username = if (online) destination.?.username() else null,
+                    .topic = publish.topic,
+                    .payload = publish.payload,
+                    .qos = route.qos,
+                    .retain = route.retain,
+                    .properties = publish.properties,
+                }))
+            {
                 // A read denial suppresses every overlapping subscription for
                 // this Session before either its durable queue or live queue
                 // changes. The raw router match still counts for the
@@ -5470,14 +5638,14 @@ pub const Broker = struct {
                 // Mosquitto always delivers QoS 0 directly to an online
                 // persistent client. It drops QoS 0 while offline unless its
                 // non-default queue_qos0 option is enabled. QoS 1/2 can take
-                // the same shared-Publication
-                // path when Session Expiry is zero: the runtime keeps the
-                // Packet Identifier state until ACK, and no payload is
-                // allowed to survive this Network Connection.
+                // the same shared-Publication path when Session Expiry is
+                // zero: runtime state owns the transaction until ACK, and no
+                // payload may survive this Network Connection.
                 if (online) route.output_subscriber_id = owner_id.?;
                 continue;
             }
-            const changed = persistent_changed orelse &ignored_persistent_change;
+            const changed = persistent_changed orelse
+                &ignored_persistent_change;
             var route_persistent_changed = false;
             var route_enqueued = false;
             self.enqueueSessionDeliveryManyLocked(
@@ -6002,12 +6170,12 @@ pub const Broker = struct {
     }
 
     fn publishAuthorized(
-        self: Broker,
-        listener_access: ?ListenerAccessControlHandler,
+        self: *const Broker,
+        listener_access: ?*const ListenerAccessControlHandler,
         connect: mqtt.Connect,
         publish: mqtt.Publish,
     ) bool {
-        if (self.options.access_control) |access| {
+        if (self.options.access_control) |*access| {
             if (!access.authorize_publish(
                 access.context,
                 connect,
@@ -6020,12 +6188,12 @@ pub const Broker = struct {
     }
 
     fn subscribeAuthorized(
-        self: Broker,
-        listener_access: ?ListenerAccessControlHandler,
+        self: *const Broker,
+        listener_access: ?*const ListenerAccessControlHandler,
         connect: mqtt.Connect,
         subscription: mqtt.Subscription,
     ) bool {
-        if (self.options.access_control) |access| {
+        if (self.options.access_control) |*access| {
             if (!access.authorize_subscribe(
                 access.context,
                 connect,
@@ -6038,12 +6206,12 @@ pub const Broker = struct {
     }
 
     fn unsubscribeAuthorized(
-        self: Broker,
-        listener_access: ?ListenerAccessControlHandler,
+        self: *const Broker,
+        listener_access: ?*const ListenerAccessControlHandler,
         connect: mqtt.Connect,
         topic_filter: []const u8,
     ) bool {
-        if (self.options.access_control) |access| {
+        if (self.options.access_control) |*access| {
             if (access.authorize_unsubscribe) |authorize| {
                 if (!authorize(access.context, connect, topic_filter)) {
                     return false;
@@ -6055,28 +6223,29 @@ pub const Broker = struct {
         return authorize(access.context, connect, topic_filter);
     }
 
-    fn deliveryAuthorized(
-        self: Broker,
-        listener_access: ?ListenerAccessControlHandler,
-        delivery: DeliveryAuthorization,
-    ) bool {
-        if (self.options.access_control) |access| {
-            if (access.authorize_delivery) |authorize| {
-                if (!authorize(access.context, delivery)) return false;
-            }
-        }
-        const access = listener_access orelse return true;
-        const authorize = access.authorize_delivery orelse return true;
-        return authorize(access.context, delivery);
+    fn deliveryAuthorizers(
+        self: *const Broker,
+        listener_access: ?*const ListenerAccessControlHandler,
+    ) DeliveryAuthorizationChain {
+        return .{
+            .broker = if (self.options.access_control) |*access|
+                access
+            else
+                null,
+            .listener = listener_access,
+        };
     }
 
     fn retainedSourceAuthorized(
-        self: Broker,
+        self: *const Broker,
         delivery: retained_mod.Delivery,
     ) bool {
         if (!self.options.check_retain_source) return true;
         const source_client_id = delivery.source_client_id orelse return true;
-        const access = self.options.access_control orelse return true;
+        const access = if (self.options.access_control) |*value|
+            value
+        else
+            return true;
         const authorize = access.authorize_retained_source orelse return true;
         return authorize(access.context, .{
             .client_id = source_client_id,
@@ -6480,7 +6649,11 @@ pub const Broker = struct {
         const handle = slot.sessionHandle() orelse return null;
         const connection = slot.connection orelse return null;
         const route_id = try self.sessions.routeId(handle);
-        const client_id = try self.sessions.clientId(handle);
+        const authorizers = self.deliveryAuthorizers(slot.accessControl());
+        const client_id = if (authorizers.configured())
+            try self.sessions.clientId(handle)
+        else
+            &.{};
         const persistent_session = self.sessionIsPersistentLocked(handle);
         var persistent_changed = false;
         errdefer {
@@ -6512,7 +6685,8 @@ pub const Broker = struct {
             }
             const transmission = transmissions[0];
             if (transmission == .publish and
-                !self.deliveryAuthorized(slot.accessControl(), .{
+                authorizers.configured() and
+                !authorizers.authorize(.{
                     .client_id = client_id,
                     .username = slot.username(),
                     .topic = transmission.publish.topic,
