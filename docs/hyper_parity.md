@@ -151,6 +151,9 @@ benchmark response:
   Content-Length, Transfer-Encoding, Trailer, or Connection itself; Upgrade is
   limited to HTTP/1.1, requires its connection option and valid protocol-list
   syntax, and is mandatory on 101 responses;
+- outbound Expect values use their list grammar; `100-continue` must be the
+  sole expectation on an HTTP/1.1 request that will send non-empty content,
+  and response writers reject the request-only field;
 - both owned and caller-storage request parsers enforce Host cardinality,
   syntax, and absolute-/authority-form agreement before body parsing, so a
   direct codec caller cannot accidentally omit the runtime validation step;

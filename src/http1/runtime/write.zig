@@ -259,6 +259,14 @@ fn prepareStreamingRequest(
         options.body_length
     else
         fixed_length;
+    try http1.validateRequestExpectForWrite(
+        options.version,
+        scratch.request_headers.items,
+        if (use_chunked)
+            options.body_length == null or options.body_length.? != 0
+        else
+            fixed_length != 0,
+    );
 
     try appendDefaultedHeaders(
         &scratch.headers,
@@ -1034,6 +1042,88 @@ test "HTTP/1 request writers enforce empty TRACE content" {
     );
 }
 
+test "HTTP/1 request writers validate 100-continue expectations" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    try std.testing.expectError(
+        error.InvalidExpectation,
+        prepareRequest(
+            allocator,
+            .{
+                .host = "localhost",
+                .headers = &.{.{
+                    .name = "Expect",
+                    .value = "100-continue",
+                }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExpectation,
+        prepareStreamingRequest(
+            allocator,
+            .{
+                .host = "localhost",
+                .body_length = 0,
+                .headers = &.{.{
+                    .name = "Expect",
+                    .value = "100-continue",
+                }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidExpectation,
+        prepareResponse(
+            allocator,
+            .{ .headers = &.{.{
+                .name = "Expect",
+                .value = "100-continue",
+            }} },
+            &scratch,
+        ),
+    );
+
+    const request = try prepareStreamingRequest(
+        allocator,
+        .{
+            .host = "localhost",
+            .headers = &.{.{
+                .name = "Expect",
+                .value = "100-continue",
+            }},
+        },
+        &scratch,
+    );
+    try std.testing.expectEqual(StreamingFraming.chunked, request.framing);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.head,
+        "Expect: 100-continue\r\n",
+    ) != null);
+
+    const extension = try prepareRequest(
+        allocator,
+        .{
+            .host = "localhost",
+            .headers = &.{.{
+                .name = "Expect",
+                .value = "custom=value; mode=fast",
+            }},
+        },
+        &scratch,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        extension.header,
+        "Expect: custom=value; mode=fast\r\n",
+    ) != null);
+}
+
 test "HTTP/1 runtime response writers preserve an empty reason separator" {
     const allocator = std.testing.allocator;
     var scratch: Scratch = .{};
@@ -1250,6 +1340,11 @@ pub fn prepareRequest(
         scratch.request_headers.items,
         options.body.len,
         use_chunked,
+    );
+    try http1.validateRequestExpectForWrite(
+        options.version,
+        scratch.request_headers.items,
+        options.body.len != 0,
     );
 
     try appendDefaultedHeaders(
@@ -1485,6 +1580,7 @@ fn prepareResponseFraming(
         options.headers,
     );
     try http1.validateResponseTeForWrite(options.headers);
+    try http1.validateResponseExpectForWrite(options.headers);
     try http1.validateResponseUpgradeForWrite(
         options.status,
         options.headers,

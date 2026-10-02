@@ -168,7 +168,7 @@ Current protocol coverage includes:
   request's valid HTTP/1.1 `TE: trailers` plus `Connection: TE` capability,
   with runtime request writers synthesizing the required connection option,
   strict Connection option syntax and framing-field nomination rejection,
-  version-correct Upgrade coupling, opt-in obsolete folded-field
+  version-correct Upgrade coupling, body-aware `Expect: 100-continue`, opt-in obsolete folded-field
   unfolding, exact-allocation/empty-header owned-parse fast paths, strict allocation-free borrowed request/response head parsing into
   caller header storage with exact Content-Length pipeline offsets and
   method/status-aware response boundaries, request-target/status/reason-phrase start-line validation with method-specific asterisk/authority-form and no-fragment rules, status-forbidden response-body write rejection with RFC-compliant 304 representation metadata, keep-alive/upgrade handling, pipelined

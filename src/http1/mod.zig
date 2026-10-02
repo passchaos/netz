@@ -29,6 +29,7 @@ pub const Error = wire.Error || error{
     ConflictingContentLength,
     InvalidTransferEncoding,
     InvalidConnection,
+    InvalidExpectation,
     InvalidTrailer,
     ChunkSizeOverflow,
     ChunkExtensionTooLarge,
@@ -1508,6 +1509,18 @@ fn consumeTransferQuotedString(
     value: []const u8,
     pos: *usize,
 ) Error!void {
+    return consumeQuotedString(
+        value,
+        pos,
+        error.InvalidTransferEncoding,
+    );
+}
+
+fn consumeQuotedString(
+    value: []const u8,
+    pos: *usize,
+    comptime invalid: Error,
+) Error!void {
     std.debug.assert(pos.* < value.len and value[pos.*] == '"');
     pos.* += 1;
     while (pos.* < value.len) {
@@ -1515,13 +1528,13 @@ fn consumeTransferQuotedString(
         pos.* += 1;
         if (byte == '"') return;
         if (byte == '\\') {
-            if (pos.* == value.len) return error.InvalidTransferEncoding;
+            if (pos.* == value.len) return invalid;
             const escaped = value[pos.*];
             if (!(escaped == '\t' or
                 (escaped >= 0x20 and escaped <= 0x7e) or
                 escaped >= 0x80))
             {
-                return error.InvalidTransferEncoding;
+                return invalid;
             }
             pos.* += 1;
             continue;
@@ -1533,10 +1546,10 @@ fn consumeTransferQuotedString(
             (byte >= 0x5d and byte <= 0x7e) or
             byte >= 0x80))
         {
-            return error.InvalidTransferEncoding;
+            return invalid;
         }
     }
-    return error.InvalidTransferEncoding;
+    return invalid;
 }
 
 fn responseTransferEncodingIsCloseDelimited(headers: []const Header) Error!bool {
@@ -1715,6 +1728,126 @@ pub fn validateResponseTeForWrite(headers: []const Header) Error!void {
     }
 }
 
+const ExpectHeaderState = struct {
+    present: bool = false,
+    member_count: usize = 0,
+    continue_count: usize = 0,
+};
+
+fn consumeExpectTokenOrQuoted(
+    value: []const u8,
+    pos: *usize,
+) Error!void {
+    if (pos.* == value.len) return error.InvalidExpectation;
+    if (value[pos.*] == '"') {
+        consumeQuotedString(value, pos, error.InvalidExpectation) catch {
+            return error.InvalidExpectation;
+        };
+        return;
+    }
+    const start = pos.*;
+    while (pos.* < value.len and validHeaderNameByte(value[pos.*])) {
+        pos.* += 1;
+    }
+    if (pos.* == start) return error.InvalidExpectation;
+}
+
+fn parseExpectHeaders(headers: []const Header) Error!ExpectHeaderState {
+    var state: ExpectHeaderState = .{};
+    for (headers) |header| {
+        if (!header.eqlName("expect")) continue;
+        state.present = true;
+        var pos: usize = 0;
+        while (true) {
+            skipTransferOws(header.value, &pos);
+            const name_start = pos;
+            while (pos < header.value.len and
+                validHeaderNameByte(header.value[pos]))
+            {
+                pos += 1;
+            }
+            if (pos == name_start) return error.InvalidExpectation;
+            const name = header.value[name_start..pos];
+            state.member_count = std.math.add(
+                usize,
+                state.member_count,
+                1,
+            ) catch return error.InvalidExpectation;
+            skipTransferOws(header.value, &pos);
+
+            var has_value_or_parameters = false;
+            if (pos < header.value.len and header.value[pos] == '=') {
+                has_value_or_parameters = true;
+                pos += 1;
+                skipTransferOws(header.value, &pos);
+                try consumeExpectTokenOrQuoted(header.value, &pos);
+                skipTransferOws(header.value, &pos);
+                while (pos < header.value.len and header.value[pos] == ';') {
+                    pos += 1;
+                    skipTransferOws(header.value, &pos);
+                    const parameter_start = pos;
+                    while (pos < header.value.len and
+                        validHeaderNameByte(header.value[pos]))
+                    {
+                        pos += 1;
+                    }
+                    if (pos == parameter_start) {
+                        return error.InvalidExpectation;
+                    }
+                    skipTransferOws(header.value, &pos);
+                    if (pos == header.value.len or header.value[pos] != '=') {
+                        return error.InvalidExpectation;
+                    }
+                    pos += 1;
+                    skipTransferOws(header.value, &pos);
+                    try consumeExpectTokenOrQuoted(header.value, &pos);
+                    skipTransferOws(header.value, &pos);
+                }
+            }
+
+            if (std.ascii.eqlIgnoreCase(name, "100-continue")) {
+                if (has_value_or_parameters) {
+                    return error.InvalidExpectation;
+                }
+                state.continue_count = std.math.add(
+                    usize,
+                    state.continue_count,
+                    1,
+                ) catch return error.InvalidExpectation;
+            }
+            if (pos == header.value.len) break;
+            if (header.value[pos] != ',') {
+                return error.InvalidExpectation;
+            }
+            pos += 1;
+        }
+    }
+    return state;
+}
+
+/// Validate the only standardized expectation that affects the HTTP/1 write
+/// state machine. Unknown but well-formed extension expectations remain
+/// available for applications and can receive a 417 response from the peer.
+pub fn validateRequestExpectForWrite(
+    version: Version,
+    headers: []const Header,
+    has_content: bool,
+) Error!void {
+    const state = try parseExpectHeaders(headers);
+    if (state.continue_count == 0) return;
+    if (state.continue_count != 1 or state.member_count != 1 or
+        version != .http_1_1 or !has_content)
+    {
+        return error.InvalidExpectation;
+    }
+}
+
+pub fn validateResponseExpectForWrite(headers: []const Header) Error!void {
+    if (hasHeaderNamed(headers, "expect")) {
+        return error.InvalidExpectation;
+    }
+}
+
 pub fn validateResponseBodyForStatus(status: u16, headers: []const Header, body: []const u8, trailers: []const Header) Error!void {
     try validateStatusCode(status);
     if (!statusCodeForbidsBody(status)) return;
@@ -1889,17 +2022,24 @@ fn validateRequestForWrite(
     if (has_trailer_declaration and framing.body != .chunked) {
         return error.InvalidTrailer;
     }
-    switch (framing.body) {
-        .none => if (body.len != 0) return error.InvalidContentLength,
-        .content_length => if (framing.content_length.? != body.len) {
-            return error.InvalidContentLength;
+    const has_content = switch (framing.body) {
+        .none => blk: {
+            if (body.len != 0) return error.InvalidContentLength;
+            break :blk false;
+        },
+        .content_length => blk: {
+            if (framing.content_length.? != body.len) {
+                return error.InvalidContentLength;
+            }
+            break :blk body.len != 0;
         },
         // This low-level serializer accepts an already transfer-coded body.
         // Callers that have unencoded chunks should use the runtime writer or
         // `encodeChunked` first.
-        .chunked => try validateChunkedBodyForWrite(body, headers),
+        .chunked => (try validateChunkedBodyForWrite(body, headers)) != 0,
         .close_delimited => unreachable,
-    }
+    };
+    try validateRequestExpectForWrite(version, headers, has_content);
 }
 
 fn requestWireLen(method: Method, target: []const u8, version: Version, headers: []const Header, body: []const u8) Error!usize {
@@ -1971,6 +2111,7 @@ fn validateResponseForWrite(
     try validateTransferEncodingForVersion(version, headers);
     try validateConnectionHeadersForWrite(version, headers);
     try validateResponseTeForWrite(headers);
+    try validateResponseExpectForWrite(headers);
     try validateResponseUpgradeForWrite(status, headers);
     try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
     const has_transfer_encoding = hasHeaderNamed(
@@ -1995,7 +2136,7 @@ fn validateResponseForWrite(
         // however, a final chunked coding must contain exactly one complete
         // chunked wire body so no suffix can be interpreted as another message.
         if (!close_delimited and body.len != 0) {
-            try validateChunkedBodyForWrite(body, headers);
+            _ = try validateChunkedBodyForWrite(body, headers);
         }
     } else {
         if (has_trailer_declaration) return error.InvalidTrailer;
@@ -2442,7 +2583,7 @@ fn scanChunkedWireBody(bytes: []const u8) Error!ChunkedWireLayout {
 fn validateChunkedBodyForWrite(
     bytes: []const u8,
     headers: []const Header,
-) Error!void {
+) Error!usize {
     const layout = try scanChunkedWireBody(bytes);
     if (layout.consumed != bytes.len) return error.InvalidChunk;
     const trailer_fields = bytes[layout.trailer_start..layout.trailer_fields_end];
@@ -2450,7 +2591,7 @@ fn validateChunkedBodyForWrite(
         trailer_fields,
         .{ .max_headers = std.math.maxInt(usize) },
     );
-    if (!hasHeaderNamed(headers, "trailer")) return;
+    if (!hasHeaderNamed(headers, "trailer")) return layout.body_len;
     var lines = std.mem.splitSequence(u8, trailer_fields, "\r\n");
     while (lines.next()) |line| {
         if (line.len == 0) continue;
@@ -2459,6 +2600,7 @@ fn validateChunkedBodyForWrite(
             return error.InvalidTrailer;
         }
     }
+    return layout.body_len;
 }
 
 fn copyChunkedBody(bytes: []const u8, out: []u8) Error!void {
@@ -2943,6 +3085,34 @@ test "HTTP/1 low-level request writers validate framing before output" {
             },
             .body = "",
         },
+        .{
+            .expected = error.InvalidExpectation,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Expect", .value = "100-continue" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidExpectation,
+            .version = .http_1_0,
+            .headers = &.{
+                .{ .name = "Content-Length", .value = "4" },
+                .{ .name = "Expect", .value = "100-continue" },
+            },
+            .body = "body",
+        },
+        .{
+            .expected = error.InvalidExpectation,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Content-Length", .value = "4" },
+                .{ .name = "Expect", .value = "100-continue, custom" },
+            },
+            .body = "body",
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -3012,6 +3182,26 @@ test "HTTP/1 low-level request writers validate framing before output" {
         u8,
         encoded.items,
         "TE: trailers\r\nConnection: keep-alive, TE\r\n",
+    ) != null);
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .POST,
+        "/expect",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Content-Length", .value = "4" },
+            .{ .name = "Expect", .value = "100-continue" },
+        },
+        "body",
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoded.items,
+        "Expect: 100-continue\r\n",
     ) != null);
 
     encoded.clearRetainingCapacity();
@@ -3235,6 +3425,11 @@ test "HTTP/1 low-level response writers validate framing before output" {
             .expected = error.InvalidTransferEncoding,
             .version = .http_1_1,
             .headers = &.{.{ .name = "TE", .value = "trailers" }},
+        },
+        .{
+            .expected = error.InvalidExpectation,
+            .version = .http_1_1,
+            .headers = &.{.{ .name = "Expect", .value = "100-continue" }},
         },
         .{
             .expected = error.InvalidConnection,
