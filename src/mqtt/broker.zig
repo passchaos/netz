@@ -533,7 +533,8 @@ const ClientSlot = struct {
         graceful_disconnect: bool = false,
         has_will_handle: bool = false,
         has_session_handle: bool = false,
-        _padding: u4 = 0,
+        has_retained_source_id: bool = false,
+        _padding: u3 = 0,
     } = .{},
     /// Allocated only after policy and Session admission, immediately before a
     /// successful CONNACK. Keeping the large transport/session state out of
@@ -555,7 +556,7 @@ const ClientSlot = struct {
     /// Allocated only when a listener contributes an ACL overlay. Callback
     /// contexts remain borrowed from the listener for the connection lifetime.
     listener_access_control: ?*ListenerAccessControlHandler = null,
-    retained_source_id: ?u64 = null,
+    retained_source_id_value: u64 = undefined,
     /// Borrowed from `ClientTask.connect` while this slot is active. MQTT's
     /// two-byte UTF-8 length bounds the compact descriptor.
     username_ptr: ?[*]const u8 = null,
@@ -765,6 +766,22 @@ const ClientSlot = struct {
         self.state.has_session_handle = true;
     }
 
+    fn retainedSourceId(self: ClientSlot) ?u64 {
+        return if (self.state.has_retained_source_id)
+            self.retained_source_id_value
+        else
+            null;
+    }
+
+    fn setRetainedSourceId(self: *ClientSlot, maybe_source_id: ?u64) void {
+        const source_id = maybe_source_id orelse {
+            self.state.has_retained_source_id = false;
+            return;
+        };
+        self.retained_source_id_value = source_id;
+        self.state.has_retained_source_id = true;
+    }
+
     fn setListenerAccessControl(
         self: *ClientSlot,
         allocator: std.mem.Allocator,
@@ -918,7 +935,7 @@ test "MQTT broker capacity slots keep connection state out of line" {
         @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
     );
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 104), @sizeOf(ClientSlot));
+        try std.testing.expectEqual(@as(usize, 96), @sizeOf(ClientSlot));
         try std.testing.expectEqual(@as(usize, 152), @sizeOf(ClientBuffers));
         try std.testing.expectEqual(
             @as(usize, 8),
@@ -1056,6 +1073,22 @@ test "MQTT broker stores optional Session and Will handles without tags" {
     slot.setWillHandle(null);
     try std.testing.expect(slot.sessionHandle() == null);
     try std.testing.expect(slot.willHandle() == null);
+}
+
+test "MQTT broker stores optional retained source identity without tag" {
+    var slot: ClientSlot = .{};
+    try std.testing.expect(slot.retainedSourceId() == null);
+
+    slot.setRetainedSourceId(0);
+    try std.testing.expectEqual(@as(?u64, 0), slot.retainedSourceId());
+    slot.setRetainedSourceId(std.math.maxInt(u64));
+    try std.testing.expectEqual(
+        @as(?u64, std.math.maxInt(u64)),
+        slot.retainedSourceId(),
+    );
+
+    slot.setRetainedSourceId(null);
+    try std.testing.expect(slot.retainedSourceId() == null);
 }
 
 test "MQTT broker allocates listener ACL metadata on demand" {
@@ -3770,8 +3803,8 @@ pub const Broker = struct {
             listener_access_control,
         );
         errdefer slot.clearListenerAccessControl(self.allocator);
-        slot.retained_source_id = retained_source_id;
-        errdefer slot.retained_source_id = null;
+        slot.setRetainedSourceId(retained_source_id);
+        errdefer slot.setRetainedSourceId(null);
         // `preparePending` passes the effective CONNECT after any
         // username-as-client-id transformation; its username remains the
         // authenticated wire identity used by listener read ACLs.
@@ -4186,7 +4219,7 @@ pub const Broker = struct {
         slot.setSessionHandle(null);
         slot.state.session_present = false;
         slot.state.session_persistent = false;
-        slot.retained_source_id = null;
+        slot.setRetainedSourceId(null);
         slot.setUsername(null);
         slot.setWillHandle(null);
         slot.clearBuffers(self.allocator);
@@ -4360,7 +4393,7 @@ pub const Broker = struct {
         slot.state.session_present = false;
         slot.state.session_persistent = false;
         slot.listener_access_control = null;
-        slot.retained_source_id = null;
+        slot.setRetainedSourceId(null);
         slot.setUsername(null);
         slot.state.active = false;
         self.recordPersistentChangeLocked(persistent_changed);
@@ -4924,7 +4957,7 @@ pub const Broker = struct {
             canonical_publish,
             connect.client_id,
             connect.username,
-            publisher_slot.retained_source_id,
+            publisher_slot.retainedSourceId(),
             true,
             if (mapped_topic.allocation == null and
                 owned_publish.packet.contains(canonical_publish.topic) and
@@ -5008,7 +5041,7 @@ pub const Broker = struct {
             publish,
             connect.client_id,
             connect.username,
-            publisher_slot.retained_source_id,
+            publisher_slot.retainedSourceId(),
             std.Io.Clock.awake.now(self.io),
         ) catch |err| {
             self.state_mutex.unlock(self.io);
