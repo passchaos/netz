@@ -31,7 +31,10 @@ test "MQTT auth state rejects mismatched methods and traffic" {
         .value = &method,
     } }});
     method[0] = 'x';
-    try std.testing.expectEqualStrings("mirror", state.method.?);
+    try std.testing.expectEqualStrings("mirror", state.method().?);
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 16), @sizeOf(State));
+    }
     try std.testing.expectEqual(Phase.authenticating, state.phase);
     try std.testing.expectError(
         error.AuthenticationInProgress,
@@ -71,6 +74,23 @@ test "MQTT auth state rejects mismatched methods and traffic" {
     try std.testing.expectEqual(Phase.active, state.phase);
 }
 
+test "MQTT auth method allocation failure leaves inactive state" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var state: State = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        state.beginConnect(failing.allocator(), &.{.{ .utf8 = .{
+            .id = .authentication_method,
+            .value = "method",
+        } }}),
+    );
+    try std.testing.expect(state.method() == null);
+    try std.testing.expectEqual(Phase.inactive, state.phase);
+}
+
 test "MQTT auth state rejects a method introduced by CONNACK" {
     var state: State = .{};
     try state.beginConnect(std.testing.allocator, &.{});
@@ -90,14 +110,23 @@ test "MQTT auth state rejects a method introduced by CONNACK" {
 }
 
 pub const State = struct {
-    method: ?[]u8 = null,
+    method_ptr: [*]u8 = undefined,
+    method_len: u16 = 0,
+    has_method: bool = false,
     phase: Phase = .inactive,
+
+    pub fn method(self: State) ?[]const u8 {
+        if (!self.has_method) return null;
+        return self.method_ptr[0..self.method_len];
+    }
 
     pub fn deinit(
         self: *State,
         allocator: std.mem.Allocator,
     ) void {
-        if (self.method) |method| allocator.free(method);
+        if (self.has_method) {
+            allocator.free(self.method_ptr[0..self.method_len]);
+        }
         self.* = undefined;
     }
 
@@ -106,14 +135,19 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         properties: []const mqtt.Property,
     ) Error!void {
-        if (self.phase != .inactive or self.method != null) {
+        if (self.phase != .inactive or self.has_method) {
             return error.InvalidAuthenticationState;
         }
-        const method = mqtt.authenticationMethod(properties) orelse {
+        const method_value = mqtt.authenticationMethod(properties) orelse {
             self.phase = .active;
             return;
         };
-        self.method = try allocator.dupe(u8, method);
+        const method_len = std.math.cast(u16, method_value.len) orelse
+            return error.InvalidProperty;
+        const owned = try allocator.dupe(u8, method_value);
+        self.method_ptr = owned.ptr;
+        self.method_len = method_len;
+        self.has_method = true;
         self.phase = .authenticating;
     }
 
@@ -121,7 +155,7 @@ pub const State = struct {
         self: State,
         properties: []const mqtt.Property,
     ) Error!void {
-        const expected = self.method orelse
+        const expected = self.method() orelse
             return error.AuthenticationNotConfigured;
         const actual = mqtt.authenticationMethod(properties) orelse
             return error.AuthenticationMethodMismatch;

@@ -6086,7 +6086,7 @@ pub const Broker = struct {
             }
 
             const connection = slot.connection.?;
-            const visible_topic = connection.topic_namespace.visibleTopic(
+            const visible_topic = connection.visibleTopic(
                 delivery.publication.topic(),
             ) catch |err| switch (err) {
                 error.TopicOutsideNamespace => {
@@ -6258,7 +6258,7 @@ pub const Broker = struct {
             var wire_transmission = transmission;
             const payload_len = switch (wire_transmission) {
                 .publish => |*publish| blk: {
-                    publish.topic = connection.topic_namespace.visibleTopic(
+                    publish.topic = connection.visibleTopic(
                         publish.topic,
                     ) catch |err| switch (err) {
                         error.TopicOutsideNamespace => {

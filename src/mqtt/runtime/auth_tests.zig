@@ -180,7 +180,7 @@ test "MQTT enhanced authentication connects and reauthenticates" {
     try std.testing.expectEqual(@as(usize, 1), handler.calls);
     try std.testing.expectEqualStrings(
         method,
-        result.connection.authentication.method.?,
+        result.connection.authentication.method().?,
     );
     try std.testing.expectEqualStrings(
         "initial-final",

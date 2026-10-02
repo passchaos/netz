@@ -1145,7 +1145,7 @@ pub const PendingAcceptedClient = struct {
             property_count += 1;
         }
         if (resolved.reason_code == 0) {
-            if (self.connection.authentication.method) |method| {
+            if (self.connection.authentication.method()) |method| {
                 if (!self.authentication_authorized) {
                     return error.AuthenticationInProgress;
                 }
@@ -1344,7 +1344,7 @@ pub const PendingAcceptedClient = struct {
         data: []const u8,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
-        const method = self.connection.authentication.method orelse
+        const method = self.connection.authentication.method() orelse
             return error.AuthenticationNotConfigured;
         const properties = [_]mqtt.Property{
             .{ .utf8 = .{
@@ -2551,10 +2551,10 @@ pub const Connection = struct {
     /// protocol parsing. The 296-byte descriptor remains out of line for the
     /// overwhelmingly common direct-connection path.
     proxy_metadata: ?*proxy_protocol.Metadata = null,
-    /// Broker listener namespace. Empty means the global topic space. This is
-    /// owned by the Connection so Session takeover and asynchronous delivery
-    /// can always project canonical topics through the destination listener.
-    topic_namespace: listener_namespace.Namespace = .{},
+    /// Owned broker-listener namespace. Null means the global topic space.
+    /// Session takeover and asynchronous delivery can therefore project
+    /// canonical topics without retaining Namespace's ownership flag.
+    topic_namespace: ?[]u8 = null,
 
     /// Wrap an already-negotiated WebSocket connection in the shared MQTT
     /// session state. Prefer `mqtt.websocket_runtime.Client`/`Server` unless
@@ -2658,7 +2658,7 @@ pub const Connection = struct {
         self.write_property_scratch.deinit(self.allocator);
         self.clearPendingPingState();
         self.clearProxyMetadata();
-        self.topic_namespace.deinit(self.allocator);
+        if (self.topic_namespace) |prefix| self.allocator.free(prefix);
         self.transport.close(self.allocator);
         self.* = undefined;
     }
@@ -2875,18 +2875,28 @@ pub const Connection = struct {
         self: *Connection,
         prefix: []const u8,
     ) Error!void {
-        const namespace = try listener_namespace.Namespace.initOwned(
-            self.allocator,
-            prefix,
-        );
-        self.topic_namespace.deinit(self.allocator);
-        self.topic_namespace = namespace;
+        const validated = try listener_namespace.Namespace.init(prefix);
+        const replacement = if (validated.prefix.len == 0)
+            null
+        else
+            try self.allocator.dupe(u8, validated.prefix);
+        if (self.topic_namespace) |previous| self.allocator.free(previous);
+        self.topic_namespace = replacement;
     }
 
     pub fn topicNamespace(
         self: *const Connection,
     ) []const u8 {
-        return self.topic_namespace.prefix;
+        return self.topic_namespace orelse &.{};
+    }
+
+    pub fn visibleTopic(
+        self: *const Connection,
+        canonical_topic: []const u8,
+    ) listener_namespace.Error![]const u8 {
+        return (listener_namespace.Namespace{
+            .prefix = self.topicNamespace(),
+        }).visibleTopic(canonical_topic);
     }
 
     /// Server-side Maximum QoS negotiated for this Network Connection.
@@ -3724,7 +3734,7 @@ pub const Connection = struct {
         var visible = transmission;
         switch (visible) {
             .publish => |*publish_value| {
-                publish_value.topic = try self.topic_namespace.visibleTopic(
+                publish_value.topic = try self.visibleTopic(
                     publish_value.topic,
                 );
                 publish_value.qos = if (@intFromEnum(publish_value.qos) <
@@ -4811,7 +4821,7 @@ pub const Connection = struct {
         data: []const u8,
     ) Error!void {
         try self.validateOutgoingAuthReason(0x19);
-        const method = self.authentication.method orelse
+        const method = self.authentication.method() orelse
             return error.AuthenticationNotConfigured;
         const properties = [_]mqtt.Property{
             .{ .utf8 = .{
@@ -4907,7 +4917,7 @@ pub const Connection = struct {
         if (self.authentication.phase != .reauthenticating) {
             return error.InvalidAuthenticationState;
         }
-        const method = self.authentication.method orelse
+        const method = self.authentication.method() orelse
             return error.AuthenticationNotConfigured;
         const properties = [_]mqtt.Property{
             .{ .utf8 = .{
@@ -4958,7 +4968,7 @@ pub const Connection = struct {
         if (self.authentication.phase != .authenticating) {
             return error.InvalidAuthenticationState;
         }
-        const method = self.authentication.method orelse
+        const method = self.authentication.method() orelse
             return error.AuthenticationNotConfigured;
         try self.writeAuth(0x18, &.{
             .{ .utf8 = .{
@@ -7037,10 +7047,49 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 904), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 888), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*proxy_protocol.Metadata),
             @sizeOf(@FieldType(Connection, "proxy_metadata")),
+        );
+    }
+}
+
+test "MQTT Connection owns listener namespace compactly" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var connection = Connection{
+        .allocator = failing.allocator(),
+        .transport = undefined,
+    };
+
+    try std.testing.expectEqualStrings("", connection.topicNamespace());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.setTopicNamespace("tenant/"),
+    );
+    try std.testing.expectEqualStrings("", connection.topicNamespace());
+
+    connection.allocator = std.testing.allocator;
+    try connection.setTopicNamespace("tenant/");
+    try std.testing.expectEqualStrings("tenant/", connection.topicNamespace());
+    try std.testing.expectEqualStrings(
+        "sensor",
+        try connection.visibleTopic("tenant/sensor"),
+    );
+    try std.testing.expectError(
+        error.TopicOutsideNamespace,
+        connection.visibleTopic("other/sensor"),
+    );
+    try connection.setTopicNamespace("");
+    try std.testing.expect(connection.topic_namespace == null);
+
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(
+            @sizeOf(?[]u8),
+            @sizeOf(@FieldType(Connection, "topic_namespace")),
         );
     }
 }
