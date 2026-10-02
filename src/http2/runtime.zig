@@ -3134,6 +3134,42 @@ pub const PromisedRequest = push.PromisedRequest;
 
 pub const AlternativeService = peer_metadata.AlternativeService;
 
+const OwnedFrameSlot = struct {
+    value: frame_io.OwnedFrame = .{
+        .bytes = &.{},
+        .frame = undefined,
+    },
+
+    fn hasValue(self: *const OwnedFrameSlot) bool {
+        return self.value.bytes.len != 0;
+    }
+
+    fn getPtr(self: *OwnedFrameSlot) ?*frame_io.OwnedFrame {
+        return if (self.hasValue()) &self.value else null;
+    }
+
+    fn put(self: *OwnedFrameSlot, value: frame_io.OwnedFrame) void {
+        std.debug.assert(!self.hasValue());
+        // Production owned frames include the nine-byte wire header. Tests and
+        // internal recovery helpers may use a shorter synthetic backing slice,
+        // but an owned frame can never use the empty sentinel.
+        std.debug.assert(value.bytes.len != 0);
+        self.value = value;
+    }
+
+    fn take(self: *OwnedFrameSlot) ?frame_io.OwnedFrame {
+        if (!self.hasValue()) return null;
+        const value = self.value;
+        self.* = .{};
+        return value;
+    }
+
+    fn deinit(self: *OwnedFrameSlot, allocator: std.mem.Allocator) void {
+        var value = self.take() orelse return;
+        value.deinit(allocator);
+    }
+};
+
 pub const Connection = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -3187,7 +3223,7 @@ pub const Connection = struct {
     /// second time.
     duplex_sibling_headers: std.ArrayList(DeferredHeaderBlock) = .empty,
     duplex_sibling_header_head: usize = 0,
-    pending_duplex_sibling_header: ?PendingDuplexSiblingHeader = null,
+    pending_duplex_sibling_header: DuplexHeaderBlockSlot = .{},
     /// New request streams seen by the graceful-shutdown PING pump are
     /// admitted before the final GOAWAY boundary is selected, but their raw
     /// HEADERS remain queued so HPACK is decoded exactly once in wire order.
@@ -3203,11 +3239,11 @@ pub const Connection = struct {
     /// Scratch readers expose borrowed slices. When their next frame comes
     /// from the owning pending queue, retain that allocation until the next
     /// connection read invalidates the borrow.
-    borrowed_pending_frame: ?OwnedFrame = null,
+    borrowed_pending_frame: OwnedFrameSlot = .{},
     /// Emergency ownership slot used when queue growth or its configured cap
     /// makes a PING wait fail after consuming one more frame from the wire. It
     /// follows the queued prefix and keeps the next application read lossless.
-    pending_application_overflow: ?OwnedFrame = null,
+    pending_application_overflow: OwnedFrameSlot = .{},
     /// A duplex stream owns the connection frame reader until both HTTP/2
     /// halves close or it is explicitly abandoned. This catches accidental
     /// construction of two step drivers; ordinary APIs retain their documented
@@ -3221,10 +3257,10 @@ pub const Connection = struct {
     /// One active-stream frame captured by a flow-control wait. It is separate
     /// from sibling frames so the duplex reader can consume it first without
     /// repeatedly cycling an unrelated queued frame.
-    duplex_pending_frame: ?OwnedFrame = null,
+    duplex_pending_frame: OwnedFrameSlot = .{},
     /// A bounded duplex accept retains an incomplete HEADERS/CONTINUATION
     /// sequence here so timeout never discards connection-wide HPACK input.
-    pending_duplex_request_head: ?DuplexHeaderBlock = null,
+    pending_duplex_request_head: DuplexHeaderBlockSlot = .{},
     /// Awake-clock timestamp of the last frame removed from transport. Queued
     /// application frames were already accounted for at ingress and therefore
     /// do not make an idle connection look newly active when later consumed.
@@ -3335,25 +3371,17 @@ pub const Connection = struct {
         self.write_batch.deinit(self.allocator);
         self.batch_data_headers.deinit(self.allocator);
         self.batch_data_parts.deinit(self.allocator);
-        if (self.borrowed_pending_frame) |*frame| {
-            frame.deinit(self.allocator);
-        }
+        self.borrowed_pending_frame.deinit(self.allocator);
         for (self.pending_application_frames.items[self.pending_application_frame_head..]) |*frame| frame.deinit(self.allocator);
         self.pending_application_frames.deinit(self.allocator);
         for (self.duplex_sibling_headers.items[self.duplex_sibling_header_head..]) |entry| freeHeaders(self.allocator, entry.headers);
         self.duplex_sibling_headers.deinit(self.allocator);
-        if (self.pending_duplex_sibling_header) |*pending| {
-            pending.deinit(self.allocator);
-        }
+        self.pending_duplex_sibling_header.deinit(self.allocator);
         self.graceful_preadmitted_peer_streams.deinit(self.allocator);
         self.clearGracefulPreadmitDecoder();
-        if (self.pending_application_overflow) |*frame| {
-            frame.deinit(self.allocator);
-        }
-        if (self.pending_duplex_request_head) |*head| {
-            head.deinit(self.allocator);
-        }
-        if (self.duplex_pending_frame) |*frame| frame.deinit(self.allocator);
+        self.pending_application_overflow.deinit(self.allocator);
+        self.pending_duplex_request_head.deinit(self.allocator);
+        self.duplex_pending_frame.deinit(self.allocator);
         self.frame_reader.deinit(self.allocator);
         self.transportForIo().close();
         self.* = undefined;
@@ -3374,12 +3402,12 @@ pub const Connection = struct {
             self.pending_requests.items.len == self.pending_request_head and
             self.pending_application_frames.items.len ==
                 self.pending_application_frame_head and
-            self.pending_application_overflow == null and
+            !self.pending_application_overflow.hasValue() and
             self.duplex_sibling_headers.items.len ==
                 self.duplex_sibling_header_head and
-            self.pending_duplex_sibling_header == null and
-            self.duplex_pending_frame == null and
-            self.borrowed_pending_frame == null and
+            !self.pending_duplex_sibling_header.hasValue() and
+            !self.duplex_pending_frame.hasValue() and
+            !self.borrowed_pending_frame.hasValue() and
             self.response_semantics.items.len == 0 and
             self.push_state.isQuiescent() and
             !self.limits.enable_push;
@@ -7734,24 +7762,22 @@ pub const Connection = struct {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.role != .server or
             (self.duplex_reader_active and
-                self.pending_duplex_request_head == null))
+                !self.pending_duplex_request_head.hasValue()))
         {
             return error.UnexpectedFrame;
         }
-        if (self.pending_duplex_request_head) |*pending| {
+        if (self.pending_duplex_request_head.getPtr()) |pending| {
             const stream_id = pending.stream_id;
             const end_stream = pending.end_stream;
             const headers = (pending.resumeUntil(self, deadline) catch |err| {
                 if (err != error.Timeout) {
-                    pending.deinit(self.allocator);
-                    self.pending_duplex_request_head = null;
+                    self.pending_duplex_request_head.deinit(self.allocator);
                     self.cancelPeerRequest(stream_id);
                     self.duplex_reader_active = false;
                 }
                 return err;
             }).?;
-            pending.deinit(self.allocator);
-            self.pending_duplex_request_head = null;
+            self.pending_duplex_request_head.deinit(self.allocator);
             return self.finishAcceptedDuplexRequest(
                 stream_id,
                 headers,
@@ -7779,7 +7805,7 @@ pub const Connection = struct {
                 continue;
             }
             self.duplex_reader_active = true;
-            self.pending_duplex_request_head = DuplexHeaderBlock.init(
+            const pending_value = DuplexHeaderBlock.init(
                 self,
                 frame.frame,
             ) catch |err| {
@@ -7787,19 +7813,18 @@ pub const Connection = struct {
                 self.duplex_reader_active = false;
                 return err;
             };
-            const pending = &self.pending_duplex_request_head.?;
+            self.pending_duplex_request_head.put(pending_value);
+            const pending = self.pending_duplex_request_head.getPtr().?;
             const end_stream = pending.end_stream;
             const headers = (pending.resumeUntil(self, deadline) catch |err| {
                 if (err != error.Timeout) {
-                    pending.deinit(self.allocator);
-                    self.pending_duplex_request_head = null;
+                    self.pending_duplex_request_head.deinit(self.allocator);
                     self.cancelPeerRequest(stream_id);
                     self.duplex_reader_active = false;
                 }
                 return err;
             }).?;
-            pending.deinit(self.allocator);
-            self.pending_duplex_request_head = null;
+            self.pending_duplex_request_head.deinit(self.allocator);
             return self.finishAcceptedDuplexRequest(
                 stream_id,
                 headers,
@@ -8573,13 +8598,10 @@ pub const Connection = struct {
         if (self.callback_reader_active) return error.UnexpectedFrame;
         // A scratch borrow lasts until the next read. Release the owning frame
         // retained for the previous borrow before replacing its storage.
-        if (self.borrowed_pending_frame) |*previous| {
-            previous.deinit(self.allocator);
-            self.borrowed_pending_frame = null;
-        }
+        self.borrowed_pending_frame.deinit(self.allocator);
         if (self.popQueuedApplicationFrame()) |frame| {
-            self.borrowed_pending_frame = frame;
-            const pending = &self.borrowed_pending_frame.?;
+            self.borrowed_pending_frame.put(frame);
+            const pending = self.borrowed_pending_frame.getPtr().?;
             return .{
                 .bytes = pending.bytes,
                 .frame = pending.frame,
@@ -8681,10 +8703,7 @@ pub const Connection = struct {
         self: *Connection,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
-        if (self.duplex_pending_frame) |frame| {
-            self.duplex_pending_frame = null;
-            return frame;
-        }
+        if (self.duplex_pending_frame.take()) |frame| return frame;
         while (true) {
             var frame = try self.readOwnedTransportFrameWithDeadline(deadline);
             if (try self.discardFrameAboveGracefulBoundaryUntil(
@@ -8703,10 +8722,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
         if (self.callback_reader_active) return error.UnexpectedFrame;
-        if (self.borrowed_pending_frame) |*previous| {
-            previous.deinit(self.allocator);
-            self.borrowed_pending_frame = null;
-        }
+        self.borrowed_pending_frame.deinit(self.allocator);
         const borrowed = try self.readTransportFrameWithDeadline(deadline);
         const bytes = try self.allocator.dupe(u8, borrowed.bytes);
         errdefer self.allocator.free(bytes);
@@ -8721,10 +8737,7 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!OwnedFrame {
         if (self.callback_reader_active) return error.UnexpectedFrame;
-        if (self.borrowed_pending_frame) |*previous| {
-            previous.deinit(self.allocator);
-            self.borrowed_pending_frame = null;
-        }
+        self.borrowed_pending_frame.deinit(self.allocator);
         if (self.popQueuedApplicationFrame()) |frame| return frame;
         const borrowed = try self.readTransportFrameWithDeadline(deadline);
         const bytes = try self.allocator.dupe(u8, borrowed.bytes);
@@ -8746,10 +8759,7 @@ pub const Connection = struct {
             self.compactPendingApplicationFramesIfSparse();
             return pending;
         }
-        if (self.pending_application_overflow) |frame| {
-            self.pending_application_overflow = null;
-            return frame;
-        }
+        if (self.pending_application_overflow.take()) |frame| return frame;
         return null;
     }
 
@@ -8803,43 +8813,43 @@ pub const Connection = struct {
         try self.queueDuplexSiblingFrame(frame);
         frame_owned = false;
 
-        if (self.pending_duplex_sibling_header == null and
+        if (!self.pending_duplex_sibling_header.hasValue() and
             frame.frame.header.frame_type == .headers)
         {
-            self.pending_duplex_sibling_header = .{
-                .block = try DuplexHeaderBlock.init(self, frame.frame),
-            };
-        } else if (self.pending_duplex_sibling_header == null) {
+            self.pending_duplex_sibling_header.put(
+                try DuplexHeaderBlock.init(self, frame.frame),
+            );
+        } else if (!self.pending_duplex_sibling_header.hasValue()) {
             return;
         } else if (frame.frame.header.frame_type != .continuation or
             frame.frame.header.stream_id !=
-                self.pending_duplex_sibling_header.?.block.stream_id)
+                self.pending_duplex_sibling_header.getPtr().?.stream_id)
         {
             return error.UnexpectedFrame;
         }
 
-        const pending = &self.pending_duplex_sibling_header.?;
+        const pending = self.pending_duplex_sibling_header.getPtr().?;
         // The continuation frame is already queued. Resume against transport
         // only when more fragments are required; the just-read bytes are first
         // incorporated directly to avoid consuming the sibling queue.
         if (frame.frame.header.frame_type == .continuation) {
-            pending.block.continuation_count += 1;
-            if (pending.block.continuation_count > self.maxContinuationFrames()) {
+            pending.continuation_count += 1;
+            if (pending.continuation_count > self.maxContinuationFrames()) {
                 return error.MessageTooLarge;
             }
-            try pending.block.bytes.appendSlice(
+            try pending.bytes.appendSlice(
                 self.allocator,
                 frame.frame.payload,
             );
-            try pending.block.validateSize(self);
-            pending.block.end_headers =
+            try pending.validateSize(self);
+            pending.end_headers =
                 (frame.frame.header.flags & flag_end_headers) != 0;
         }
-        if (!pending.block.end_headers) return;
-        const stream_id = pending.block.stream_id;
+        if (!pending.end_headers) return;
+        const stream_id = pending.stream_id;
         const headers = decodeOwnedHeaders(
             self.allocator,
-            pending.block.bytes.items,
+            pending.bytes.items,
             self.limits,
             &self.hpack_decoder,
         ) catch |err| {
@@ -8850,15 +8860,14 @@ pub const Connection = struct {
         self.duplex_sibling_headers.append(self.allocator, .{
             .stream_id = stream_id,
             .headers = headers,
-            .continuation_count = pending.block.continuation_count,
+            .continuation_count = pending.continuation_count,
         }) catch |err| {
             // HPACK has advanced, so replaying the retained raw block after a
             // failed deferred-value allocation would decode it twice.
             self.aggregate_timeout_unusable = true;
             return err;
         };
-        pending.deinit(self.allocator);
-        self.pending_duplex_sibling_header = null;
+        self.pending_duplex_sibling_header.deinit(self.allocator);
     }
 
     fn compactPendingApplicationFramesIfSparse(self: *Connection) void {
@@ -8889,7 +8898,7 @@ pub const Connection = struct {
     fn pendingApplicationFrameCount(self: *const Connection) usize {
         return self.pending_application_frames.items.len -
             self.pending_application_frame_head +
-            @intFromBool(self.pending_application_overflow != null);
+            @intFromBool(self.pending_application_overflow.hasValue());
     }
 
     fn queuePendingApplicationFrame(
@@ -8934,8 +8943,7 @@ pub const Connection = struct {
         self: *Connection,
         frame: OwnedFrame,
     ) void {
-        std.debug.assert(self.pending_application_overflow == null);
-        self.pending_application_overflow = frame;
+        self.pending_application_overflow.put(frame);
     }
 
     const PeerRequestAdmission = enum {
@@ -10913,7 +10921,7 @@ pub const Connection = struct {
                     return err;
                 };
             }
-            if (self.pending_application_overflow != null) {
+            if (self.pending_application_overflow.hasValue()) {
                 return error.MessageTooLarge;
             }
             self.writeControlFrameUntil(
@@ -11003,7 +11011,7 @@ pub const Connection = struct {
         if (!options.while_idle and !self.hasActiveStreams()) {
             return .skipped_idle;
         }
-        if (self.pending_application_overflow != null) {
+        if (self.pending_application_overflow.hasValue()) {
             return error.MessageTooLarge;
         }
         if (self.last_peer_frame_at == null) {
@@ -11069,7 +11077,7 @@ pub const Connection = struct {
         // An earlier bounded wait could retain one frame beyond the configured
         // queue cap. Require the application to drain it before another probe
         // can consume later wire data out of order.
-        if (self.pending_application_overflow != null) {
+        if (self.pending_application_overflow.hasValue()) {
             return error.MessageTooLarge;
         }
         try self.writeControlFrameUntil(.ping, 0, &data, deadline);
@@ -14489,10 +14497,10 @@ pub const Connection = struct {
             }
             switch (frame.frame.header.frame_type) {
                 .headers, .data, .push_promise => {
-                    if (self.duplex_pending_frame != null) {
+                    if (self.duplex_pending_frame.hasValue()) {
                         return error.UnexpectedFrame;
                     }
-                    self.duplex_pending_frame = frame;
+                    self.duplex_pending_frame.put(frame);
                     frame_owned = false;
                     return error.ResponseAvailable;
                 },
@@ -14501,10 +14509,10 @@ pub const Connection = struct {
                     // Preserve the terminal frame for the duplex event API so
                     // callers receive the typed reset even when it arrived
                     // while a write was pumping flow-control updates.
-                    if (self.duplex_pending_frame != null) {
+                    if (self.duplex_pending_frame.hasValue()) {
                         return error.UnexpectedFrame;
                     }
-                    self.duplex_pending_frame = frame;
+                    self.duplex_pending_frame.put(frame);
                     frame_owned = false;
                     return error.ResponseAvailable;
                 },
@@ -16060,18 +16068,6 @@ const DeferredHeaderBlock = struct {
     continuation_count: usize,
 };
 
-const PendingDuplexSiblingHeader = struct {
-    block: DuplexHeaderBlock,
-
-    fn deinit(
-        self: *PendingDuplexSiblingHeader,
-        allocator: std.mem.Allocator,
-    ) void {
-        self.block.deinit(allocator);
-        self.* = undefined;
-    }
-};
-
 const DuplexHeaderBlock = struct {
     stream_id: u31,
     end_stream: bool,
@@ -16160,6 +16156,37 @@ const DuplexHeaderBlock = struct {
     }
 };
 
+const DuplexHeaderBlockSlot = struct {
+    value: DuplexHeaderBlock = .{
+        .stream_id = 0,
+        .end_stream = false,
+        .end_headers = false,
+    },
+
+    fn hasValue(self: *const DuplexHeaderBlockSlot) bool {
+        return self.value.stream_id != 0;
+    }
+
+    fn getPtr(self: *DuplexHeaderBlockSlot) ?*DuplexHeaderBlock {
+        return if (self.hasValue()) &self.value else null;
+    }
+
+    fn put(self: *DuplexHeaderBlockSlot, value: DuplexHeaderBlock) void {
+        std.debug.assert(!self.hasValue());
+        std.debug.assert(value.stream_id != 0);
+        self.value = value;
+    }
+
+    fn deinit(
+        self: *DuplexHeaderBlockSlot,
+        allocator: std.mem.Allocator,
+    ) void {
+        if (!self.hasValue()) return;
+        self.value.deinit(allocator);
+        self.* = .{};
+    }
+};
+
 pub const DuplexWriteResult = struct {
     written: usize,
     response_available: bool,
@@ -16200,13 +16227,11 @@ pub const ClientDuplexStream = struct {
     response_content_length: ?usize = null,
     response_body_forbidden: bool = false,
     informational_count: usize = 0,
-    pending_header: ?DuplexHeaderBlock = null,
+    pending_header: DuplexHeaderBlockSlot = .{},
     released: bool = false,
 
     pub fn deinit(self: *ClientDuplexStream) void {
-        if (self.pending_header) |*header| {
-            header.deinit(self.connection.allocator);
-        }
+        self.pending_header.deinit(self.connection.allocator);
         if (!self.released) {
             if (self.request_finished and self.response_finished) {
                 self.release();
@@ -16581,14 +16606,13 @@ pub const ClientDuplexStream = struct {
             return .finished;
         }
         while (true) {
-            if (self.pending_header) |*pending| {
+            if (self.pending_header.getPtr()) |pending| {
                 const end_stream = pending.end_stream;
                 const headers = (try pending.resumeUntil(
                     self.connection,
                     deadline,
                 )).?;
-                pending.deinit(self.connection.allocator);
-                self.pending_header = null;
+                self.pending_header.deinit(self.connection.allocator);
                 return self.applyResponseHeaders(headers, end_stream);
             }
             var frame = try self.connection.readOwnedFrameForDuplexWithDeadline(deadline);
@@ -16607,18 +16631,17 @@ pub const ClientDuplexStream = struct {
             }
             switch (frame.frame.header.frame_type) {
                 .headers => {
-                    self.pending_header = try DuplexHeaderBlock.init(
+                    self.pending_header.put(try DuplexHeaderBlock.init(
                         self.connection,
                         frame.frame,
-                    );
-                    const pending = &self.pending_header.?;
+                    ));
+                    const pending = self.pending_header.getPtr().?;
                     const end_stream = pending.end_stream;
                     const headers = (try pending.resumeUntil(
                         self.connection,
                         deadline,
                     )).?;
-                    pending.deinit(self.connection.allocator);
-                    self.pending_header = null;
+                    self.pending_header.deinit(self.connection.allocator);
                     return self.applyResponseHeaders(headers, end_stream);
                 },
                 .data => {
@@ -16846,13 +16869,11 @@ pub const ServerDuplexStream = struct {
     response_finished: bool = false,
     response_expected_length: ?usize = null,
     response_written: usize = 0,
-    pending_header: ?DuplexHeaderBlock = null,
+    pending_header: DuplexHeaderBlockSlot = .{},
     released: bool = false,
 
     pub fn deinit(self: *ServerDuplexStream) void {
-        if (self.pending_header) |*header| {
-            header.deinit(self.connection.allocator);
-        }
+        self.pending_header.deinit(self.connection.allocator);
         if (!self.released) {
             if (self.request_finished and self.response_finished) {
                 self.release();
@@ -17344,13 +17365,12 @@ pub const ServerDuplexStream = struct {
             return .finished;
         }
         while (true) {
-            if (self.pending_header) |*pending| {
+            if (self.pending_header.getPtr()) |pending| {
                 const trailers = (try pending.resumeUntil(
                     self.connection,
                     deadline,
                 )).?;
-                pending.deinit(self.connection.allocator);
-                self.pending_header = null;
+                self.pending_header.deinit(self.connection.allocator);
                 errdefer freeHeaders(self.connection.allocator, trailers);
                 try validateHeaderBlock(trailers, .request_trailers);
                 try validateExpectedContentLength(
@@ -17420,17 +17440,16 @@ pub const ServerDuplexStream = struct {
                     if ((frame.frame.header.flags & flag_end_stream) == 0) {
                         return error.UnexpectedFrame;
                     }
-                    self.pending_header = try DuplexHeaderBlock.init(
+                    self.pending_header.put(try DuplexHeaderBlock.init(
                         self.connection,
                         frame.frame,
-                    );
-                    const pending = &self.pending_header.?;
+                    ));
+                    const pending = self.pending_header.getPtr().?;
                     const trailers = (try pending.resumeUntil(
                         self.connection,
                         deadline,
                     )).?;
-                    pending.deinit(self.connection.allocator);
-                    self.pending_header = null;
+                    self.pending_header.deinit(self.connection.allocator);
                     errdefer freeHeaders(self.connection.allocator, trailers);
                     try validateHeaderBlock(trailers, .request_trailers);
                     try validateExpectedContentLength(
@@ -18060,7 +18079,7 @@ pub const Tunnel = struct {
         // frame. Let that stream's ordinary reader make progress before this
         // tunnel consumes more bytes from the shared connection.
         if (self.connection.pendingApplicationFrameCount() != 0 and
-            self.connection.pending_duplex_sibling_header == null)
+            !self.connection.pending_duplex_sibling_header.hasValue())
         {
             return error.ResponseAvailable;
         }
@@ -18089,7 +18108,7 @@ pub const Tunnel = struct {
                 // Keep consuming an uninterrupted HEADERS/CONTINUATION block
                 // so HPACK advances in wire order before handing the sibling
                 // stream back to an ordinary request/response reader.
-                if (self.connection.pending_duplex_sibling_header != null) {
+                if (self.connection.pending_duplex_sibling_header.hasValue()) {
                     continue;
                 }
                 return error.ResponseAvailable;
@@ -18770,18 +18789,12 @@ pub const testing = struct {
     pub fn deinitPendingApplicationFrames(
         connection: *Connection,
     ) void {
-        if (connection.borrowed_pending_frame) |*frame| {
-            frame.deinit(connection.allocator);
-            connection.borrowed_pending_frame = null;
-        }
+        connection.borrowed_pending_frame.deinit(connection.allocator);
         for (connection.pending_application_frames.items[connection.pending_application_frame_head..]) |*frame| frame.deinit(connection.allocator);
         connection.pending_application_frames.deinit(connection.allocator);
         connection.pending_application_frames = .empty;
         connection.pending_application_frame_head = 0;
-        if (connection.pending_application_overflow) |*frame| {
-            frame.deinit(connection.allocator);
-            connection.pending_application_overflow = null;
-        }
+        connection.pending_application_overflow.deinit(connection.allocator);
     }
 
     pub fn handleConnectionFrame(
@@ -19064,7 +19077,20 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 
 test "HTTP/2 connection keeps optional state compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 1_872), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 1_840), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 48), @sizeOf(OwnedFrameSlot));
+        try std.testing.expectEqual(
+            @as(usize, 40),
+            @sizeOf(DuplexHeaderBlockSlot),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 120),
+            @sizeOf(ClientDuplexStream),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 208),
+            @sizeOf(ServerDuplexStream),
+        );
         try std.testing.expectEqual(
             @sizeOf(?*peer_metadata.Origins),
             @sizeOf(@FieldType(Connection, "peer_origins")),
@@ -19103,11 +19129,49 @@ test "HTTP/2 connection keeps optional state compact" {
     try std.testing.expect(connection.hpack_encoder_staging == null);
     try std.testing.expect(connection.push_state.state == null);
     try std.testing.expect(connection.priority_state.state == null);
+    try std.testing.expect(!connection.borrowed_pending_frame.hasValue());
+    try std.testing.expect(!connection.pending_application_overflow.hasValue());
+    try std.testing.expect(!connection.duplex_pending_frame.hasValue());
+    try std.testing.expect(!connection.pending_duplex_request_head.hasValue());
+    try std.testing.expect(!connection.pending_duplex_sibling_header.hasValue());
     try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.alternativeServices().len,
     );
+}
+
+test "HTTP/2 compact owned frame slot transfers ownership" {
+    const allocator = std.testing.allocator;
+    var slot = OwnedFrameSlot{};
+    slot.deinit(allocator);
+    try std.testing.expect(!slot.hasValue());
+
+    const bytes = try allocator.alloc(u8, http2.FrameHeader.encoded_len);
+    slot.put(.{ .bytes = bytes, .frame = undefined });
+    try std.testing.expect(slot.hasValue());
+    var owned = slot.take() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!slot.hasValue());
+    owned.deinit(allocator);
+
+    const second = try allocator.alloc(u8, http2.FrameHeader.encoded_len);
+    slot.put(.{ .bytes = second, .frame = undefined });
+    slot.deinit(allocator);
+    try std.testing.expect(!slot.hasValue());
+}
+
+test "HTTP/2 compact duplex header slot uses stream zero as empty" {
+    var slot = DuplexHeaderBlockSlot{};
+    try std.testing.expect(!slot.hasValue());
+    slot.put(.{
+        .stream_id = 1,
+        .end_stream = true,
+        .end_headers = true,
+    });
+    try std.testing.expect(slot.hasValue());
+    try std.testing.expectEqual(@as(u31, 1), slot.getPtr().?.stream_id);
+    slot.deinit(std.testing.allocator);
+    try std.testing.expect(!slot.hasValue());
 }
 
 test "HTTP/2 lazy staged HPACK encoder rolls back allocation failure" {

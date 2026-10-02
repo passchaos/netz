@@ -1305,12 +1305,15 @@ that advertise `SETTINGS_ENABLE_PUSH=0` and servers that never initiate push do
 not allocate it. RFC 9218 update and idle-reservation indexes are also retained
 only after the first priority operation; the ordinary stream lifecycle takes a
 null-state fast path. On 64-bit targets these changes reduce
-`runtime.Connection` from 2,496 to 1,872 bytes: 80 bytes from peer metadata,
+`runtime.Connection` from 2,496 to 1,840 bytes: 80 bytes from peer metadata,
 112 bytes after alignment from the cold decoder, 160 bytes from batch staging,
-160 bytes from push state, and 112 bytes after alignment from priority state.
-Layout, disabled-limit, retry, and exhaustive allocation-failure tests cover
-the lazy ownership boundaries; this is fixed-state evidence, not a throughput
-claim.
+160 bytes from push state, 112 bytes after alignment from priority state, and
+32 bytes after alignment from tag-free pending frame/header slots. Client and
+server duplex streams also drop from 128 to 120 bytes and from 216 to 208 bytes
+respectively.
+Layout, disabled-limit, ownership-transfer, retry, and exhaustive
+allocation-failure tests cover these boundaries; this is fixed-state evidence,
+not a throughput claim.
 
 Inbound HPACK decoding now enforces `Limits.max_header_list_size` while walking
 the compressed block rather than after materializing every header. Static,
