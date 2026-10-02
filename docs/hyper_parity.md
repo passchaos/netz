@@ -1297,11 +1297,13 @@ Additional unique advisory entries are ignored without closing the connection.
 Focused state and wire tests verify that retained counts and capacities stop
 growing while later PING traffic remains usable. Their list/index pairs are
 now allocated independently on first use rather than embedded in every
-connection. On 64-bit targets this replaces 96 bytes of cold containers with
-two optional pointers and reduces `runtime.Connection` from 2,496 to 2,416
-bytes. Layout, disabled-limit, retry, and exhaustive allocation-failure tests
-cover the lazy ownership boundary; this is fixed-state evidence, not a
-throughput claim.
+connection. The speculative HPACK decoder used only while synchronizing a
+two-phase graceful shutdown is likewise allocated on first preadmission. On
+64-bit targets these changes reduce `runtime.Connection` from 2,496 to 2,304
+bytes: 80 bytes from the peer metadata containers and another 112 bytes after
+alignment from the cold decoder. Layout, disabled-limit, retry, and exhaustive
+allocation-failure tests cover the lazy ownership boundaries; this is
+fixed-state evidence, not a throughput claim.
 
 Inbound HPACK decoding now enforces `Limits.max_header_list_size` while walking
 the compressed block rather than after materializing every header. Static,

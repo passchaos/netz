@@ -3195,10 +3195,10 @@ pub const Connection = struct {
     /// Processed-stream boundary before the current speculative graceful
     /// admission run. Rollback restores it while preserving observed IDs.
     graceful_preadmit_base_processed_stream_id: ?u31 = null,
-    /// Shadow HPACK state advances across preadmission checks in exact wire
-    /// order. The live decoder remains untouched until queued frames are later
-    /// delivered to the application request reader.
-    graceful_preadmit_decoder: ?http2.Hpack.Decoder = null,
+    /// Lazily allocated shadow HPACK state advances across preadmission checks
+    /// in exact wire order. The live decoder remains untouched until queued
+    /// frames are later delivered to the application request reader.
+    graceful_preadmit_decoder: ?*http2.Hpack.Decoder = null,
     /// Scratch readers expose borrowed slices. When their next frame comes
     /// from the owning pending queue, retain that allocation until the next
     /// connection read invalidates the borrow.
@@ -3345,9 +3345,7 @@ pub const Connection = struct {
             pending.deinit(self.allocator);
         }
         self.graceful_preadmitted_peer_streams.deinit(self.allocator);
-        if (self.graceful_preadmit_decoder) |*decoder| {
-            decoder.deinit(self.allocator);
-        }
+        self.clearGracefulPreadmitDecoder();
         if (self.pending_application_overflow) |*frame| {
             frame.deinit(self.allocator);
         }
@@ -9086,8 +9084,12 @@ pub const Connection = struct {
         }
         const started_shadow = self.graceful_preadmit_decoder == null;
         if (started_shadow) {
-            self.graceful_preadmit_decoder =
-                try self.hpack_decoder.clone(self.allocator);
+            self.graceful_preadmit_decoder = blk: {
+                const decoder = try self.allocator.create(http2.Hpack.Decoder);
+                errdefer self.allocator.destroy(decoder);
+                decoder.* = try self.hpack_decoder.clone(self.allocator);
+                break :blk decoder;
+            };
             self.graceful_preadmit_base_processed_stream_id =
                 self.last_peer_processed_stream_id;
         }
@@ -9150,8 +9152,9 @@ pub const Connection = struct {
     }
 
     fn clearGracefulPreadmitDecoder(self: *Connection) void {
-        if (self.graceful_preadmit_decoder) |*decoder| {
+        if (self.graceful_preadmit_decoder) |decoder| {
             decoder.deinit(self.allocator);
+            self.allocator.destroy(decoder);
         }
         self.graceful_preadmit_decoder = null;
     }
@@ -19039,7 +19042,7 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 
 test "HTTP/2 connection keeps peer metadata cold" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 2_416), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 2_304), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*peer_metadata.Origins),
             @sizeOf(@FieldType(Connection, "peer_origins")),
@@ -19047,6 +19050,10 @@ test "HTTP/2 connection keeps peer metadata cold" {
         try std.testing.expectEqual(
             @sizeOf(?*peer_metadata.AlternativeServices),
             @sizeOf(@FieldType(Connection, "alternative_services")),
+        );
+        try std.testing.expectEqual(
+            @sizeOf(?*http2.Hpack.Decoder),
+            @sizeOf(@FieldType(Connection, "graceful_preadmit_decoder")),
         );
     }
 
@@ -19058,10 +19065,59 @@ test "HTTP/2 connection keeps peer metadata cold" {
     };
     try std.testing.expect(connection.peer_origins == null);
     try std.testing.expect(connection.alternative_services == null);
+    try std.testing.expect(connection.graceful_preadmit_decoder == null);
     try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.alternativeServices().len,
+    );
+}
+
+test "HTTP/2 lazy graceful HPACK clone rolls back allocation failure" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .server,
+        .graceful_shutdown_phase = .synchronizing,
+    };
+    defer {
+        connection.clearGracefulPreadmitDecoder();
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    const inserted = try connection.hpack_decoder.decodeBlockOwnedWithLimit(
+        allocator,
+        "\x40\x01x\x01y",
+        1,
+        64,
+    );
+    freeHeaders(allocator, inserted);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        // The shadow object allocation succeeds; cloning its non-empty
+        // dynamic table then fails and must destroy the detached object.
+        .fail_index = 1,
+    });
+    connection.allocator = failing.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.preadmitGracefulPeerRequest(.{
+            .header = .{
+                .length = 0,
+                .frame_type = .headers,
+                .flags = flag_end_headers | flag_end_stream,
+                .stream_id = 1,
+            },
+            .payload = &.{},
+        }),
+    );
+    connection.allocator = allocator;
+    try std.testing.expect(connection.graceful_preadmit_decoder == null);
+    try std.testing.expect(
+        connection.graceful_preadmit_base_processed_stream_id == null,
     );
 }
 
