@@ -313,15 +313,18 @@ pub fn selectSubprotocol(
     supported: []const []const u8,
 ) !?[]u8 {
     try validateSupportedSubprotocols(supported);
+    var saw_header = false;
     var token_count: usize = 0;
     for (headers) |header| {
         if (!std.ascii.eqlIgnoreCase(
             header.name,
             "sec-websocket-protocol",
         )) continue;
+        saw_header = true;
         var requested = std.mem.splitScalar(u8, header.value, ',');
         while (requested.next()) |raw| {
             const candidate = wire.trimOws(raw);
+            if (candidate.len == 0) continue;
             if (!websocket.validSubprotocolToken(candidate)) {
                 return error.InvalidSubprotocol;
             }
@@ -329,6 +332,7 @@ pub fn selectSubprotocol(
                 return error.PayloadTooLarge;
         }
     }
+    if (saw_header and token_count == 0) return error.InvalidSubprotocol;
     var token_stack: [protocol_token_stack_capacity][]const u8 = undefined;
     const seen = try storage.acquire(
         []const u8,
@@ -347,6 +351,7 @@ pub fn selectSubprotocol(
         var requested = std.mem.splitScalar(u8, header.value, ',');
         while (requested.next()) |raw| {
             const candidate = wire.trimOws(raw);
+            if (candidate.len == 0) continue;
             if (!websocket.validSubprotocolToken(candidate)) {
                 return error.InvalidSubprotocol;
             }
@@ -480,7 +485,7 @@ test "WebSocket subprotocol offer is stack-first and exact on overflow" {
 
     const h1_headers = [_]http1.Header{.{
         .name = "Sec-WebSocket-Protocol",
-        .value = "chat.v2, chat.v1",
+        .value = ", chat.v2,, chat.v1,",
     }};
     const selected = try selectSubprotocol(
         allocator,
@@ -489,6 +494,15 @@ test "WebSocket subprotocol offer is stack-first and exact on overflow" {
     );
     defer if (selected) |value| allocator.free(value);
     try std.testing.expectEqualStrings("chat.v2", selected.?);
+
+    const empty_protocols = [_]http1.Header{.{
+        .name = "Sec-WebSocket-Protocol",
+        .value = ", ,",
+    }};
+    try std.testing.expectError(
+        error.InvalidSubprotocol,
+        selectSubprotocol(allocator, &empty_protocols, &.{"chat.v1"}),
+    );
 
     const sixteen_tokens = [_]http1.Header{.{
         .name = "Sec-WebSocket-Protocol",

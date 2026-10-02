@@ -1311,17 +1311,21 @@ pub fn validateClientKey(key: []const u8) Error!void {
 }
 
 fn validateClientSubprotocolHeaders(headers: []const http1.Header) Error!void {
+    var saw_header = false;
     var token_index: usize = 0;
     for (headers) |header| {
         if (!header.eqlName("sec-websocket-protocol")) continue;
+        saw_header = true;
         var protocols = std.mem.splitScalar(u8, header.value, ',');
         while (protocols.next()) |raw_protocol| {
             const protocol = wire.trimOws(raw_protocol);
+            if (protocol.len == 0) continue;
             if (!validSubprotocolToken(protocol)) return error.InvalidHandshake;
             if (subprotocolTokenSeenBefore(headers, token_index, protocol)) return error.InvalidHandshake;
             token_index += 1;
         }
     }
+    if (saw_header and token_index == 0) return error.InvalidHandshake;
 }
 
 fn validateClientExtensionHeaders(headers: []const http1.Header) Error!void {
@@ -1334,8 +1338,10 @@ fn subprotocolTokenSeenBefore(headers: []const http1.Header, before_index: usize
         if (!header.eqlName("sec-websocket-protocol")) continue;
         var protocols = std.mem.splitScalar(u8, header.value, ',');
         while (protocols.next()) |raw_protocol| {
+            const protocol = wire.trimOws(raw_protocol);
+            if (protocol.len == 0) continue;
             if (seen >= before_index) return false;
-            if (std.mem.eql(u8, wire.trimOws(raw_protocol), candidate)) return true;
+            if (std.mem.eql(u8, protocol, candidate)) return true;
             seen += 1;
         }
     }
@@ -2579,10 +2585,26 @@ test "WebSocket handshake validation" {
     defer invalid_protocol_req.deinit(allocator);
     try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(invalid_protocol_req));
 
-    const empty_protocol = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1,\r\n\r\n";
-    var empty_protocol_req = try http1.parseRequest(allocator, empty_protocol, .{});
-    defer empty_protocol_req.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateClientHandshake(empty_protocol_req));
+    const empty_protocol_members = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: , chat.v1,,\r\n\r\n";
+    var empty_protocol_members_req = try http1.parseRequest(
+        allocator,
+        empty_protocol_members,
+        .{},
+    );
+    defer empty_protocol_members_req.deinit(allocator);
+    try validateClientHandshake(empty_protocol_members_req);
+
+    const only_empty_protocols = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: , ,\r\n\r\n";
+    var only_empty_protocols_req = try http1.parseRequest(
+        allocator,
+        only_empty_protocols,
+        .{},
+    );
+    defer only_empty_protocols_req.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidHandshake,
+        validateClientHandshake(only_empty_protocols_req),
+    );
 
     const duplicate_protocol = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: chat.v1, chat.v1\r\n\r\n";
     var duplicate_protocol_req = try http1.parseRequest(allocator, duplicate_protocol, .{});

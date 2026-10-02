@@ -1379,7 +1379,9 @@ token detection uses 16 stack slots before exact fallback; H1, RFC 8441, and
 RFC 9220 now share that grammar and preference implementation.
 Client-side H1, RFC 8441, and RFC 9220 request construction also rejects an
 exact duplicate in the configured preference list before serializing any
-header bytes, while preserving case-sensitive protocol identity.
+header bytes, while preserving case-sensitive protocol identity. Incoming
+`1#token` lists ignore RFC 2616 null members but still reject a field set with
+no actual subprotocol.
 Final isolated `bench-websocket-echo --stats` smokes reported 18 allocations /
 9,916 peak live bytes at one connection and 51 / 39,664 bytes at four
 connections, identical
