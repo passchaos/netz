@@ -509,7 +509,10 @@ const DeliveryWriter = struct {
 const ClientSlot = struct {
     generation: u32 = 0,
     active: bool = false,
-    connection: ?runtime.Connection = null,
+    /// Allocated only after policy and Session admission, immediately before a
+    /// successful CONNACK. Keeping the large transport/session state out of
+    /// line prevents every unused capacity slot from reserving a Connection.
+    connection: ?*runtime.Connection = null,
     will_handle: ?will_mod.Handle = null,
     session_handle: ?session_mod.Handle = null,
     session_present: bool = false,
@@ -741,6 +744,12 @@ const ClientSlot = struct {
         return removed;
     }
 };
+
+test "MQTT broker capacity slots keep connection state out of line" {
+    try std.testing.expect(
+        @sizeOf(ClientSlot) <= @sizeOf(runtime.Connection) / 2,
+    );
+}
 
 fn shouldScheduleTransientDelivery(
     session_persistent: bool,
@@ -1417,7 +1426,10 @@ pub const Broker = struct {
             slot.session_write_scratch.deinit(self.allocator);
             slot.session_property_scratch.deinit(self.allocator);
             slot.transient_inflight_payloads.deinit(self.allocator);
-            if (slot.connection) |*connection| connection.close();
+            if (slot.connection) |connection| {
+                connection.close();
+                self.allocator.destroy(connection);
+            }
         }
         self.allocator.free(self.slots);
         self.allocator.free(self.options.auto_client_id_prefix);
@@ -1454,7 +1466,7 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         for (self.slots) |*slot| {
-            if (slot.connection) |*connection| {
+            if (slot.connection) |connection| {
                 connection.shutdown() catch {};
             }
         }
@@ -2600,7 +2612,7 @@ pub const Broker = struct {
             // An accept/setup failure must not strand already-started readers
             // behind this finite serve call.
             for (self.slots) |*slot| {
-                if (slot.connection) |*connection| {
+                if (slot.connection) |connection| {
                     connection.shutdown() catch {};
                 }
             }
@@ -3009,7 +3021,8 @@ pub const Broker = struct {
         pending_owned: *bool,
         result: *?anyerror,
     ) Error!ClientTask {
-        var accepted = pending.finish(accept_options) catch |err| {
+        var registration_needs_rollback = true;
+        errdefer if (registration_needs_rollback) {
             self.abortRegistration(
                 index,
                 registration.subscriber_id,
@@ -3021,27 +3034,44 @@ pub const Broker = struct {
                 true,
                 registration_progress.rollback_changed,
             ) catch {};
-            return err;
         };
+        // Reserve stable storage before sending a successful CONNACK. An
+        // allocation failure can then roll registration back without first
+        // telling the peer that its Session was accepted.
+        const stored_connection = try self.allocator.create(
+            runtime.Connection,
+        );
+        var stored_connection_owned = true;
+        var stored_connection_initialized = false;
+        errdefer if (stored_connection_owned) {
+            if (stored_connection_initialized) stored_connection.close();
+            self.allocator.destroy(stored_connection);
+        };
+        var accepted = try pending.finish(accept_options);
         pending_owned.* = false;
-        if (registration.replaced_owner_id) |owner_id| {
-            self.disconnectReplacedSessionOwner(owner_id);
-        }
         var accepted_owns_connection = true;
         errdefer if (accepted_owns_connection) {
             accepted.deinit(self.allocator);
         };
+        stored_connection.* = accepted.connection;
+        accepted.connection = undefined;
+        stored_connection_initialized = true;
+        accepted_owns_connection = false;
+        errdefer accepted.connect.deinit(self.allocator);
+        if (registration.replaced_owner_id) |owner_id| {
+            self.disconnectReplacedSessionOwner(owner_id);
+        }
         self.attachConnection(
             index,
             registration.subscriber_id,
-            &accepted.connection,
+            stored_connection,
             registration.persistent_changed,
         );
+        stored_connection_owned = false;
+        registration_needs_rollback = false;
         // A threshold reached during the provisional CONNECT window was left
         // pending by SnapshotBusy. Attachment is the first safe retry point.
         self.autosavePersistentChangesIfNeeded();
-        accepted_owns_connection = false;
-        errdefer accepted.connect.deinit(self.allocator);
         errdefer self.unregister(
             index,
             registration.subscriber_id,
@@ -3600,7 +3630,7 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         if (!still_replaced) return;
 
-        const connection = &owner.connection.?;
+        const connection = owner.connection.?;
         if (connection.protocol == .v5) {
             connection.writeDisconnectWithProperties(0x8e, &.{}) catch {};
         }
@@ -3668,7 +3698,7 @@ pub const Broker = struct {
         self: *Broker,
         slot_index: usize,
         id: router_mod.SubscriberId,
-        connection: *runtime.Connection,
+        stored_connection: *runtime.Connection,
         persistent_changed: bool,
     ) void {
         self.state_mutex.lockUncancelable(self.io);
@@ -3679,8 +3709,7 @@ pub const Broker = struct {
         std.debug.assert(
             subscriberId(slot_index, slot.generation) == id,
         );
-        slot.connection = connection.*;
-        connection.* = undefined;
+        slot.connection = stored_connection;
         var active_connections: usize = 0;
         for (self.slots) |candidate| {
             active_connections +|= @intFromBool(
@@ -3900,7 +3929,7 @@ pub const Broker = struct {
         // Publish an idle slot only after every field from the old generation
         // has been detached. `claimSlot` observes this state under the same
         // mutex, so it can never reserve a slot that still owns a connection.
-        var connection = slot.connection;
+        const connection = slot.connection;
         slot.connection = null;
         slot.will_handle = null;
         slot.session_handle = null;
@@ -3915,7 +3944,10 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         state_locked = false;
         self.deadline_driver.notify(self.io);
-        defer if (connection) |*value| value.close();
+        defer if (connection) |value| {
+            value.close();
+            self.allocator.destroy(value);
+        };
         // Persist disconnect, Session expiry, and Will scheduling before an
         // orderly close becomes observable to the peer.
         try self.finalizePersistentChange(
@@ -5864,7 +5896,7 @@ pub const Broker = struct {
                 };
             }
 
-            const connection = &slot.connection.?;
+            const connection = slot.connection.?;
             const visible_topic = connection.topic_namespace.visibleTopic(
                 delivery.publication.topic(),
             ) catch |err| switch (err) {
@@ -5977,7 +6009,7 @@ pub const Broker = struct {
     ) Error!?DetachedSessionPacket {
         persistent_changed_out.* = false;
         const handle = slot.session_handle orelse return null;
-        const connection = &(slot.connection orelse return null);
+        const connection = slot.connection orelse return null;
         const route_id = try self.sessions.routeId(handle);
         const client_id = try self.sessions.clientId(handle);
         const persistent_session = self.sessionIsPersistentLocked(handle);
@@ -6773,7 +6805,7 @@ const ClientTask = struct {
         var connect = task.connect;
         defer connect.deinit(task.broker.allocator);
         const slot = &task.broker.slots[task.slot_index];
-        const connection = &slot.connection.?;
+        const connection = slot.connection.?;
         defer task.broker.unregister(
             task.slot_index,
             task.subscriber_id,
@@ -7252,7 +7284,7 @@ const DeliveryWriterTask = struct {
             slot.delivery_ready.reset();
             if (stop.load(.acquire)) return null;
             broker.flushSlot(slot_index, slot) catch |err| {
-                if (slot.connection) |*connection| {
+                if (slot.connection) |connection| {
                     connection.interrupt() catch {};
                 }
                 return err;

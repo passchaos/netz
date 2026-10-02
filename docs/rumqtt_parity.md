@@ -3471,6 +3471,16 @@ proxy evidence for the entire suite.
    five shapes, including 10,948 to 10,236 KiB for balanced 32×32. Mosquitto
    still uses materially less memory in every shape, so connection-state
    sizing remains active work.
+   Broker admission now also keeps the 1,408-byte runtime Connection out of
+   the preallocated capacity table. On the audited 64-bit target this reduces
+   each idle `ClientSlot` from 1,824 to 400 bytes; the default 1,024-slot broker
+   therefore reserves 1,458,176 fewer bytes before clients connect. Stable
+   storage is allocated before sending a successful CONNACK, transferred to
+   the slot only after that write succeeds, and freed after the reader and
+   delivery writer stop. Raw TCP, TLS, WebSocket, Client ID takeover, and
+   allocator leak tests cover the ownership paths. Fully occupied brokers
+   still retain the required Connection state, so this is deterministic
+   capacity-headroom evidence rather than a steady-state payload-memory claim.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence
