@@ -2,6 +2,7 @@ const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
 const exact_range_set = @import("../internal/exact_range_set.zig");
+const http_method = @import("../internal/http_method.zig");
 const quic = @import("../quic/mod.zig");
 const header_fields = @import("codec/header_storage.zig");
 
@@ -5204,17 +5205,7 @@ fn validateHeaderBlockImpl(
 }
 
 fn validateHttpToken(value: []const u8) Error!void {
-    if (value.len == 0) return error.InvalidHeader;
-    for (value) |byte| {
-        if (!isHttpTchar(byte)) return error.InvalidHeader;
-    }
-}
-
-fn isHttpTchar(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
+    if (!http_method.isToken(value)) return error.InvalidHeader;
 }
 
 fn validateUriScheme(scheme: []const u8) Error!void {

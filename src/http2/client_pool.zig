@@ -7,6 +7,7 @@
 const std = @import("std");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const http_method = @import("../internal/http_method.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const runtime = @import("runtime.zig");
 
@@ -196,7 +197,7 @@ pub const Pool = struct {
                 const was_reused = lease.was_reused;
                 lease.discard();
                 if (retry_stale and was_reused and
-                    methodIsIdempotent(request_options.method) and
+                    http_method.isIdempotent(request_options.method) and
                     retryableStaleConnectionError(err))
                 {
                     retry_stale = false;
@@ -263,7 +264,7 @@ pub const Pool = struct {
                 const was_reused = lease.was_reused;
                 lease.discard();
                 if (retry_stale and was_reused and
-                    methodIsIdempotent(request_options.method) and
+                    http_method.isIdempotent(request_options.method) and
                     retryableStaleConnectionError(err))
                 {
                     retry_stale = false;
@@ -672,15 +673,6 @@ fn transportForScheme(scheme: []const u8) Error!Transport {
     return error.UnsupportedScheme;
 }
 
-fn methodIsIdempotent(method: []const u8) bool {
-    return std.mem.eql(u8, method, "GET") or
-        std.mem.eql(u8, method, "HEAD") or
-        std.mem.eql(u8, method, "PUT") or
-        std.mem.eql(u8, method, "DELETE") or
-        std.mem.eql(u8, method, "OPTIONS") or
-        std.mem.eql(u8, method, "TRACE");
-}
-
 fn retryableStaleConnectionError(err: anyerror) bool {
     return switch (err) {
         error.ConnectionAborted,
@@ -725,13 +717,14 @@ test "HTTP/2 client pool validates idle limits" {
 }
 
 test "HTTP/2 stale retry policy accepts only idempotent methods" {
-    try std.testing.expect(methodIsIdempotent("GET"));
-    try std.testing.expect(methodIsIdempotent("HEAD"));
-    try std.testing.expect(methodIsIdempotent("PUT"));
-    try std.testing.expect(methodIsIdempotent("DELETE"));
-    try std.testing.expect(methodIsIdempotent("OPTIONS"));
-    try std.testing.expect(methodIsIdempotent("TRACE"));
-    try std.testing.expect(!methodIsIdempotent("POST"));
-    try std.testing.expect(!methodIsIdempotent("CONNECT"));
-    try std.testing.expect(!methodIsIdempotent("PATCH"));
+    try std.testing.expect(http_method.isIdempotent("GET"));
+    try std.testing.expect(http_method.isIdempotent("HEAD"));
+    try std.testing.expect(http_method.isIdempotent("PUT"));
+    try std.testing.expect(http_method.isIdempotent("DELETE"));
+    try std.testing.expect(http_method.isIdempotent("OPTIONS"));
+    try std.testing.expect(http_method.isIdempotent("TRACE"));
+    try std.testing.expect(http_method.isIdempotent("QUERY"));
+    try std.testing.expect(!http_method.isIdempotent("POST"));
+    try std.testing.expect(!http_method.isIdempotent("CONNECT"));
+    try std.testing.expect(!http_method.isIdempotent("PATCH"));
 }

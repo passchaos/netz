@@ -834,6 +834,7 @@ test "HTTP/1 client pool retries a stale idempotent connection" {
             request = try second.readRequest(.{});
             defer request.deinit(self.server.allocator);
             try std.testing.expectEqualStrings("/retry", request.request.target);
+            try std.testing.expect(request.request.method == .QUERY);
             try second.writeResponse(.{ .body = "retried" });
         }
     };
@@ -849,7 +850,7 @@ test "HTTP/1 client pool retries a stale idempotent connection" {
     defer allocator.free(retry_uri);
     var first = try pool.requestUri(first_uri, .{});
     first.deinit(allocator);
-    var retried = try pool.requestUri(retry_uri, .{});
+    var retried = try pool.requestUri(retry_uri, .{ .method = .QUERY });
     defer retried.deinit(allocator);
     try std.testing.expectEqualStrings("retried", retried.response.body);
 

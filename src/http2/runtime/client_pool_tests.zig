@@ -171,6 +171,10 @@ test "HTTP/2 client pool retries stale reused idempotent connection once" {
                 self.err = error.InvalidRequest;
                 return;
             }
+            if (!std.mem.eql(u8, retried.method, "QUERY")) {
+                self.err = error.InvalidMethod;
+                return;
+            }
             second.writeResponse(retried.stream_id, .{
                 .body = "retried",
             }) catch |err| {
@@ -190,7 +194,7 @@ test "HTTP/2 client pool retries stale reused idempotent connection once" {
     defer allocator.free(retry_uri);
     var seed = try pool.requestUri(seed_uri, .{});
     seed.deinit(allocator);
-    var retried = try pool.requestUri(retry_uri, .{});
+    var retried = try pool.requestUri(retry_uri, .{ .method = "QUERY" });
     defer retried.deinit(allocator);
     try std.testing.expectEqualStrings("retried", retried.body);
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());

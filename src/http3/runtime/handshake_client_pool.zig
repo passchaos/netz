@@ -9,6 +9,7 @@ const std = @import("std");
 const http3 = @import("../mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const fifo_admission = @import("../../internal/fifo_admission.zig");
+const http_method = @import("../../internal/http_method.zig");
 
 pub const Error = error{
     InvalidPoolOptions,
@@ -479,7 +480,7 @@ pub fn Pool(comptime Runtime: type) type {
                     const reused = lease.was_reused;
                     lease.discard();
                     if (retry_stale and reused and
-                        methodIsIdempotent(request_options.method) and
+                        http_method.isIdempotent(request_options.method) and
                         retryableStaleConnectionError(err))
                     {
                         retry_stale = false;
@@ -567,7 +568,7 @@ pub fn Pool(comptime Runtime: type) type {
                     const reused = lease.was_reused;
                     lease.discard();
                     if (retry_stale and reused and
-                        methodIsIdempotent(request_options.method) and
+                        http_method.isIdempotent(request_options.method) and
                         retryableStaleConnectionError(err))
                     {
                         retry_stale = false;
@@ -582,7 +583,7 @@ pub fn Pool(comptime Runtime: type) type {
                     const reused = lease.was_reused;
                     lease.discard();
                     if (retry_stale and reused and
-                        methodIsIdempotent(request_options.method) and
+                        http_method.isIdempotent(request_options.method) and
                         retryableStaleConnectionError(err))
                     {
                         retry_stale = false;
@@ -849,6 +850,15 @@ test "HTTP/3 handshake client pool reuses one authenticated connection" {
                     self.err = error.InvalidUri;
                     return;
                 }
+                const expected_method = if (index == 0) "GET" else "QUERY";
+                if (!std.mem.eql(
+                    u8,
+                    request.request.method,
+                    expected_method,
+                )) {
+                    self.err = error.InvalidMethod;
+                    return;
+                }
                 session.sendResponse(request.stream_id, .{
                     .status = 200,
                     .body = if (index == 0) "one" else "two",
@@ -927,7 +937,7 @@ test "HTTP/3 handshake client pool reuses one authenticated connection" {
 
     var first = try pool.requestUri(first_uri, .{});
     defer first.deinit(allocator);
-    var second = try pool.requestUri(second_uri, .{});
+    var second = try pool.requestUri(second_uri, .{ .method = "QUERY" });
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("one", first.response.body);
     try std.testing.expectEqualStrings("two", second.response.body);
@@ -1444,15 +1454,6 @@ fn nowMillis(io: std.Io) u64 {
     const now = std.Io.Clock.awake.now(io).nanoseconds;
     if (now <= 0) return 0;
     return @as(u64, @intCast(now)) / std.time.ns_per_ms;
-}
-
-fn methodIsIdempotent(method: []const u8) bool {
-    return std.mem.eql(u8, method, "GET") or
-        std.mem.eql(u8, method, "HEAD") or
-        std.mem.eql(u8, method, "PUT") or
-        std.mem.eql(u8, method, "DELETE") or
-        std.mem.eql(u8, method, "OPTIONS") or
-        std.mem.eql(u8, method, "TRACE");
 }
 
 fn retryableStaleConnectionError(err: anyerror) bool {

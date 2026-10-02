@@ -1,6 +1,7 @@
 const std = @import("std");
 const http2 = @import("../../mod.zig");
 const connection_headers = @import("connection.zig");
+const http_method = @import("../../../internal/http_method.zig");
 
 const Error = http2.Error || error{
     MissingPseudoHeader,
@@ -260,10 +261,7 @@ fn validateHeaderValue(value: []const u8) Error!void {
 }
 
 fn validateHttpToken(value: []const u8) Error!void {
-    if (value.len == 0) return error.InvalidHeader;
-    for (value) |byte| {
-        if (!isHttpTchar(byte)) return error.InvalidHeader;
-    }
+    if (!http_method.isToken(value)) return error.InvalidHeader;
 }
 
 pub fn methodIsHead(method: []const u8) bool {
@@ -283,13 +281,6 @@ fn methodHasDefinedPayloadSemantics(method: []const u8) bool {
 
 fn methodIsOptions(method: []const u8) bool {
     return std.mem.eql(u8, method, "OPTIONS");
-}
-
-fn isHttpTchar(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or switch (byte) {
-        '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~' => true,
-        else => false,
-    };
 }
 
 fn validateUriScheme(scheme: []const u8) Error!void {

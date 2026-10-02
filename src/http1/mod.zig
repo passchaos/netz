@@ -1,5 +1,6 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const http_method = @import("../internal/http_method.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const client_pool = @import("client_pool.zig");
@@ -59,17 +60,12 @@ pub const MethodTag = enum {
     }
 
     pub fn safe(self: MethodTag) bool {
-        return switch (self) {
-            .GET, .HEAD, .OPTIONS, .TRACE, .QUERY => true,
-            else => false,
-        };
+        return self != .extension and http_method.isSafe(self.string());
     }
 
     pub fn idempotent(self: MethodTag) bool {
-        return switch (self) {
-            .GET, .HEAD, .PUT, .DELETE, .OPTIONS, .TRACE, .QUERY => true,
-            else => false,
-        };
+        return self != .extension and
+            http_method.isIdempotent(self.string());
     }
 };
 
@@ -133,10 +129,7 @@ pub const Method = union(MethodTag) {
     }
 
     fn validateBytes(bytes: []const u8) Error!void {
-        if (bytes.len == 0) return error.InvalidMethod;
-        for (bytes) |byte| {
-            if (!validHeaderNameByte(byte)) return error.InvalidMethod;
-        }
+        if (!http_method.isToken(bytes)) return error.InvalidMethod;
     }
 
     fn isStandard(bytes: []const u8) bool {
