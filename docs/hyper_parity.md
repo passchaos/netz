@@ -1846,6 +1846,16 @@ sibling reuse, and connection-error precedence.
    fallback and disables the connection allocator after warmup on both peers.
    Uncompressed fragmentation uses the same bounded batching strategy, with a
    40-KiB bidirectional regression crossing the masking boundary.
+   RFC 8441's mutually exclusive resumable application message, Ping, and Close
+   transactions now share one 296-byte tagged union. Automatic Pong/Close stays
+   independent because the receive owner can queue it behind an older
+   application write. On 64-bit targets this reduces each `H2Connection` from
+   2,000 to 1,600 bytes (20.0%) without narrowing payload, cursor, or control
+   state. A layout assertion plus the existing partial-DATA, queued-auto-Pong,
+   close-FIN, and fatal-reset regressions guard the new representation. The
+   bidirectional Hyper h2c/TLS RFC 8441 gate was reconfirmed after this change
+   on 2026-10-02, including fragmented text, Ping/Pong, bounded Close, TLS
+   metadata, and traffic-key update coverage.
    HTTP/1 WebSocket application sends now expose the same single-frame
    timeout/deadline surface as RFC 8441. TCP reports an exact RFC 6455 wire
    prefix, while standard and vail TLS retain a partially submitted ciphertext

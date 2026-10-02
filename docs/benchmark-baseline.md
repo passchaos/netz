@@ -6096,19 +6096,25 @@ exclude runtime stacks, allocator internals, and kernel socket buffers; MaxRSS
 includes the first two but not kernel socket memory. The two scopes are reported
 separately.
 
-The HTTP/1 WebSocket connection layout now overlays its mutually exclusive
-resumable application message, Ping, and Close state in one tagged union while
-keeping automatic Pong/Close state independent for receive/write races. On
-64-bit targets `runtime.Connection` is 1,568 bytes, down from 1,968 bytes: 400
-bytes (20.3%) less fixed state per connection, or 51,200 bytes across the
-128-connection shape above. A compile-time-sensitive unit assertion fixes that
-layout and the bounded message/control/queued-auto-Pong regressions cover every
-variant. This stack/inline-state reduction is separate from the benchmark's
-explicit allocator counters and does not change their reported ratio.
+The HTTP/1 and RFC 8441 WebSocket connection layouts now overlay their
+mutually exclusive resumable application message, Ping, and Close state in one
+shared tagged-union design while keeping automatic Pong/Close state independent
+for receive/write races. On 64-bit targets `runtime.Connection` is 1,568 bytes,
+down from 1,968 bytes, and `runtime.H2Connection` is 1,600 bytes, down from
+2,000 bytes. Each saves 400 bytes of fixed state per live H1 connection or H2
+WebSocket tunnel (20.3% and 20.0%, respectively); the H1 reduction is 51,200
+bytes across the 128-connection shape above. Compile-time-sensitive unit
+assertions fix both layouts, and the bounded message/control/queued-auto-Pong
+regressions cover every variant. This stack/inline-state reduction is separate
+from the benchmark's explicit allocator counters and does not change their
+reported ratio.
 A four-connection ReleaseFast smoke after the change completed 80 measured
 4-KiB round trips with checksum 11,160 at 19.024 us aggregate/roundtrip. It
 reported 54 allocations and 11,016 peak live bytes. With no matched baseline,
 this is functional/no-regression evidence rather than a latency claim.
+The corresponding uncompressed RFC 8441 smoke completed twenty measured 4-KiB
+round trips with checksum 5,100 at 39.298 us/roundtrip and reported 50 measured
+allocations. It likewise serves only as functional/no-regression evidence.
 
 The current-key borrowed visitor receive path now prevalidates each packet
 number once and carries that fact into ACK-range commit. Ordered traffic can
