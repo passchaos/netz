@@ -933,13 +933,36 @@ test "MQTT broker allocates listener ACL metadata on demand" {
 fn shouldScheduleTransientDelivery(
     session_persistent: bool,
     qos: mqtt.QoS,
+    delivery_count: usize,
     queued_count: usize,
     high_watermark: usize,
     same_connection: bool,
 ) bool {
     std.debug.assert(high_watermark != 0);
-    return !same_connection and !session_persistent and qos == .exactly_once and
+    return !same_connection and !session_persistent and qos != .at_most_once and
+        delivery_count > 1 and
         queued_count < high_watermark;
+}
+
+fn networkDeliveryMode(
+    upgrade_outgoing_qos: bool,
+    source_qos: mqtt.QoS,
+) NetworkDeliveryMode {
+    return if (!upgrade_outgoing_qos and source_qos == .at_most_once)
+        .synchronous
+    else
+        .asynchronous;
+}
+
+fn subscriptionsNeedDeliveryWriter(
+    local_maximum_qos: mqtt.QoS,
+    subscriptions: []const mqtt.Subscription,
+) bool {
+    if (local_maximum_qos == .at_most_once) return false;
+    for (subscriptions) |subscription| {
+        if (subscription.qos != .at_most_once) return true;
+    }
+    return false;
 }
 
 test "MQTT transient delivery scheduling respects persistence and watermark" {
@@ -947,6 +970,7 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
     try std.testing.expect(shouldScheduleTransientDelivery(
         false,
         .exactly_once,
+        2,
         0,
         limit,
         false,
@@ -954,6 +978,7 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
     try std.testing.expect(shouldScheduleTransientDelivery(
         false,
         .exactly_once,
+        2,
         limit - 1,
         limit,
         false,
@@ -961,30 +986,84 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
     try std.testing.expect(!shouldScheduleTransientDelivery(
         false,
         .exactly_once,
+        2,
         limit,
         limit,
         false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        false,
+        .at_most_once,
+        2,
+        0,
+        limit,
+        false,
+    ));
+    try std.testing.expect(shouldScheduleTransientDelivery(
+        false,
+        .at_least_once,
+        2,
+        0,
+        limit,
+        false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        true,
+        .exactly_once,
+        2,
+        0,
+        limit,
+        false,
+    ));
+    try std.testing.expect(!shouldScheduleTransientDelivery(
+        false,
+        .exactly_once,
+        2,
+        0,
+        limit,
+        true,
     ));
     try std.testing.expect(!shouldScheduleTransientDelivery(
         false,
         .at_least_once,
+        1,
         0,
         limit,
         false,
     ));
-    try std.testing.expect(!shouldScheduleTransientDelivery(
-        true,
-        .exactly_once,
-        0,
-        limit,
-        false,
+
+    try std.testing.expectEqual(
+        NetworkDeliveryMode.synchronous,
+        networkDeliveryMode(false, .at_most_once),
+    );
+    try std.testing.expectEqual(
+        NetworkDeliveryMode.asynchronous,
+        networkDeliveryMode(false, .at_least_once),
+    );
+    try std.testing.expectEqual(
+        NetworkDeliveryMode.asynchronous,
+        networkDeliveryMode(false, .exactly_once),
+    );
+    try std.testing.expectEqual(
+        NetworkDeliveryMode.asynchronous,
+        networkDeliveryMode(true, .at_most_once),
+    );
+
+    const subscriptions = [_]mqtt.Subscription{
+        .{ .topic_filter = "qos/0", .qos = .at_most_once },
+        .{ .topic_filter = "qos/1", .qos = .at_least_once },
+    };
+    try std.testing.expect(!subscriptionsNeedDeliveryWriter(
+        .at_most_once,
+        &subscriptions,
     ));
-    try std.testing.expect(!shouldScheduleTransientDelivery(
-        false,
+    try std.testing.expect(subscriptionsNeedDeliveryWriter(
+        .at_least_once,
+        &subscriptions,
+    ));
+    try std.testing.expect(!subscriptionsNeedDeliveryWriter(
         .exactly_once,
-        0,
-        limit,
-        true,
+        subscriptions[0..1],
     ));
 }
 
@@ -4929,8 +5008,10 @@ pub const Broker = struct {
         acknowledge_qos1: bool,
         prefixed_packet: ?*runtime.OwnedPacket,
     ) Error!void {
-        const mode: NetworkDeliveryMode = if (!self.options.upgrade_outgoing_qos and
-            publish.qos != .exactly_once) .synchronous else .asynchronous;
+        const mode = networkDeliveryMode(
+            self.options.upgrade_outgoing_qos,
+            publish.qos,
+        );
         const deferred_plan = switch (mode) {
             inline else => |comptime_mode| try self.routeReleasedPublishMode(
                 comptime_mode,
@@ -5408,6 +5489,7 @@ pub const Broker = struct {
                 if (shouldScheduleTransientDelivery(
                     destination.session_persistent,
                     queued_delivery.qos,
+                    enqueued_count,
                     destination.queuedCount(),
                     async_high_watermark,
                     publisher_id != null and
@@ -7149,12 +7231,11 @@ const ClientTask = struct {
                         )) return;
                         return err;
                     };
-                    if (connection.localMaximumQoS() == .exactly_once) {
-                        for (owned.subscribe.subscriptions) |subscription| {
-                            if (subscription.qos != .exactly_once) continue;
-                            try task.ensureDeliveryWriter(slot);
-                            break;
-                        }
+                    if (subscriptionsNeedDeliveryWriter(
+                        connection.localMaximumQoS(),
+                        owned.subscribe.subscriptions,
+                    )) {
+                        try task.ensureDeliveryWriter(slot);
                     }
                 },
                 .unsubscribe => |*owned| {

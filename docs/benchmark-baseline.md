@@ -5440,14 +5440,15 @@ range. The median netz-minus-Mosquitto gap fell from 2,284 to 2,124 KiB
 narrows but does not close the independent-peer memory gap and remains memory
 evidence rather than a throughput claim.
 
-Transient QoS 2 broker fanout now uses one lazy writer per subscribed
+Transient QoS 1/2 broker fanout now uses one lazy writer per subscribed
 connection instead of making a publisher wait for every unrelated subscriber
-socket. The writer starts only after a QoS 2 subscription is processed, shares
-the existing per-connection write serialization, preserves PINGRESP as an
+socket. The writer starts only after a QoS 1/2 subscription is processed,
+subject to the connection's Maximum QoS, shares the existing per-connection
+write serialization, preserves PINGRESP as an
 ordered output barrier, and is joined before slot reuse. Self-delivery stays on
 the synchronous path so its PUBLISH precedes PUBACK/PUBCOMP on the shared
 connection. A queue depth of 16 returns that destination to synchronous
-backpressure before the configured hard queue/drop limit. QoS 0/1 and durable
+backpressure before the configured hard queue/drop limit. QoS 0 and durable
 Session delivery retain their original synchronous paths.
 
 A fixed-binary CPU-0/client and CPU-1/server A/B used 32 publishers, 32
@@ -5456,8 +5457,8 @@ subscribers, MQTT 5 QoS 2, a four-message publisher window, 1,000 warmups and
 deliveries with checksum 18,656,000. Baseline/candidate throughput medians were
 1,591/2,240 publishes/s; the paired candidate/baseline median was 1.417x with
 7/7 wins. Paired p50 and p99 medians fell to 0.653x and 0.682x. The exact
-final-binary QoS 1 five-shape matrix exercises the synchronous route and is the
-current-path control; no QoS 1 speedup is attributed to this change. Three
+final-binary QoS 1 five-shape matrix was the historical synchronous-path
+control. Three
 5,000-publish RSS pairs measured transient QoS 2 medians of 6,544 KiB baseline
 and 6,708 KiB candidate. Three durable-Session QoS 2 controls, which also start
 no writer, measured 6,624/6,620 KiB with overlapping timing.
@@ -5471,6 +5472,32 @@ and `326fec275da8588cfc4a03ce41b67bdad1344e5ba2f5bd1b17b8adb77d47d839`
 respectively. The strict QoS 1/QoS 2 five-shape matrix summary hashes are
 `5f32c63cbd4c0167a4f99c1b1d7f44794d9da516a5a79ee36c053996bc762574`
 and `1df7a0be6e51b819ccde56b9c5d0d99e972a54f95b43cb555dde16149c18a465`.
+
+Extending that writer to multi-destination transient QoS 1 removes unrelated
+subscriber socket writes from the publisher's PUBACK critical path while
+retaining synchronous self-delivery, durable Session delivery, QoS 0 delivery,
+per-connection write serialization, and the 16-delivery fallback watermark.
+An immediate pre-change four-sample five-shape matrix at
+`zig-out/mqtt-broker-matrix/run.20261002T094138Z.1428572` had netz medians of
+27,958 / 50,190 / 2,863 / 4,131 / 20,159 publish/s in serial,
+publishers-32, fanout-32, balanced-32x32, and large-payload order. Two
+consecutive final-binary matrices at
+`zig-out/mqtt-broker-matrix/run.20261002T120130Z.1729461` and
+`zig-out/mqtt-broker-matrix/run.20261002T120212Z.1739418` produced
+29,452–29,635 / 50,482–50,784 / 4,214–4,219 / 3,945–4,065 /
+24,793–25,206 publish/s in the same order. All 120 broker runs completed exact
+delivery counts and checksums. Fanout-32 therefore improved 47.2–47.4%, its
+p99 fell from 1.346 ms to 0.824–0.835 ms, and large-payload throughput improved
+23.0–25.0%; serial and publishers-32 improved 5.3–6.0% and 0.6–1.2%, while
+noisy balanced 32×32 regressed 1.6–4.5%.
+The co-run Mosquitto-normalized ratios improved from 0.651x to 0.953–0.956x
+for fanout-32 and from 0.818x to 1.001–1.030x for large-payload. Median broker
+RSS increased by 112 KiB for fanout-32 and 62–94 KiB for large-payload,
+the bounded cost of lazily created subscriber writers. The baseline and two
+candidate summary SHA-256 values are
+`85ee91fe87aec1b52b30375ae70b35bec52410256836e97fb4b7dc121b91ad95`,
+`2e9586944c14fe6d7813e6aeb7c789c1c500d97c8a44fb0c1bde0dda6aeb4b16`,
+and `54d69bc147b50d53e1eddb1fce5c80fde25513596308b54c33e365ed426abe1f`.
 
 ## MQTT shared-subscription router
 

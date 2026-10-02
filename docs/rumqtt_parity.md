@@ -676,7 +676,7 @@ ABBA schedule, and caps each artifact at 32 MiB and the matrix at 128 MiB.
 Both brokers use `TCP_NODELAY`; Mosquitto's per-packet verbose logging is
 disabled so logging and delayed ACKs cannot manufacture a comparison result.
 
-The current aarch64 Linux capture used CPUs 0/1/2 for
+The pre-QoS-1-writer aarch64 Linux capture used CPUs 0/1/2 for
 client/server/sampler, Zig 0.16.0, four ABBA samples per shape, one exact
 subscription per subscriber, MQTT 5 QoS 1, and 2-ms broker RSS sampling. All
 40 broker runs completed their expected deliveries and independently
@@ -694,7 +694,7 @@ Rates and p99 are medians; brackets show every sample.
 | balanced-32x32 (32×32, 64 B, 4) | 4,187 [4,002–4,238] | 4,549 [4,454–4,742] | 0.920× | 23.002 / 17.443 | 8.68 / 11.31 |
 | large-payload (4×4, 4096 B, 16) | 19,621 [19,525–19,652] | 23,874 [23,426–25,035] | 0.822× | 2.371 / 3.824 | 3.69 / 4.11 |
 
-The matrix exposes rather than hides the current deficit. Netz reaches
+That matrix exposes rather than hides the then-current deficit. Netz reaches
 0.635–0.920× Mosquitto's median throughput across all five shapes. Its p99 is
 lower in the publisher-heavy and 4-KiB shapes and higher in the other three.
 Median broker RSS is higher in three shapes and lower in balanced 32×32 and
@@ -967,7 +967,8 @@ concurrency improved balanced throughput about 4% but regressed fanout
 throughput and p50. Smaller default-path experiments that skipped unused
 delivery-ACL or repeated Session validation work were likewise inconsistent
 across fanout and balanced. The adopted design instead starts one persistent
-writer only after a transient client processes its first QoS 2 subscription.
+writer only after a transient client processes its first QoS 1 or QoS 2
+subscription.
 The publisher retains routing, persistence, and PUBREC/PUBCOMP ordering;
 self-delivery remains synchronous so its PUBLISH precedes PUBACK/PUBCOMP on the
 shared connection. It signals other destination writers rather than waiting on
@@ -977,17 +978,17 @@ the owning reader, and teardown joins the writer before the slot can be reused.
 Durable Sessions remain on the original synchronous path because their detach
 operations serialize on shared Session/persistence state. A 16-delivery
 internal high watermark returns a lagging transient destination to synchronous
-backpressure before the configured hard queue/drop limit. QoS 0/1 compile to
-the original synchronous route and create no writer.
+backpressure before the configured hard queue/drop limit. QoS 0 and durable
+Session delivery retain the original synchronous route and create no writer.
 
 Seven CPU-0/1 fixed-binary, order-alternated transient QoS 2 balanced-32x32
 pairs used 1,000 warmups and 10,000 measured 64-byte publishes at window 4.
 Every arm completed 320,000 deliveries with checksum 18,656,000. Median
 throughput moved from 1,591 to 2,240 publishes/s; the paired throughput median
 was 1.417x with 7/7 wins. Paired p50 and p99 medians were 0.653x and 0.682x.
-The exact final-binary QoS 1 matrix above exercises all five synchronous shapes;
-no QoS 1 speedup is attributed to this change. Three shorter RSS pairs measured
-6,544 KiB baseline versus 6,708 KiB candidate medians for transient QoS 2.
+The exact final-binary QoS 1 matrix above was the synchronous-path control for
+this QoS 2 change. Three shorter RSS pairs measured 6,544 KiB baseline versus
+6,708 KiB candidate medians for transient QoS 2.
 Three durable QoS 2 control pairs, which also start no writer, measured 6,624
 versus 6,620 KiB and overlapping timing. The baseline broker, candidate broker,
 fixed driver, and complete paired log have SHA-256 values
@@ -996,6 +997,41 @@ fixed driver, and complete paired log have SHA-256 values
 `dda118b3c68c0c24f4a77ad9e3c5b939f6df17c6904de7bb131c971e07aafc36`,
 and `326fec275da8588cfc4a03ce41b67bdad1344e5ba2f5bd1b17b8adb77d47d839`
 respectively.
+
+The same bounded writer now covers multi-destination transient QoS 1 delivery.
+Publisher PUBACK no longer waits for unrelated subscriber socket writes;
+self-delivery remains synchronous, and the 16-delivery watermark still
+converts a lagging target to caller-owned backpressure. Source QoS 0 remains
+synchronous unless the broker is configured to upgrade its outgoing QoS.
+Writer creation follows the effective local Maximum QoS, so a QoS-0-only
+connection allocates no writer.
+
+An immediate pre-change matrix is retained at
+`zig-out/mqtt-broker-matrix/run.20261002T094138Z.1428572` (23,252,125 bytes;
+summary SHA-256
+`85ee91fe87aec1b52b30375ae70b35bec52410256836e97fb4b7dc121b91ad95`).
+Two consecutive final-binary captures are retained at
+`zig-out/mqtt-broker-matrix/run.20261002T120130Z.1729461` (23,251,737 bytes;
+summary SHA-256
+`2e9586944c14fe6d7813e6aeb7c789c1c500d97c8a44fb0c1bde0dda6aeb4b16`)
+and `zig-out/mqtt-broker-matrix/run.20261002T120212Z.1739418` (23,251,726
+bytes; summary SHA-256
+`54d69bc147b50d53e1eddb1fce5c80fde25513596308b54c33e365ed426abe1f`).
+All 120 broker runs completed their exact delivery counts and checksums. The
+two final-binary netz medians versus the immediate baseline were 29,452–29,635
+versus 27,958 publish/s for serial, 50,482–50,784 versus 50,190 for
+publishers-32, 4,214–4,219 versus 2,863 for fanout-32, 3,945–4,065 versus
+4,131 for balanced-32x32, and 24,793–25,206 versus 20,159 for large-payload.
+Thus fanout-32 improved 47.2–47.4% and large-payload improved 23.0–25.0%;
+serial and publishers-32 improved 5.3–6.0% and 0.6–1.2%, while noisy balanced
+32×32 regressed 1.6–4.5%.
+Normalizing each ABBA capture to its co-run audited Mosquitto binary produced
+0.953–0.956× for fanout-32 versus 0.651× before, and 1.001–1.030× for
+large-payload versus 0.818× before. Fanout p99 fell from 1.346 ms to
+0.824–0.835 ms. The expected writer cost was about 112 KiB of median broker
+RSS in fanout-32; the 4-KiB shape added 62–94 KiB. These are bounded
+multi-subscriber and large-payload gains, not a universal MQTT superiority
+claim; serial and publisher-heavy scheduling remain visible targets.
 
 A five-pair fixed-binary balanced-32x32 A/B at
 `zig-out/mqtt-qos2-cache-ab` (36,706,710 bytes; aggregate file-hash digest
