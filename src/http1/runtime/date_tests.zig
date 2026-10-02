@@ -256,7 +256,14 @@ test "HTTP/1 server Date is final-response only" {
 
     const switching = try runtime_write.prepareServerResponse(
         allocator,
-        .{ .status = 101, .reason = "Switching Protocols" },
+        .{
+            .status = 101,
+            .reason = "Switching Protocols",
+            .headers = &.{
+                .{ .name = "Connection", .value = "Upgrade" },
+                .{ .name = "Upgrade", .value = "netz-test" },
+            },
+        },
         default_date,
         &scratch,
     );

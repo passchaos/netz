@@ -144,6 +144,10 @@ benchmark response:
   `chunked` name, and require the HTTP/1.1 `Connection: TE` hop-by-hop marker;
   runtime writers synthesize a missing marker, while response writers reject
   the request-only field before emitting bytes;
+- outbound Connection lists use strict token syntax and cannot nominate Host,
+  Content-Length, Transfer-Encoding, Trailer, or Connection itself; Upgrade is
+  limited to HTTP/1.1, requires its connection option and valid protocol-list
+  syntax, and is mandatory on 101 responses;
 - both owned and caller-storage request parsers enforce Host cardinality,
   syntax, and absolute-/authority-form agreement before body parsing, so a
   direct codec caller cannot accidentally omit the runtime validation step;

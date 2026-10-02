@@ -28,6 +28,7 @@ pub const Error = wire.Error || error{
     InvalidContentLength,
     ConflictingContentLength,
     InvalidTransferEncoding,
+    InvalidConnection,
     InvalidTrailer,
     ChunkSizeOverflow,
     ChunkExtensionTooLarge,
@@ -1603,7 +1604,7 @@ fn connectionOptionPresent(
         while (options.next()) |raw_option| {
             const option = wire.trimOws(raw_option);
             validateHeaderName(option) catch {
-                return error.InvalidTransferEncoding;
+                return error.InvalidConnection;
             };
             if (std.ascii.eqlIgnoreCase(option, expected)) found = true;
         }
@@ -1623,6 +1624,86 @@ pub fn validateRequestTeForWrite(
     if (version != .http_1_1) return error.InvalidTransferEncoding;
     if (!try connectionOptionPresent(headers, "te")) {
         return error.InvalidTransferEncoding;
+    }
+}
+
+fn validateUpgradeValue(value: []const u8) Error!void {
+    var protocols = std.mem.splitScalar(u8, value, ',');
+    while (protocols.next()) |raw_protocol| {
+        const protocol = wire.trimOws(raw_protocol);
+        const slash = std.mem.indexOfScalar(u8, protocol, '/');
+        if (slash) |index| {
+            if (index == 0 or index + 1 == protocol.len or
+                std.mem.indexOfScalar(u8, protocol[index + 1 ..], '/') != null)
+            {
+                return error.InvalidConnection;
+            }
+            validateHeaderName(protocol[0..index]) catch {
+                return error.InvalidConnection;
+            };
+            validateHeaderName(protocol[index + 1 ..]) catch {
+                return error.InvalidConnection;
+            };
+        } else {
+            validateHeaderName(protocol) catch {
+                return error.InvalidConnection;
+            };
+        }
+    }
+}
+
+fn connectionOptionIsCritical(option: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(option, "connection") or
+        std.ascii.eqlIgnoreCase(option, "content-length") or
+        std.ascii.eqlIgnoreCase(option, "host") or
+        std.ascii.eqlIgnoreCase(option, "trailer") or
+        std.ascii.eqlIgnoreCase(option, "transfer-encoding");
+}
+
+/// Validate sender-side Connection options and Upgrade coupling. Routing and
+/// message-framing fields cannot become hop-by-hop because an intermediary
+/// removing them would cause the next recipient to interpret different bytes.
+pub fn validateConnectionHeadersForWrite(
+    version: Version,
+    headers: []const Header,
+) Error!void {
+    var has_upgrade_option = false;
+    var has_upgrade = false;
+    for (headers) |header| {
+        if (header.eqlName("upgrade")) {
+            has_upgrade = true;
+            try validateUpgradeValue(header.value);
+            continue;
+        }
+        if (!header.eqlName("connection")) continue;
+        var options = std.mem.splitScalar(u8, header.value, ',');
+        while (options.next()) |raw_option| {
+            const option = wire.trimOws(raw_option);
+            validateHeaderName(option) catch {
+                return error.InvalidConnection;
+            };
+            if (connectionOptionIsCritical(option)) {
+                return error.InvalidConnection;
+            }
+            if (std.ascii.eqlIgnoreCase(option, "upgrade")) {
+                has_upgrade_option = true;
+            }
+        }
+    }
+    if (has_upgrade and
+        (version != .http_1_1 or !has_upgrade_option))
+    {
+        return error.InvalidConnection;
+    }
+}
+
+/// A 101 response only has meaning when it selects a protocol through Upgrade.
+pub fn validateResponseUpgradeForWrite(
+    status: u16,
+    headers: []const Header,
+) Error!void {
+    if (status == 101 and !hasHeaderNamed(headers, "upgrade")) {
+        return error.InvalidResponse;
     }
 }
 
@@ -1755,6 +1836,7 @@ fn validateRequestForWrite(
     if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
     try validateTransferEncodingForVersion(version, headers);
+    try validateConnectionHeadersForWrite(version, headers);
     try validateRequestTeForWrite(version, headers);
     try validateRequestHostParts(method, version, target, headers);
     try validateOutgoingRequestBodyForMethod(
@@ -1850,7 +1932,9 @@ fn validateResponseForWrite(
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
     try validateTransferEncodingForVersion(version, headers);
+    try validateConnectionHeadersForWrite(version, headers);
     try validateResponseTeForWrite(headers);
+    try validateResponseUpgradeForWrite(status, headers);
     try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
     const has_transfer_encoding = hasHeaderNamed(
         headers,
@@ -2635,6 +2719,43 @@ test "HTTP/1 low-level request writers validate framing before output" {
             .body = "",
         },
         .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Connection", .value = "close,,upgrade" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Connection", .value = "Content-Length" },
+                .{ .name = "Content-Length", .value = "0" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Upgrade", .value = "websocket" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_0,
+            .headers = &.{
+                .{ .name = "Connection", .value = "Upgrade" },
+                .{ .name = "Upgrade", .value = "websocket" },
+            },
+            .body = "",
+        },
+        .{
             .expected = error.BufferTooShort,
             .version = .http_1_1,
             .headers = &.{
@@ -2827,6 +2948,26 @@ test "HTTP/1 low-level request writers validate framing before output" {
     try writeRequestChecked(
         &encoded,
         allocator,
+        .GET,
+        "/upgrade",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Connection", .value = "Upgrade" },
+            .{ .name = "Upgrade", .value = "websocket" },
+        },
+        "",
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoded.items,
+        "Connection: Upgrade\r\nUpgrade: websocket\r\n",
+    ) != null);
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
         .CONNECT,
         "example.com:443",
         .http_1_1,
@@ -2909,6 +3050,7 @@ test "HTTP/1 low-level response writers validate framing before output" {
     const prefix = "already-written";
     const invalid_cases = [_]struct {
         expected: Error,
+        status: u16 = 200,
         version: Version,
         headers: []const Header,
         body: []const u8 = "",
@@ -3004,6 +3146,33 @@ test "HTTP/1 low-level response writers validate framing before output" {
             .version = .http_1_1,
             .headers = &.{.{ .name = "TE", .value = "trailers" }},
         },
+        .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_1,
+            .headers = &.{.{
+                .name = "Connection",
+                .value = "keep-alive,",
+            }},
+        },
+        .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Connection", .value = "Transfer-Encoding" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+        },
+        .{
+            .expected = error.InvalidConnection,
+            .version = .http_1_1,
+            .headers = &.{.{ .name = "Upgrade", .value = "websocket" }},
+        },
+        .{
+            .expected = error.InvalidResponse,
+            .status = 101,
+            .version = .http_1_1,
+            .headers = &.{},
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -3017,7 +3186,7 @@ test "HTTP/1 low-level response writers validate framing before output" {
                 &encoded,
                 allocator,
                 case.version,
-                200,
+                case.status,
                 "OK",
                 case.headers,
                 case.body,
@@ -3031,7 +3200,7 @@ test "HTTP/1 low-level response writers validate framing before output" {
                 &encoded,
                 allocator,
                 case.version,
-                200,
+                case.status,
                 "OK",
                 case.headers,
                 case.body,
@@ -3107,6 +3276,26 @@ test "HTTP/1 low-level response writers validate framing before output" {
     );
     try std.testing.expectEqualStrings(
         "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeResponseChecked(
+        &encoded,
+        allocator,
+        .http_1_1,
+        101,
+        "Switching Protocols",
+        &.{
+            .{ .name = "Connection", .value = "Upgrade" },
+            .{ .name = "Upgrade", .value = "websocket" },
+        },
+        "",
+    );
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+            "Connection: Upgrade\r\n" ++
+            "Upgrade: websocket\r\n\r\n",
         encoded.items,
     );
 }

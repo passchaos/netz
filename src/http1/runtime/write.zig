@@ -184,6 +184,10 @@ fn prepareStreamingRequest(
         &scratch.request_headers,
         allocator,
     );
+    try http1.validateConnectionHeadersForWrite(
+        options.version,
+        scratch.request_headers.items,
+    );
     try http1.validateRequestTeForWrite(
         options.version,
         scratch.request_headers.items,
@@ -305,7 +309,15 @@ fn prepareStreamingResponseWithDefaultDate(
     scratch.reset();
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
+    try http1.validateConnectionHeadersForWrite(
+        options.version,
+        options.headers,
+    );
     try http1.validateResponseTeForWrite(options.headers);
+    try http1.validateResponseUpgradeForWrite(
+        options.status,
+        options.headers,
+    );
     try prepareTrailerNames(
         &scratch.trailer_headers,
         &scratch.trailer_name_storage,
@@ -743,6 +755,82 @@ test "HTTP/1 runtime request writer normalizes TE connection semantics" {
     );
 }
 
+test "HTTP/1 runtime writers reject unsafe Connection options" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    try std.testing.expectError(
+        error.InvalidConnection,
+        prepareRequest(
+            allocator,
+            .{
+                .host = "localhost",
+                .headers = &.{
+                    .{ .name = "Connection", .value = "Content-Length" },
+                    .{ .name = "Content-Length", .value = "0" },
+                },
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidConnection,
+        prepareStreamingRequest(
+            allocator,
+            .{
+                .host = "localhost",
+                .headers = &.{.{
+                    .name = "Connection",
+                    .value = "close, bad option",
+                }},
+                .body_length = 0,
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidConnection,
+        prepareRequest(
+            allocator,
+            .{
+                .host = "localhost",
+                .headers = &.{.{
+                    .name = "Upgrade",
+                    .value = "websocket",
+                }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidResponse,
+        prepareResponse(
+            allocator,
+            .{ .status = 101, .reason = "Switching Protocols" },
+            &scratch,
+        ),
+    );
+
+    const switching = try prepareResponse(
+        allocator,
+        .{
+            .status = 101,
+            .reason = "Switching Protocols",
+            .headers = &.{
+                .{ .name = "Connection", .value = "Upgrade" },
+                .{ .name = "Upgrade", .value = "websocket" },
+            },
+        },
+        &scratch,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        switching.header,
+        "Connection: Upgrade\r\nUpgrade: websocket\r\n",
+    ) != null);
+}
+
 test "HTTP/1 response writers enforce empty 205 content" {
     const allocator = std.testing.allocator;
     var scratch: Scratch = .{};
@@ -1057,6 +1145,10 @@ pub fn prepareRequest(
         &scratch.request_headers,
         allocator,
     );
+    try http1.validateConnectionHeadersForWrite(
+        options.version,
+        scratch.request_headers.items,
+    );
     try http1.validateRequestTeForWrite(
         options.version,
         scratch.request_headers.items,
@@ -1326,7 +1418,15 @@ fn prepareResponseFraming(
     if (options.version == .http_0_9) return error.InvalidVersion;
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
+    try http1.validateConnectionHeadersForWrite(
+        options.version,
+        options.headers,
+    );
     try http1.validateResponseTeForWrite(options.headers);
+    try http1.validateResponseUpgradeForWrite(
+        options.status,
+        options.headers,
+    );
     try http1.validateOutgoingResponseBodyForStatus(
         options.status,
         options.headers,
