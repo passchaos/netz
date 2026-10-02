@@ -661,7 +661,7 @@ test "MQTT reconnect Session snapshot stages QoS2 before first wire write" {
     const active = first_client.connection().?;
     const runtime_packet_id_before = active.next_packet_id;
     const runtime_inflight_before = active.outgoing_inflight;
-    const alias_count_before = active.outgoing_topic_aliases.count();
+    const alias_count_before = active.outgoingTopicAliasCount();
     try std.testing.expectError(
         error.InvalidQoS,
         first_client.stagePublish(
@@ -685,7 +685,7 @@ test "MQTT reconnect Session snapshot stages QoS2 before first wire write" {
     );
     try std.testing.expectEqual(
         alias_count_before,
-        active.outgoing_topic_aliases.count(),
+        active.outgoingTopicAliasCount(),
     );
     shared.expected_packet_id = packet_id;
     shared.staged.set(io);
