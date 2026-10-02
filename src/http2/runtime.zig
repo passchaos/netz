@@ -9,6 +9,7 @@ const outbound_headers = @import("runtime/headers/connection.zig");
 const message_headers = @import("runtime/headers/message.zig");
 const push = @import("runtime/push.zig");
 const priority_runtime = @import("runtime/priority.zig");
+const peer_metadata = @import("runtime/peer_metadata.zig");
 const response_scheduler = @import(
     "runtime/response_scheduler.zig",
 );
@@ -3131,44 +3132,7 @@ const LocallyResetStream = struct {
 
 pub const PromisedRequest = push.PromisedRequest;
 
-const AltSvcKey = struct {
-    stream_id: u31,
-    origin: []const u8,
-};
-
-const AltSvcKeyContext = struct {
-    pub fn hash(_: @This(), key: AltSvcKey) u64 {
-        var hasher = std.hash.Wyhash.init(0);
-        std.hash.autoHash(&hasher, key.stream_id);
-        std.hash.autoHash(&hasher, key.origin.len);
-        hasher.update(key.origin);
-        return hasher.final();
-    }
-
-    pub fn eql(_: @This(), lhs: AltSvcKey, rhs: AltSvcKey) bool {
-        return lhs.stream_id == rhs.stream_id and
-            std.mem.eql(u8, lhs.origin, rhs.origin);
-    }
-};
-
-const AltSvcIndex = std.HashMapUnmanaged(
-    AltSvcKey,
-    usize,
-    AltSvcKeyContext,
-    std.hash_map.default_max_load_percentage,
-);
-
-pub const AlternativeService = struct {
-    stream_id: u31,
-    origin: []u8,
-    field_value: []u8,
-
-    fn deinit(self: *AlternativeService, allocator: std.mem.Allocator) void {
-        allocator.free(self.origin);
-        allocator.free(self.field_value);
-        self.* = undefined;
-    }
-};
+pub const AlternativeService = peer_metadata.AlternativeService;
 
 pub const Connection = struct {
     io: std.Io,
@@ -3312,10 +3276,8 @@ pub const Connection = struct {
     /// errors. Application cancellation, timeouts, and REFUSED_STREAM do not
     /// consume this budget.
     local_error_reset_streams: usize = 0,
-    peer_origins: std.ArrayList([]u8) = .empty,
-    peer_origin_index: std.StringHashMapUnmanaged(usize) = .empty,
-    alternative_services: std.ArrayList(AlternativeService) = .empty,
-    alternative_service_index: AltSvcIndex = .empty,
+    peer_origins: ?*peer_metadata.Origins = null,
+    alternative_services: ?*peer_metadata.AlternativeServices = null,
     /// Peers may have stream frames in flight when RST_STREAM reaches them. A
     /// bounded timestamped FIFO lets another response reader discard those
     /// late frames for a minimum duration without connection-lifetime growth.
@@ -3333,6 +3295,19 @@ pub const Connection = struct {
     /// constructor sets it to `https`.
     default_scheme: ?[]const u8 = null,
 
+    fn deinitPeerMetadata(self: *Connection) void {
+        if (self.peer_origins) |origins| {
+            origins.deinit(self.allocator);
+            self.allocator.destroy(origins);
+            self.peer_origins = null;
+        }
+        if (self.alternative_services) |services| {
+            services.deinit(self.allocator);
+            self.allocator.destroy(services);
+            self.alternative_services = null;
+        }
+    }
+
     pub fn close(self: *Connection) void {
         if (self.default_authority) |authority| self.allocator.free(authority);
         self.send_stream_windows.deinit(self.allocator);
@@ -3349,16 +3324,7 @@ pub const Connection = struct {
         self.response_semantics_index.deinit(self.allocator);
         for (self.pending_requests.items[self.pending_request_head..]) |*pending| pending.deinit(self.allocator);
         self.pending_requests.deinit(self.allocator);
-        for (self.peer_origins.items) |origin| {
-            self.allocator.free(origin);
-        }
-        self.peer_origins.deinit(self.allocator);
-        self.peer_origin_index.deinit(self.allocator);
-        for (self.alternative_services.items) |*service| {
-            service.deinit(self.allocator);
-        }
-        self.alternative_services.deinit(self.allocator);
-        self.alternative_service_index.deinit(self.allocator);
+        self.deinitPeerMetadata();
         self.locally_reset_streams.deinit(self.allocator);
         self.locally_reset_stream_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
@@ -6796,13 +6762,15 @@ pub const Connection = struct {
     }
 
     pub fn peerOrigins(self: Connection) []const []u8 {
-        return self.peer_origins.items;
+        const origins = self.peer_origins orelse return &.{};
+        return origins.items();
     }
 
     pub fn alternativeServices(
         self: Connection,
     ) []const AlternativeService {
-        return self.alternative_services.items;
+        const services = self.alternative_services orelse return &.{};
+        return services.items();
     }
 
     /// Return the most recent RFC 9218 signal for a request or promised push.
@@ -14914,74 +14882,62 @@ pub const Connection = struct {
         origin_value: []const u8,
         field_value: []const u8,
     ) Error!void {
-        const key = AltSvcKey{
-            .stream_id = stream_id,
-            .origin = origin_value,
-        };
-        if (self.alternative_service_index.count() != 0) {
-            if (self.alternative_service_index.get(key)) |index| {
-                const service = &self.alternative_services.items[index];
-                if (std.mem.eql(u8, service.field_value, field_value)) return;
-
-                const origin = try self.allocator.dupe(u8, origin_value);
-                errdefer self.allocator.free(origin);
-                const value = try self.allocator.dupe(u8, field_value);
-                errdefer self.allocator.free(value);
-                const key_ptr = self.alternative_service_index.getKeyPtr(key) orelse
-                    unreachable;
-                key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
-                self.allocator.free(service.origin);
-                self.allocator.free(service.field_value);
-                service.origin = origin;
-                service.field_value = value;
-                return;
-            }
+        if (self.alternative_services) |services| {
+            return services.store(
+                self.allocator,
+                stream_id,
+                origin_value,
+                field_value,
+                self.limits.max_alternative_services,
+            );
         }
-        if (self.alternative_services.items.len >=
-            self.limits.max_alternative_services) return;
-        const slot = try self.alternative_service_index.getOrPut(
-            self.allocator,
-            key,
+        if (self.limits.max_alternative_services == 0) return;
+
+        const services = try self.allocator.create(
+            peer_metadata.AlternativeServices,
         );
-        std.debug.assert(!slot.found_existing);
-        errdefer _ = self.alternative_service_index.remove(key);
-        const origin = try self.allocator.dupe(u8, origin_value);
-        errdefer self.allocator.free(origin);
-        const value = try self.allocator.dupe(u8, field_value);
-        errdefer self.allocator.free(value);
-        const index = self.alternative_services.items.len;
-        try self.alternative_services.append(self.allocator, .{
-            .stream_id = stream_id,
-            .origin = origin,
-            .field_value = value,
-        });
-        slot.key_ptr.* = .{ .stream_id = stream_id, .origin = origin };
-        slot.value_ptr.* = index;
+        services.* = .{};
+        errdefer {
+            services.deinit(self.allocator);
+            self.allocator.destroy(services);
+        }
+        try services.store(
+            self.allocator,
+            stream_id,
+            origin_value,
+            field_value,
+            self.limits.max_alternative_services,
+        );
+        self.alternative_services = services;
     }
 
     fn peerOriginKnown(self: Connection, origin: []const u8) bool {
-        return self.peer_origin_index.count() != 0 and
-            self.peer_origin_index.contains(origin);
+        const origins = self.peer_origins orelse return false;
+        return origins.contains(origin);
     }
 
     fn storePeerOrigin(self: *Connection, origin: []const u8) Error!void {
-        if (self.peer_origin_index.count() != 0 and
-            self.peer_origin_index.contains(origin)) return;
-        if (self.peer_origins.items.len >= self.limits.max_peer_origins) {
-            return;
+        if (self.peer_origins) |origins| {
+            return origins.store(
+                self.allocator,
+                origin,
+                self.limits.max_peer_origins,
+            );
         }
-        const slot = try self.peer_origin_index.getOrPut(
+        if (self.limits.max_peer_origins == 0) return;
+
+        const origins = try self.allocator.create(peer_metadata.Origins);
+        origins.* = .{};
+        errdefer {
+            origins.deinit(self.allocator);
+            self.allocator.destroy(origins);
+        }
+        try origins.store(
             self.allocator,
             origin,
+            self.limits.max_peer_origins,
         );
-        std.debug.assert(!slot.found_existing);
-        errdefer _ = self.peer_origin_index.remove(origin);
-        const owned = try self.allocator.dupe(u8, origin);
-        errdefer self.allocator.free(owned);
-        const index = self.peer_origins.items.len;
-        try self.peer_origins.append(self.allocator, owned);
-        self.peer_origin_index.getKeyPtr(origin).?.* = owned;
-        slot.value_ptr.* = index;
+        self.peer_origins = origins;
     }
 
     fn applyLocalLimits(self: *Connection) void {
@@ -19081,6 +19037,90 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
     }
 }
 
+test "HTTP/2 connection keeps peer metadata cold" {
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 2_416), @sizeOf(Connection));
+        try std.testing.expectEqual(
+            @sizeOf(?*peer_metadata.Origins),
+            @sizeOf(@FieldType(Connection, "peer_origins")),
+        );
+        try std.testing.expectEqual(
+            @sizeOf(?*peer_metadata.AlternativeServices),
+            @sizeOf(@FieldType(Connection, "alternative_services")),
+        );
+    }
+
+    const connection = Connection{
+        .io = undefined,
+        .allocator = std.testing.allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    try std.testing.expect(connection.peer_origins == null);
+    try std.testing.expect(connection.alternative_services == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        connection.alternativeServices().len,
+    );
+}
+
+test "HTTP/2 lazy peer metadata creation is transactional" {
+    const allocator = std.testing.allocator;
+
+    var origin_failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 1,
+    });
+    var origin_connection = Connection{
+        .io = undefined,
+        .allocator = origin_failing.allocator(),
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        origin_connection.deinitPeerMetadata();
+        origin_connection.hpack_decoder.deinit(allocator);
+        origin_connection.hpack_encoder.deinit(allocator);
+    }
+    try std.testing.expectError(
+        error.OutOfMemory,
+        origin_connection.storePeerOrigin("https://example.com"),
+    );
+    try std.testing.expect(origin_connection.peer_origins == null);
+    origin_connection.allocator = allocator;
+    try origin_connection.storePeerOrigin("https://example.com");
+
+    var alternative_failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 1,
+    });
+    var alternative_connection = Connection{
+        .io = undefined,
+        .allocator = alternative_failing.allocator(),
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        alternative_connection.deinitPeerMetadata();
+        alternative_connection.hpack_decoder.deinit(allocator);
+        alternative_connection.hpack_encoder.deinit(allocator);
+    }
+    try std.testing.expectError(
+        error.OutOfMemory,
+        alternative_connection.storeAlternativeService(
+            0,
+            "https://example.com",
+            "h3=\":443\"",
+        ),
+    );
+    try std.testing.expect(alternative_connection.alternative_services == null);
+    alternative_connection.allocator = allocator;
+    try alternative_connection.storeAlternativeService(
+        0,
+        "https://example.com",
+        "h3=\":443\"",
+    );
+}
+
 test "HTTP/2 runtime accumulates server ORIGIN entries" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -19151,9 +19191,16 @@ test "HTTP/2 runtime accumulates server ORIGIN entries" {
     );
     try std.testing.expect(client.peerOriginKnown("https://cdn.example.com"));
     try std.testing.expect(!client.peerOriginKnown("https://img.example.com"));
-    try std.testing.expectEqual(@as(?usize, 1), client.peer_origin_index.get("https://cdn.example.com"));
-    try std.testing.expect(client.peer_origin_index.get("https://img.example.com") == null);
-    try std.testing.expect(client.peer_origin_index.get("https://missing.example.com") == null);
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        client.peer_origins.?.getIndex("https://cdn.example.com"),
+    );
+    try std.testing.expect(
+        client.peer_origins.?.getIndex("https://img.example.com") == null,
+    );
+    try std.testing.expect(
+        client.peer_origins.?.getIndex("https://missing.example.com") == null,
+    );
     _ = try client.ping([_]u8{0x41} ** 8);
 
     thread.join();
@@ -19169,9 +19216,7 @@ test "HTTP/2 duplicate ORIGIN entry does not allocate" {
         .role = .client,
     };
     defer {
-        for (connection.peer_origins.items) |origin| allocator.free(origin);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -19186,7 +19231,7 @@ test "HTTP/2 duplicate ORIGIN entry does not allocate" {
     defer connection.allocator = saved_allocator;
     try connection.storePeerOrigin("https://example.com");
     try std.testing.expect(!no_alloc.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 1), connection.peer_origins.items.len);
+    try std.testing.expectEqual(@as(usize, 1), connection.peerOrigins().len);
 }
 
 test "HTTP/2 ORIGIN state enforces connection bound" {
@@ -19199,16 +19244,14 @@ test "HTTP/2 ORIGIN state enforces connection bound" {
         .limits = .{ .max_peer_origins = 2 },
     };
     defer {
-        for (connection.peer_origins.items) |origin| allocator.free(origin);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
 
     try connection.storePeerOrigin("https://one.example");
     try connection.storePeerOrigin("https://two.example");
-    const capacity = connection.peer_origins.capacity;
+    const capacity = connection.peer_origins.?.capacity();
     var no_alloc = std.testing.FailingAllocator.init(allocator, .{
         .fail_index = 0,
     });
@@ -19218,8 +19261,8 @@ test "HTTP/2 ORIGIN state enforces connection bound" {
     try connection.storePeerOrigin("https://one.example");
     try connection.storePeerOrigin("https://three.example");
     try std.testing.expect(!no_alloc.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 2), connection.peer_origins.items.len);
-    try std.testing.expectEqual(capacity, connection.peer_origins.capacity);
+    try std.testing.expectEqual(@as(usize, 2), connection.peerOrigins().len);
+    try std.testing.expectEqual(capacity, connection.peer_origins.?.capacity());
     try std.testing.expect(!connection.peerOriginKnown(
         "https://three.example",
     ));
@@ -19234,9 +19277,7 @@ test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
         .role = .client,
     };
     defer {
-        for (connection.peer_origins.items) |origin| allocator.free(origin);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
+        connection.deinitPeerMetadata();
     }
     const payload = [_]u8{ 0, 1, 'x' };
     // Non-zero stream and incompatible flags are ignored per RFC 8336.
@@ -19267,8 +19308,7 @@ test "HTTP/2 runtime ignores invalid ORIGIN envelope and client origin" {
         .role = .server,
     };
     defer {
-        server_connection.peer_origins.deinit(allocator);
-        server_connection.peer_origin_index.deinit(allocator);
+        server_connection.deinitPeerMetadata();
     }
     try std.testing.expect(try server_connection.handleConnectionFrame(.{
         .header = .{
@@ -19387,26 +19427,24 @@ test "HTTP/2 runtime receives connection and stream ALTSVC frames" {
     );
     try std.testing.expectEqual(
         @as(?usize, 0),
-        client.alternative_service_index.get(.{
-            .stream_id = 0,
-            .origin = "https://example.com",
-        }),
+        client.alternative_services.?.getIndex(
+            0,
+            "https://example.com",
+        ),
     );
     try std.testing.expectEqual(
         @as(?usize, 1),
-        client.alternative_service_index.get(.{
-            .stream_id = 1,
-            .origin = "",
-        }),
+        client.alternative_services.?.getIndex(1, ""),
     );
-    try std.testing.expect(client.alternative_service_index.get(.{
-        .stream_id = 0,
-        .origin = "https://missing.example.com",
-    }) == null);
-    try std.testing.expect(client.alternative_service_index.get(.{
-        .stream_id = 3,
-        .origin = "",
-    }) == null);
+    try std.testing.expect(
+        client.alternative_services.?.getIndex(
+            0,
+            "https://missing.example.com",
+        ) == null,
+    );
+    try std.testing.expect(
+        client.alternative_services.?.getIndex(3, "") == null,
+    );
     _ = try client.ping([_]u8{0x42} ** 8);
     thread.join();
     if (shared.err) |err| return err;
@@ -19421,11 +19459,7 @@ test "HTTP/2 ALTSVC identical replacement does not allocate" {
         .role = .client,
     };
     defer {
-        for (connection.alternative_services.items) |*service| {
-            service.deinit(allocator);
-        }
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -19448,7 +19482,10 @@ test "HTTP/2 ALTSVC identical replacement does not allocate" {
         "h3=\":443\"; ma=3600",
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
-    try std.testing.expectEqual(@as(usize, 1), connection.alternative_services.items.len);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        connection.alternativeServices().len,
+    );
 }
 
 test "HTTP/2 ALTSVC state enforces connection bound" {
@@ -19461,11 +19498,7 @@ test "HTTP/2 ALTSVC state enforces connection bound" {
         .limits = .{ .max_alternative_services = 2 },
     };
     defer {
-        for (connection.alternative_services.items) |*service| {
-            service.deinit(allocator);
-        }
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -19487,14 +19520,14 @@ test "HTTP/2 ALTSVC state enforces connection bound" {
     );
     try std.testing.expectEqual(
         @as(usize, 2),
-        connection.alternative_services.items.len,
+        connection.alternativeServices().len,
     );
     try std.testing.expectEqualStrings(
         "h3=\":8443\"; ma=30",
-        connection.alternative_services.items[0].field_value,
+        connection.alternativeServices()[0].field_value,
     );
 
-    const capacity = connection.alternative_services.capacity;
+    const capacity = connection.alternative_services.?.capacity();
     var no_alloc = std.testing.FailingAllocator.init(allocator, .{
         .fail_index = 0,
     });
@@ -19509,11 +19542,11 @@ test "HTTP/2 ALTSVC state enforces connection bound" {
     try std.testing.expect(!no_alloc.has_induced_failure);
     try std.testing.expectEqual(
         @as(usize, 2),
-        connection.alternative_services.items.len,
+        connection.alternativeServices().len,
     );
     try std.testing.expectEqual(
         capacity,
-        connection.alternative_services.capacity,
+        connection.alternative_services.?.capacity(),
     );
 }
 
@@ -19533,10 +19566,7 @@ test "HTTP/2 zero advertisement bounds retain no peer metadata" {
         },
     };
     defer {
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -25901,10 +25931,7 @@ test "HTTP/2 pending request queue reuses consumed slots" {
             pending.deinit(allocator);
         }
         connection.pending_requests.deinit(allocator);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -25968,10 +25995,7 @@ test "HTTP/2 pending request queue skips peer-reset tombstones" {
             pending.deinit(allocator);
         }
         connection.pending_requests.deinit(allocator);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -26027,10 +26051,7 @@ test "HTTP/2 pending request reset accounting preserves unrelated queue entries"
             pending.deinit(allocator);
         }
         connection.pending_requests.deinit(allocator);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -26081,10 +26102,7 @@ test "HTTP/2 pending request reset tombstone reuses consumed slot without alloca
             pending.deinit(allocator);
         }
         connection.pending_requests.deinit(allocator);
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
     }
@@ -30521,10 +30539,7 @@ test "HTTP/2 partial extension control write fails connection closed" {
         .role = .server,
     };
     defer {
-        connection.peer_origins.deinit(allocator);
-        connection.peer_origin_index.deinit(allocator);
-        connection.alternative_services.deinit(allocator);
-        connection.alternative_service_index.deinit(allocator);
+        connection.deinitPeerMetadata();
     }
 
     try std.testing.expectError(
