@@ -108,7 +108,6 @@ pub fn validateHttp1Server(
         }
         return error.InvalidSubprotocol;
     }
-    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
     return null;
 }
 
@@ -154,8 +153,16 @@ pub fn validateH2Server(
         }
         return error.InvalidSubprotocol;
     }
-    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
     return null;
+}
+
+/// Enforce an application-level requirement for subprotocol negotiation.
+/// RFC 6455 itself permits a server to select no offered subprotocol.
+pub fn enforceSubprotocolRequirement(
+    required: bool,
+    selected: ?[]const u8,
+) !void {
+    if (required and selected == null) return error.InvalidSubprotocol;
 }
 
 pub fn requiredH2(
@@ -502,6 +509,12 @@ test "WebSocket subprotocol offer is stack-first and exact on overflow" {
     try std.testing.expectError(
         error.InvalidSubprotocol,
         selectSubprotocol(allocator, &empty_protocols, &.{"chat.v1"}),
+    );
+    try enforceSubprotocolRequirement(false, null);
+    try enforceSubprotocolRequirement(true, "chat.v1");
+    try std.testing.expectError(
+        error.InvalidSubprotocol,
+        enforceSubprotocolRequirement(true, null),
     );
 
     const sixteen_tokens = [_]http1.Header{.{

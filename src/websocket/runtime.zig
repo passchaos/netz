@@ -1963,6 +1963,7 @@ pub const ConnectAttempt = struct {
     initial_websocket_bytes: ?[]u8,
     key: [24]u8,
     protocols: []const []const u8,
+    require_subprotocol: bool = false,
     enable_permessage_deflate: bool,
     allow_context_takeover: bool,
     compression_threshold: usize,
@@ -2016,6 +2017,10 @@ pub const ConnectAttempt = struct {
         errdefer if (selected_protocol) |protocol| {
             self.allocator.free(protocol);
         };
+        try handshake_headers.enforceSubprotocolRequirement(
+            self.require_subprotocol,
+            selected_protocol,
+        );
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = self.enable_permessage_deflate,
             .allow_context_takeover = self.allow_context_takeover,
@@ -3586,6 +3591,7 @@ pub const Client = struct {
             .initial_websocket_bytes = response_bytes.extra,
             .key = key,
             .protocols = options.protocols,
+            .require_subprotocol = options.require_subprotocol,
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
             .compression_threshold = options.compression_threshold,
@@ -3615,6 +3621,9 @@ pub const ConnectOptions = struct {
     host: []const u8 = "",
     target: []const u8 = "/",
     protocols: []const []const u8 = &.{},
+    /// Require the server to select one offered subprotocol. RFC 6455 permits
+    /// a null selection by default even when the client sent preferences.
+    require_subprotocol: bool = false,
     /// Optional browser Origin value for the opening request.
     origin: ?[]const u8 = null,
     /// Additional opening-handshake fields such as Authorization or Cookie.
@@ -9926,6 +9935,10 @@ pub const H2ConnectAttempt = struct {
         errdefer if (selected_protocol) |protocol| {
             self.allocator.free(protocol);
         };
+        try handshake_headers.enforceSubprotocolRequirement(
+            self.options.require_subprotocol,
+            selected_protocol,
+        );
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = self.options.enable_permessage_deflate,
             .allow_context_takeover = self.options.allow_context_takeover,
@@ -10726,6 +10739,9 @@ pub const H2ConnectOptions = struct {
     /// selected transport rather than hard-coding secure origins.
     scheme: ?[]const u8 = null,
     protocols: []const []const u8 = &.{},
+    /// Require the peer to select one offered subprotocol. The default accepts
+    /// RFC 6455's null selection.
+    require_subprotocol: bool = false,
     /// Optional browser Origin value sent as a regular RFC 8441 header.
     origin: ?[]const u8 = null,
     extra_headers: []const http2.Hpack.HeaderField = &.{},
@@ -12061,7 +12077,15 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     );
     defer response.deinit(allocator);
     try std.testing.expectEqual(@as(?[]u8, null), try validateServerHandshake(allocator, response, client_key, &.{}));
-    try std.testing.expectError(error.InvalidSubprotocol, validateServerHandshake(allocator, response, client_key, &.{"chat.v1"}));
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try validateServerHandshake(
+            allocator,
+            response,
+            client_key,
+            &.{"chat.v1"},
+        ),
+    );
 
     const listed_upgrade =
         "HTTP/1.1 101 Switching Protocols\r\n" ++
@@ -12372,7 +12396,14 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
         .{ .name = "sec-websocket-protocol", .value = "chat.v2, chat.v1" },
     };
     try std.testing.expectError(error.InvalidSubprotocol, selectH2Subprotocol(allocator, &duplicate_split_protocol, &.{ "chat.v1", "chat.v2" }));
-    try std.testing.expectError(error.InvalidSubprotocol, validateH2ServerHandshake(allocator, &.{}, &.{"chat.v1"}));
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try validateH2ServerHandshake(
+            allocator,
+            &.{},
+            &.{"chat.v1"},
+        ),
+    );
 }
 
 test "WebSocket runtime client and server exchange over TCP" {

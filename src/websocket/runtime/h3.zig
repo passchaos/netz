@@ -283,6 +283,9 @@ pub const ConnectOptions = struct {
     authority: []const u8,
     path: []const u8 = "/",
     protocols: []const []const u8 = &.{},
+    /// Require the peer to select one offered subprotocol. The default accepts
+    /// RFC 6455's null selection.
+    require_subprotocol: bool = false,
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
@@ -296,6 +299,9 @@ pub const ConnectOptions = struct {
 /// destination, and default TLS server name are derived from the HTTPS URI.
 pub const UriConnectOptions = struct {
     protocols: []const []const u8 = &.{},
+    /// Require the peer to select one offered subprotocol. The default accepts
+    /// RFC 6455's null selection.
+    require_subprotocol: bool = false,
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
     enable_permessage_deflate: bool = false,
@@ -400,6 +406,10 @@ pub const ConnectAttempt = struct {
         errdefer if (selected_protocol) |protocol| {
             self.h3.?.allocator.free(protocol);
         };
+        try handshake_headers.enforceSubprotocolRequirement(
+            self.options.require_subprotocol,
+            selected_protocol,
+        );
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = self.options.enable_permessage_deflate,
             .allow_context_takeover = self.options.allow_context_takeover,
@@ -4785,6 +4795,7 @@ pub const Client = struct {
                 .authority = endpoint.authority,
                 .path = path,
                 .protocols = options.protocols,
+                .require_subprotocol = options.require_subprotocol,
                 .origin = options.origin,
                 .extra_headers = options.extra_headers,
                 .enable_permessage_deflate = options.enable_permessage_deflate,
@@ -5771,6 +5782,7 @@ fn validateServerHandshake(
     headers: []const http3.Qpack.HeaderField,
     offered_protocols: []const []const u8,
 ) Error!?[]u8 {
+    try handshake_headers.validateOfferedProtocols(offered_protocols);
     try rejectLegacyHeaders(headers);
     if (try optionalHeader(headers, "sec-websocket-version")) |_| {
         return error.InvalidHandshake;
@@ -5787,8 +5799,18 @@ fn validateServerHandshake(
         }
         return error.InvalidSubprotocol;
     }
-    if (offered_protocols.len != 0) return error.InvalidSubprotocol;
     return null;
+}
+
+test "WebSocket HTTP3 permits null subprotocol selection" {
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try validateServerHandshake(
+            std.testing.allocator,
+            &.{},
+            &.{"chat.v1"},
+        ),
+    );
 }
 
 fn selectSubprotocol(

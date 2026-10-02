@@ -1382,6 +1382,10 @@ exact duplicate in the configured preference list before serializing any
 header bytes, while preserving case-sensitive protocol identity. Incoming
 `1#token` lists ignore RFC 2616 null members but still reject a field set with
 no actual subprotocol.
+On the response path, all three transports accept RFC 6455's null subprotocol
+selection even when the client offered preferences. Applications that require
+an application protocol can set `require_subprotocol`; unsolicited or malformed
+server selections remain handshake failures.
 Final isolated `bench-websocket-echo --stats` smokes reported 18 allocations /
 9,916 peak live bytes at one connection and 51 / 39,664 bytes at four
 connections, identical
