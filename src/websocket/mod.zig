@@ -1176,10 +1176,7 @@ pub fn validateClientHandshake(req: http1.Request) Error!void {
     const host = try requiredSingletonHeader(req.headers, "host");
     if (wire.trimOws(host).len == 0) return error.InvalidHandshake;
     http1.validateHostValue(host) catch return error.InvalidHandshake;
-    const upgrade = try requiredSingletonHeader(req.headers, "upgrade");
-    if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) return error.InvalidHandshake;
-    if (!hasHeader(req.headers, "connection")) return error.MissingHeader;
-    if (!headersContainToken(req.headers, "connection", "upgrade")) return error.InvalidHandshake;
+    try validateHttp1UpgradeHeaders(req.headers);
     const version = try requiredSingletonHeader(req.headers, "sec-websocket-version");
     if (!std.mem.eql(u8, version, "13")) return error.InvalidHandshake;
     const key = try requiredSingletonHeader(req.headers, "sec-websocket-key");
@@ -1197,18 +1194,71 @@ fn requiredSingletonHeader(headers: []const http1.Header, name: []const u8) Erro
     return found orelse error.MissingHeader;
 }
 
-fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
-    for (headers) |header| {
-        if (header.eqlName(name)) return true;
+const HeaderListMatch = struct {
+    present: bool = false,
+    matched: bool = false,
+};
+
+fn validUpgradeProtocol(protocol: []const u8) bool {
+    const slash = std.mem.indexOfScalar(u8, protocol, '/') orelse
+        return validSubprotocolToken(protocol);
+    if (slash == 0 or slash + 1 == protocol.len or
+        std.mem.indexOfScalar(u8, protocol[slash + 1 ..], '/') != null)
+    {
+        return false;
     }
-    return false;
+    return validSubprotocolToken(protocol[0..slash]) and
+        validSubprotocolToken(protocol[slash + 1 ..]);
 }
 
-fn headersContainToken(headers: []const http1.Header, name: []const u8, token: []const u8) bool {
+fn headerListMatch(
+    headers: []const http1.Header,
+    name: []const u8,
+    expected: []const u8,
+    comptime upgrade_protocol: bool,
+) Error!HeaderListMatch {
+    var result: HeaderListMatch = .{};
     for (headers) |header| {
-        if (header.eqlName(name) and wire.containsToken(header.value, token)) return true;
+        if (!header.eqlName(name)) continue;
+        result.present = true;
+        var values = std.mem.splitScalar(u8, header.value, ',');
+        while (values.next()) |raw_value| {
+            const value = wire.trimOws(raw_value);
+            if (value.len == 0) continue;
+            const valid = if (upgrade_protocol)
+                validUpgradeProtocol(value)
+            else
+                validSubprotocolToken(value);
+            if (!valid) return error.InvalidHandshake;
+            if (std.ascii.eqlIgnoreCase(value, expected)) {
+                result.matched = true;
+            }
+        }
     }
-    return false;
+    return result;
+}
+
+/// Validate repeated HTTP/1 Upgrade and Connection fields as list-valued
+/// fields. RFC 6455 requires `websocket` and `upgrade` tokens respectively;
+/// unrelated valid protocols and connection options remain interoperable.
+pub fn validateHttp1UpgradeHeaders(headers: []const http1.Header) Error!void {
+    const upgrade = try headerListMatch(
+        headers,
+        "upgrade",
+        "websocket",
+        true,
+    );
+    if (!upgrade.present) return error.MissingHeader;
+    if (!upgrade.matched) return error.InvalidHandshake;
+
+    const connection = try headerListMatch(
+        headers,
+        "connection",
+        "upgrade",
+        false,
+    );
+    if (!connection.present) return error.MissingHeader;
+    if (!connection.matched) return error.InvalidHandshake;
 }
 
 pub fn validateClientKey(key: []const u8) Error!void {
@@ -2274,6 +2324,36 @@ test "WebSocket handshake validation" {
     var split_req = try http1.parseRequest(allocator, split_connection, .{});
     defer split_req.deinit(allocator);
     try validateClientHandshake(split_req);
+
+    const listed_upgrade = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: h2c/1, WebSocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var listed_upgrade_req = try http1.parseRequest(
+        allocator,
+        listed_upgrade,
+        .{},
+    );
+    defer listed_upgrade_req.deinit(allocator);
+    try validateClientHandshake(listed_upgrade_req);
+
+    const split_upgrade = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: h2c/1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var split_upgrade_req = try http1.parseRequest(
+        allocator,
+        split_upgrade,
+        .{},
+    );
+    defer split_upgrade_req.deinit(allocator);
+    try validateClientHandshake(split_upgrade_req);
+
+    const invalid_upgrade = "GET /chat HTTP/1.1\r\nHost: example.com\r\nUpgrade: h2c/bad/version, websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+    var invalid_upgrade_req = try http1.parseRequest(
+        allocator,
+        invalid_upgrade,
+        .{},
+    );
+    defer invalid_upgrade_req.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidHandshake,
+        validateClientHandshake(invalid_upgrade_req),
+    );
 
     const http10 = "GET /chat HTTP/1.0\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
     var http10_req = try http1.parseRequest(allocator, http10, .{});

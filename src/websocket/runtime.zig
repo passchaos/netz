@@ -12063,6 +12063,96 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
     try std.testing.expectEqual(@as(?[]u8, null), try validateServerHandshake(allocator, response, client_key, &.{}));
     try std.testing.expectError(error.InvalidSubprotocol, validateServerHandshake(allocator, response, client_key, &.{"chat.v1"}));
 
+    const listed_upgrade =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: h2c/1, WebSocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "\r\n";
+    var listed_response = try http1.parseResponse(
+        allocator,
+        listed_upgrade,
+        http1HandshakeResponseParseOptions(.{}),
+    );
+    defer listed_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try validateServerHandshake(
+            allocator,
+            listed_response,
+            client_key,
+            &.{},
+        ),
+    );
+
+    const split_upgrade =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: h2c/1\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "\r\n";
+    var split_upgrade_response = try http1.parseResponse(
+        allocator,
+        split_upgrade,
+        http1HandshakeResponseParseOptions(.{}),
+    );
+    defer split_upgrade_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(?[]u8, null),
+        try validateServerHandshake(
+            allocator,
+            split_upgrade_response,
+            client_key,
+            &.{},
+        ),
+    );
+
+    const wrong_status =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "Content-Length: 0\r\n" ++
+        "\r\n";
+    var wrong_status_response = try http1.parseResponse(
+        allocator,
+        wrong_status,
+        http1HandshakeResponseParseOptions(.{}),
+    );
+    defer wrong_status_response.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidHandshake,
+        validateServerHandshake(
+            allocator,
+            wrong_status_response,
+            client_key,
+            &.{},
+        ),
+    );
+
+    const malformed_upgrade =
+        "HTTP/1.1 101 Switching Protocols\r\n" ++
+        "Upgrade: h2c/bad/version, websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" ++
+        "\r\n";
+    var malformed_upgrade_response = try http1.parseResponse(
+        allocator,
+        malformed_upgrade,
+        http1HandshakeResponseParseOptions(.{}),
+    );
+    defer malformed_upgrade_response.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidHandshake,
+        validateServerHandshake(
+            allocator,
+            malformed_upgrade_response,
+            client_key,
+            &.{},
+        ),
+    );
+
     const duplicate_accept =
         "HTTP/1.1 101 Switching Protocols\r\n" ++
         "Upgrade: websocket\r\n" ++

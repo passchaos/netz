@@ -974,6 +974,10 @@ extension negotiation. Default tests replay truncations, byte flips and random
 inputs; Zig's `--fuzz` mode adds coverage guidance. The companion
 `fuzz-stateful` target drives bounded text/binary fragmentation, continuation,
 control-frame interleaving, UTF-8 completion, and aggregate message limits.
+HTTP/1 Upgrade validation combines repeated field lines and comma-separated
+protocol lists, accepts the case-insensitive `websocket` token wherever it
+appears, rejects malformed protocol or Connection members, and requires status
+101 on the client response path.
 The dedicated `fuzz-websocket-compression` target feeds arbitrary bounded bytes
 to the RFC 7692 inflater and verifies exact round trips through the standard and
 Vort compressors, including fragmented plaintext and every negotiated 8-15 bit

@@ -64,17 +64,10 @@ pub fn validateHttp1Server(
     client_key: []const u8,
     offered_protocols: []const []const u8,
 ) !?[]u8 {
-    if (response.version != .http_1_1) return error.InvalidHandshake;
-    const upgrade = try requiredHttp1(response.headers, "upgrade");
-    if (!std.ascii.eqlIgnoreCase(upgrade, "websocket")) {
+    if (response.version != .http_1_1 or response.status != 101) {
         return error.InvalidHandshake;
     }
-    if (!hasHttp1(response.headers, "connection")) {
-        return error.MissingHeader;
-    }
-    if (!http1ContainsToken(response.headers, "connection", "upgrade")) {
-        return error.InvalidHandshake;
-    }
+    try websocket.validateHttp1UpgradeHeaders(response.headers);
     if ((try http1.contentLength(response.headers)) != null) {
         return error.InvalidHandshake;
     }
@@ -383,26 +376,6 @@ pub fn selectSubprotocol(
     }
     if (selected) |protocol| return try allocator.dupe(u8, protocol);
     return null;
-}
-
-fn hasHttp1(headers: []const http1.Header, name: []const u8) bool {
-    for (headers) |header| {
-        if (header.eqlName(name)) return true;
-    }
-    return false;
-}
-
-fn http1ContainsToken(
-    headers: []const http1.Header,
-    name: []const u8,
-    token: []const u8,
-) bool {
-    for (headers) |header| {
-        if (header.eqlName(name) and wire.containsToken(header.value, token)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 fn http1ClientOwned(name: []const u8) bool {
