@@ -86,6 +86,23 @@ pub const Limits = struct {
     proxy_header_timeout: ?std.Io.Duration = null,
 };
 
+/// Limits consulted after the transport preface and socket setup have
+/// completed. Listener-only policy stays in `Limits` instead of being copied
+/// into every live MQTT connection.
+const ConnectionLimits = struct {
+    max_packet_size: usize = 16 * 1024 * 1024,
+    max_pending_ping_packets: usize = 256,
+    proxy_v2_require_client_certificate: bool = false,
+
+    fn from(limits: Limits) ConnectionLimits {
+        return .{
+            .max_packet_size = limits.max_packet_size,
+            .max_pending_ping_packets = limits.max_pending_ping_packets,
+            .proxy_v2_require_client_certificate = limits.proxy_v2_require_client_certificate,
+        };
+    }
+};
+
 pub fn proxyHeaderDeadline(
     io: std.Io,
     limits: Limits,
@@ -325,7 +342,7 @@ pub const Server = struct {
             .allocator = self.allocator,
             .transport = .initTcp(self.io, stream),
             .protocol = options.protocol,
-            .limits = self.limits,
+            .limits = .from(self.limits),
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
@@ -530,7 +547,7 @@ pub const UnixServer = struct {
             .allocator = self.allocator,
             .transport = .initTcp(self.io, stream),
             .protocol = options.protocol,
-            .limits = self.limits,
+            .limits = .from(self.limits),
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
         };
@@ -2180,7 +2197,7 @@ fn connectStreamAttemptBefore(
         .allocator = allocator,
         .transport = .initTcp(io, stream),
         .protocol = options.protocol,
-        .limits = limits,
+        .limits = .from(limits),
         .max_outgoing_inflight = options.max_outgoing_inflight,
         .max_incoming_inflight = mqtt.receiveMaximum(
             options.properties,
@@ -2475,7 +2492,7 @@ pub const Connection = struct {
     endpoint_role: EndpointRole = .unestablished,
     connect_session_expiry: u32 = 0,
     incoming_connect_level: ?u8 = null,
-    limits: Limits = .{},
+    limits: ConnectionLimits = .{},
     next_packet_id: u16 = 1,
     outgoing_inflight: u16 = 0,
     max_outgoing_inflight: u16 = 16,
@@ -2555,7 +2572,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .transport = try .initWebSocket(allocator, ws),
             .protocol = protocol,
-            .limits = limits,
+            .limits = .from(limits),
             .max_outgoing_inflight = max_outgoing_inflight,
             .incoming_topic_alias_maximum = topic_alias_maximum,
         };
@@ -2584,7 +2601,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .transport = undefined,
             .protocol = options.protocol,
-            .limits = options.limits,
+            .limits = .from(options.limits),
             .max_outgoing_inflight = options.max_outgoing_inflight,
             .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse
                 options.max_outgoing_inflight,
@@ -2624,7 +2641,7 @@ pub const Connection = struct {
             .allocator = allocator,
             .transport = .initTlsServer(tls_connection),
             .protocol = protocol,
-            .limits = limits,
+            .limits = .from(limits),
             .max_outgoing_inflight = max_outgoing_inflight,
             .incoming_topic_alias_maximum = topic_alias_maximum,
         };
@@ -7020,11 +7037,36 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 944), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 904), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*proxy_protocol.Metadata),
             @sizeOf(@FieldType(Connection, "proxy_metadata")),
         );
+    }
+}
+
+test "MQTT Connection retains only post-admission limits" {
+    const configured = Limits{
+        .max_packet_size = 12_345,
+        .max_pending_ping_packets = 7,
+        .tcp_nodelay = false,
+        .proxy_protocol = .v2,
+        .proxy_v2_require_tls = true,
+        .proxy_v2_require_client_certificate = true,
+        .proxy_header_timeout = .fromSeconds(9),
+    };
+    const active = ConnectionLimits.from(configured);
+    try std.testing.expectEqual(
+        configured.max_packet_size,
+        active.max_packet_size,
+    );
+    try std.testing.expectEqual(
+        configured.max_pending_ping_packets,
+        active.max_pending_ping_packets,
+    );
+    try std.testing.expect(active.proxy_v2_require_client_certificate);
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 24), @sizeOf(ConnectionLimits));
     }
 }
 
