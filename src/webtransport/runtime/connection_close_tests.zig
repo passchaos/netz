@@ -163,11 +163,12 @@ test "WebTransport peer connection close can be polled after packet dispatch" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(allocator, .init(0)),
     };
     h3_owned = false;
     streams_owned = false;
     defer {
+        session.control.deinit();
         session.streams.deinit();
         session.h3.deinit();
     }
@@ -262,11 +263,12 @@ test "WebTransport forbidden CONNECT frame closes the HTTP/3 connection" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(allocator, .init(0)),
     };
     h3_owned = false;
     streams_owned = false;
     defer {
+        session.control.deinit();
         session.streams.deinit();
         session.h3.deinit();
     }

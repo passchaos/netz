@@ -34,8 +34,10 @@ test "WebTransport classifies terminal close send failures" {
 
 test "WebTransport control records permanent local close failure" {
     var control = try @import("session_control.zig").Control.init(
+        std.testing.allocator,
         .init(0),
     );
+    defer control.deinit();
     try control.beginLocalClose();
     control.recordLocalCloseFailure(0x10203040);
     try std.testing.expect(!control.local_close_started);
@@ -1742,7 +1744,11 @@ test "WebTransport session control parses split framed capsules and skips unknow
     // mirrors transport availability. No complete value is buffered by the
     // state machine while the unknown capsule is skipped.
     for (1..bytes.len) |split| {
-        var candidate = try control_module.Control.init(.init(0));
+        var candidate = try control_module.Control.init(
+            std.testing.allocator,
+            .init(0),
+        );
+        defer candidate.deinit();
         const first = try candidate.feed(bytes[0..split]);
         try std.testing.expect(first == null);
         const second = try candidate.feed(bytes[split..]);
@@ -1773,7 +1779,11 @@ test "WebTransport CONNECT control accepts DATA and skips unknown HTTP/3 frames"
     @memcpy(encoded[len..][0..drain.len], drain);
     len += drain.len;
 
-    var control = try control_module.Control.init(.init(0));
+    var control = try control_module.Control.init(
+        std.testing.allocator,
+        .init(0),
+    );
+    defer control.deinit();
     const event = (try control.feed(encoded[0..len])).?;
     try std.testing.expect(event == .draining);
 }
@@ -1800,7 +1810,11 @@ test "WebTransport CONNECT control rejects forbidden HTTP/3 frame types" {
     for (forbidden) |frame_type| {
         var encoded: [8]u8 = undefined;
         const frame = try quic.varint.encodeInto(&encoded, frame_type);
-        var control = try control_module.Control.init(.init(0));
+        var control = try control_module.Control.init(
+            std.testing.allocator,
+            .init(0),
+        );
+        defer control.deinit();
         if (frame.len > 1) {
             try std.testing.expect(
                 (try control.feed(frame[0 .. frame.len - 1])) == null,
@@ -1831,8 +1845,9 @@ test "Protected session control retains close after drain event" {
     @memcpy(joined[drain.len..][0..close.len], close);
 
     var reader = protected.Reader.init(
-        try control_module.Control.init(.init(0)),
+        try control_module.Control.init(std.testing.allocator, .init(0)),
     );
+    defer reader.deinit();
     const first = (try reader.consume(
         joined[0 .. drain.len + close.len],
     )).?;
@@ -1867,8 +1882,9 @@ test "Protected session control retains maximum close after drain event" {
     @memcpy(joined[drain.len..][0..close.len], close);
 
     var reader = protected.Reader.init(
-        try control_module.Control.init(.init(0)),
+        try control_module.Control.init(std.testing.allocator, .init(0)),
     );
+    defer reader.deinit();
     const first = (try reader.consume(
         joined[0 .. drain.len + close.len],
     )).?;
@@ -1879,22 +1895,103 @@ test "Protected session control retains maximum close after drain event" {
     try std.testing.expectEqualSlices(u8, &reason, second.closed.reason);
 }
 
+test "WebTransport session control uses bounded close reason storage" {
+    const control_module = @import("session_control.zig");
+
+    const inline_reason = [_]u8{'s'} ** 128;
+    var inline_capsule_storage: [4 + control_module.max_close_reason + 16]u8 =
+        undefined;
+    const inline_capsule = try control_module.writeCloseInto(
+        &inline_capsule_storage,
+        31,
+        &inline_reason,
+    );
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var inline_control = try control_module.Control.init(
+        no_alloc.allocator(),
+        .init(0),
+    );
+    defer inline_control.deinit();
+    const inline_result = try inline_control.feedCapsulePayload(inline_capsule);
+    try std.testing.expect(inline_result.event.? == .closed);
+    try std.testing.expectEqualSlices(
+        u8,
+        &inline_reason,
+        inline_result.event.?.closed.reason,
+    );
+    try std.testing.expect(inline_control.close_reason_heap == null);
+
+    const heap_reason = [_]u8{'h'} ** 129;
+    var heap_capsule_storage: [4 + control_module.max_close_reason + 16]u8 =
+        undefined;
+    const heap_capsule = try control_module.writeCloseInto(
+        &heap_capsule_storage,
+        32,
+        &heap_reason,
+    );
+    var heap_control = try control_module.Control.init(
+        no_alloc.allocator(),
+        .init(0),
+    );
+    defer heap_control.deinit();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        heap_control.feedCapsulePayload(heap_capsule),
+    );
+    try std.testing.expect(heap_control.close_reason_heap == null);
+    heap_control.allocator = std.testing.allocator;
+    const heap_result = try heap_control.feedCapsulePayload(heap_capsule);
+    try std.testing.expect(heap_result.event.? == .closed);
+    try std.testing.expectEqualSlices(
+        u8,
+        &heap_reason,
+        heap_result.event.?.closed.reason,
+    );
+    try std.testing.expectEqual(
+        heap_reason.len,
+        heap_control.close_reason_heap.?.len,
+    );
+
+    const invalid_reason = [_]u8{'i'} ** 129;
+    const invalid_capsule = try control_module.writeCloseInto(
+        &heap_capsule_storage,
+        33,
+        &invalid_reason,
+    );
+    invalid_capsule[invalid_capsule.len - 1] = 0xff;
+    var invalid_control = try control_module.Control.init(
+        std.testing.allocator,
+        .init(0),
+    );
+    defer invalid_control.deinit();
+    try std.testing.expectError(
+        error.InvalidCapsule,
+        invalid_control.feedCapsulePayload(invalid_capsule),
+    );
+    try std.testing.expect(invalid_control.close_reason_heap == null);
+}
+
 test "Protected session control clean FIN closes only at capsule boundary" {
     const protected =
         @import("protected_session_control.zig");
     const control_module = @import("session_control.zig");
 
     var clean = protected.Reader.init(
-        try control_module.Control.init(.init(0)),
+        try control_module.Control.init(std.testing.allocator, .init(0)),
     );
+    defer clean.deinit();
     const closed = (try clean.finish()).?;
     try std.testing.expect(closed == .closed);
     try std.testing.expectEqual(@as(u32, 0), closed.closed.code);
     try std.testing.expectEqualStrings("", closed.closed.reason);
 
     var partial = protected.Reader.init(
-        try control_module.Control.init(.init(0)),
+        try control_module.Control.init(std.testing.allocator, .init(0)),
     );
+    defer partial.deinit();
     var close_storage: [64]u8 = undefined;
     const close = try control_module.writeCloseInto(
         &close_storage,

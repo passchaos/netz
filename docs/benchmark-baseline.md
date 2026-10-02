@@ -5611,18 +5611,23 @@ WebTransport datagram runtime benchmark
   datagrams/s: 151031
 ```
 
-WebTransport's resumable CLOSE storage now keeps encoded capsules through 128
-bytes inline and allocates longer reasons at their exact encoded size. This
-reduces `PendingSessionClose` from 1,064 to 160 bytes and removes 904 bytes of
-fixed state from each development, lightweight protected, and authenticated
-client/server Session type on 64-bit targets. The resulting sizes are 2,832 B
-for `AcceptedSession`, 2,640 B for `AcceptedProtectedSession`, 18,184 B for
-`AcceptedHandshakeSession`, 9,120 B for `ClientSession`, 18,728 B for
-`HandshakeClientSession`, and 10,728 B for `ProtectedClientSession`.
-The ordinary short-close path remains allocation-free; tests force the first
-over-inline allocation to fail, exercise successful heap ownership, and retain
-the existing maximum-reason timeout/cleanup coverage. These are deterministic
-layout and allocation-path results rather than throughput measurements.
+WebTransport's resumable outbound CLOSE storage now keeps encoded capsules
+through 128 bytes inline and allocates longer reasons at their exact encoded
+size. The inbound Capsule parser uses the same threshold for peer close
+reasons, retaining longer values in one exact allocation. This reduces
+`PendingSessionClose` from 1,064 to 160 bytes, `session_control.Control` from
+1,160 to 296 bytes, and `protected_session_control.Reader` from 2,224 to 1,360
+bytes. Together the changes remove 1,768 bytes of fixed state from every
+development, lightweight protected, and authenticated client/server Session
+type on 64-bit targets. The resulting sizes are 1,968 B for `AcceptedSession`,
+1,776 B for `AcceptedProtectedSession`, 17,320 B for
+`AcceptedHandshakeSession`, 8,256 B for `ClientSession`, 17,864 B for
+`HandshakeClientSession`, and 9,864 B for `ProtectedClientSession`.
+The ordinary short-close paths remain allocation-free; tests force the first
+over-inline allocation to fail, retry the same input after rollback, reject
+invalid long UTF-8 without leaking, and retain the existing maximum-reason
+timeout coverage. These are deterministic layout and allocation-path results
+rather than throughput measurements.
 
 The stream smoke uses real QUIC/TLS and HTTP/3 CONNECT rather than the
 cleartext development transport. It validates modern bidirectional association

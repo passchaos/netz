@@ -16,28 +16,36 @@ const protected_control =
 const stream_batch = @import("runtime/stream/batch.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
-test "WebTransport sessions keep pending close storage compact" {
+test "WebTransport sessions keep inbound and outbound close storage compact" {
     if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(
+            @as(usize, 296),
+            @sizeOf(session_control.Control),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 1_360),
+            @sizeOf(protected_control.Reader),
+        );
         try std.testing.expectEqual(
             @as(usize, 160),
             @sizeOf(PendingSessionClose),
         );
-        try std.testing.expectEqual(@as(usize, 2_832), @sizeOf(AcceptedSession));
+        try std.testing.expectEqual(@as(usize, 1_968), @sizeOf(AcceptedSession));
         try std.testing.expectEqual(
-            @as(usize, 2_640),
+            @as(usize, 1_776),
             @sizeOf(AcceptedProtectedSession),
         );
         try std.testing.expectEqual(
-            @as(usize, 18_184),
+            @as(usize, 17_320),
             @sizeOf(AcceptedHandshakeSession),
         );
-        try std.testing.expectEqual(@as(usize, 9_120), @sizeOf(ClientSession));
+        try std.testing.expectEqual(@as(usize, 8_256), @sizeOf(ClientSession));
         try std.testing.expectEqual(
-            @as(usize, 18_728),
+            @as(usize, 17_864),
             @sizeOf(HandshakeClientSession),
         );
         try std.testing.expectEqual(
-            @as(usize, 10_728),
+            @as(usize, 9_864),
             @sizeOf(ProtectedClientSession),
         );
     }
@@ -1286,7 +1294,7 @@ pub const PendingSession = struct {
             .session_id = session_id,
             .streams = streams,
             .control = protected_control.Reader.init(
-                try session_control.Control.init(session_id),
+                try session_control.Control.init(allocator, session_id),
             ),
         };
     }
@@ -1454,7 +1462,7 @@ pub const PendingProtectedSession = struct {
             .request = request,
             .session_id = session_id,
             .control = protected_control.Reader.init(
-                try session_control.Control.init(session_id),
+                try session_control.Control.init(allocator, session_id),
             ),
         };
     }
@@ -2934,7 +2942,10 @@ pub const EndpointServer = struct {
             null,
         );
         errdefer streams.deinit();
-        const control = try session_control.Control.init(source.session_id);
+        const control = try session_control.Control.init(
+            self.allocator,
+            source.session_id,
+        );
         const accepted = try self.allocator.create(EndpointAcceptedSession);
         errdefer self.allocator.destroy(accepted);
         const response_result = source.h3.tryAcceptConnectResponse(
@@ -4020,6 +4031,7 @@ pub const AcceptedSession = struct {
         self.request.deinit(allocator);
         self.streams.deinit();
         clearPendingSessionClose(&self.pending_close);
+        self.control.deinit();
         self.* = undefined;
     }
 
@@ -4267,6 +4279,7 @@ pub const AcceptedProtectedSession = struct {
 
     pub fn deinit(self: *AcceptedProtectedSession, allocator: std.mem.Allocator) void {
         clearPendingSessionClose(&self.pending_close);
+        self.control.deinit();
         self.request.deinit(allocator);
         self.* = undefined;
     }
@@ -4760,7 +4773,10 @@ pub const PendingHandshakeSession = struct {
             null,
         );
         errdefer streams.deinit();
-        const control = try session_control.Control.init(self.session_id);
+        const control = try session_control.Control.init(
+            allocator,
+            self.session_id,
+        );
         if (self.h3.dispatcherBound()) {
             try self.h3.tryAcceptConnectResponse(
                 self.session_id.value,
@@ -4960,6 +4976,7 @@ pub const AcceptedHandshakeSession = struct {
     pub fn deinit(self: *AcceptedHandshakeSession) void {
         const allocator = self.h3.established.connection.endpoint.allocator;
         clearPendingSessionClose(&self.pending_close);
+        self.control.deinit();
         self.h3.closeConnectDatagramAssociation(
             self.session_id.value,
         ) catch {};
@@ -6790,6 +6807,7 @@ pub const ClientSession = struct {
 
     pub fn deinit(self: *ClientSession) void {
         clearPendingSessionClose(&self.pending_close);
+        self.control.deinit();
         // Accepted development clients own their H3 transport, but notifying
         // the shared server also lets it retire the CONNECT immediately rather
         // than retaining a dead peer until endpoint shutdown.
@@ -7554,7 +7572,10 @@ pub const ConnectAttempt = struct {
             .response = self.response,
             .streams = streams,
             .control = protected_control.Reader.init(
-                try session_control.Control.init(self.session_id),
+                try session_control.Control.init(
+                    self.h3.?.quic_client.endpoint.allocator,
+                    self.session_id,
+                ),
             ),
         };
         self.* = undefined;
@@ -8243,6 +8264,7 @@ pub const HandshakeClientSession = struct {
 
     pub fn deinit(self: *HandshakeClientSession) void {
         clearPendingSessionClose(&self.pending_close);
+        self.control.deinit();
         if (self.dispatcher) |dispatcher| {
             _ = dispatcher.unregisterConnection(
                 self.dispatcher_handle.?,
@@ -10664,7 +10686,10 @@ pub const HandshakeConnectAttempt = struct {
             null,
         );
         errdefer streams.deinit();
-        const control = try session_control.Control.init(self.session_id);
+        const control = try session_control.Control.init(
+            h3.allocator,
+            self.session_id,
+        );
         if (single_attempt)
             try h3.detachResponseStreamOnce(self.session_id.value)
         else
@@ -10919,6 +10944,7 @@ pub const ProtectedClientSession = struct {
 
     pub fn deinit(self: *ProtectedClientSession) void {
         clearPendingSessionClose(&self.pending_close);
+        self.control.deinit();
         self.datagram_batch_scratch.deinit(
             self.h3.quic_client.endpoint.allocator,
         );
@@ -11568,7 +11594,10 @@ pub const ProtectedConnectAttempt = struct {
         std.debug.assert(self.response_trailers.len == 0);
         std.debug.assert(!self.stream_complete);
         const control = protected_control.Reader.init(
-            try session_control.Control.init(self.session_id),
+            try session_control.Control.init(
+                self.h3.?.quic_client.endpoint.allocator,
+                self.session_id,
+            ),
         );
         const session = ProtectedClientSession{
             .h3 = self.h3.?,
@@ -16260,9 +16289,10 @@ test "WebTransport protected control deadlines reject invalid budgets" {
         .request = undefined,
         .session_id = .init(0),
         .control = protected_control.Reader.init(
-            try session_control.Control.init(.init(0)),
+            try session_control.Control.init(std.testing.allocator, .init(0)),
         ),
     };
+    defer server_session.control.deinit();
     try std.testing.expectError(
         error.Timeout,
         server_session.receiveSessionEventWithTimeout(&server, .zero),
@@ -16329,11 +16359,14 @@ test "WebTransport protected control deadlines reject invalid budgets" {
         .session_id = .init(0),
         .response = undefined,
         .control = protected_control.Reader.init(
-            try session_control.Control.init(.init(0)),
+            try session_control.Control.init(std.testing.allocator, .init(0)),
         ),
     };
     client_h3 = undefined;
-    defer client_session.h3.deinit();
+    defer {
+        client_session.control.deinit();
+        client_session.h3.deinit();
+    }
     var buffer: [16]u8 = undefined;
     try std.testing.expectError(
         error.Timeout,
@@ -17859,11 +17892,15 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(
+            std.testing.allocator,
+            .init(0),
+        ),
     };
     h3_owned = false;
     streams_owned = false;
     defer {
+        session.control.deinit();
         session.streams.deinit();
         session.h3.deinit();
     }

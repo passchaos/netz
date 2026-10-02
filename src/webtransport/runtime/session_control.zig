@@ -14,10 +14,11 @@ const quic = @import("../../quic/mod.zig");
 const association = @import("stream_association.zig");
 
 pub const max_close_reason: usize = webtransport.max_close_reason;
+const inline_close_reason_capacity: usize = 128;
 
 pub const Error = webtransport.Error || http3.runtime.Error || error{
     InvalidSessionState,
-};
+} || std.mem.Allocator.Error;
 
 pub const Event = union(enum) {
     draining,
@@ -67,6 +68,7 @@ const CapsuleStage = enum {
 };
 
 pub const Control = struct {
+    allocator: std.mem.Allocator,
     session_id: webtransport.SessionId,
     state: webtransport.SessionState,
     local_drain_sent: bool = false,
@@ -91,13 +93,78 @@ pub const Control = struct {
     capsule_value_remaining: u64 = 0,
     close_code_bytes: [4]u8 = undefined,
     close_code_len: u8 = 0,
-    close_reason: [max_close_reason]u8 = undefined,
+    close_reason_inline: [inline_close_reason_capacity]u8 = undefined,
+    close_reason_heap: ?[]u8 = null,
     close_reason_len: usize = 0,
 
-    pub fn init(session_id: webtransport.SessionId) Error!Control {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        session_id: webtransport.SessionId,
+    ) Error!Control {
         var state: webtransport.SessionState = .{};
         try state.establish(session_id);
-        return .{ .session_id = session_id, .state = state };
+        return .{
+            .allocator = allocator,
+            .session_id = session_id,
+            .state = state,
+        };
+    }
+
+    pub fn deinit(self: *Control) void {
+        self.clearCloseReason();
+        self.* = undefined;
+    }
+
+    fn closeReason(self: *const Control) []const u8 {
+        if (self.close_reason_heap) |reason| {
+            return reason[0..self.close_reason_len];
+        }
+        return self.close_reason_inline[0..self.close_reason_len];
+    }
+
+    fn prepareCloseReason(self: *Control, len: usize) !void {
+        std.debug.assert(self.close_reason_heap == null);
+        if (len > self.close_reason_inline.len) {
+            self.close_reason_heap = try self.allocator.alloc(u8, len);
+        }
+        self.close_reason_len = 0;
+    }
+
+    fn appendCloseReasonByte(self: *Control, byte: u8) void {
+        if (self.close_reason_heap) |reason| {
+            reason[self.close_reason_len] = byte;
+        } else {
+            self.close_reason_inline[self.close_reason_len] = byte;
+        }
+        self.close_reason_len += 1;
+    }
+
+    fn clearCloseReason(self: *Control) void {
+        if (self.close_reason_heap) |reason| {
+            std.crypto.secureZero(u8, reason);
+            self.allocator.free(reason);
+            self.close_reason_heap = null;
+        } else {
+            std.crypto.secureZero(
+                u8,
+                self.close_reason_inline[0..self.close_reason_len],
+            );
+        }
+        self.close_reason_len = 0;
+    }
+
+    fn restore(self: *Control, snapshot: Control) void {
+        if (self.close_reason_heap) |current| {
+            const same_allocation = if (snapshot.close_reason_heap) |previous|
+                current.ptr == previous.ptr
+            else
+                false;
+            if (!same_allocation) {
+                std.crypto.secureZero(u8, current);
+                self.allocator.free(current);
+            }
+        }
+        self.* = snapshot;
     }
 
     pub fn ensureOpen(self: Control) Error!void {
@@ -197,7 +264,7 @@ pub const Control = struct {
         if (available.len != 0) {
             const snapshot = self.*;
             const result = self.consume(available) catch |err| {
-                self.* = snapshot;
+                self.restore(snapshot);
                 return err;
             };
             const release_result = if (single_attempt)
@@ -211,7 +278,7 @@ pub const Control = struct {
                     result.consumed,
                 );
             release_result catch |err| {
-                self.* = snapshot;
+                self.restore(snapshot);
                 return err;
             };
             if (result.event) |event| return event;
@@ -235,12 +302,12 @@ pub const Control = struct {
             if (!self.atMessageBoundary()) return error.InvalidCapsule;
             // A clean CONNECT FIN without WT_CLOSE_SESSION is defined as a
             // normal close with code zero and an empty reason.
-            self.close_reason_len = 0;
+            self.clearCloseReason();
             self.terminal_reported = true;
             self.state.close(0);
             return .{ .closed = .{
                 .code = 0,
-                .reason = self.close_reason[0..0],
+                .reason = &.{},
             } };
         }
         return null;
@@ -302,7 +369,12 @@ pub const Control = struct {
         self: *Control,
         bytes: []const u8,
     ) Error!?Event {
-        return (try self.consume(bytes)).event;
+        const snapshot = self.*;
+        const result = self.consume(bytes) catch |err| {
+            self.restore(snapshot);
+            return err;
+        };
+        return result.event;
     }
 
     /// Feed Capsule Protocol payload bytes after HTTP/3 DATA framing has
@@ -317,10 +389,14 @@ pub const Control = struct {
         consumed: usize,
         event: ?Event,
     } {
+        const snapshot = self.*;
         var offset: usize = 0;
         while (offset < bytes.len) {
             if (self.terminal_reported) return error.InvalidCapsule;
-            const event = try self.feedCapsuleByte(bytes[offset]);
+            const event = self.feedCapsuleByte(bytes[offset]) catch |err| {
+                self.restore(snapshot);
+                return err;
+            };
             offset += 1;
             if (event) |value| {
                 return .{ .consumed = offset, .event = value };
@@ -338,12 +414,12 @@ pub const Control = struct {
         {
             return error.InvalidCapsule;
         }
-        self.close_reason_len = 0;
+        self.clearCloseReason();
         self.terminal_reported = true;
         self.state.close(0);
         return .{ .closed = .{
             .code = 0,
-            .reason = self.close_reason[0..0],
+            .reason = &.{},
         } };
     }
 
@@ -387,7 +463,7 @@ pub const Control = struct {
                         return error.InvalidCapsule;
                     }
                     self.close_code_len = 0;
-                    self.close_reason_len = 0;
+                    try self.prepareCloseReason(@intCast(length - 4));
                 }
                 self.capsule_stage = .capsule_value;
                 if (length == 0) self.resetCapsule();
@@ -400,8 +476,7 @@ pub const Control = struct {
                         self.close_code_bytes[self.close_code_len] = byte;
                         self.close_code_len += 1;
                     } else {
-                        self.close_reason[self.close_reason_len] = byte;
-                        self.close_reason_len += 1;
+                        self.appendCloseReasonByte(byte);
                     }
                 }
                 self.capsule_value_remaining -= 1;
@@ -410,7 +485,7 @@ pub const Control = struct {
                         webtransport.CapsuleType.close_webtransport_session)
                     {
                         if (!std.unicode.utf8ValidateSlice(
-                            self.close_reason[0..self.close_reason_len],
+                            self.closeReason(),
                         )) {
                             return error.InvalidCapsule;
                         }
@@ -428,7 +503,7 @@ pub const Control = struct {
                         self.state.close(code);
                         return .{ .closed = .{
                             .code = code,
-                            .reason = self.close_reason[0..self.close_reason_len],
+                            .reason = self.closeReason(),
                         } };
                     }
                     self.resetCapsule();

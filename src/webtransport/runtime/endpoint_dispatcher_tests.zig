@@ -408,10 +408,13 @@ test "WebTransport accepted session rejects a second CONNECT and stays usable" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
 
     var peer = try quic.one_rtt.Connection.init(&peer_endpoint, .{
         .peer = server_endpoint.address(),
@@ -628,11 +631,14 @@ test "WebTransport endpoint poll mirrors automatic stream-credit retry timer" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     // Ownership moved to `accepted`; avoid the outer defer.
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -780,10 +786,13 @@ test "WebTransport endpoint reads defer paced receive credit" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
 
     var fixed_io = FixedClockIo{
         .delegate = server_endpoint.io,
@@ -873,10 +882,11 @@ test "WebTransport endpoint reads defer paced receive credit" {
 
     var close_capsule: [4 + session_control.max_close_reason + 16]u8 =
         undefined;
+    const close_reason = [_]u8{'r'} ** 129;
     const capsule = try session_control.writeCloseInto(
         &close_capsule,
         89,
-        "paced control credit rollback",
+        &close_reason,
     );
     var control_bytes: [4 + session_control.max_close_reason + 32]u8 =
         undefined;
@@ -930,6 +940,11 @@ test "WebTransport endpoint reads defer paced receive credit" {
     try std.testing.expect(close_event == .session);
     try std.testing.expect(close_event.session == .closed);
     try std.testing.expectEqual(@as(u32, 89), close_event.session.closed.code);
+    try std.testing.expectEqualSlices(
+        u8,
+        &close_reason,
+        close_event.session.closed.reason,
+    );
     try std.testing.expect(accepted.control.terminal_reported);
     try std.testing.expect(accepted.close_response_pending);
     try std.testing.expectEqual(@as(usize, 0), fixed_io.sleep_calls);
@@ -993,10 +1008,13 @@ test "WebTransport endpoint poll refreshes timers before returning an error" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
 
     // Leave a Capsule type varint incomplete at a clean HTTP/3 DATA-frame
     // boundary, then deliver FIN. Polling must report InvalidCapsule. A PING
@@ -1095,10 +1113,13 @@ test "WebTransport endpoint close failure still schedules expiry" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
     try std.testing.expect(dispatcher.nextTimerDeadline() == null);
 
     var failed_send = ObservedBatchSend{
@@ -1208,10 +1229,13 @@ test "WebTransport endpoint stream write leaves UDP receive to dispatcher" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
     const stream_id = try accepted.openBidirectionalStream();
     try std.testing.expectEqual(@as(u62, 1), stream_id);
 
@@ -1357,10 +1381,13 @@ test "WebTransport endpoint control and datagram sends do not wait for pacing" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
     const reset_stream_id = try accepted.openBidirectionalStream();
     const stopped_stream_id: u62 = 4;
     _ = try accepted.streams.registerPeer(
@@ -1818,10 +1845,13 @@ test "WebTransport endpoint reports peer close before paced response FIN" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
 
     var fixed_io = FixedClockIo{
         .delegate = server_endpoint.io,
@@ -2007,10 +2037,13 @@ test "WebTransport endpoint stream credit operations do not wait for pacing" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     streams_owned = false;
-    defer accepted.streams.deinit();
+    defer {
+        accepted.control.deinit();
+        accepted.streams.deinit();
+    }
 
     var fixed_io = FixedClockIo{
         .delegate = server_endpoint.io,
@@ -2229,7 +2262,7 @@ test "WebTransport dispatcher client defers terminal cleanup pacing" {
         .session_id = .init(0),
         .response = response,
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
         .dispatcher = &dispatcher,
         .dispatcher_handle = handle,
     };
@@ -2802,11 +2835,12 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams_a,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     server_a_h3_owned = false;
     streams_a_owned = false;
     defer {
+        session_a.control.deinit();
         session_a.streams.deinit();
         session_a.h3.deinit();
     }
@@ -2815,11 +2849,12 @@ test "WebTransport sessions poll dispatcher-routed stream and datagram state" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams_b,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     server_b_h3_owned = false;
     streams_b_owned = false;
     defer {
+        session_b.control.deinit();
         session_b.streams.deinit();
         session_b.h3.deinit();
     }
@@ -3701,7 +3736,7 @@ test "WebTransport dispatcher client stream polls do not wait for credit" {
         .session_id = .init(0),
         .response = response,
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
         .dispatcher = &dispatcher,
         .dispatcher_handle = handle,
     };
@@ -4520,11 +4555,12 @@ test "WebTransport handshake receive helpers honor timeouts" {
         .request = undefined,
         .session_id = .init(0),
         .streams = streams,
-        .control = try session_control.Control.init(.init(0)),
+        .control = try session_control.Control.init(std.testing.allocator, .init(0)),
     };
     h3_owned = false;
     streams_owned = false;
     defer {
+        session.control.deinit();
         session.streams.deinit();
         session.h3.deinit();
     }

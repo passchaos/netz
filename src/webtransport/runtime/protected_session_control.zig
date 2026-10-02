@@ -28,6 +28,11 @@ pub const Reader = struct {
         return .{ .control = control };
     }
 
+    pub fn deinit(self: *Reader) void {
+        self.control.deinit();
+        self.* = undefined;
+    }
+
     pub fn consume(
         self: *Reader,
         bytes: []const u8,
