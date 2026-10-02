@@ -3162,8 +3162,9 @@ pub const Connection = struct {
     hpack_encoder: http2.Hpack.Encoder = .{},
     /// Transactional batch encoding copies live HPACK state here. Successful
     /// batches swap the encoders, so both sides retain their dynamic-table and
-    /// scratch capacity for the next batch.
-    hpack_encoder_staging: http2.Hpack.Encoder = .{},
+    /// scratch capacity for the next batch. Single-message connections avoid
+    /// carrying a second encoder by allocating this state on first batch use.
+    hpack_encoder_staging: ?*http2.Hpack.Encoder = null,
     /// Reassembles only fragmented HEADERS/PUSH_PROMISE blocks. A single-frame
     /// block is decoded directly from frame-reader storage, avoiding this copy
     /// on the common path while retaining capacity for later continuations.
@@ -3329,7 +3330,7 @@ pub const Connection = struct {
         self.locally_reset_stream_index.deinit(self.allocator);
         self.hpack_decoder.deinit(self.allocator);
         self.hpack_encoder.deinit(self.allocator);
-        self.hpack_encoder_staging.deinit(self.allocator);
+        self.deinitStagedHpackEncoder();
         self.header_block_scratch.deinit(self.allocator);
         self.write_batch.deinit(self.allocator);
         self.batch_data_headers.deinit(self.allocator);
@@ -6031,19 +6032,43 @@ pub const Connection = struct {
     fn prepareStagedHpackEncoder(
         self: *Connection,
     ) Error!*http2.Hpack.Encoder {
-        try self.hpack_encoder_staging.copyFromRetainingCapacity(
+        if (self.hpack_encoder_staging) |staging| {
+            try staging.copyFromRetainingCapacity(
+                self.allocator,
+                &self.hpack_encoder,
+            );
+            return staging;
+        }
+
+        const staging = try self.allocator.create(http2.Hpack.Encoder);
+        staging.* = .{};
+        errdefer {
+            staging.deinit(self.allocator);
+            self.allocator.destroy(staging);
+        }
+        try staging.copyFromRetainingCapacity(
             self.allocator,
             &self.hpack_encoder,
         );
-        return &self.hpack_encoder_staging;
+        self.hpack_encoder_staging = staging;
+        return staging;
     }
 
     fn commitStagedHpackEncoder(self: *Connection) void {
+        const staging = self.hpack_encoder_staging orelse unreachable;
         std.mem.swap(
             http2.Hpack.Encoder,
             &self.hpack_encoder,
-            &self.hpack_encoder_staging,
+            staging,
         );
+    }
+
+    fn deinitStagedHpackEncoder(self: *Connection) void {
+        if (self.hpack_encoder_staging) |staging| {
+            staging.deinit(self.allocator);
+            self.allocator.destroy(staging);
+            self.hpack_encoder_staging = null;
+        }
     }
 
     const BatchResponseState = struct {
@@ -19042,7 +19067,7 @@ fn writeAll(io: std.Io, stream: net.Stream, bytes: []const u8) net.Stream.Writer
 
 test "HTTP/2 connection keeps peer metadata cold" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 2_304), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 2_144), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*peer_metadata.Origins),
             @sizeOf(@FieldType(Connection, "peer_origins")),
@@ -19055,6 +19080,10 @@ test "HTTP/2 connection keeps peer metadata cold" {
             @sizeOf(?*http2.Hpack.Decoder),
             @sizeOf(@FieldType(Connection, "graceful_preadmit_decoder")),
         );
+        try std.testing.expectEqual(
+            @sizeOf(?*http2.Hpack.Encoder),
+            @sizeOf(@FieldType(Connection, "hpack_encoder_staging")),
+        );
     }
 
     const connection = Connection{
@@ -19066,10 +19095,58 @@ test "HTTP/2 connection keeps peer metadata cold" {
     try std.testing.expect(connection.peer_origins == null);
     try std.testing.expect(connection.alternative_services == null);
     try std.testing.expect(connection.graceful_preadmit_decoder == null);
+    try std.testing.expect(connection.hpack_encoder_staging == null);
     try std.testing.expectEqual(@as(usize, 0), connection.peerOrigins().len);
     try std.testing.expectEqual(
         @as(usize, 0),
         connection.alternativeServices().len,
+    );
+}
+
+test "HTTP/2 lazy staged HPACK encoder rolls back allocation failure" {
+    const allocator = std.testing.allocator;
+    var connection = Connection{
+        .io = undefined,
+        .allocator = allocator,
+        .stream = undefined,
+        .role = .client,
+    };
+    defer {
+        connection.deinitStagedHpackEncoder();
+        connection.hpack_decoder.deinit(allocator);
+        connection.hpack_encoder.deinit(allocator);
+    }
+
+    _ = try connection.hpack_encoder.encodeBlockRetained(allocator, &.{.{
+        .name = "x-live",
+        .value = "one",
+    }});
+    const live_entries =
+        connection.hpack_encoder.dynamic_table.entries.items.len;
+
+    {
+        var failing = std.testing.FailingAllocator.init(allocator, .{
+            // The staging object allocation succeeds; copying its non-empty
+            // dynamic table then fails and must destroy the detached object.
+            .fail_index = 1,
+        });
+        connection.allocator = failing.allocator();
+        defer connection.allocator = allocator;
+        try std.testing.expectError(
+            error.OutOfMemory,
+            connection.prepareStagedHpackEncoder(),
+        );
+    }
+
+    try std.testing.expect(connection.hpack_encoder_staging == null);
+    try std.testing.expectEqual(
+        live_entries,
+        connection.hpack_encoder.dynamic_table.entries.items.len,
+    );
+    const staging = try connection.prepareStagedHpackEncoder();
+    try std.testing.expectEqual(
+        live_entries,
+        staging.dynamic_table.entries.items.len,
     );
 }
 
@@ -30138,7 +30215,7 @@ test "HTTP/2 batch deadlines validate before stream or wire mutation" {
         connection.batch_data_parts.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
     const requests = [_]RequestOptions{.{
         .authority = "localhost",
@@ -30311,7 +30388,7 @@ test "HTTP/2 bodyless request batch partial HEADERS write fails closed" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     const requests = [_]RequestOptions{
@@ -30374,7 +30451,7 @@ test "HTTP/2 single request partial HEADERS write fails closed" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     try std.testing.expectError(
@@ -30410,7 +30487,7 @@ test "HTTP/2 single HEADERS encode failure preserves live HPACK state" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     _ = try connection.hpack_encoder.encodeBlockRetained(allocator, &.{.{
@@ -30483,7 +30560,7 @@ test "HTTP/2 PUSH_PROMISE partial write rolls back state and fails closed" {
         connection.response_semantics_index.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
     try connection.addActivePeerStream(1);
 
@@ -30833,7 +30910,7 @@ test "HTTP/2 streaming request batch partial HEADERS write fails closed" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     const requests = [_]RequestOptions{
@@ -30905,7 +30982,7 @@ test "HTTP/2 body request streaming response batch partial HEADERS fails closed"
         connection.batch_data_parts.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     const requests = [_]RequestOptions{
@@ -30975,7 +31052,7 @@ test "HTTP/2 request body batch partial DATA does not append cleanup resets" {
         connection.batch_data_parts.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     const requests = [_]RequestOptions{.{
@@ -31772,7 +31849,7 @@ test "HTTP/2 request batch rolls back staged HPACK state" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     const requests = [_]RequestOptions{
@@ -31828,7 +31905,7 @@ test "HTTP/2 request body batch rolls back staged HPACK state" {
         connection.batch_data_parts.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
 
     const requests = [_]RequestOptions{
@@ -31891,7 +31968,7 @@ test "HTTP/2 response batch validates transactionally" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
     try connection.addActivePeerStream(1);
     try connection.addActivePeerStream(3);
@@ -31999,7 +32076,7 @@ test "HTTP/2 response batch partial HEADERS write fails closed" {
         connection.write_batch.deinit(allocator);
         connection.hpack_decoder.deinit(allocator);
         connection.hpack_encoder.deinit(allocator);
-        connection.hpack_encoder_staging.deinit(allocator);
+        connection.deinitStagedHpackEncoder();
     }
     try connection.addActivePeerStream(1);
     try connection.addActivePeerStream(3);

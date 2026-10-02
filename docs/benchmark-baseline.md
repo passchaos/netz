@@ -467,10 +467,11 @@ as its streaming counterpart. On `http2_parallel_x10_empty`, this removed one
 bytes. The single before/after timings were 28.607 and 28.363 us/batch, so this
 records the deterministic allocation/copy reduction without claiming a latency
 improvement.
-The client request and server response batch writers now alternate between two
-connection-owned HPACK encoders. Before staging a batch, the inactive encoder
-copies live compression state while retaining its entry, index, string and
-encoded-block capacities; commit is a pointer-free swap. On the same warmed
+The client request and server response batch writers now alternate between the
+live HPACK encoder and a second connection-owned encoder allocated on first
+batch use. Before staging a batch, the inactive encoder copies live compression
+state while retaining its entry, index, string and encoded-block capacities;
+commit is a pointer-free swap. On the same warmed
 parallel x10 run this removed the remaining ten batch-level clone allocations
 per batch, reducing measured calls from 60,000 to 40,000 and cumulative
 requested bytes from 16,200,000 to 12,560,000. The exact-size list now contains
