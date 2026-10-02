@@ -2452,6 +2452,17 @@ fn problemInformationProperty(property: mqtt.Property) bool {
     };
 }
 
+/// Queue state used only by the blocking `ping*` helpers while they preserve
+/// interleaved application packets for the next ordinary read.
+const PendingPingState = struct {
+    packets: std.ArrayList(OwnedPacket) = .empty,
+    head: usize = 0,
+    /// One packet already removed from the wire is retained after a queue-cap
+    /// or allocation failure. The next ordinary reader recovers it after the
+    /// queued prefix.
+    overflow: ?OwnedPacket = null,
+};
+
 pub const Connection = struct {
     const EndpointRole = enum { unestablished, client, server };
 
@@ -2511,12 +2522,9 @@ pub const Connection = struct {
     /// connection's single-writer boundary, avoiding one property-array
     /// allocation for every delivered PUBLISH.
     write_property_scratch: std.ArrayList(mqtt.Property) = .empty,
-    pending_ping_packets: std.ArrayList(OwnedPacket) = .empty,
-    pending_ping_packet_head: usize = 0,
-    /// One packet already removed from the wire is retained after a queue-cap
-    /// or allocation failure. The next ordinary reader can recover it before
-    /// another liveness probe is allowed to consume later bytes.
-    pending_ping_overflow: ?OwnedPacket = null,
+    /// Allocated before the first synchronous PINGREQ. Broker connections and
+    /// event-loop clients therefore do not pay for blocking-ping queue state.
+    pending_ping: ?*PendingPingState = null,
     /// Owned metadata from an explicitly trusted PROXY protocol listener.
     /// Keeping it beside rather than inside the transport allows the same
     /// identity model to span raw TCP, TLS, WS, and WSS adapters.
@@ -2630,13 +2638,7 @@ pub const Connection = struct {
         self.authentication.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
         self.write_property_scratch.deinit(self.allocator);
-        for (self.pending_ping_packets.items[self.pending_ping_packet_head..]) |*packet| {
-            packet.deinit(self.allocator);
-        }
-        self.pending_ping_packets.deinit(self.allocator);
-        if (self.pending_ping_overflow) |*packet| {
-            packet.deinit(self.allocator);
-        }
+        self.clearPendingPingState();
         self.clearProxyMetadata();
         self.topic_namespace.deinit(self.allocator);
         self.transport.close(self.allocator);
@@ -4413,8 +4415,9 @@ pub const Connection = struct {
                 // The packet has already left the transport. Retain it even
                 // when the configured cap or allocator rejects a queue slot,
                 // so the caller can drain the exact wire sequence afterward.
-                std.debug.assert(self.pending_ping_overflow == null);
-                self.pending_ping_overflow = packet;
+                const pending = self.pending_ping.?;
+                std.debug.assert(pending.overflow == null);
+                pending.overflow = packet;
                 packet_owned = false;
                 return err;
             };
@@ -5771,25 +5774,45 @@ pub const Connection = struct {
     }
 
     fn pendingPingPacketCount(self: *const Connection) usize {
-        return self.pending_ping_packets.items.len -
-            self.pending_ping_packet_head +
-            @intFromBool(self.pending_ping_overflow != null);
+        const pending = self.pending_ping orelse return 0;
+        return pending.packets.items.len - pending.head +
+            @intFromBool(pending.overflow != null);
     }
 
-    fn ensurePingQueueAvailable(self: *const Connection) Error!void {
-        if (self.pending_ping_overflow != null or
-            self.limits.max_pending_ping_packets == 0 or
-            self.pendingPingPacketCount() >=
-                self.limits.max_pending_ping_packets)
-        {
+    fn ensurePingQueueAvailable(self: *Connection) Error!void {
+        if (self.limits.max_pending_ping_packets == 0) {
             return error.TooManyPendingPackets;
         }
+        if (self.pending_ping) |pending| {
+            if (pending.overflow != null or
+                self.pendingPingPacketCount() >=
+                    self.limits.max_pending_ping_packets)
+            {
+                return error.TooManyPendingPackets;
+            }
+            return;
+        }
+        const pending = try self.allocator.create(PendingPingState);
+        pending.* = .{};
+        self.pending_ping = pending;
+    }
+
+    fn clearPendingPingState(self: *Connection) void {
+        const pending = self.pending_ping orelse return;
+        for (pending.packets.items[pending.head..]) |*packet| {
+            packet.deinit(self.allocator);
+        }
+        pending.packets.deinit(self.allocator);
+        if (pending.overflow) |*packet| packet.deinit(self.allocator);
+        self.allocator.destroy(pending);
+        self.pending_ping = null;
     }
 
     fn queuePendingPingPacket(
         self: *Connection,
         packet: OwnedPacket,
     ) Error!void {
+        const pending = self.pending_ping.?;
         // Check the semantic bound before append. The caller handles either a
         // full queue or allocator failure by using the emergency slot.
         if (self.pendingPingPacketCount() >=
@@ -5797,44 +5820,41 @@ pub const Connection = struct {
         {
             return error.TooManyPendingPackets;
         }
-        if (self.pending_ping_packet_head != 0 and
-            self.pending_ping_packets.items.len ==
-                self.pending_ping_packets.capacity)
+        if (pending.head != 0 and
+            pending.packets.items.len == pending.packets.capacity)
         {
             self.compactPendingPingPackets();
         }
-        try self.pending_ping_packets.append(self.allocator, packet);
+        try pending.packets.append(self.allocator, packet);
     }
 
     fn compactPendingPingPackets(self: *Connection) void {
-        if (self.pending_ping_packet_head == 0) return;
-        const remaining = self.pending_ping_packets.items.len -
-            self.pending_ping_packet_head;
+        const pending = self.pending_ping.?;
+        if (pending.head == 0) return;
+        const remaining = pending.packets.items.len - pending.head;
         if (remaining != 0) {
             @memmove(
-                self.pending_ping_packets.items[0..remaining],
-                self.pending_ping_packets.items[self.pending_ping_packet_head..],
+                pending.packets.items[0..remaining],
+                pending.packets.items[pending.head..],
             );
         }
-        self.pending_ping_packets.items.len = remaining;
-        self.pending_ping_packet_head = 0;
+        pending.packets.items.len = remaining;
+        pending.head = 0;
     }
 
     fn popPendingPingPacket(self: *Connection) ?OwnedPacket {
-        if (self.pending_ping_packet_head <
-            self.pending_ping_packets.items.len)
-        {
-            const packet =
-                self.pending_ping_packets.items[self.pending_ping_packet_head];
-            self.pending_ping_packet_head += 1;
+        const pending = self.pending_ping orelse return null;
+        if (pending.head < pending.packets.items.len) {
+            const packet = pending.packets.items[pending.head];
+            pending.head += 1;
             return packet;
         }
         // Clear the consumed prefix only after it is exhausted. The overflow
         // packet always followed that prefix on the wire and must remain last.
-        self.pending_ping_packets.clearRetainingCapacity();
-        self.pending_ping_packet_head = 0;
-        if (self.pending_ping_overflow) |packet| {
-            self.pending_ping_overflow = null;
+        pending.packets.clearRetainingCapacity();
+        pending.head = 0;
+        if (pending.overflow) |packet| {
+            pending.overflow = null;
             return packet;
         }
         return null;
@@ -6916,10 +6936,44 @@ test "MQTT Connection allocates PROXY metadata on demand" {
     try std.testing.expect(connection.proxyMetadata() == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 1_120), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 1_040), @sizeOf(Connection));
         try std.testing.expectEqual(
             @sizeOf(?*proxy_protocol.Metadata),
             @sizeOf(@FieldType(Connection, "proxy_metadata")),
+        );
+    }
+}
+
+test "MQTT Connection allocates blocking PING state on demand" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var connection = Connection{
+        .allocator = failing.allocator(),
+        .transport = undefined,
+    };
+
+    try std.testing.expect(connection.pending_ping == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingPingPacketCount());
+    try std.testing.expectError(
+        error.OutOfMemory,
+        connection.ensurePingQueueAvailable(),
+    );
+    try std.testing.expect(connection.pending_ping == null);
+
+    connection.allocator = std.testing.allocator;
+    try connection.ensurePingQueueAvailable();
+    try std.testing.expect(connection.pending_ping != null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingPingPacketCount());
+    connection.clearPendingPingState();
+    try std.testing.expect(connection.pending_ping == null);
+
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 88), @sizeOf(PendingPingState));
+        try std.testing.expectEqual(
+            @sizeOf(?*PendingPingState),
+            @sizeOf(@FieldType(Connection, "pending_ping")),
         );
     }
 }
