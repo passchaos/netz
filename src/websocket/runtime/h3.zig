@@ -415,11 +415,8 @@ pub const ConnectAttempt = struct {
             .allow_context_takeover = self.options.allow_context_takeover,
         };
         const negotiated_extension = try websocket.ExtensionNegotiation
-            .validateResponseForOfferWithPolicy(
-            try optionalHeader(
-                self.response.headers,
-                "sec-websocket-extensions",
-            ),
+            .validateResponseHeadersForOfferWithPolicy(
+            self.response.headers,
             websocket.ExtensionNegotiation.offerValue(extension_policy),
             extension_policy,
         );

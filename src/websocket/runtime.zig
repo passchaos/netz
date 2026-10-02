@@ -2026,11 +2026,8 @@ pub const ConnectAttempt = struct {
             .allow_context_takeover = self.allow_context_takeover,
         };
         const selected_extension = try websocket.ExtensionNegotiation
-            .validateResponseForOfferWithPolicy(
-            try optionalSingletonHeader(
-                self.response.headers,
-                "sec-websocket-extensions",
-            ),
+            .validateResponseHeadersForOfferWithPolicy(
+            self.response.headers,
             websocket.ExtensionNegotiation.offerValue(extension_policy),
             extension_policy,
         );
@@ -9944,11 +9941,8 @@ pub const H2ConnectAttempt = struct {
             .allow_context_takeover = self.options.allow_context_takeover,
         };
         const selected_extension = try websocket.ExtensionNegotiation
-            .validateResponseForOfferWithPolicy(
-            try optionalH2SingletonHeader(
-                self.response.headers,
-                "sec-websocket-extensions",
-            ),
+            .validateResponseHeadersForOfferWithPolicy(
+            self.response.headers,
             websocket.ExtensionNegotiation.offerValue(extension_policy),
             extension_policy,
         );
@@ -12206,7 +12200,7 @@ test "WebSocket client handshake accepts split Connection and rejects duplicate 
         http1HandshakeResponseParseOptions(.{}),
     );
     defer duplicate_extensions_response.deinit(allocator);
-    try std.testing.expectError(error.InvalidHandshake, validateServerHandshake(allocator, duplicate_extensions_response, client_key, &.{}));
+    try std.testing.expectError(error.InvalidExtension, validateServerHandshake(allocator, duplicate_extensions_response, client_key, &.{}));
 
     const content_length_101 =
         "HTTP/1.1 101 Switching Protocols\r\n" ++
@@ -12327,7 +12321,15 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
         .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover" },
         .{ .name = "sec-websocket-extensions", .value = "permessage-deflate; server_no_context_takeover; client_no_context_takeover" },
     };
-    try std.testing.expectError(error.InvalidHandshake, optionalH2SingletonHeader(&duplicate_extensions, "sec-websocket-extensions"));
+    try std.testing.expectError(
+        error.InvalidExtension,
+        websocket.ExtensionNegotiation
+            .validateResponseHeadersForOfferWithPolicy(
+            &duplicate_extensions,
+            "permessage-deflate; server_no_context_takeover; client_no_context_takeover",
+            .{ .enable_permessage_deflate = true },
+        ),
+    );
 
     const split_offer = [_]http2.Hpack.HeaderField{
         .{ .name = "sec-websocket-extensions", .value = "x-unknown" },

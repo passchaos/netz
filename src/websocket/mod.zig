@@ -296,23 +296,68 @@ pub const ExtensionNegotiation = struct {
         const raw = header_value orelse return .{};
         if (!policy.enable_permessage_deflate) return error.InvalidExtension;
         var negotiated: ?ExtensionNegotiation = null;
+        try mergeResponseValue(raw, policy, &negotiated);
+        return negotiated orelse error.InvalidExtension;
+    }
+
+    /// Validate all repeated Sec-WebSocket-Extensions response fields as one
+    /// HTTP list.
+    pub fn validateResponseHeadersWithPolicy(
+        headers: anytype,
+        policy: Policy,
+    ) Error!ExtensionNegotiation {
+        var saw_header = false;
+        var negotiated: ?ExtensionNegotiation = null;
+        for (headers) |header| {
+            if (!std.ascii.eqlIgnoreCase(
+                header.name,
+                "sec-websocket-extensions",
+            )) continue;
+            saw_header = true;
+            if (!policy.enable_permessage_deflate) {
+                return error.InvalidExtension;
+            }
+            try mergeResponseValue(header.value, policy, &negotiated);
+        }
+        if (!saw_header) return .{};
+        return negotiated orelse error.InvalidExtension;
+    }
+
+    /// Validate repeated response fields and bind the selected extension to
+    /// the client's exact offer.
+    pub fn validateResponseHeadersForOfferWithPolicy(
+        headers: anytype,
+        offer_header: ?[]const u8,
+        policy: Policy,
+    ) Error!ExtensionNegotiation {
+        const response = try validateResponseHeadersWithPolicy(
+            headers,
+            policy,
+        );
+        return validateResponseAgainstOffer(response, offer_header);
+    }
+
+    fn mergeResponseValue(
+        raw: []const u8,
+        policy: Policy,
+        negotiated: *?ExtensionNegotiation,
+    ) Error!void {
         var parser = ExtensionListParser.init(raw);
         while (try parser.next(.response)) |extension| {
             switch (extension) {
                 .unknown, .declined => return error.InvalidExtension,
                 .permessage_deflate => |parsed| {
-                    if (negotiated != null) return error.InvalidExtension;
+                    if (negotiated.* != null) return error.InvalidExtension;
                     if (!policy.allow_context_takeover and
                         (!parsed.client_no_context_takeover or
                             !parsed.server_no_context_takeover))
                     {
                         return error.InvalidExtension;
                     }
-                    negotiated = parsed;
+                    negotiated.* = parsed;
                 },
             }
         }
-        return negotiated orelse error.InvalidExtension;
     }
 
     /// Validate a server selection against the exact extension offer sent by
@@ -327,6 +372,13 @@ pub const ExtensionNegotiation = struct {
         policy: Policy,
     ) Error!ExtensionNegotiation {
         const response = try validateResponseWithPolicy(header_value, policy);
+        return validateResponseAgainstOffer(response, offer_header);
+    }
+
+    fn validateResponseAgainstOffer(
+        response: ExtensionNegotiation,
+        offer_header: ?[]const u8,
+    ) Error!ExtensionNegotiation {
         if (!response.permessage_deflate) return response;
 
         const raw_offer = offer_header orelse return error.InvalidExtension;
@@ -2784,6 +2836,64 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
         "permessage-deflate; server_no_context_takeover; client_no_context_takeover; client_max_window_bits=\"12\"",
     );
     try std.testing.expectEqual(@as(?u8, 12), small_window_response.client_max_window_bits);
+    const split_response_headers = [_]http1.Header{
+        .{ .name = "Sec-WebSocket-Extensions", .value = "" },
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "permessage-deflate",
+        },
+    };
+    const split_response = try ExtensionNegotiation
+        .validateResponseHeadersForOfferWithPolicy(
+        &split_response_headers,
+        "permessage-deflate",
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        },
+    );
+    try std.testing.expect(split_response.permessage_deflate);
+
+    const duplicate_response_headers = [_]http1.Header{
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "permessage-deflate",
+        },
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = ", permessage-deflate",
+        },
+    };
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseHeadersForOfferWithPolicy(
+            &duplicate_response_headers,
+            "permessage-deflate",
+            .{
+                .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
+            },
+        ),
+    );
+
+    const unknown_response_headers = [_]http1.Header{
+        .{
+            .name = "Sec-WebSocket-Extensions",
+            .value = "permessage-deflate",
+        },
+        .{ .name = "Sec-WebSocket-Extensions", .value = "x-unknown" },
+    };
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.validateResponseHeadersForOfferWithPolicy(
+            &unknown_response_headers,
+            "permessage-deflate",
+            .{
+                .enable_permessage_deflate = true,
+                .allow_context_takeover = true,
+            },
+        ),
+    );
     var invalid_window_output: std.ArrayList(u8) = .empty;
     defer invalid_window_output.deinit(allocator);
     try std.testing.expectError(

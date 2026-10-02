@@ -988,6 +988,10 @@ Syntactically valid `permessage-deflate` offers with unknown, duplicate, or
 invalid-valued parameters are declined independently as RFC 7692 requires, so
 a later valid alternative can still be selected without weakening the fatal
 RFC 6455 syntax boundary.
+Client response validation also combines repeated extension field lines before
+checking the exact offer. A null list member beside one negotiated extension is
+tolerated, while an unknown server selection or a repeated
+`permessage-deflate` selection remains a fatal handshake error.
 The dedicated `fuzz-websocket-compression` target feeds arbitrary bounded bytes
 to the RFC 7692 inflater and verifies exact round trips through the standard and
 Vort compressors, including fragmented plaintext and every negotiated 8-15 bit
