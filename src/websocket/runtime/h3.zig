@@ -5804,11 +5804,7 @@ fn selectSubprotocol(
 }
 
 fn validateProtocols(protocols: []const []const u8) Error!void {
-    for (protocols) |protocol| {
-        if (!websocket.validSubprotocolToken(protocol)) {
-            return error.InvalidSubprotocol;
-        }
-    }
+    return handshake_headers.validateOfferedProtocols(protocols);
 }
 
 fn acceptExtensions(

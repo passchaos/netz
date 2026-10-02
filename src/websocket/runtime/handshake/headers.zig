@@ -29,11 +29,9 @@ pub fn prepareProtocolValue(
     protocols: []const []const u8,
     stack: []u8,
 ) !PreparedProtocolValue {
+    try validateOfferedProtocols(protocols);
     var len: usize = 0;
     for (protocols, 0..) |protocol, index| {
-        if (!websocket.validSubprotocolToken(protocol)) {
-            return error.InvalidSubprotocol;
-        }
         len = std.math.add(usize, len, protocol.len) catch
             return error.PayloadTooLarge;
         if (index != 0) {
@@ -64,6 +62,7 @@ pub fn validateHttp1Server(
     client_key: []const u8,
     offered_protocols: []const []const u8,
 ) !?[]u8 {
+    try validateOfferedProtocols(offered_protocols);
     if (response.version != .http_1_1 or response.status != 101) {
         return error.InvalidHandshake;
     }
@@ -138,6 +137,7 @@ pub fn validateH2Server(
     headers: []const http2.Hpack.HeaderField,
     offered_protocols: []const []const u8,
 ) !?[]u8 {
+    try validateOfferedProtocols(offered_protocols);
     try rejectH2Legacy(headers);
     if (try optionalH2(headers, "sec-websocket-version")) |_| {
         return error.InvalidHandshake;
@@ -407,6 +407,22 @@ fn validateSupportedSubprotocols(supported: []const []const u8) !void {
     }
 }
 
+/// RFC 6455 requires every subprotocol in a client's preference list to be
+/// unique. Subprotocol identifiers are case-sensitive, so differently cased
+/// tokens remain distinct.
+pub fn validateOfferedProtocols(protocols: []const []const u8) !void {
+    for (protocols, 0..) |protocol, index| {
+        if (!websocket.validSubprotocolToken(protocol)) {
+            return error.InvalidSubprotocol;
+        }
+        for (protocols[0..index]) |previous| {
+            if (std.mem.eql(u8, previous, protocol)) {
+                return error.InvalidSubprotocol;
+            }
+        }
+    }
+}
+
 test "WebSocket subprotocol offer is stack-first and exact on overflow" {
     const allocator = std.testing.allocator;
     var stack: [protocol_value_stack_capacity]u8 = undefined;
@@ -423,6 +439,34 @@ test "WebSocket subprotocol offer is stack-first and exact on overflow" {
     try std.testing.expectEqualStrings("chat.v1, chat.v2", common.value);
     try std.testing.expect(common.allocated == null);
     try std.testing.expect(!failing.has_induced_failure);
+
+    var duplicate_stack = [_]u8{0xa5} ** protocol_value_stack_capacity;
+    try std.testing.expectError(
+        error.InvalidSubprotocol,
+        prepareProtocolValue(
+            failing.allocator(),
+            &.{ "chat.v1", "chat.v1" },
+            &duplicate_stack,
+        ),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0xa5} ** protocol_value_stack_capacity),
+        &duplicate_stack,
+    );
+    try std.testing.expect(!failing.has_induced_failure);
+
+    var case_stack: [protocol_value_stack_capacity]u8 = undefined;
+    var case_distinct = try prepareProtocolValue(
+        allocator,
+        &.{ "chat.v1", "Chat.v1" },
+        &case_stack,
+    );
+    defer case_distinct.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "chat.v1, Chat.v1",
+        case_distinct.value,
+    );
 
     const long = "x" ** (protocol_value_stack_capacity + 1);
     try std.testing.expectError(

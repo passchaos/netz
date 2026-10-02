@@ -1376,9 +1376,13 @@ common path under an allocator that rejects every allocation and verifies the
 first overflow reports OOM; the three 80+80 wire tests cover each fallback.
 Subprotocol offer serialization uses a 128-byte stack buffer, while duplicate
 token detection uses 16 stack slots before exact fallback; H1, RFC 8441, and
-RFC 9220 now share that grammar and preference implementation. Final isolated
-`bench-websocket-echo --stats` smokes reported 18 allocations / 9,916 peak live
-bytes at one connection and 51 / 39,664 bytes at four connections, identical
+RFC 9220 now share that grammar and preference implementation.
+Client-side H1, RFC 8441, and RFC 9220 request construction also rejects an
+exact duplicate in the configured preference list before serializing any
+header bytes, while preserving case-sensitive protocol identity.
+Final isolated `bench-websocket-echo --stats` smokes reported 18 allocations /
+9,916 peak live bytes at one connection and 51 / 39,664 bytes at four
+connections, identical
 to the immediately preceding descriptor-only run. Latency was 9.224 and 9.733
 us/roundtrip respectively. This is no-regression evidence; whole-connection
 telemetry is dominated by other retained allocations and does not isolate the
