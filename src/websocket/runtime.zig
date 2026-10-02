@@ -12315,6 +12315,18 @@ test "WebSocket over HTTP/2 handshake rejects duplicate critical headers" {
     defer if (accepted) |value| allocator.free(value);
     try std.testing.expect(accepted != null);
 
+    const declined_offer = [_]http2.Hpack.HeaderField{.{
+        .name = "sec-websocket-extensions",
+        .value = "permessage-deflate; unknown=1",
+    }};
+    try std.testing.expect(
+        try acceptH2Extensions(
+            allocator,
+            &declined_offer,
+            .{ .enable_permessage_deflate = true },
+        ) == null,
+    );
+
     const malformed_later_extension = [_]http2.Hpack.HeaderField{
         .{
             .name = "sec-websocket-extensions",

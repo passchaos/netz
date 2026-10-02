@@ -984,6 +984,10 @@ HTTP/1, HTTP/2, and HTTP/3 before selecting the first supported
 when their token, parameter, and quoted-token grammar is valid; malformed
 members after a usable offer and malformed offers presented while compression
 is disabled now fail the handshake instead of escaping validation.
+Syntactically valid `permessage-deflate` offers with unknown, duplicate, or
+invalid-valued parameters are declined independently as RFC 7692 requires, so
+a later valid alternative can still be selected without weakening the fatal
+RFC 6455 syntax boundary.
 The dedicated `fuzz-websocket-compression` target feeds arbitrary bounded bytes
 to the RFC 7692 inflater and verifies exact round trips through the standard and
 Vort compressors, including fragmented plaintext and every negotiated 8-15 bit
