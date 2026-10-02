@@ -140,6 +140,9 @@ benchmark response:
 - CONNECT request authority must agree with Host across borrowed, owned and
   runtime validation, and senders reject request content, Content-Length,
   Transfer-Encoding and trailers as required by RFC 9110;
+- TRACE request writers reject non-empty content, transfer coding and trailers;
+  aggregate and streaming paths preserve a legal zero-length request instead
+  of defaulting an unknown-length TRACE to chunked framing;
 - request TE values use the transfer-coding grammar, reject the reserved
   `chunked` name, and require the HTTP/1.1 `Connection: TE` hop-by-hop marker;
   runtime writers synthesize a missing marker, while response writers reject

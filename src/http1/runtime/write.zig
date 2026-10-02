@@ -207,6 +207,13 @@ fn prepareStreamingRequest(
         )) return error.InvalidHost;
     }
 
+    try http1.validateOutgoingRequestFramingForMethod(
+        options.method,
+        scratch.request_headers.items,
+        options.body_length,
+        options.trailer_names.len != 0,
+    );
+
     try prepareTrailerNames(
         &scratch.trailer_headers,
         &scratch.trailer_name_storage,
@@ -970,6 +977,61 @@ test "HTTP/1 304 response writers preserve metadata transfer coding" {
         streaming_head.head,
         "\r\n\r\n",
     ));
+}
+
+test "HTTP/1 request writers enforce empty TRACE content" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        prepareRequest(
+            allocator,
+            .{ .method = .TRACE, .host = "localhost", .body = "body" },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        prepareRequest(
+            allocator,
+            .{
+                .method = .TRACE,
+                .host = "localhost",
+                .headers = &.{.{
+                    .name = "Transfer-Encoding",
+                    .value = "chunked",
+                }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        prepareStreamingRequest(
+            allocator,
+            .{
+                .method = .TRACE,
+                .host = "localhost",
+                .body_length = 1,
+            },
+            &scratch,
+        ),
+    );
+
+    const request = try prepareStreamingRequest(
+        allocator,
+        .{
+            .method = .TRACE,
+            .host = "localhost",
+        },
+        &scratch,
+    );
+    try std.testing.expectEqual(StreamingFraming{ .fixed = 0 }, request.framing);
+    try std.testing.expect(
+        std.mem.indexOf(u8, request.head, "Transfer-Encoding:") == null,
+    );
 }
 
 test "HTTP/1 runtime response writers preserve an empty reason separator" {
@@ -1755,7 +1817,7 @@ fn requestUnknownLengthUsesChunked(method: http1.Method) bool {
         // Match Hyper's conservative default: these methods usually carry no
         // entity, but callers can still opt in with body_length or an explicit
         // Transfer-Encoding header.
-        .GET, .HEAD, .CONNECT => false,
+        .GET, .HEAD, .CONNECT, .TRACE => false,
         else => true,
     };
 }

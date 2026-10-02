@@ -1754,17 +1754,54 @@ pub fn validateOutgoingRequestBodyForMethod(
     body: []const u8,
     trailers: []const Header,
 ) Error!void {
-    if (method != .CONNECT) return;
-    if ((try contentLength(headers)) != null) {
-        return error.InvalidContentLength;
+    try validateOutgoingRequestFramingForMethod(
+        method,
+        headers,
+        body.len,
+        trailers.len != 0,
+    );
+}
+
+/// Validate request-method constraints when only the prospective body length
+/// is known. A null length is safe for TRACE because its streaming writer is
+/// fixed to zero and will reject later body bytes.
+pub fn validateOutgoingRequestFramingForMethod(
+    method: Method,
+    headers: []const Header,
+    body_length: ?usize,
+    has_trailers: bool,
+) Error!void {
+    switch (method) {
+        .CONNECT => {
+            if ((try contentLength(headers)) != null) {
+                return error.InvalidContentLength;
+            }
+            if (hasHeaderNamed(headers, "transfer-encoding")) {
+                return error.InvalidTransferEncoding;
+            }
+            if (hasHeaderNamed(headers, "trailer") or has_trailers) {
+                return error.InvalidTrailer;
+            }
+            if ((body_length orelse 0) != 0) {
+                return error.InvalidContentLength;
+            }
+        },
+        .TRACE => {
+            if (hasHeaderNamed(headers, "transfer-encoding")) {
+                return error.InvalidTransferEncoding;
+            }
+            if (hasHeaderNamed(headers, "trailer") or has_trailers) {
+                return error.InvalidTrailer;
+            }
+            if (try contentLength(headers)) |declared| {
+                if (declared != 0) return error.InvalidContentLength;
+            }
+            if ((body_length orelse 0) != 0) {
+                return error.InvalidContentLength;
+            }
+        },
+        else => {},
     }
-    if (hasHeaderNamed(headers, "transfer-encoding")) {
-        return error.InvalidTransferEncoding;
-    }
-    if (hasHeaderNamed(headers, "trailer") or trailers.len != 0) {
-        return error.InvalidTrailer;
-    }
-    if (body.len != 0) return error.InvalidContentLength;
 }
 
 fn responseForbidsBody(status: u16, request_method: ?Method) bool {
@@ -2873,6 +2910,39 @@ test "HTTP/1 low-level request writers validate framing before output" {
             },
             .body = "0\r\n\r\n",
         },
+        .{
+            .expected = error.InvalidContentLength,
+            .method = .TRACE,
+            .target = "/trace",
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Content-Length", .value = "4" },
+            },
+            .body = "body",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .method = .TRACE,
+            .target = "/trace",
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Transfer-Encoding", .value = "chunked" },
+            },
+            .body = "0\r\n\r\n",
+        },
+        .{
+            .expected = error.InvalidTrailer,
+            .method = .TRACE,
+            .target = "/trace",
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "Trailer", .value = "Digest" },
+            },
+            .body = "",
+        },
     };
 
     var encoded: std.ArrayList(u8) = .empty;
@@ -2977,6 +3047,26 @@ test "HTTP/1 low-level request writers validate framing before output" {
     try std.testing.expectEqualStrings(
         "CONNECT example.com:443 HTTP/1.1\r\n" ++
             "Host: example.com:443\r\n\r\n",
+        encoded.items,
+    );
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .TRACE,
+        "/trace",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Content-Length", .value = "0" },
+        },
+        "",
+    );
+    try std.testing.expectEqualStrings(
+        "TRACE /trace HTTP/1.1\r\n" ++
+            "Host: example.com\r\n" ++
+            "Content-Length: 0\r\n\r\n",
         encoded.items,
     );
 
