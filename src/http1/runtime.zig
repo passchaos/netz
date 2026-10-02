@@ -6721,6 +6721,7 @@ test "HTTP/1 serve response derives trailer capability from request" {
         .{ .name = "Host", .value = "example.test" },
         .{ .name = "TE", .value = "gzip" },
         .{ .name = "te", .value = "Trailers" },
+        .{ .name = "Connection", .value = "TE" },
     };
     var accepted = try adjustResponseForServeLoop(
         allocator,

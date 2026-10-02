@@ -140,6 +140,10 @@ benchmark response:
 - CONNECT request authority must agree with Host across borrowed, owned and
   runtime validation, and senders reject request content, Content-Length,
   Transfer-Encoding and trailers as required by RFC 9110;
+- request TE values use the transfer-coding grammar, reject the reserved
+  `chunked` name, and require the HTTP/1.1 `Connection: TE` hop-by-hop marker;
+  runtime writers synthesize a missing marker, while response writers reject
+  the request-only field before emitting bytes;
 - both owned and caller-storage request parsers enforce Host cardinality,
   syntax, and absolute-/authority-form agreement before body parsing, so a
   direct codec caller cannot accidentally omit the runtime validation step;

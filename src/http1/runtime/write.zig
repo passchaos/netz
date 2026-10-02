@@ -180,6 +180,14 @@ fn prepareStreamingRequest(
         options.headers,
         options.host orelse target_authority,
     );
+    try appendRequiredTeConnectionOption(
+        &scratch.request_headers,
+        allocator,
+    );
+    try http1.validateRequestTeForWrite(
+        options.version,
+        scratch.request_headers.items,
+    );
     try http1.validateHostHeaderBlock(
         options.version,
         scratch.request_headers.items,
@@ -297,6 +305,7 @@ fn prepareStreamingResponseWithDefaultDate(
     scratch.reset();
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
+    try http1.validateResponseTeForWrite(options.headers);
     try prepareTrailerNames(
         &scratch.trailer_headers,
         &scratch.trailer_name_storage,
@@ -663,6 +672,77 @@ test "HTTP/1 aggregate framing honors explicit Trailer declarations" {
     );
 }
 
+test "HTTP/1 runtime request writer normalizes TE connection semantics" {
+    const allocator = std.testing.allocator;
+    var scratch: Scratch = .{};
+    defer scratch.deinit(allocator);
+
+    const request = try prepareRequest(
+        allocator,
+        .{
+            .host = "localhost",
+            .headers = &.{.{ .name = "TE", .value = "trailers" }},
+        },
+        &scratch,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "TE: trailers\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "Connection: TE\r\n",
+    ) != null);
+
+    const streaming_request = try prepareStreamingRequest(
+        allocator,
+        .{
+            .host = "localhost",
+            .body_length = 0,
+            .headers = &.{.{ .name = "TE", .value = "trailers" }},
+        },
+        &scratch,
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        streaming_request.head,
+        "Connection: TE\r\n",
+    ) != null);
+
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        prepareRequest(
+            allocator,
+            .{
+                .host = "localhost",
+                .headers = &.{.{ .name = "TE", .value = "chunked" }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        prepareRequest(
+            allocator,
+            .{
+                .version = .http_1_0,
+                .headers = &.{.{ .name = "TE", .value = "trailers" }},
+            },
+            &scratch,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidTransferEncoding,
+        prepareResponse(
+            allocator,
+            .{ .headers = &.{.{ .name = "TE", .value = "trailers" }} },
+            &scratch,
+        ),
+    );
+}
+
 test "HTTP/1 response writers enforce empty 205 content" {
     const allocator = std.testing.allocator;
     var scratch: Scratch = .{};
@@ -973,6 +1053,14 @@ pub fn prepareRequest(
         options.headers,
         synthesized_host,
     );
+    try appendRequiredTeConnectionOption(
+        &scratch.request_headers,
+        allocator,
+    );
+    try http1.validateRequestTeForWrite(
+        options.version,
+        scratch.request_headers.items,
+    );
     try http1.validateHostHeaderBlock(
         options.version,
         scratch.request_headers.items,
@@ -1238,6 +1326,7 @@ fn prepareResponseFraming(
     if (options.version == .http_0_9) return error.InvalidVersion;
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
+    try http1.validateResponseTeForWrite(options.headers);
     try http1.validateOutgoingResponseBodyForStatus(
         options.status,
         options.headers,
@@ -1372,6 +1461,18 @@ fn appendRequestHeadersWithHost(
             list.appendAssumeCapacity(.{ .name = "Host", .value = value });
         }
     }
+}
+
+fn appendRequiredTeConnectionOption(
+    headers: *std.ArrayList(http1.Header),
+    allocator: std.mem.Allocator,
+) Error!void {
+    if (!hasHeader(headers.items, "te") or
+        wire.anyHeaderContainsToken(headers.items, "connection", "te"))
+    {
+        return;
+    }
+    try headers.append(allocator, .{ .name = "Connection", .value = "TE" });
 }
 
 fn prepareTrailerNames(

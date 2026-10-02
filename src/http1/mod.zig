@@ -377,11 +377,10 @@ pub fn requestAcceptsTrailers(
     version: Version,
     headers: []const Header,
 ) bool {
-    return version == .http_1_1 and wire.anyHeaderContainsToken(
-        headers,
-        "te",
-        "trailers",
-    );
+    if (version != .http_1_1) return false;
+    const state = parseTeHeaders(headers) catch return false;
+    return state.accepts_trailers and
+        (connectionOptionPresent(headers, "te") catch false);
 }
 
 fn hasHeaderNamed(headers: []const Header, name: []const u8) bool {
@@ -1403,68 +1402,98 @@ fn updateTransferEncodingFraming(
     saw_chunked: *bool,
     final_is_chunked: *bool,
 ) Error!void {
-    var pos: usize = 0;
-    var saw_coding = false;
-    while (true) {
-        skipTransferOws(value, &pos);
-        const name_start = pos;
-        while (pos < value.len and validHeaderNameByte(value[pos])) {
-            pos += 1;
-        }
-        if (pos == name_start) return error.InvalidTransferEncoding;
-        const name = value[name_start..pos];
-        skipTransferOws(value, &pos);
-
-        var has_parameters = false;
-        while (pos < value.len and value[pos] == ';') {
-            has_parameters = true;
-            pos += 1;
-            skipTransferOws(value, &pos);
-            const parameter_start = pos;
-            while (pos < value.len and validHeaderNameByte(value[pos])) {
-                pos += 1;
-            }
-            if (pos == parameter_start) return error.InvalidTransferEncoding;
-            skipTransferOws(value, &pos);
-            if (pos == value.len or value[pos] != '=') {
-                return error.InvalidTransferEncoding;
-            }
-            pos += 1;
-            skipTransferOws(value, &pos);
-            if (pos == value.len) return error.InvalidTransferEncoding;
-            if (value[pos] == '"') {
-                try consumeTransferQuotedString(value, &pos);
-            } else {
-                const parameter_value_start = pos;
-                while (pos < value.len and validHeaderNameByte(value[pos])) {
-                    pos += 1;
-                }
-                if (pos == parameter_value_start) {
-                    return error.InvalidTransferEncoding;
-                }
-            }
-            skipTransferOws(value, &pos);
-        }
-
-        const is_chunked = std.ascii.eqlIgnoreCase(name, "chunked");
+    var codings = TransferCodingIterator{ .value = value };
+    while (try codings.next()) |coding| {
+        const is_chunked = std.ascii.eqlIgnoreCase(
+            coding.name,
+            "chunked",
+        );
         if (is_chunked) {
             // RFC 9112 allows other transfer codings before chunked, but
             // chunked itself may only be applied once, must be final, and has
             // no parameters.
-            if (saw_chunked.* or has_parameters) {
+            if (saw_chunked.* or coding.has_parameters) {
                 return error.InvalidTransferEncoding;
             }
             saw_chunked.* = true;
         }
         final_is_chunked.* = is_chunked;
-        saw_coding = true;
-
-        if (pos == value.len) break;
-        if (value[pos] != ',') return error.InvalidTransferEncoding;
-        pos += 1;
     }
-    if (!saw_coding) return error.InvalidTransferEncoding;
 }
+
+const TransferCoding = struct {
+    name: []const u8,
+    has_parameters: bool,
+};
+
+const TransferCodingIterator = struct {
+    value: []const u8,
+    pos: usize = 0,
+    done: bool = false,
+
+    fn next(self: *TransferCodingIterator) Error!?TransferCoding {
+        if (self.done) return null;
+        skipTransferOws(self.value, &self.pos);
+        const name_start = self.pos;
+        while (self.pos < self.value.len and
+            validHeaderNameByte(self.value[self.pos]))
+        {
+            self.pos += 1;
+        }
+        if (self.pos == name_start) return error.InvalidTransferEncoding;
+        const name = self.value[name_start..self.pos];
+        skipTransferOws(self.value, &self.pos);
+
+        var has_parameters = false;
+        while (self.pos < self.value.len and self.value[self.pos] == ';') {
+            has_parameters = true;
+            self.pos += 1;
+            skipTransferOws(self.value, &self.pos);
+            const parameter_start = self.pos;
+            while (self.pos < self.value.len and
+                validHeaderNameByte(self.value[self.pos]))
+            {
+                self.pos += 1;
+            }
+            if (self.pos == parameter_start) {
+                return error.InvalidTransferEncoding;
+            }
+            skipTransferOws(self.value, &self.pos);
+            if (self.pos == self.value.len or self.value[self.pos] != '=') {
+                return error.InvalidTransferEncoding;
+            }
+            self.pos += 1;
+            skipTransferOws(self.value, &self.pos);
+            if (self.pos == self.value.len) {
+                return error.InvalidTransferEncoding;
+            }
+            if (self.value[self.pos] == '"') {
+                try consumeTransferQuotedString(self.value, &self.pos);
+            } else {
+                const parameter_value_start = self.pos;
+                while (self.pos < self.value.len and
+                    validHeaderNameByte(self.value[self.pos]))
+                {
+                    self.pos += 1;
+                }
+                if (self.pos == parameter_value_start) {
+                    return error.InvalidTransferEncoding;
+                }
+            }
+            skipTransferOws(self.value, &self.pos);
+        }
+
+        if (self.pos == self.value.len) {
+            self.done = true;
+        } else {
+            if (self.value[self.pos] != ',') {
+                return error.InvalidTransferEncoding;
+            }
+            self.pos += 1;
+        }
+        return .{ .name = name, .has_parameters = has_parameters };
+    }
+};
 
 fn skipTransferOws(value: []const u8, pos: *usize) void {
     while (pos.* < value.len and
@@ -1533,6 +1562,75 @@ fn validateTransferEncodingForVersion(version: Version, headers: []const Header)
     if (version != .http_1_0) return;
     for (headers) |header| {
         if (header.eqlName("transfer-encoding")) return error.InvalidTransferEncoding;
+    }
+}
+
+const TeHeaderState = struct {
+    present: bool = false,
+    accepts_trailers: bool = false,
+};
+
+fn parseTeHeaders(headers: []const Header) Error!TeHeaderState {
+    var state: TeHeaderState = .{};
+    for (headers) |header| {
+        if (!header.eqlName("te")) continue;
+        state.present = true;
+        if (wire.trimOws(header.value).len == 0) continue;
+        var codings = TransferCodingIterator{ .value = header.value };
+        while (try codings.next()) |coding| {
+            if (std.ascii.eqlIgnoreCase(coding.name, "chunked")) {
+                return error.InvalidTransferEncoding;
+            }
+            if (std.ascii.eqlIgnoreCase(coding.name, "trailers")) {
+                if (coding.has_parameters) {
+                    return error.InvalidTransferEncoding;
+                }
+                state.accepts_trailers = true;
+            }
+        }
+    }
+    return state;
+}
+
+fn connectionOptionPresent(
+    headers: []const Header,
+    expected: []const u8,
+) Error!bool {
+    var found = false;
+    for (headers) |header| {
+        if (!header.eqlName("connection")) continue;
+        var options = std.mem.splitScalar(u8, header.value, ',');
+        while (options.next()) |raw_option| {
+            const option = wire.trimOws(raw_option);
+            validateHeaderName(option) catch {
+                return error.InvalidTransferEncoding;
+            };
+            if (std.ascii.eqlIgnoreCase(option, expected)) found = true;
+        }
+    }
+    return found;
+}
+
+/// Validate the HTTP/1 request-only TE field before serialization. RFC 9112
+/// reserves `chunked` as always acceptable and RFC 9110 requires the hop-by-hop
+/// field to be named by a Connection option.
+pub fn validateRequestTeForWrite(
+    version: Version,
+    headers: []const Header,
+) Error!void {
+    const state = try parseTeHeaders(headers);
+    if (!state.present) return;
+    if (version != .http_1_1) return error.InvalidTransferEncoding;
+    if (!try connectionOptionPresent(headers, "te")) {
+        return error.InvalidTransferEncoding;
+    }
+}
+
+/// TE advertises request-side response capabilities and is never a response
+/// field, regardless of HTTP/1.x version.
+pub fn validateResponseTeForWrite(headers: []const Header) Error!void {
+    if (hasHeaderNamed(headers, "te")) {
+        return error.InvalidTransferEncoding;
     }
 }
 
@@ -1657,6 +1755,7 @@ fn validateRequestForWrite(
     if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
     try validateTransferEncodingForVersion(version, headers);
+    try validateRequestTeForWrite(version, headers);
     try validateRequestHostParts(method, version, target, headers);
     try validateOutgoingRequestBodyForMethod(
         method,
@@ -1751,6 +1850,7 @@ fn validateResponseForWrite(
     try validateReasonPhrase(reason);
     try validateStatusCode(status);
     try validateTransferEncodingForVersion(version, headers);
+    try validateResponseTeForWrite(headers);
     try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
     const has_transfer_encoding = hasHeaderNamed(
         headers,
@@ -2591,6 +2691,35 @@ test "HTTP/1 low-level request writers validate framing before output" {
             .body = "0\r\n\r\n",
         },
         .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "TE", .value = "trailers" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "TE", .value = "chunked" },
+                .{ .name = "Connection", .value = "TE" },
+            },
+            .body = "",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_1,
+            .headers = &.{
+                .{ .name = "Host", .value = "example.com" },
+                .{ .name = "TE", .value = "trailers; q=1" },
+                .{ .name = "Connection", .value = "TE" },
+            },
+            .body = "",
+        },
+        .{
             .expected = error.InvalidHost,
             .method = .CONNECT,
             .target = "example.com:443",
@@ -2673,6 +2802,26 @@ test "HTTP/1 low-level request writers validate framing before output" {
         "GET /legacy HTTP/1.0\r\n\r\n",
         encoded.items,
     );
+
+    encoded.clearRetainingCapacity();
+    try writeRequestChecked(
+        &encoded,
+        allocator,
+        .GET,
+        "/trailers",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "TE", .value = "trailers" },
+            .{ .name = "Connection", .value = "keep-alive, TE" },
+        },
+        "",
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoded.items,
+        "TE: trailers\r\nConnection: keep-alive, TE\r\n",
+    ) != null);
 
     encoded.clearRetainingCapacity();
     try writeRequestChecked(
@@ -2849,6 +2998,11 @@ test "HTTP/1 low-level response writers validate framing before output" {
                 .{ .name = "Trailer", .value = "Digest" },
             },
             .body = "0\r\nX-Other: value\r\n\r\n",
+        },
+        .{
+            .expected = error.InvalidTransferEncoding,
+            .version = .http_1_1,
+            .headers = &.{.{ .name = "TE", .value = "trailers" }},
         },
     };
 
@@ -3114,13 +3268,25 @@ test "HTTP/1 request trailer capability combines repeated TE fields" {
     const headers = [_]Header{
         .{ .name = "TE", .value = "gzip" },
         .{ .name = "te", .value = "deflate, Trailers" },
+        .{ .name = "Connection", .value = "keep-alive, TE" },
     };
     try std.testing.expect(requestAcceptsTrailers(.http_1_1, &headers));
     try std.testing.expect(!requestAcceptsTrailers(.http_1_0, &headers));
-    try std.testing.expect(!requestAcceptsTrailers(.http_1_1, &.{.{
+    try std.testing.expect(!requestAcceptsTrailers(.http_1_1, &.{ .{
         .name = "TE",
         .value = "gzip, trailers;q=1",
+    }, .{
+        .name = "Connection",
+        .value = "TE",
+    } }));
+    try std.testing.expect(!requestAcceptsTrailers(.http_1_1, &.{.{
+        .name = "TE",
+        .value = "trailers",
     }}));
+    try std.testing.expect(!requestAcceptsTrailers(.http_1_1, &.{
+        .{ .name = "TE", .value = "chunked, trailers" },
+        .{ .name = "Connection", .value = "TE" },
+    }));
 }
 
 test "HTTP/1 parser preserves exact header-name spelling across borrowed and owned heads" {
