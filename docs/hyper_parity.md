@@ -203,7 +203,9 @@ benchmark response:
   of copying the entire batch. The batch-only encoded bytes, descriptor list,
   and iovec list are allocated together on first pipeline use, removing three
   empty containers from ordinary client and server connections while retaining
-  their warmed capacity;
+  their warmed capacity. Trailer-name descriptors, backing names, and generated
+  `Trailer` values are likewise allocated only for messages that declare or
+  supply trailers;
 - complete requests, single responses, and both coalesced and borrowed response
   batches finish all validation and allocation before transport I/O. Once a
   write begins, any transport error permanently retires the HTTP/1 connection:

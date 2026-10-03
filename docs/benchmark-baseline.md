@@ -180,9 +180,12 @@ implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 The response-batch encoded bytes, slice list, and offset descriptors now share
 one state allocated on first batch use instead of three empty `ArrayList`s in
 every connection. On 64-bit targets this reduces `runtime_write.Scratch` from
-320 to 256 bytes, `Client` from 720 to 656 bytes, and `Connection` from 656 to
-592 bytes. A fail-first test keeps the state absent after allocation failure,
-and an identical warmed batch completes with a failing allocator without a new
+320 to 256 bytes. Trailer-name descriptors, their backing names, and generated
+`Trailer` field values are independently allocated only when a message declares
+or supplies trailers, reducing the scratch again to 192 bytes. Together these
+changes reduce `Client` from 720 to 592 bytes and `Connection` from 656 to 528
+bytes. Fail-first tests keep each state absent after allocation failure, and an
+identical warmed batch completes with a failing allocator without a new
 allocation. These are fixed-layout and allocation-lifetime results rather than
 a latency claim.
 

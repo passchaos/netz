@@ -27,11 +27,11 @@ const informationalResponseToSkip = message_framing.informationalResponseToSkip;
 const requestShouldSendContinue = message_framing.requestShouldSendContinue;
 const RequestReadStage = enum { head, continue_write, body };
 
-test "HTTP/1 connection keeps response batch scratch lazy" {
+test "HTTP/1 connections keep optional write scratch compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 656), @sizeOf(Client));
-        try std.testing.expectEqual(@as(usize, 592), @sizeOf(Connection));
-        try std.testing.expectEqual(@as(usize, 256), @sizeOf(WriteScratch));
+        try std.testing.expectEqual(@as(usize, 592), @sizeOf(Client));
+        try std.testing.expectEqual(@as(usize, 528), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 192), @sizeOf(WriteScratch));
     }
 }
 
@@ -3432,7 +3432,7 @@ pub const Client = struct {
             options,
             &self.write_scratch,
         );
-        const announced_trailers = self.write_scratch.trailer_headers.items;
+        const announced_trailers = self.write_scratch.trailerHeaders();
         self.transport().writeAll(prepared.head) catch |err| {
             self.writer_state.phase = .unusable;
             return err;
@@ -4502,7 +4502,7 @@ pub const Connection = struct {
             self.defaultResponseDate(),
             &self.write_scratch,
         );
-        const announced_trailers = self.write_scratch.trailer_headers.items;
+        const announced_trailers = self.write_scratch.trailerHeaders();
         const active_transport = self.transport();
         active_transport.writeAll(prepared.head) catch |err| {
             self.writer_state.phase = .unusable;

@@ -126,6 +126,25 @@ const BatchScratch = struct {
     }
 };
 
+const TrailerScratch = struct {
+    headers: std.ArrayList(http1.Header) = .empty,
+    name_storage: std.ArrayList(u8) = .empty,
+    value: std.ArrayList(u8) = .empty,
+
+    fn reset(self: *TrailerScratch) void {
+        self.headers.clearRetainingCapacity();
+        self.name_storage.clearRetainingCapacity();
+        self.value.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *TrailerScratch, allocator: std.mem.Allocator) void {
+        self.headers.deinit(allocator);
+        self.name_storage.deinit(allocator);
+        self.value.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     /// Independent contiguous transport staging. This cannot share `encoded`:
@@ -135,9 +154,7 @@ pub const Scratch = struct {
     batch: ?*BatchScratch = null,
     headers: std.ArrayList(http1.Header) = .empty,
     request_headers: std.ArrayList(http1.Header) = .empty,
-    trailer_headers: std.ArrayList(http1.Header) = .empty,
-    trailer_name_storage: std.ArrayList(u8) = .empty,
-    trailer_value: std.ArrayList(u8) = .empty,
+    trailers: ?*TrailerScratch = null,
     streaming_chunk_descriptors: std.ArrayList(u8) = .empty,
     streaming_parts: std.ArrayList([]const u8) = .empty,
     content_length: [32]u8 = undefined,
@@ -146,9 +163,7 @@ pub const Scratch = struct {
         self.encoded.clearRetainingCapacity();
         self.headers.clearRetainingCapacity();
         self.request_headers.clearRetainingCapacity();
-        self.trailer_headers.clearRetainingCapacity();
-        self.trailer_name_storage.clearRetainingCapacity();
-        self.trailer_value.clearRetainingCapacity();
+        if (self.trailers) |trailers| trailers.reset();
         self.streaming_chunk_descriptors.clearRetainingCapacity();
         self.streaming_parts.clearRetainingCapacity();
     }
@@ -162,9 +177,10 @@ pub const Scratch = struct {
         }
         self.headers.deinit(allocator);
         self.request_headers.deinit(allocator);
-        self.trailer_headers.deinit(allocator);
-        self.trailer_name_storage.deinit(allocator);
-        self.trailer_value.deinit(allocator);
+        if (self.trailers) |trailers| {
+            trailers.deinit(allocator);
+            allocator.destroy(trailers);
+        }
         self.streaming_chunk_descriptors.deinit(allocator);
         self.streaming_parts.deinit(allocator);
         self.* = undefined;
@@ -179,6 +195,22 @@ pub const Scratch = struct {
         batch.* = .{};
         self.batch = batch;
         return batch;
+    }
+
+    fn trailerScratch(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!*TrailerScratch {
+        if (self.trailers) |trailers| return trailers;
+        const trailers = try allocator.create(TrailerScratch);
+        trailers.* = .{};
+        self.trailers = trailers;
+        return trailers;
+    }
+
+    pub fn trailerHeaders(self: *const Scratch) []const http1.Header {
+        const trailers = self.trailers orelse return &.{};
+        return trailers.headers.items;
     }
 };
 
@@ -243,22 +275,26 @@ fn prepareStreamingRequest(
         options.trailer_names.len != 0,
     );
 
-    try prepareTrailerNames(
-        &scratch.trailer_headers,
-        &scratch.trailer_name_storage,
-        allocator,
-        scratch.request_headers.items,
-        options.trailer_names,
-    );
-    const explicit_chunked = try chunkedWriteFraming(
-        options.version,
-        scratch.request_headers.items,
-        scratch.trailer_headers.items,
-    );
     const trailers_requested = hasHeader(
         scratch.request_headers.items,
         "trailer",
     ) or options.trailer_names.len != 0;
+    const trailer_headers: []const http1.Header = if (trailers_requested) blk: {
+        const trailers = try scratch.trailerScratch(allocator);
+        try prepareTrailerNames(
+            &trailers.headers,
+            &trailers.name_storage,
+            allocator,
+            scratch.request_headers.items,
+            options.trailer_names,
+        );
+        break :blk trailers.headers.items;
+    } else &.{};
+    const explicit_chunked = try chunkedWriteFraming(
+        options.version,
+        scratch.request_headers.items,
+        trailer_headers,
+    );
     if (trailers_requested and !explicit_chunked) {
         return error.InvalidTrailer;
     }
@@ -302,15 +338,15 @@ fn prepareStreamingRequest(
         allocator,
         scratch.request_headers.items,
         fixed_length,
-        scratch.trailer_headers.items,
+        trailer_headers,
         use_chunked,
         shouldDefaultRequestContentLength(
             options.method,
             fixed_length,
-            scratch.trailer_headers.items,
+            trailer_headers,
         ),
         &scratch.content_length,
-        &scratch.trailer_value,
+        scratch,
         null,
     );
     try encodeRequestHead(allocator, options, scratch);
@@ -362,18 +398,24 @@ fn prepareStreamingResponseWithDefaultDate(
         options.status,
         options.headers,
     );
-    try prepareTrailerNames(
-        &scratch.trailer_headers,
-        &scratch.trailer_name_storage,
-        allocator,
-        options.headers,
-        options.trailer_names,
-    );
+    const trailers_requested = hasHeader(options.headers, "trailer") or
+        options.trailer_names.len != 0;
+    const trailer_headers: []const http1.Header = if (trailers_requested) blk: {
+        const trailers = try scratch.trailerScratch(allocator);
+        try prepareTrailerNames(
+            &trailers.headers,
+            &trailers.name_storage,
+            allocator,
+            options.headers,
+            options.trailer_names,
+        );
+        break :blk trailers.headers.items;
+    } else &.{};
     try http1.validateOutgoingResponseBodyForStatus(
         options.status,
         options.headers,
         &.{},
-        scratch.trailer_headers.items,
+        trailer_headers,
     );
 
     const suppress_body = responseWriteSuppressesBody(
@@ -383,10 +425,8 @@ fn prepareStreamingResponseWithDefaultDate(
     const explicit_chunked = try chunkedWriteFraming(
         options.version,
         options.headers,
-        scratch.trailer_headers.items,
+        trailer_headers,
     );
-    const trailers_requested = hasHeader(options.headers, "trailer") or
-        options.trailer_names.len != 0;
     if (trailers_requested and !options.request_accepts_trailers) {
         return error.InvalidTrailer;
     }
@@ -469,14 +509,14 @@ fn prepareStreamingResponseWithDefaultDate(
             options.body_length orelse 0
         else
             fixed_length,
-        scratch.trailer_headers.items,
+        trailer_headers,
         header_uses_chunked,
         responseShouldDefaultContentLength(
             options.status,
             options.request_method,
         ),
         &scratch.content_length,
-        &scratch.trailer_value,
+        scratch,
         if (responseStatusIsFinal(options.status)) default_date else null,
     );
     try encodeStreamingResponseHead(allocator, options, scratch);
@@ -527,7 +567,7 @@ test "HTTP/1 streaming framing honors explicit Trailer declarations" {
     );
     try std.testing.expectEqual(
         @as(usize, 2),
-        scratch.trailer_headers.items.len,
+        scratch.trailerHeaders().len,
     );
 
     try std.testing.expectError(
@@ -1397,7 +1437,7 @@ pub fn prepareRequest(
             options.trailers,
         ),
         &scratch.content_length,
-        &scratch.trailer_value,
+        scratch,
         null,
     );
 
@@ -1532,7 +1572,9 @@ fn prepareResponsePartsWithDefaultDate(
         scratch.encoded.clearRetainingCapacity();
         scratch.headers.clearRetainingCapacity();
         scratch.request_headers.clearRetainingCapacity();
-        scratch.trailer_value.clearRetainingCapacity();
+        if (scratch.trailers) |trailers| {
+            trailers.value.clearRetainingCapacity();
+        }
 
         const framing = try prepareResponseFraming(
             allocator,
@@ -1601,7 +1643,7 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 72), @sizeOf(BatchScratch));
-        try std.testing.expectEqual(@as(usize, 256), @sizeOf(Scratch));
+        try std.testing.expectEqual(@as(usize, 192), @sizeOf(Scratch));
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Scratch, "batch")),
@@ -1629,6 +1671,57 @@ test "HTTP/1 write scratch allocates batch state lazily" {
         @intFromPtr(batch),
         @intFromPtr(try scratch.batchScratch(no_alloc.allocator())),
     );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 write scratch allocates trailer state only when requested" {
+    const allocator = std.testing.allocator;
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 72), @sizeOf(TrailerScratch));
+        try std.testing.expectEqual(
+            @as(usize, 8),
+            @sizeOf(@FieldType(Scratch, "trailers")),
+        );
+    }
+
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+    _ = try prepareRequest(allocator, .{
+        .host = "localhost",
+    }, &scratch);
+    try std.testing.expect(scratch.trailers == null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        scratch.trailerScratch(failing.allocator()),
+    );
+    try std.testing.expect(scratch.trailers == null);
+
+    const options = StreamingRequestOptions{
+        .method = .POST,
+        .host = "localhost",
+        .headers = &.{.{
+            .name = "Transfer-Encoding",
+            .value = "chunked",
+        }},
+        .trailer_names = &.{"Digest"},
+    };
+    const prepared = try prepareStreamingRequest(allocator, options, &scratch);
+    try std.testing.expectEqual(StreamingFraming.chunked, prepared.framing);
+    try std.testing.expectEqual(@as(usize, 1), scratch.trailerHeaders().len);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    const warmed = try prepareStreamingRequest(
+        no_alloc.allocator(),
+        options,
+        &scratch,
+    );
+    try std.testing.expectEqual(StreamingFraming.chunked, warmed.framing);
     try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
@@ -1723,7 +1816,7 @@ fn prepareResponseFraming(
             options.request_method,
         ),
         &scratch.content_length,
-        &scratch.trailer_value,
+        scratch,
         default_date,
     );
     return .{
@@ -1932,7 +2025,7 @@ fn appendDefaultedHeaders(
     use_chunked: bool,
     add_default_content_length: bool,
     len_buf: *[32]u8,
-    trailer_value: *std.ArrayList(u8),
+    scratch: *Scratch,
     default_date: ?[]const u8,
 ) Error!void {
     var has_content_length = false;
@@ -1957,14 +2050,15 @@ fn appendDefaultedHeaders(
             });
         }
         if (trailers.len != 0 and !has_trailer) {
+            const trailer_scratch = try scratch.trailerScratch(allocator);
             try renderTrailerHeaderValue(
-                trailer_value,
+                &trailer_scratch.value,
                 allocator,
                 trailers,
             );
             list.appendAssumeCapacity(.{
                 .name = "Trailer",
-                .value = trailer_value.items,
+                .value = trailer_scratch.value.items,
             });
         }
     } else if (add_default_content_length and !has_content_length) {
