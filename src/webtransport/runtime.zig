@@ -5169,6 +5169,64 @@ pub const AcceptedHandshakeSession = struct {
         );
     }
 
+    /// Fill an arrival-ordered caller-owned DATAGRAM batch. On failure,
+    /// `received_count` identifies the exact completed output prefix.
+    pub fn receiveDatagramsInto(
+        self: *AcceptedHandshakeSession,
+        outputs: [][]u8,
+        received_count: *usize,
+    ) Error!void {
+        received_count.* = 0;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.receiveConnectDatagramsInto(
+            self.session_id.value,
+            outputs,
+            received_count,
+        );
+    }
+
+    pub fn receiveDatagramsIntoWithTimeout(
+        self: *AcceptedHandshakeSession,
+        outputs: [][]u8,
+        received_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.receiveConnectDatagramsIntoWithTimeout(
+            self.session_id.value,
+            outputs,
+            received_count,
+            timeout,
+        );
+    }
+
+    pub fn receiveDatagramsIntoWithDeadline(
+        self: *AcceptedHandshakeSession,
+        outputs: [][]u8,
+        received_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.receiveConnectDatagramsIntoWithDeadline(
+            self.session_id.value,
+            outputs,
+            received_count,
+            deadline,
+        );
+    }
+
     pub fn receiveManyDatagrams(self: *AcceptedHandshakeSession, count: usize) Error!OwnedHandshakeDatagramBatch {
         try webtransport.ensureDatagramsNegotiated(self.h3.options.local_settings, self.h3.control.settings.peer);
         return receiveManyHandshakeDatagrams(
@@ -8765,6 +8823,67 @@ pub const HandshakeClientSession = struct {
         return self.h3.receiveConnectDatagramIntoWithDeadline(
             self.session_id.value,
             output,
+            deadline,
+        );
+    }
+
+    /// Fill an arrival-ordered caller-owned DATAGRAM batch. On failure,
+    /// `received_count` identifies the exact completed output prefix.
+    pub fn receiveDatagramsInto(
+        self: *HandshakeClientSession,
+        outputs: [][]u8,
+        received_count: *usize,
+    ) Error!void {
+        received_count.* = 0;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.receiveConnectDatagramsInto(
+            self.session_id.value,
+            outputs,
+            received_count,
+        );
+    }
+
+    pub fn receiveDatagramsIntoWithTimeout(
+        self: *HandshakeClientSession,
+        outputs: [][]u8,
+        received_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.receiveConnectDatagramsIntoWithTimeout(
+            self.session_id.value,
+            outputs,
+            received_count,
+            timeout,
+        );
+    }
+
+    pub fn receiveDatagramsIntoWithDeadline(
+        self: *HandshakeClientSession,
+        outputs: [][]u8,
+        received_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try webtransport.ensureDatagramsNegotiated(
+            self.h3.options.local_settings,
+            self.h3.control.settings.peer,
+        );
+        return self.h3.receiveConnectDatagramsIntoWithDeadline(
+            self.session_id.value,
+            outputs,
+            received_count,
             deadline,
         );
     }
@@ -13108,6 +13227,40 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.receiveDatagramIntoWithDeadline(output, deadline);
     }
 
+    pub fn receiveDatagramsInto(
+        self: *StatefulProtectedClientSession,
+        outputs: [][]u8,
+        received_count: *usize,
+    ) Error!void {
+        return self.session.receiveDatagramsInto(outputs, received_count);
+    }
+
+    pub fn receiveDatagramsIntoWithTimeout(
+        self: *StatefulProtectedClientSession,
+        outputs: [][]u8,
+        received_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.receiveDatagramsIntoWithTimeout(
+            outputs,
+            received_count,
+            timeout,
+        );
+    }
+
+    pub fn receiveDatagramsIntoWithDeadline(
+        self: *StatefulProtectedClientSession,
+        outputs: [][]u8,
+        received_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.receiveDatagramsIntoWithDeadline(
+            outputs,
+            received_count,
+            deadline,
+        );
+    }
+
     pub fn pollDatagram(
         self: *StatefulProtectedClientSession,
     ) Error!?OwnedHandshakeDatagram {
@@ -17191,24 +17344,23 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
                 "handshake-client-one",
                 first_payload,
             );
-            var datagrams = try accepted.receiveManyDatagrams(2);
-            defer datagrams.deinit();
-            if (datagrams.firstError()) |err| return err;
-            try std.testing.expectEqual(@as(usize, 2), datagrams.receivedCount());
+            var remaining_storage: [2][64]u8 = undefined;
+            var remaining_outputs = [_][]u8{
+                &remaining_storage[0],
+                &remaining_storage[1],
+            };
+            var received_count: usize = 99;
+            try accepted.receiveDatagramsInto(
+                &remaining_outputs,
+                &received_count,
+            );
+            try std.testing.expectEqual(@as(usize, 2), received_count);
             const client_payloads = [_][]const u8{
                 "handshake-client-two",
                 "handshake-client-three",
             };
-            for (datagrams.datagrams, client_payloads) |maybe, expected| {
-                const datagram = maybe orelse return error.MissingDatagram;
-                try std.testing.expectEqual(
-                    accepted.session_id.value,
-                    datagram.datagram.session_id.value,
-                );
-                try std.testing.expectEqualStrings(
-                    expected,
-                    datagram.datagram.payload,
-                );
+            for (remaining_outputs, client_payloads) |actual, expected| {
+                try std.testing.expectEqualStrings(expected, actual);
             }
             var committed: usize = 99;
             try accepted.sendDatagramsWithTimeout(
@@ -17337,27 +17489,24 @@ test "WebTransport handshake runtime CONNECT and datagrams over QUIC handshake" 
         "handshake-server-one",
         first_response,
     );
-    var responses = try client.receiveManyDatagramsWithTimeout(
-        2,
+    var remaining_response_storage: [2][64]u8 = undefined;
+    var remaining_response_outputs = [_][]u8{
+        &remaining_response_storage[0],
+        &remaining_response_storage[1],
+    };
+    var received_response_count: usize = 99;
+    try client.receiveDatagramsIntoWithTimeout(
+        &remaining_response_outputs,
+        &received_response_count,
         .fromSeconds(1),
     );
-    defer responses.deinit();
-    if (responses.firstError()) |err| return err;
-    try std.testing.expectEqual(@as(usize, 2), responses.receivedCount());
+    try std.testing.expectEqual(@as(usize, 2), received_response_count);
     const server_payloads = [_][]const u8{
         "handshake-server-two",
         "handshake-server-three",
     };
-    for (responses.datagrams, server_payloads) |maybe, expected| {
-        const datagram = maybe orelse return error.MissingDatagram;
-        try std.testing.expectEqual(
-            client.session_id.value,
-            datagram.datagram.session_id.value,
-        );
-        try std.testing.expectEqualStrings(
-            expected,
-            datagram.datagram.payload,
-        );
+    for (remaining_response_outputs, server_payloads) |actual, expected| {
+        try std.testing.expectEqualStrings(expected, actual);
     }
     const stats = client.stats();
     try std.testing.expectEqual(@as(u64, 3), stats.datagrams_sent);
@@ -17969,7 +18118,7 @@ test "WebTransport handshake session receives datagrams with std.Io async batch"
     if (shared.err) |err| return err;
 }
 
-test "WebTransport bounded DATAGRAM batch retains partial progress" {
+test "WebTransport owning and caller-buffer DATAGRAM batches retain partial progress" {
     const allocator = std.testing.allocator;
 
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -18062,7 +18211,57 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
     });
     defer peer.deinit();
 
-    try sendHandshakeDatagramForTest(&peer, .init(0), "first");
+    var empty_outputs: [0][]u8 = .{};
+    var empty_count: usize = 99;
+    try session.receiveDatagramsInto(&empty_outputs, &empty_count);
+    try std.testing.expectEqual(@as(usize, 0), empty_count);
+    var timeout_storage: [1][8]u8 = undefined;
+    var timeout_outputs = [_][]u8{&timeout_storage[0]};
+    var timeout_count: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveDatagramsIntoWithTimeout(
+            &timeout_outputs,
+            &timeout_count,
+            .zero,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), timeout_count);
+
+    try sendHandshakeDatagramForTest(&peer, .init(0), "caller-first");
+    var caller_storage: [2][32]u8 = undefined;
+    var caller_outputs = [_][]u8{
+        &caller_storage[0],
+        &caller_storage[1],
+    };
+    var caller_count: usize = 99;
+    try std.testing.expectError(
+        error.Timeout,
+        session.receiveDatagramsIntoWithTimeout(
+            &caller_outputs,
+            &caller_count,
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), caller_count);
+    try std.testing.expectEqualStrings("caller-first", caller_outputs[0]);
+
+    try sendHandshakeDatagramForTest(&peer, .init(0), "caller-second");
+    var caller_resumed_storage: [32]u8 = undefined;
+    var caller_resumed_outputs = [_][]u8{&caller_resumed_storage};
+    caller_count = 99;
+    try session.receiveDatagramsIntoWithDeadline(
+        &caller_resumed_outputs,
+        &caller_count,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), caller_count);
+    try std.testing.expectEqualStrings(
+        "caller-second",
+        caller_resumed_outputs[0],
+    );
+
+    try sendHandshakeDatagramForTest(&peer, .init(0), "owned-first");
     var batch = try session.receiveManyDatagramsWithTimeout(
         2,
         .fromMilliseconds(20),
@@ -18071,12 +18270,12 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
     try std.testing.expectEqual(@as(usize, 1), batch.receivedCount());
     try std.testing.expectEqual(error.Timeout, batch.firstError().?);
     try std.testing.expectEqualStrings(
-        "first",
+        "owned-first",
         batch.datagrams[0].?.datagram.payload,
     );
     try std.testing.expect(batch.datagrams[1] == null);
 
-    try sendHandshakeDatagramForTest(&peer, .init(0), "second");
+    try sendHandshakeDatagramForTest(&peer, .init(0), "owned-second");
     var resumed = try session.receiveManyDatagramsWithDeadline(
         1,
         .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
@@ -18085,7 +18284,7 @@ test "WebTransport bounded DATAGRAM batch retains partial progress" {
     try std.testing.expectEqual(@as(usize, 1), resumed.receivedCount());
     try std.testing.expect(resumed.firstError() == null);
     try std.testing.expectEqualStrings(
-        "second",
+        "owned-second",
         resumed.datagrams[0].?.datagram.payload,
     );
 }

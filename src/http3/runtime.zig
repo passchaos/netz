@@ -491,6 +491,25 @@ fn receiveConnectDatagramIntoFromSession(
     }
 }
 
+fn receiveConnectDatagramsIntoFromSession(
+    session: anytype,
+    stream_id: u62,
+    outputs: [][]u8,
+    received_count: *usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError!void {
+    received_count.* = 0;
+    for (outputs) |*output| {
+        output.* = try receiveConnectDatagramIntoFromSession(
+            session,
+            stream_id,
+            output.*,
+            deadline,
+        );
+        received_count.* += 1;
+    }
+}
+
 const observeConnectDatagramTerminal = connect_datagram_routing.observeTerminal;
 const ensureConnectDatagramSendSideOpen =
     connect_datagram_routing.ensureSendSideOpen;
@@ -7703,6 +7722,67 @@ pub const HandshakeServerSession = struct {
         );
     }
 
+    /// Fill an arrival-ordered batch of CONNECT DATAGRAM payloads in caller
+    /// storage. `received_count` retains the exact completed prefix on error.
+    pub fn receiveConnectDatagramsInto(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        outputs: [][]u8,
+        received_count: *usize,
+    ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return receiveConnectDatagramsIntoFromSession(
+            self,
+            stream_id,
+            outputs,
+            received_count,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveConnectDatagramsIntoWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        outputs: [][]u8,
+        received_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveConnectDatagramsIntoWithDeadline(
+            stream_id,
+            outputs,
+            received_count,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveConnectDatagramsIntoWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        outputs: [][]u8,
+        received_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return receiveConnectDatagramsIntoFromSession(
+            self,
+            stream_id,
+            outputs,
+            received_count,
+            deadline,
+        );
+    }
+
     pub fn closeConnectDatagramAssociation(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -14837,6 +14917,67 @@ pub const HandshakeClient = struct {
             self,
             stream_id,
             output,
+            deadline,
+        );
+    }
+
+    /// Fill an arrival-ordered batch of CONNECT DATAGRAM payloads in caller
+    /// storage. `received_count` retains the exact completed prefix on error.
+    pub fn receiveConnectDatagramsInto(
+        self: *HandshakeClient,
+        stream_id: u62,
+        outputs: [][]u8,
+        received_count: *usize,
+    ) Error!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return receiveConnectDatagramsIntoFromSession(
+            self,
+            stream_id,
+            outputs,
+            received_count,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveConnectDatagramsIntoWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        outputs: [][]u8,
+        received_count: *usize,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveConnectDatagramsIntoWithDeadline(
+            stream_id,
+            outputs,
+            received_count,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveConnectDatagramsIntoWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        outputs: [][]u8,
+        received_count: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        received_count.* = 0;
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return receiveConnectDatagramsIntoFromSession(
+            self,
+            stream_id,
+            outputs,
+            received_count,
             deadline,
         );
     }

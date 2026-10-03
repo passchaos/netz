@@ -569,6 +569,8 @@ so individual 1-RTT features are easy to inspect:
   `--receive-into` selects the authenticated session's caller-buffer receive
   API and reports `receive_mode=caller-buffer`; the default owning path remains
   available as `receive_mode=owning` for allocation/performance comparisons.
+  Caller-buffer mode receives batches matching the send batch, capped by the
+  in-flight window, and reports the effective `receive_batch_size`.
 - `bench-webtransport-stream` measures real-handshake associated STREAM
   transfer, fair cross-stream batching, cancellation, loss, and reordering.
   `--send-timeout-ms=N` supplies one absolute budget shared by every payload

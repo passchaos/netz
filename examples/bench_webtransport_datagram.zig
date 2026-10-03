@@ -173,6 +173,8 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         sent: *std.atomic.Value(usize),
         done: *std.Io.Event,
         receive_into: bool,
+        batch_size: usize,
+        iterations: usize,
         received: std.atomic.Value(usize) = .init(0),
         checksum: u64 = 0,
         err: ?anyerror = null,
@@ -186,52 +188,85 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         fn runFallible(self: *@This()) !void {
             var accepted = try self.server.accept();
             defer accepted.deinit();
+            const session_allocator =
+                accepted.h3.established.connection.endpoint.allocator;
+            const receive_storage = if (self.receive_into)
+                try session_allocator.alloc(
+                    u8,
+                    self.batch_size * max_payload_bytes,
+                )
+            else
+                null;
+            defer if (receive_storage) |storage| {
+                session_allocator.free(storage);
+            };
+            const receive_outputs = if (self.receive_into)
+                try session_allocator.alloc([]u8, self.batch_size)
+            else
+                null;
+            defer if (receive_outputs) |outputs| {
+                session_allocator.free(outputs);
+            };
             var post_done_timeouts: usize = 0;
-            var receive_buffer: [max_payload_bytes]u8 = undefined;
             while (!self.done.isSet() or
                 self.received.load(.acquire) < self.sent.load(.acquire))
             {
+                const received_total = self.received.load(.acquire);
+                if (received_total == self.iterations) break;
+                var received_now: usize = 0;
+                var receive_error: ?anyerror = null;
                 if (self.receive_into) {
-                    const payload = accepted.receiveDatagramIntoWithTimeout(
-                        &receive_buffer,
-                        .fromMilliseconds(10),
-                    ) catch |err| switch (err) {
-                        error.Timeout => {
-                            if (self.done.isSet()) {
-                                post_done_timeouts += 1;
-                                if (post_done_timeouts == 100) {
-                                    return error.MissingDatagram;
-                                }
-                            }
-                            continue;
-                        },
-                        else => return err,
-                    };
-                    for (payload) |byte| self.checksum +%= byte;
-                } else {
-                    var datagram = accepted.receiveDatagramWithTimeout(
-                        .fromMilliseconds(10),
-                    ) catch |err| switch (err) {
-                        error.Timeout => {
-                            if (self.done.isSet()) {
-                                post_done_timeouts += 1;
-                                if (post_done_timeouts == 100) {
-                                    return error.MissingDatagram;
-                                }
-                            }
-                            continue;
-                        },
-                        else => return err,
-                    };
-                    defer datagram.deinit(
-                        accepted.h3.established.connection.endpoint.allocator,
+                    const count = @min(
+                        self.batch_size,
+                        self.iterations - received_total,
                     );
-                    for (datagram.datagram.payload) |byte| {
-                        self.checksum +%= byte;
+                    const storage = receive_storage.?;
+                    const outputs = receive_outputs.?[0..count];
+                    for (outputs, 0..) |*output, index| {
+                        output.* = storage[index * max_payload_bytes ..][0..max_payload_bytes];
+                    }
+                    accepted.receiveDatagramsIntoWithTimeout(
+                        outputs,
+                        &received_now,
+                        .fromMilliseconds(10),
+                    ) catch |err| {
+                        receive_error = err;
+                    };
+                    for (outputs[0..received_now]) |payload| {
+                        for (payload) |byte| self.checksum +%= byte;
+                    }
+                } else {
+                    var maybe_datagram: ?netz.webtransport.runtime.OwnedHandshakeDatagram =
+                        accepted.receiveDatagramWithTimeout(
+                            .fromMilliseconds(10),
+                        ) catch |err| result: {
+                            receive_error = err;
+                            break :result null;
+                        };
+                    if (maybe_datagram) |*datagram| {
+                        defer datagram.deinit(session_allocator);
+                        for (datagram.datagram.payload) |byte| {
+                            self.checksum +%= byte;
+                        }
+                        received_now = 1;
                     }
                 }
-                post_done_timeouts = 0;
-                _ = self.received.fetchAdd(1, .release);
+                if (received_now != 0) {
+                    post_done_timeouts = 0;
+                    _ = self.received.fetchAdd(received_now, .release);
+                }
+                if (receive_error) |err| switch (err) {
+                    error.Timeout => {
+                        if (self.done.isSet() and received_now == 0) {
+                            post_done_timeouts += 1;
+                            if (post_done_timeouts == 100) {
+                                return error.MissingDatagram;
+                            }
+                        }
+                        continue;
+                    },
+                    else => return err,
+                };
             }
         }
     };
@@ -242,6 +277,8 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         .sent = &sent,
         .done = &done,
         .receive_into = config.receive_into,
+        .batch_size = receiveBatchSize(config),
+        .iterations = config.iterations,
     };
     var server_task = io.async(Shared.run, .{&shared});
     defer server_task.cancel(io);
@@ -294,6 +331,7 @@ const BurstSendResult = struct {
     batch_size: usize,
     max_in_flight: usize,
     receive_into: bool,
+    receive_batch_size: usize,
     send_calls: usize,
     payload_bytes: usize,
     elapsed_ns: u64,
@@ -378,6 +416,7 @@ fn runBurstSends(
         .batch_size = config.batch_size,
         .max_in_flight = config.max_in_flight orelse 0,
         .receive_into = config.receive_into,
+        .receive_batch_size = receiveBatchSize(config),
         .send_calls = send_calls,
         .payload_bytes = payload.len,
         .elapsed_ns = elapsed,
@@ -396,6 +435,7 @@ fn printBurstResult(
             "io_backend=zio-std-io attempted={d} " ++
             "sent={d} timed_out={d} received={d} payload_bytes={d} " ++
             "batch_size={d} max_in_flight={d} receive_mode={s} " ++
+            "receive_batch_size={d} " ++
             "send_calls={d} " ++
             "logical_MiB/s={d:.2} send_p50_ns={d} send_p99_ns={d} " ++
             "checksum={d}\n",
@@ -408,6 +448,7 @@ fn printBurstResult(
             result.batch_size,
             result.max_in_flight,
             if (result.receive_into) "caller-buffer" else "owning",
+            result.receive_batch_size,
             result.send_calls,
             mibPerSecond(
                 result.sent * result.payload_bytes,
@@ -509,6 +550,14 @@ fn waitForBurstWindow(
         if (nowNs(io) -| started >= timeout_ns) return error.BenchmarkTimeout;
         try std.Io.sleep(io, .fromMicroseconds(1), .awake);
     }
+}
+
+fn receiveBatchSize(config: Config) usize {
+    if (!config.receive_into) return 1;
+    return @min(
+        config.batch_size,
+        config.max_in_flight orelse std.math.maxInt(usize),
+    );
 }
 
 fn payloadLen(config: Config) usize {

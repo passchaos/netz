@@ -6070,7 +6070,11 @@ and report `max_in_flight=0`.
 API. Fresh matching payloads are copied directly from authenticated packet
 storage; a short caller buffer retains the DATAGRAM in the ordinary bounded
 association queue, so retry does not silently consume it. The owning APIs and
-the benchmark default remain unchanged.
+the benchmark default remain unchanged. The caller-buffer batch forms fill an
+arrival-ordered output prefix under one absolute deadline and report the exact
+completed count on failure. In `--receive-into` mode the benchmark receives
+groups matching `--batch-size`, capped by `--max-in-flight`, and reports the
+effective `receive_batch_size`.
 
 For 1,000 1024-byte DATAGRAMs, allocation telemetry fell from 2,221 to 1,220
 allocations and removed all 1,000 per-DATAGRAM 1024-byte association payload
@@ -6082,6 +6086,13 @@ and median send p50 fell from 4,397 to 4,352 ns. A separate cross-build run was
 directionally consistent (98.24 to 100.10 MiB/s, 9/9 wins). The 35-byte shape
 did not show a stable throughput gain, so caller-buffer receive is opt-in and
 the owning path remains the default.
+Replacing the benchmark's repeated single caller-buffer calls with the batch
+API added only two fixed scratch allocations (16,640 bytes for batch 16), not
+per-DATAGRAM allocation. Nine additional alternating fixed-binary CPU-0 pairs
+at 100,000×1024B moved median throughput from 92.42 to 94.45 MiB/s (2.2%, 8/9
+wins) and median send p50 from 4,796 to 4,564 ns (4.8% lower). This is a
+same-workload caller-buffer single-versus-batch comparison; the remaining
+1,025-byte allocation per DATAGRAM belongs to the QUIC receive queue.
 After the protected stack-send integration, the same 1,000-DATAGRAM bounded
 burst again attempted/sent/received all 1,000 with zero timeout and checksum
 3,549,000. The loaded-host sample was 10.483 us p50 / 17.998 us p99 and

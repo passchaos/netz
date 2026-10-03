@@ -1073,8 +1073,9 @@ Current protocol coverage includes:
   DATAGRAM routing/terminal/error handling under
   `http3/runtime/datagram/routing.zig`, and a handshake-backed
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
-  WebTransport payload-size accounting, batch receive helpers, caller-buffer
-  single-DATAGRAM receive with non-consuming short-buffer retry, modern
+  WebTransport payload-size accounting, owning and caller-buffer batch receive
+  helpers with exact partial progress and non-consuming short-buffer retry,
+  modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with
   per-session limits, prevalidated transactional cross-stream packet-batch writes that
