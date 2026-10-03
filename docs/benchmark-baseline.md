@@ -5573,6 +5573,32 @@ for transient QoS 2, and
 `43bf8a8e89123009a45e1a7c51eadd4cc10d63ae181ed6c372e51ad6d417a068`
 for durable QoS 2.
 
+Persistent Session expiry pruning now has a conservative per-Session earliest
+message deadline. The ordinary no-expiry path returns in O(1) instead of
+scanning queued and inflight arrays on every enqueue and every single-packet
+broker drain. Expiring messages still use the exact scan when the deadline is
+due; that scan repairs the next deadline. Snapshot restore, enqueue, immediate
+inflight insertion, and QoS 0 rollback all update the hint, while an
+`await_pubcomp` QoS 2 record remains exempt from Message Expiry as required.
+
+A fixed-binary, CPU-0/client and CPU-1/server comparison used 32 publishers,
+32 subscribers, MQTT 5 QoS 2, 3,600-second Sessions, a four-message publisher
+window, 1,000 warmups, and 10,000 measured 64-byte publishes per arm. All seven
+AB/BA pairs completed 320,000 deliveries with checksum 18,656,000. The
+candidate won throughput and p99 in five pairs; the median paired throughput
+ratio was 1.014 and the median paired p99 ratio was 0.976. Client allocation
+counts and cumulative bytes were identical. Baseline/candidate broker hashes
+are
+`5ec1526f842612a4bf33302f45bf74c8df404642f234c10a8ba5fc23317a9688`
+and `83ebf9768c5124d3b4b2b95b7c234f4ac1e5b5dac1d724327d9b63d7873f9650`;
+the validated paired log SHA-256 is
+`7eade410a59b63a8e015411bcf7f89a5a765e4fbaed6bd3d390e23c7988a4dac`.
+The complete candidate five-shape matrix also preserved all delivery counts
+and checksums; its summary SHA-256 is
+`9d68958b426cecfc4c6cd7ae6cbdc79fe26ca7e36c900382249ad8a666cb18e7`.
+The remaining cross-broker durable-session gap is still dominated by broader
+per-destination ownership and scheduling work.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was

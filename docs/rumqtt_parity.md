@@ -3599,6 +3599,21 @@ proxy evidence for the entire suite.
    delivery counts and checksums across all 240 broker runs; their timing moved
    in both directions, so
    this is a memory result rather than a general throughput claim.
+   Persistent Sessions now also maintain one conservative earliest Application
+   Message expiry deadline. Enqueue and single-packet drain return immediately
+   from expiry pruning when no message has an expiry or the deadline is still
+   in the future, instead of walking both queued and inflight arrays. Once due,
+   the existing exact scan removes expired PUBLISH records and repairs the next
+   deadline; a stale early deadline after ACK/drop is safe. Snapshot restore and
+   QoS 0 write rollback both rebuild the hint, while QoS 2 records awaiting
+   PUBCOMP remain deliberately non-expiring. A fixed-binary, CPU-0/client and
+   CPU-1/server, seven-pair AB/BA test used 32 publishers, 32 subscribers, a
+   four-message publisher window, 1,000 warmups, 10,000 measured QoS 2
+   publishes, 320,000 verified deliveries, and 3,600-second Sessions. The
+   candidate won throughput and p99 in five of seven pairs; median paired
+   candidate/baseline ratios were 1.014 for throughput and 0.976 for p99.
+   Allocation counts and bytes were identical. This is a modest targeted
+   no-expiry fast-path result, not closure of the broader durable QoS 2 gap.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

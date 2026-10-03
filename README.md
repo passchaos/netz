@@ -1503,6 +1503,10 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # configured hard limit during transactional route preflight. A fixed-binary
 # three-sample allocator comparison reduced fanout-32 and balanced-32x32 broker
 # peak live bytes by 34.1% and 31.2% without adding allocation calls.
+# Persistent Sessions maintain a conservative earliest Message Expiry deadline,
+# so ordinary no-expiry enqueue/drain operations skip a full queued+inflight
+# prune scan. A seven-pair fixed-binary durable QoS 2 run improved median
+# throughput 1.4% and reduced median p99 2.4%.
 # The broker's single-reader TCP loop also supplies 128 bytes of caller storage
 # for ACKs and common small PUBLISH packets. Eligible fragmented packets remain
 # in connection-owned read-ahead across timeouts, while oversized packets, TLS,

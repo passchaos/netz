@@ -339,6 +339,10 @@ const Session = struct {
     inflight: std.ArrayList(?Inflight) = .empty,
     inflight_count: usize = 0,
     inflight_payload_bytes: usize = 0,
+    /// Conservative earliest expiry across queued and expirable inflight
+    /// publications. A stale early value is safe and repaired by the next due
+    /// scan; the sentinel lets the ordinary no-expiry path avoid both scans.
+    next_publish_expiry_ns: i96 = no_publish_expiry,
     /// Owns one QoS 0 publication between queue selection and completion of
     /// the corresponding socket write. No MQTT acknowledgement can own QoS 0,
     /// so this transient slot keeps borrowed transmission slices valid and
@@ -861,6 +865,7 @@ pub const Store = struct {
                 session.queued_payload_bytes = queued_payload_bytes;
                 session.allocation_bytes += publish.allocation_bytes;
                 self.total_bytes += publish.allocation_bytes;
+                notePublishExpiry(session, publish.*);
                 restored = null;
             }
         }
@@ -934,6 +939,9 @@ pub const Store = struct {
             session.inflight_payload_bytes = inflight_payload_bytes;
             session.allocation_bytes += publish.allocation_bytes;
             self.total_bytes += publish.allocation_bytes;
+            if (state != .await_pubcomp) {
+                notePublishExpiry(session, publish);
+            }
             publish = undefined;
         }
 
@@ -1655,6 +1663,7 @@ pub const Store = struct {
         session.queued_payload_bytes = queued_payload_bytes;
         session.allocation_bytes += publish.allocation_bytes;
         self.total_bytes += publish.allocation_bytes;
+        notePublishExpiry(session, publish);
         publish = undefined;
         snapshot_changed.* = true;
         return .queued;
@@ -1785,6 +1794,7 @@ pub const Store = struct {
         session.inflight_payload_bytes += publish.payload.len;
         session.allocation_bytes += publish.allocation_bytes;
         self.total_bytes += publish.allocation_bytes;
+        notePublishExpiry(session, publish);
         publish = undefined;
         return publishTransmission(
             session.inflight.items[inflight_index].?,
@@ -2054,6 +2064,7 @@ pub const Store = struct {
             session.queued.items[session.queued_head] = publish;
             session.queued_count += 1;
             session.queued_payload_bytes += publish.payload.len;
+            notePublishExpiry(session, publish);
             return;
         }
         const session = try self.getSession(handle);
@@ -2270,6 +2281,7 @@ pub const Store = struct {
         session.queued.items[session.queued_head] = publish;
         session.queued_count += 1;
         session.queued_payload_bytes += publish.payload.len;
+        notePublishExpiry(session, publish);
     }
 
     pub fn recordIncomingQoS2(
@@ -2595,10 +2607,17 @@ pub const Store = struct {
         session: *Session,
         now_ns: i96,
     ) bool {
+        if (now_ns < session.next_publish_expiry_ns) return false;
         var changed = false;
+        var next_expiry_ns: i96 = no_publish_expiry;
         for (session.queued.items[session.queued_head..]) |*maybe_publish| {
             if (maybe_publish.*) |publish| {
-                if (remainingExpiry(publish, now_ns) != 0) continue;
+                const deadline = publishExpiryDeadline(publish);
+                if (deadline == no_publish_expiry) continue;
+                if (now_ns < deadline) {
+                    next_expiry_ns = @min(next_expiry_ns, deadline);
+                    continue;
+                }
                 var removed = publish;
                 maybe_publish.* = null;
                 session.queued_count -= 1;
@@ -2616,14 +2635,17 @@ pub const Store = struct {
         var index: usize = 0;
         while (index < session.inflight.items.len) : (index += 1) {
             const inflight = session.inflight.items[index] orelse continue;
-            if (inflight.state == .await_pubcomp or
-                remainingExpiry(inflight.publish, now_ns) != 0)
-            {
+            if (inflight.state == .await_pubcomp) continue;
+            const deadline = publishExpiryDeadline(inflight.publish);
+            if (deadline == no_publish_expiry) continue;
+            if (now_ns < deadline) {
+                next_expiry_ns = @min(next_expiry_ns, deadline);
                 continue;
             }
             self.removeInflight(session, index);
             changed = true;
         }
+        session.next_publish_expiry_ns = next_expiry_ns;
         return changed;
     }
 
@@ -2976,6 +2998,22 @@ fn remainingExpiry(publish: OwnedPublish, now_ns: i96) ?u32 {
     ));
 }
 
+const no_publish_expiry = std.math.maxInt(i96);
+
+fn publishExpiryDeadline(publish: OwnedPublish) i96 {
+    const interval = publish.expiry_interval orelse return no_publish_expiry;
+    const lifetime_ns = @as(i96, interval) * std.time.ns_per_s;
+    return std.math.add(i96, publish.stored_at_ns, lifetime_ns) catch
+        no_publish_expiry;
+}
+
+fn notePublishExpiry(session: *Session, publish: OwnedPublish) void {
+    session.next_publish_expiry_ns = @min(
+        session.next_publish_expiry_ns,
+        publishExpiryDeadline(publish),
+    );
+}
+
 fn transmissionForInflight(
     inflight: Inflight,
     now_ns: i96,
@@ -3055,6 +3093,78 @@ fn countNullSlots(comptime T: type, items: []const ?T) usize {
     var count: usize = 0;
     for (items) |item| count += @intFromBool(item == null);
     return count;
+}
+
+test "Session publish expiry deadline skips and repairs scans" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("expiry-deadline", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "unbounded",
+        "value",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    const session = try store.getSession(opened.handle);
+    try std.testing.expectEqual(
+        no_publish_expiry,
+        session.next_publish_expiry_ns,
+    );
+
+    var one_second = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .message_expiry_interval,
+        .value = 1,
+    } }};
+    var three_seconds = [_]mqtt.Property{.{ .four_byte = .{
+        .id = .message_expiry_interval,
+        .value = 3,
+    } }};
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "first",
+        "value",
+        .{
+            .qos = .at_least_once,
+            .properties = &one_second,
+            .now = .zero,
+        },
+    );
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "second",
+        "value",
+        .{
+            .qos = .at_least_once,
+            .properties = &three_seconds,
+            .now = .zero,
+        },
+    );
+    try std.testing.expectEqual(
+        @as(i96, std.time.ns_per_s),
+        session.next_publish_expiry_ns,
+    );
+    try std.testing.expect(!store.pruneExpiredPublishes(
+        session,
+        std.time.ns_per_s - 1,
+    ));
+    try std.testing.expect(store.pruneExpiredPublishes(
+        session,
+        std.time.ns_per_s,
+    ));
+    try std.testing.expectEqual(@as(usize, 2), session.queued_count);
+    try std.testing.expectEqual(
+        @as(i96, 3 * std.time.ns_per_s),
+        session.next_publish_expiry_ns,
+    );
+    try std.testing.expect(store.pruneExpiredPublishes(
+        session,
+        3 * std.time.ns_per_s,
+    ));
+    try std.testing.expectEqual(@as(usize, 1), session.queued_count);
+    try std.testing.expectEqual(
+        no_publish_expiry,
+        session.next_publish_expiry_ns,
+    );
 }
 
 test "Session queue cursor releases a fully consumed prefix" {
