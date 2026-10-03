@@ -3619,16 +3619,30 @@ proxy evidence for the entire suite.
    immutable Topic Name and payload while every Session continues to own its
    QoS, Retain flag, Subscription Identifiers, expiry accounting, Packet
    Identifier state, logical byte budget, and snapshot representation. Online
-   Session delivery keeps the established storage-cache path, avoiding the
-   per-source allocation cost measured by a rejected all-destination sharing
-   prototype. A new `bench-mqtt-session` AB/BA sub-benchmark holds 256 messages
-   for 64 offline Sessions. Its seven-pair median measured 336 versus 812 ns per
+   Session delivery normally keeps the established storage-cache path, avoiding
+   the per-source allocation cost measured by a rejected all-destination
+   sharing prototype. When a multi-destination QoS 1 TCP PUBLISH already owns
+   a packet allocation with a `Publication`-sized prefix, however, the broker
+   transfers that allocation into one Publication shared by online durable
+   Session entries and transient destinations. Borrowed small packets do not
+   activate this exception. A new `bench-mqtt-session` AB/BA sub-benchmark
+   holds 256 messages for 64 offline Sessions. Its seven-pair median measured
+   336 versus 812 ns per
    destination, while backing allocations fell from 16,896 to 768 (95.5%) and
    incremental live bytes from 11,345,920 to 3,052,544 (73.1%). All logical
    16,384 deliveries remain independently accounted and teardown returns the
    counting allocator to zero. The benchmark binary and captured output hashes
    are `a2bfe1e2a2e8a14afe3724641180f7f60cf1e906c40193a29e52ad4881b56020`
    and `07630da78b56333ae2c31f4dae44fc61b924edd81005fcbc764d951fd48eb6f9`.
+   A seven-sample fixed-binary QoS 1 durable allocator comparison kept the four
+   stack-buffer shapes at baseline levels and reduced the 4-KiB shape from
+   2,370 to 2,331 allocations, 15,495,237 to 15,175,749 cumulative requested
+   bytes, and 6,322,177 to 6,032,215 peak live bytes. All 70 broker runs ended
+   with zero live bytes. A separate seven-pair, long fixed-binary A/B completed
+   40,000 deliveries per arm with checksum 10,780,000; median throughput moved
+   from 19,090 to 19,362 publishes/s, the median paired ratio was 1.017, and the
+   candidate won all seven pairs. This supports the targeted large-packet path,
+   not a general broker throughput claim.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

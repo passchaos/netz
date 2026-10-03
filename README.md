@@ -929,7 +929,9 @@ Current protocol coverage includes:
   0/1 and durable Session delivery retain their ordered synchronous path, plus
   a bounded persistent Session
   Store with full subscription restoration, Session Expiry, offline QoS 1/2
-  queues, Receive Maximum scheduling, DUP/PUBREL reconnect retransmission,
+  queues, shared immutable Topic Name/payload backing for multi-destination
+  offline fanout and adoptable QoS 1 ingress packets, Receive Maximum
+  scheduling, DUP/PUBREL reconnect retransmission,
   out-of-order ACKs and incoming QoS 2 deduplication, atomic versioned broker
   snapshots whose file contents and, on supported POSIX targets, replacement
   directory entry are synced, matching identity-bound reconnect-client
@@ -1511,6 +1513,11 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # Name/payload owner while retaining independent per-Session QoS, properties,
 # expiry and Packet Identifiers. The 64-session offline benchmark cuts backing
 # allocations 95.5% and live bytes 73.1% versus per-destination cloning.
+# A multi-destination QoS 1 TCP PUBLISH that already owns a prefixed packet
+# allocation extends that same Publication through online durable and transient
+# destinations. Borrowed small packets keep the warmed Session-cache path. In
+# the 4-KiB durable shape this cuts peak live bytes 4.6%; a seven-pair fixed-
+# binary A/B improved median throughput 1.4% with seven candidate wins.
 # The broker's single-reader TCP loop also supplies 128 bytes of caller storage
 # for ACKs and common small PUBLISH packets. Eligible fragmented packets remain
 # in connection-owned read-ahead across timeouts, while oversized packets, TLS,

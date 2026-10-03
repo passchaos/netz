@@ -5640,10 +5640,18 @@ pub const Broker = struct {
             &session_plan_scratch,
         );
         defer session_plan.deinit();
-        var shared_offline_publication: ?*Publication = null;
-        defer if (shared_offline_publication) |publication| {
+        var shared_route_publication: ?*Publication = null;
+        defer if (shared_route_publication) |publication| {
             publication.release();
         };
+        // `prefixed_packet` is also present when a small PUBLISH borrows the
+        // connection's stack storage. Share online Session bytes only when
+        // the packet carries an allocation that Publication can adopt; an
+        // ordinary borrowed packet must not introduce a new route allocation.
+        const can_adopt_packet = if (prefixed_packet) |packet|
+            packet.prefixedAllocation() != null
+        else
+            false;
         var ignored_persistent_change = false;
         for (session_plan.routes) |*route| {
             const handle = self.sessions.handleForRouteId(
@@ -5721,18 +5729,19 @@ pub const Broker = struct {
                 &ignored_persistent_change;
             var route_persistent_changed = false;
             var route_enqueued = false;
-            const shared_publication = if (!online and
-                session_plan.routes.len > 1)
+            const shared_publication = if (session_plan.routes.len > 1 and
+                (can_adopt_packet or !online))
             blk: {
-                if (shared_offline_publication == null) {
-                    shared_offline_publication = try Publication.createFromPublish(
+                if (shared_route_publication == null) {
+                    shared_route_publication = try createRoutePublication(
                         self.allocator,
                         publish,
                         1,
                         now,
+                        prefixed_packet,
                     );
                 }
-                break :blk shared_offline_publication;
+                break :blk shared_route_publication;
             } else null;
             self.enqueueSessionDeliveryManyLocked(
                 handle,
@@ -5840,19 +5849,19 @@ pub const Broker = struct {
         }
         const plan = matches[0..plan_count];
 
-        const publication = if (plan.len == 0)
-            null
-        else
-            createRoutePublication(
-                self.allocator,
-                publish,
-                plan.len,
-                now,
-                prefixed_packet,
-            ) catch |err| {
-                self.releaseRouteReservations(plan);
-                return err;
-            };
+        const publication = if (plan.len == 0) null else if (shared_route_publication) |shared| blk: {
+            for (0..plan.len) |_| shared.retain();
+            break :blk shared;
+        } else createRoutePublication(
+            self.allocator,
+            publish,
+            plan.len,
+            now,
+            prefixed_packet,
+        ) catch |err| {
+            self.releaseRouteReservations(plan);
+            return err;
+        };
         var publication_committed = false;
         errdefer if (!publication_committed) {
             if (publication) |value| {
@@ -7467,7 +7476,7 @@ test "MQTT delivery queue reservations reclaim a consumed prefix" {
     try std.testing.expectEqual(publication, buffers.queue.items[1].publication);
 }
 
-test "MQTT offline durable fanout shares publication bytes" {
+test "MQTT offline durable fanout adopts and shares prefixed publication bytes" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -7506,6 +7515,22 @@ test "MQTT offline durable fanout shares publication bytes" {
 
     var persistent_changed = false;
     var publication_committed = false;
+    const packet_len = 64;
+    const allocation = try allocator.alignedAlloc(
+        u8,
+        .@"16",
+        @sizeOf(Publication) + packet_len,
+    );
+    const wire = allocation[@sizeOf(Publication)..];
+    @memset(wire, 0xaa);
+    @memcpy(wire[5..17], "shared/topic");
+    @memcpy(wire[31..45], "shared-payload");
+    var packet = runtime.OwnedPacket{
+        .bytes = wire,
+        .fixed = undefined,
+        .prefix_len = @sizeOf(Publication),
+    };
+    defer packet.deinit(allocator);
     var plan = try broker.enqueuePublishLocked(
         false,
         null,
@@ -7513,10 +7538,10 @@ test "MQTT offline durable fanout shares publication bytes" {
             .dup = false,
             .qos = .at_least_once,
             .retain = false,
-            .topic = "shared/topic",
+            .topic = wire[5..17],
             .packet_id = 1,
             .properties = &.{},
-            .payload = "shared-payload",
+            .payload = wire[31..45],
         },
         null,
         null,
@@ -7524,9 +7549,11 @@ test "MQTT offline durable fanout shares publication bytes" {
         .zero,
         &persistent_changed,
         &publication_committed,
-        null,
+        &packet,
     );
     defer plan.deinit(allocator);
+    try std.testing.expect(!packet.owns_bytes);
+    try std.testing.expectEqual(@as(u16, 0), packet.prefix_len);
     try std.testing.expect(persistent_changed);
     try std.testing.expect(publication_committed);
     try std.testing.expectEqual(@as(usize, 0), plan.deliveries.len);
@@ -7555,6 +7582,12 @@ test "MQTT offline durable fanout shares publication bytes" {
     try std.testing.expectEqual(
         first[0].publish.payload.ptr,
         second[0].publish.payload.ptr,
+    );
+    try std.testing.expectEqual(wire.ptr, first[0].publish.topic.ptr);
+    try std.testing.expectEqualStrings("shared/topic", first[0].publish.topic);
+    try std.testing.expectEqualStrings(
+        "shared-payload",
+        first[0].publish.payload,
     );
 }
 

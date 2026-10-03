@@ -5604,9 +5604,14 @@ Name/payload owner across its destination Sessions, matching Mosquitto's split
 between a shared base message and per-client delivery state. Each Session still
 owns its delivery properties and QoS/Retain/Packet Identifier state, applies
 its logical byte limits independently, and serializes the unchanged snapshot
-format. The optimization is restricted to offline targets in a multi-route fanout;
-online persistent delivery keeps the existing cached independent backing after
-an all-destination sharing experiment increased allocation traffic.
+format. Ordinary online persistent delivery keeps the existing cached
+independent backing after an all-destination sharing experiment increased
+allocation traffic. The narrower exception is a multi-destination QoS 1 TCP
+PUBLISH whose owned packet already carries a `Publication`-sized prefix: that
+allocation becomes the shared owner for online durable Session entries and any
+transient destinations in the same route. A small PUBLISH borrowed from the
+128-byte connection stack buffer cannot be adopted and therefore stays on the
+cache-backed path without creating an extra source Publication.
 
 `bench-mqtt-session` now includes a same-binary, seven-pair AB/BA comparison
 that retains 256 messages across 64 offline Sessions (16,384 logical
@@ -5623,6 +5628,31 @@ A complete online durable QoS 2 five-shape matrix, where sharing is deliberately
 inactive, preserved all delivery counts and checksums and showed mixed timing
 within the existing host variance. Its summary SHA-256 is
 `97446c6d1693486491dff07926b35c77982787e0d5fb3a35b35673f1ed0bafdc`.
+
+A seven-sample fixed-binary QoS 1 durable allocator comparison exercised the
+ingress exception above. All 70 broker runs completed with identical delivery
+counts/checksums and zero live bytes after teardown. The four shapes whose
+64-byte packets borrow stack storage stayed at baseline allocation levels. In
+the deterministic 4-KiB shape, the candidate reduced median allocation calls
+from 2,370 to 2,331 (1.6%), cumulative requested bytes from 15,495,237 to
+15,175,749 (2.1%), and peak live bytes from 6,322,177 to 6,032,215 (4.6%).
+Baseline/candidate broker SHA-256 values are
+`7efdc3ccf6b4c66761c2f270b41c73126874bded28dabb616f04a5da1a552fd4`
+and `a23755ef9f7e469b6a867ccbab0ea87ceb7e53311b3cbc447d59c18be451badc`;
+their allocator summary hashes are
+`2c0e4fc564eb0975e2c661056160dbaa2d518e16f466aabd1f9514b74813bb59`
+and `a12072a5842b5e60282b67b4e3b63c80531fe8c7d99cf36df15eaeecbc809094`.
+
+A separate CPU-0/client, CPU-1/server seven-pair alternating-order A/B used
+four publishers, four subscribers, MQTT 5 QoS 1, 3,600-second Sessions, a
+16-message publisher window, 1,000 warmups, and 10,000 measured 4-KiB
+publishes per arm. Every arm completed 40,000 deliveries with checksum
+10,780,000. Median throughput moved from 19,090 to 19,362 publishes/s (1.4%),
+the median paired ratio was 1.017, and the candidate won all seven pairs.
+Median p50/p99 changed from 1.245/2.489 ms to 1.210/2.418 ms. The captured log
+SHA-256 is
+`9aac0c3d68f5f43e8e056decabe7c1115d41461459b3b17f8821241e46abfce4`;
+this is targeted large-packet evidence rather than a general broker claim.
 
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
