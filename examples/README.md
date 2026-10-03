@@ -562,7 +562,10 @@ so individual 1-RTT features are easy to inspect:
   HTTP/3 WebTransport session and measure deadline-bounded DATAGRAM sends under
   congestion backpressure. `--batch-size=N` (up to 64) groups the burst into
   ordered socket batches and reports both logical DATAGRAM count and API call
-  count.
+  count. `--max-in-flight=N` keeps at most `N` successfully submitted but not
+  yet consumed DATAGRAMs outstanding, allowing long large-payload runs without
+  measuring avoidable loopback UDP queue loss. It is burst-only; omitting it
+  retains the original unbounded sender (`max_in_flight=0` in the result).
 - `bench-webtransport-stream` measures real-handshake associated STREAM
   transfer, fair cross-stream batching, cancellation, loss, and reordering.
   `--send-timeout-ms=N` supplies one absolute budget shared by every payload

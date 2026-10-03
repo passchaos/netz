@@ -5978,6 +5978,9 @@ zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
   --payload-bytes=1024 --iterations=10000
+zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
+  --burst --batch-size=16 --max-in-flight=64 \
+  --payload-bytes=1024 --iterations=10000
 ```
 
 ```text
@@ -6057,6 +6060,12 @@ The original cleartext ping-pong mode and output remain the default.
 Both ping-pong and authenticated burst modes accept
 `--payload-bytes=1..1024`. Omitting it preserves their historical 27-byte and
 35-byte payloads respectively, so existing baseline checksums remain stable.
+Authenticated burst mode also accepts `--max-in-flight=N`. The sender waits
+for enough complete-batch capacity whenever `N` successfully submitted
+DATAGRAMs remain unconsumed, so long 1024-byte loopback runs exercise sustained
+QUIC/HTTP3 processing instead of overflowing the local UDP queue. The option
+is burst-only and opt-in; omitted runs retain the historical unbounded sender
+and report `max_in_flight=0`.
 After the protected stack-send integration, the same 1,000-DATAGRAM bounded
 burst again attempted/sent/received all 1,000 with zero timeout and checksum
 3,549,000. The loaded-host sample was 10.483 us p50 / 17.998 us p99 and

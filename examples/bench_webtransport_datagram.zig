@@ -12,6 +12,7 @@ const Config = struct {
     send_timeout_ms: i64 = 1000,
     burst: bool = false,
     batch_size: usize = 1,
+    max_in_flight: ?usize = null,
     payload_bytes: ?usize = null,
 };
 
@@ -170,7 +171,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         server: *netz.webtransport.runtime.HandshakeServer,
         sent: *std.atomic.Value(usize),
         done: *std.Io.Event,
-        received: usize = 0,
+        received: std.atomic.Value(usize) = .init(0),
         checksum: u64 = 0,
         err: ?anyerror = null,
 
@@ -185,7 +186,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
             defer accepted.deinit();
             var post_done_timeouts: usize = 0;
             while (!self.done.isSet() or
-                self.received < self.sent.load(.acquire))
+                self.received.load(.acquire) < self.sent.load(.acquire))
             {
                 var datagram = accepted.receiveDatagramWithTimeout(
                     .fromMilliseconds(10),
@@ -205,8 +206,8 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
                 defer datagram.deinit(
                     accepted.h3.established.connection.endpoint.allocator,
                 );
-                self.received += 1;
                 for (datagram.datagram.payload) |byte| self.checksum +%= byte;
+                _ = self.received.fetchAdd(1, .release);
             }
         }
     };
@@ -247,16 +248,18 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         io,
         &client,
         &sent,
+        &shared.received,
         config,
     );
     done.set(io);
     server_task.await(io);
     if (shared.err) |err| return err;
-    if (shared.received != result.sent) return error.InvalidDatagramCount;
+    const received = shared.received.load(.acquire);
+    if (received != result.sent) return error.InvalidDatagramCount;
     var expected_checksum = payloadChecksum(config);
     expected_checksum *%= result.sent;
     if (shared.checksum != expected_checksum) return error.InvalidChecksum;
-    printBurstResult(result, shared.received, shared.checksum);
+    printBurstResult(result, received, shared.checksum);
 }
 
 const BurstSendResult = struct {
@@ -264,6 +267,7 @@ const BurstSendResult = struct {
     sent: usize,
     timed_out: usize,
     batch_size: usize,
+    max_in_flight: usize,
     send_calls: usize,
     payload_bytes: usize,
     elapsed_ns: u64,
@@ -276,6 +280,7 @@ fn runBurstSends(
     io: std.Io,
     client: *netz.webtransport.runtime.HandshakeClientSession,
     sent_count: *std.atomic.Value(usize),
+    received_count: *const std.atomic.Value(usize),
     config: Config,
 ) !BurstSendResult {
     var payload_storage: [max_payload_bytes]u8 = undefined;
@@ -294,7 +299,18 @@ fn runBurstSends(
     @memset(payloads, payload);
     while (success_count + timeout_count < config.iterations) {
         const remaining = config.iterations - success_count - timeout_count;
-        const count = @min(config.batch_size, remaining);
+        const count = @min(
+            config.batch_size,
+            remaining,
+            config.max_in_flight orelse std.math.maxInt(usize),
+        );
+        try waitForBurstWindow(
+            io,
+            success_count,
+            received_count,
+            count,
+            config,
+        );
         const send_started = nowNs(io);
         var committed: usize = 0;
         send_calls += 1;
@@ -334,6 +350,7 @@ fn runBurstSends(
         .sent = success_count,
         .timed_out = timeout_count,
         .batch_size = config.batch_size,
+        .max_in_flight = config.max_in_flight orelse 0,
         .send_calls = send_calls,
         .payload_bytes = payload.len,
         .elapsed_ns = elapsed,
@@ -351,7 +368,7 @@ fn printBurstResult(
         "WebTransport real-handshake bounded DATAGRAM burst: " ++
             "io_backend=zio-std-io attempted={d} " ++
             "sent={d} timed_out={d} received={d} payload_bytes={d} " ++
-            "batch_size={d} send_calls={d} " ++
+            "batch_size={d} max_in_flight={d} send_calls={d} " ++
             "logical_MiB/s={d:.2} send_p50_ns={d} send_p99_ns={d} " ++
             "checksum={d}\n",
         .{
@@ -361,6 +378,7 @@ fn printBurstResult(
             received,
             result.payload_bytes,
             result.batch_size,
+            result.max_in_flight,
             result.send_calls,
             mibPerSecond(
                 result.sent * result.payload_bytes,
@@ -397,6 +415,12 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
                 10,
             );
             if (config.iterations == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--max-in-flight=")) {
+            config.max_in_flight = try std.fmt.parseInt(
+                usize,
+                arg["--max-in-flight=".len..],
+                10,
+            );
         } else if (std.mem.startsWith(u8, arg, "--payload-bytes=")) {
             config.payload_bytes = try std.fmt.parseInt(
                 usize,
@@ -409,7 +433,7 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
                 arg["--send-timeout-ms=".len..],
                 10,
             );
-            if (config.send_timeout_ms == 0) return error.InvalidArgument;
+            if (config.send_timeout_ms <= 0) return error.InvalidArgument;
         } else return error.InvalidArgument;
     }
     if (config.batch_size == 0 or config.batch_size > max_batch_size) {
@@ -420,10 +444,38 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
             return error.InvalidArgument;
         }
     }
-    if (!config.burst and config.batch_size != 1) {
+    if (config.max_in_flight) |max_in_flight| {
+        if (max_in_flight == 0) return error.InvalidArgument;
+    }
+    if (!config.burst and
+        (config.batch_size != 1 or config.max_in_flight != null))
+    {
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn waitForBurstWindow(
+    io: std.Io,
+    sent: usize,
+    received_count: *const std.atomic.Value(usize),
+    next_count: usize,
+    config: Config,
+) !void {
+    const limit = config.max_in_flight orelse return;
+    const started = nowNs(io);
+    const timeout_ns = std.math.mul(
+        u64,
+        @as(u64, @intCast(config.send_timeout_ms)),
+        std.time.ns_per_ms,
+    ) catch std.math.maxInt(u64);
+    while (true) {
+        const received = received_count.load(.acquire);
+        const outstanding = sent -| received;
+        if (outstanding <= limit - next_count) return;
+        if (nowNs(io) -| started >= timeout_ns) return error.BenchmarkTimeout;
+        try std.Io.sleep(io, .fromMicroseconds(1), .awake);
+    }
 }
 
 fn payloadLen(config: Config) usize {
