@@ -209,7 +209,11 @@ benchmark response:
   writes are also allocated together on first use and retain their warmed
   capacity. Contiguous flattening reuses the response-batch allocation because
   those buffers must coexist, removing its standalone empty list from ordinary
-  connections;
+  connections. Request Host/TE normalization, framing validation, generated
+  fields, and final encoding likewise share one reusable header-descriptor
+  list instead of copying through a second retained list. A representative
+  cold request drops from three scratch allocations to two, and the warmed
+  aggregate and streaming paths allocate nothing further;
 - complete requests, single responses, and both coalesced and borrowed response
   batches finish all validation and allocation before transport I/O. Once a
   write begins, any transport error permanently retires the HTTP/1 connection:

@@ -29,9 +29,9 @@ const RequestReadStage = enum { head, continue_write, body };
 
 test "HTTP/1 connections keep optional write scratch compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 528), @sizeOf(Client));
-        try std.testing.expectEqual(@as(usize, 448), @sizeOf(Connection));
-        try std.testing.expectEqual(@as(usize, 120), @sizeOf(WriteScratch));
+        try std.testing.expectEqual(@as(usize, 496), @sizeOf(Client));
+        try std.testing.expectEqual(@as(usize, 432), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 96), @sizeOf(WriteScratch));
     }
 }
 

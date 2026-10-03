@@ -178,7 +178,6 @@ pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     batch: ?*BatchScratch = null,
     headers: std.ArrayList(http1.Header) = .empty,
-    request_headers: std.ArrayList(http1.Header) = .empty,
     trailers: ?*TrailerScratch = null,
     streaming_chunks: ?*StreamingChunkScratch = null,
     content_length: [content_length_buffer_len]u8 = undefined,
@@ -186,7 +185,6 @@ pub const Scratch = struct {
     fn reset(self: *Scratch) void {
         self.encoded.clearRetainingCapacity();
         self.headers.clearRetainingCapacity();
-        self.request_headers.clearRetainingCapacity();
         if (self.trailers) |trailers| trailers.reset();
         if (self.streaming_chunks) |chunks| chunks.reset();
     }
@@ -198,7 +196,6 @@ pub const Scratch = struct {
             allocator.destroy(batch);
         }
         self.headers.deinit(allocator);
-        self.request_headers.deinit(allocator);
         if (self.trailers) |trailers| {
             trailers.deinit(allocator);
             allocator.destroy(trailers);
@@ -278,30 +275,30 @@ fn prepareStreamingRequest(
 
     const target_authority = http1.absoluteFormAuthority(options.target);
     try appendRequestHeadersWithHost(
-        &scratch.request_headers,
+        &scratch.headers,
         allocator,
         options.headers,
         options.host orelse target_authority,
     );
     try appendRequiredTeConnectionOption(
-        &scratch.request_headers,
+        &scratch.headers,
         allocator,
     );
     try http1.validateConnectionHeadersForWrite(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     try http1.validateRequestTeForWrite(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     try http1.validateHostHeaderBlock(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     if (target_authority) |authority| {
         const host = wire.findHeader(
-            scratch.request_headers.items,
+            scratch.headers.items,
             "host",
         ) orelse return error.InvalidHost;
         if (!std.ascii.eqlIgnoreCase(
@@ -312,13 +309,13 @@ fn prepareStreamingRequest(
 
     try http1.validateOutgoingRequestFramingForMethod(
         options.method,
-        scratch.request_headers.items,
+        scratch.headers.items,
         options.body_length,
         options.trailer_names.len != 0,
     );
 
     const trailers_requested = hasHeader(
-        scratch.request_headers.items,
+        scratch.headers.items,
         "trailer",
     ) or options.trailer_names.len != 0;
     const trailer_headers: []const http1.Header = if (trailers_requested) blk: {
@@ -327,21 +324,21 @@ fn prepareStreamingRequest(
             &trailers.headers,
             &trailers.name_storage,
             allocator,
-            scratch.request_headers.items,
+            scratch.headers.items,
             options.trailer_names,
         );
         break :blk trailers.headers.items;
     } else &.{};
     const explicit_chunked = try chunkedWriteFraming(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
         trailer_headers,
     );
     if (trailers_requested and !explicit_chunked) {
         return error.InvalidTrailer;
     }
     const declared_length = try http1.contentLength(
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     const use_chunked = explicit_chunked or
         (declared_length == null and options.body_length == null and
@@ -368,17 +365,16 @@ fn prepareStreamingRequest(
         fixed_length;
     try http1.validateRequestExpectForWrite(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
         if (use_chunked)
             options.body_length == null or options.body_length.? != 0
         else
             fixed_length != 0,
     );
 
-    try appendDefaultedHeaders(
+    try appendDefaultedHeadersInPlace(
         &scratch.headers,
         allocator,
-        scratch.request_headers.items,
         fixed_length,
         trailer_headers,
         use_chunked,
@@ -400,7 +396,7 @@ fn prepareStreamingRequest(
             .{ .fixed = fixed_length },
         .reusable_after_finish = http1.headersKeepAlive(
             options.version,
-            scratch.request_headers.items,
+            scratch.headers.items,
         ),
         .expected_length = expected_length,
         .header_name_casing = options.header_name_casing,
@@ -1407,30 +1403,30 @@ pub fn prepareRequest(
         http1.absoluteFormAuthority(options.target);
     const synthesized_host = options.host orelse target_authority;
     try appendRequestHeadersWithHost(
-        &scratch.request_headers,
+        &scratch.headers,
         allocator,
         options.headers,
         synthesized_host,
     );
     try appendRequiredTeConnectionOption(
-        &scratch.request_headers,
+        &scratch.headers,
         allocator,
     );
     try http1.validateConnectionHeadersForWrite(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     try http1.validateRequestTeForWrite(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     try http1.validateHostHeaderBlock(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
     );
     if (target_authority) |authority| {
         const host = wire.findHeader(
-            scratch.request_headers.items,
+            scratch.headers.items,
             "host",
         ) orelse return error.InvalidHost;
         if (!std.ascii.eqlIgnoreCase(
@@ -1442,34 +1438,33 @@ pub fn prepareRequest(
     }
     try http1.validateOutgoingRequestBodyForMethod(
         options.method,
-        scratch.request_headers.items,
+        scratch.headers.items,
         options.body,
         options.trailers,
     );
     try http1.validateTrailerDeclarations(
-        scratch.request_headers.items,
+        scratch.headers.items,
         options.trailers,
     );
     const use_chunked = try chunkedWriteFraming(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
         options.trailers,
     );
     try validateDeclaredRequestBodyLength(
-        scratch.request_headers.items,
+        scratch.headers.items,
         options.body.len,
         use_chunked,
     );
     try http1.validateRequestExpectForWrite(
         options.version,
-        scratch.request_headers.items,
+        scratch.headers.items,
         options.body.len != 0,
     );
 
-    try appendDefaultedHeaders(
+    try appendDefaultedHeadersInPlace(
         &scratch.headers,
         allocator,
-        scratch.request_headers.items,
         options.body.len,
         options.trailers,
         use_chunked,
@@ -1613,7 +1608,6 @@ fn prepareResponsePartsWithDefaultDate(
     for (responses) |response| {
         scratch.encoded.clearRetainingCapacity();
         scratch.headers.clearRetainingCapacity();
-        scratch.request_headers.clearRetainingCapacity();
         if (scratch.trailers) |trailers| {
             trailers.value.clearRetainingCapacity();
         }
@@ -1685,7 +1679,7 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 96), @sizeOf(BatchScratch));
-        try std.testing.expectEqual(@as(usize, 120), @sizeOf(Scratch));
+        try std.testing.expectEqual(@as(usize, 96), @sizeOf(Scratch));
         try std.testing.expectEqual(
             @as(usize, 20),
             @sizeOf(@FieldType(Scratch, "content_length")),
@@ -1718,6 +1712,52 @@ test "HTTP/1 write scratch allocates batch state lazily" {
         @intFromPtr(try scratch.batchScratch(no_alloc.allocator())),
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 request preparation shares one header descriptor buffer" {
+    var tracking = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = tracking.allocator();
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+
+    const request = try prepareRequest(allocator, .{
+        .method = .POST,
+        .host = "example.test",
+        .headers = &.{.{ .name = "X-Test", .value = "value" }},
+        .body = "body",
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "Host: example.test\r\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "Content-Length: 4\r\n",
+    ) != null);
+    try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
+    try std.testing.expectEqual(@as(usize, 0), tracking.resize_index);
+
+    const allocations = tracking.allocations;
+    const streaming_request = try prepareStreamingRequest(allocator, .{
+        .method = .POST,
+        .host = "example.test",
+        .headers = &.{.{ .name = "X-Test", .value = "value" }},
+        .body_length = 4,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        streaming_request.head,
+        "Content-Length: 4\r\n",
+    ) != null);
+    try std.testing.expectEqual(
+        allocations,
+        tracking.allocations,
+    );
 }
 
 test "HTTP/1 write scratch allocates multi-chunk state lazily" {
@@ -1978,7 +2018,10 @@ fn appendRequestHeadersWithHost(
     host: ?[]const u8,
 ) Error!void {
     var has_host = false;
-    try list.ensureUnusedCapacity(allocator, headers.len + 1);
+    // Reserve Host, a synthesized Connection: TE marker, and the two largest
+    // framing-default additions up front. Request normalization and final
+    // rendering intentionally share this one descriptor allocation.
+    try list.ensureUnusedCapacity(allocator, headers.len + 4);
     for (headers) |header| {
         if (header.eqlName("host")) has_host = true;
         list.appendAssumeCapacity(header);
@@ -2099,6 +2142,71 @@ fn hasHeader(headers: []const http1.Header, name: []const u8) bool {
     return false;
 }
 
+const DefaultedHeaderPresence = struct {
+    content_length: bool = false,
+    transfer_encoding: bool = false,
+    trailer: bool = false,
+    date: bool = false,
+
+    fn observe(self: *@This(), header: http1.Header) void {
+        if (header.eqlName("content-length")) self.content_length = true;
+        if (header.eqlName("transfer-encoding")) {
+            self.transfer_encoding = true;
+        }
+        if (header.eqlName("trailer")) self.trailer = true;
+        if (header.eqlName("date")) self.date = true;
+    }
+};
+
+fn appendMissingDefaultedHeadersAssumeCapacity(
+    list: *std.ArrayList(http1.Header),
+    allocator: std.mem.Allocator,
+    body_len: usize,
+    trailers: []const http1.Header,
+    use_chunked: bool,
+    add_default_content_length: bool,
+    len_buf: *[content_length_buffer_len]u8,
+    scratch: *Scratch,
+    default_date: ?[]const u8,
+    presence: DefaultedHeaderPresence,
+) Error!void {
+    if (use_chunked) {
+        if (!presence.transfer_encoding) {
+            list.appendAssumeCapacity(.{
+                .name = "Transfer-Encoding",
+                .value = "chunked",
+            });
+        }
+        if (trailers.len != 0 and !presence.trailer) {
+            const trailer_scratch = try scratch.trailerScratch(allocator);
+            try renderTrailerHeaderValue(
+                &trailer_scratch.value,
+                allocator,
+                trailers,
+            );
+            list.appendAssumeCapacity(.{
+                .name = "Trailer",
+                .value = trailer_scratch.value.items,
+            });
+        }
+    } else if (add_default_content_length and !presence.content_length) {
+        const rendered = std.fmt.bufPrint(
+            len_buf,
+            "{}",
+            .{body_len},
+        ) catch unreachable;
+        list.appendAssumeCapacity(.{
+            .name = "Content-Length",
+            .value = rendered,
+        });
+    }
+    if (default_date) |value| {
+        if (!presence.date) {
+            list.appendAssumeCapacity(.{ .name = "Date", .value = value });
+        }
+    }
+}
+
 fn appendDefaultedHeaders(
     list: *std.ArrayList(http1.Header),
     allocator: std.mem.Allocator,
@@ -2111,55 +2219,64 @@ fn appendDefaultedHeaders(
     scratch: *Scratch,
     default_date: ?[]const u8,
 ) Error!void {
-    var has_content_length = false;
-    var has_transfer_encoding = false;
-    var has_trailer = false;
+    if (!use_chunked and trailers.len != 0) return error.InvalidTrailer;
+    var presence: DefaultedHeaderPresence = .{};
     try list.ensureUnusedCapacity(allocator, headers.len + 3);
     for (headers) |header| {
-        if (header.eqlName("content-length")) has_content_length = true;
-        if (header.eqlName("transfer-encoding")) {
-            has_transfer_encoding = true;
-        }
-        if (header.eqlName("trailer")) has_trailer = true;
+        presence.observe(header);
         if (use_chunked and header.eqlName("content-length")) continue;
         list.appendAssumeCapacity(header);
     }
+    return appendMissingDefaultedHeadersAssumeCapacity(
+        list,
+        allocator,
+        body_len,
+        trailers,
+        use_chunked,
+        add_default_content_length,
+        len_buf,
+        scratch,
+        default_date,
+        presence,
+    );
+}
+
+fn appendDefaultedHeadersInPlace(
+    list: *std.ArrayList(http1.Header),
+    allocator: std.mem.Allocator,
+    body_len: usize,
+    trailers: []const http1.Header,
+    use_chunked: bool,
+    add_default_content_length: bool,
+    len_buf: *[content_length_buffer_len]u8,
+    scratch: *Scratch,
+    default_date: ?[]const u8,
+) Error!void {
+    // Request validation has finished, so the normalized descriptor list can
+    // become the final output list without retaining and copying a second one.
     if (!use_chunked and trailers.len != 0) return error.InvalidTrailer;
-    if (use_chunked) {
-        if (!has_transfer_encoding) {
-            list.appendAssumeCapacity(.{
-                .name = "Transfer-Encoding",
-                .value = "chunked",
-            });
-        }
-        if (trailers.len != 0 and !has_trailer) {
-            const trailer_scratch = try scratch.trailerScratch(allocator);
-            try renderTrailerHeaderValue(
-                &trailer_scratch.value,
-                allocator,
-                trailers,
-            );
-            list.appendAssumeCapacity(.{
-                .name = "Trailer",
-                .value = trailer_scratch.value.items,
-            });
-        }
-    } else if (add_default_content_length and !has_content_length) {
-        const rendered = std.fmt.bufPrint(
-            len_buf,
-            "{}",
-            .{body_len},
-        ) catch unreachable;
-        list.appendAssumeCapacity(.{
-            .name = "Content-Length",
-            .value = rendered,
-        });
+    var presence: DefaultedHeaderPresence = .{};
+    var retained: usize = 0;
+    for (list.items) |header| {
+        presence.observe(header);
+        if (use_chunked and header.eqlName("content-length")) continue;
+        list.items[retained] = header;
+        retained += 1;
     }
-    if (default_date) |value| {
-        if (!hasHeader(headers, "date")) {
-            list.appendAssumeCapacity(.{ .name = "Date", .value = value });
-        }
-    }
+    list.items.len = retained;
+    try list.ensureUnusedCapacity(allocator, 3);
+    return appendMissingDefaultedHeadersAssumeCapacity(
+        list,
+        allocator,
+        body_len,
+        trailers,
+        use_chunked,
+        add_default_content_length,
+        len_buf,
+        scratch,
+        default_date,
+        presence,
+    );
 }
 
 fn responseStatusIsFinal(status: u16) bool {
