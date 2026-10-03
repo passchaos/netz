@@ -267,6 +267,22 @@ test "QUIC 1-RTT caller-buffer DATAGRAM receive preserves ordering and storage" 
         .connection = &server,
         .expected = &no_alloc_payloads,
     };
+    const received_before_timeout = server.datagramsReceived();
+    try std.testing.expectError(
+        error.Timeout,
+        server.visitDatagramBatchIntoServicingTimersTimeout(
+            &raw_storage,
+            &raw_datagrams,
+            .zero,
+            &no_alloc_context,
+            BorrowedContext.visit,
+        ),
+    );
+    try std.testing.expectEqual(
+        received_before_timeout,
+        server.datagramsReceived(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), no_alloc_context.next);
     var borrowed_fail = std.testing.FailingAllocator.init(
         allocator,
         .{ .fail_index = 0 },
@@ -275,13 +291,10 @@ test "QUIC 1-RTT caller-buffer DATAGRAM receive preserves ordering and storage" 
         server_endpoint.allocator = borrowed_fail.allocator();
         defer server_endpoint.allocator = allocator;
         break :blk try server
-            .visitDatagramBatchIntoServicingTimersDeadline(
+            .visitDatagramBatchIntoServicingTimersTimeout(
             &raw_storage,
             &raw_datagrams,
-            .fromNow(io, .{
-                .clock = .awake,
-                .raw = .fromSeconds(1),
-            }),
+            .fromSeconds(1),
             &no_alloc_context,
             BorrowedContext.visit,
         );

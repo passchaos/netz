@@ -3840,6 +3840,30 @@ pub const Connection = struct {
         );
     }
 
+    /// Relative-timeout counterpart to
+    /// `visitDatagramBatchIntoServicingTimers`.
+    pub fn visitDatagramBatchIntoServicingTimersTimeout(
+        self: *Connection,
+        storage: []u8,
+        datagrams: []quic.runtime.ReceivedBytesView,
+        timeout: std.Io.Duration,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || quic.runtime.ReceiveTimeoutError ||
+        callbackErrorSet(visitor))!usize {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.visitDatagramBatchIntoServicingTimersDeadline(
+            storage,
+            datagrams,
+            .fromNow(self.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+            context,
+            visitor,
+        );
+    }
+
     /// Absolute-deadline counterpart to
     /// `visitDatagramBatchIntoServicingTimers`.
     pub fn visitDatagramBatchIntoServicingTimersDeadline(

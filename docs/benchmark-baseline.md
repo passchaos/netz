@@ -1197,16 +1197,17 @@ fixed Quinn client, the netz server p50 median moved from 44.009 to 43.205 us
 included a candidate high tail, so this is a small workload-specific p50
 improvement rather than a tail-latency or general QUIC performance claim.
 
-Latency-sensitive consumers can instead use
-`visitDatagramBatchIntoServicingTimers` or its deadline variant. These methods
-receive into caller-owned raw storage, apply and acknowledge the complete
-authenticated packet batch, and synchronously visit each DATAGRAM payload
-without copying it into either the bounded queue or a second application
-buffer. Payload views expire when their callback returns, recursive receive is
-rejected with `ConcurrencyUnavailable`, and pre-existing queued payloads remain
-untouched. A real-UDP test covers packed ordered delivery, zero queue growth,
-callback-error cleanup, recursive-receive rejection, and an allocation-free
-warmed receive under a fail-first allocator. One frozen ReleaseFast binary
+Latency-sensitive consumers can instead use the blocking, relative-timeout,
+or absolute-deadline `visitDatagramBatchIntoServicingTimers*` variants. These
+methods receive into caller-owned raw storage, apply and acknowledge the
+complete authenticated packet batch, and synchronously visit each DATAGRAM
+payload without copying it into either the bounded queue or a second
+application buffer. Payload views expire when their callback returns, recursive
+receive is rejected with `ConcurrencyUnavailable`, and pre-existing queued
+payloads remain untouched. A real-UDP test covers packed ordered delivery, zero
+queue growth, callback-error cleanup, recursive-receive rejection, and an
+allocation-free warmed receive under a fail-first allocator. One frozen
+ReleaseFast binary
 (`f0962826104e29c03796e0672c861c2c55e68499242a60984937a8431f3ce375`)
 alternated copy and borrowed modes over nine CPU-0 pairs, each with 500 warmups
 and 10,000 measured 54-packet batches. The median fell from 2,694 to 2,626
