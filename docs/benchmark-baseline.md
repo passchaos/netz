@@ -896,6 +896,23 @@ medians of 163.612 and 180.510 us. This ARM64 result is directional evidence;
 the larger x86 acceleration and the remaining event-loop/payload-delivery gap
 need their own fixed-peer runs.
 
+Vail `2f2eb77` subsequently consumes up to sixteen GHASH blocks per reduction
+on ARM64 with cached powers and independent PMULL products. A noinline runtime loop
+keeps the complete receive-benchmark binary increase to 23,296 bytes; the
+rejected fully unrolled prototype added about 301 KiB. Seven fixed-binary
+short-packet pairs reduced prepared AES-128 seal/open medians from 206/283 to
+135/217 ns (34.5%/23.3%) and AES-256 from 220/334 to 166/270 ns
+(24.5%/19.2%), with every pair faster. Nine fixed-binary 1,149-byte DATAGRAM
+receive pairs compared
+`6d4f9cc5b90f43c80c52e3872efcb1cae01424a6f2c9f6e08a96bae86d6e8738`
+with
+`efa4d5674787773e7933fc1f0f9938b44e9920b5951c3d0f8fe410b70c9e9c87`;
+the median fell from 2,752 to 2,606 ns/packet (5.31%, 9/9 wins). A fresh Quinn
+matrix measured netz p50 at 173.594/207.917 us against fixed Quinn/netz
+servers, versus Quinn-client medians of 157.621/173.751 us. Because that matrix
+was separately scheduled, it remains directional evidence rather than the
+causal claim.
+
 ### QUIC 1-RTT send
 
 ```text
@@ -1274,9 +1291,9 @@ candidate) were pinned to CPU 0 and alternated in nine pairs. Every invocation
 used 500 warmups and 10,000 measured batches of 54 packets. The service-path
 median fell from 2,849 to 2,812 ns/packet, a 1.30% reduction, with the
 candidate faster in 9/9 pairs. The latest five-sample 1024-byte/window-16 Quinn
-matrix, after the Vail pure-Zig AES-GCM update, measured netz p50 at 178.769 us
-against a fixed Quinn server and 216.974 us against a fixed netz server, versus
-Quinn-client medians of 163.612 and 180.510 us. That separately scheduled,
+matrix, after the Vail ARM64 PMULL update, measured netz p50 at 173.594 us
+against a fixed Quinn server and 207.917 us against a fixed netz server, versus
+Quinn-client medians of 157.621 and 173.751 us. That separately scheduled,
 implementation-packetized matrix is
 directional compatibility evidence; the fixed-binary receive result is the
 causal performance evidence, and the large-payload cross-stack gap remains
