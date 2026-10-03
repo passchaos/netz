@@ -212,10 +212,14 @@ benchmark response:
   connections. Request Host/TE normalization, framing validation, generated
   fields, and final encoding likewise share one reusable header-descriptor
   list instead of copying through a second retained list. A representative
-  cold request drops from three scratch allocations to two, and the warmed
-  aggregate and streaming paths allocate nothing further. The exact-width
-  Content-Length decimal buffer is likewise call-local during head encoding
-  instead of remaining resident for the connection lifetime;
+  cold request first dropped from three scratch allocations to two. Final
+  header descriptors now use 16 uninitialized stack slots with an exact
+  allocation fallback for larger sets, leaving only the encoded-byte
+  allocation on the common cold path; returned heads own their encoded bytes
+  after temporary descriptor storage is released. The warmed aggregate and
+  streaming paths allocate nothing further. The exact-width Content-Length
+  decimal buffer is likewise call-local during head encoding instead of
+  remaining resident for the connection lifetime;
 - complete requests, single responses, and both coalesced and borrowed response
   batches finish all validation and allocation before transport I/O. Once a
   write begins, any transport error permanently retires the HTTP/1 connection:

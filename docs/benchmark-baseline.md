@@ -193,13 +193,15 @@ on every connection. Request Host/TE normalization and final default-header
 assembly also mutate one retained descriptor list rather than allocating and
 copying through two. A
 representative cold POST therefore falls from three scratch allocations and
-710 requested bytes to two allocations and 486 bytes; switching the warmed
-scratch to the equivalent streaming request needs no new allocation. Together
-these changes reduce the scratch from 320 to 72 bytes, `Client` from 720 to 480
-bytes, and `Connection` from 656 to 400 bytes. Fail-first tests keep each state
-absent after allocation failure, and warmed request, batch, and chunk metadata
-retains capacity. These are fixed-layout and allocation-lifetime results rather
-than a latency claim.
+710 requested bytes first to two allocations and 486 bytes. Final header
+descriptors now use 16 uninitialized stack slots with a one-allocation exact
+fallback for larger sets, leaving only the encoded-byte allocation on that
+common cold request. Switching the warmed scratch to the equivalent streaming
+request needs no new allocation. Together these changes reduce the scratch
+from 320 to 48 bytes, `Client` from 720 to 448 bytes, and `Connection` from 656
+to 384 bytes. Fail-first tests keep each lazy state absent after allocation
+failure, and warmed request, batch, and chunk metadata retains capacity. These
+are fixed-layout and allocation-lifetime results rather than a latency claim.
 
 The pipeline runner now accepts
 `--write-strategy=auto|vectored|flatten` and reports the selected policy, so

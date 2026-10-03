@@ -177,13 +177,11 @@ const content_length_buffer_len = std.fmt.count(
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     batch: ?*BatchScratch = null,
-    headers: std.ArrayList(http1.Header) = .empty,
     trailers: ?*TrailerScratch = null,
     streaming_chunks: ?*StreamingChunkScratch = null,
 
     fn reset(self: *Scratch) void {
         self.encoded.clearRetainingCapacity();
-        self.headers.clearRetainingCapacity();
         if (self.trailers) |trailers| trailers.reset();
         if (self.streaming_chunks) |chunks| chunks.reset();
     }
@@ -194,7 +192,6 @@ pub const Scratch = struct {
             batch.deinit(allocator);
             allocator.destroy(batch);
         }
-        self.headers.deinit(allocator);
         if (self.trailers) |trailers| {
             trailers.deinit(allocator);
             allocator.destroy(trailers);
@@ -252,6 +249,27 @@ pub const Scratch = struct {
     }
 };
 
+const header_staging_capacity = 16;
+
+/// Keep ordinary outgoing header sets entirely on the caller's stack. Larger
+/// sets retain full support through one exact temporary allocation.
+fn stackFirstHeaderBuffer(
+    allocator: std.mem.Allocator,
+    stack: []http1.Header,
+    required: usize,
+) std.mem.Allocator.Error![]http1.Header {
+    if (required <= stack.len) return stack[0..required];
+    return allocator.alloc(http1.Header, required);
+}
+
+fn freeStackFirstHeaderBuffer(
+    allocator: std.mem.Allocator,
+    stack: []http1.Header,
+    buffer: []http1.Header,
+) void {
+    if (buffer.ptr != stack.ptr) allocator.free(buffer);
+}
+
 pub const MessageParts = struct {
     header: []const u8,
     body: []const u8,
@@ -265,6 +283,19 @@ fn prepareStreamingRequest(
 ) Error!StreamingHead {
     if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
+    var headers_stack: [header_staging_capacity]http1.Header = undefined;
+    const headers_buffer = try stackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        std.math.add(usize, options.headers.len, 4) catch
+            return error.OutOfMemory,
+    );
+    defer freeStackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        headers_buffer,
+    );
+    var headers = std.ArrayList(http1.Header).initBuffer(headers_buffer);
     try http1.validateRequestTargetForMethod(options.method, options.target);
     if (options.method == .CONNECT) {
         // CONNECT changes the meaning of all subsequent bytes after its
@@ -273,31 +304,27 @@ fn prepareStreamingRequest(
     }
 
     const target_authority = http1.absoluteFormAuthority(options.target);
-    try appendRequestHeadersWithHost(
-        &scratch.headers,
-        allocator,
+    appendRequestHeadersWithHost(
+        &headers,
         options.headers,
         options.host orelse target_authority,
     );
-    try appendRequiredTeConnectionOption(
-        &scratch.headers,
-        allocator,
-    );
+    appendRequiredTeConnectionOption(&headers);
     try http1.validateConnectionHeadersForWrite(
         options.version,
-        scratch.headers.items,
+        headers.items,
     );
     try http1.validateRequestTeForWrite(
         options.version,
-        scratch.headers.items,
+        headers.items,
     );
     try http1.validateHostHeaderBlock(
         options.version,
-        scratch.headers.items,
+        headers.items,
     );
     if (target_authority) |authority| {
         const host = wire.findHeader(
-            scratch.headers.items,
+            headers.items,
             "host",
         ) orelse return error.InvalidHost;
         if (!std.ascii.eqlIgnoreCase(
@@ -308,13 +335,13 @@ fn prepareStreamingRequest(
 
     try http1.validateOutgoingRequestFramingForMethod(
         options.method,
-        scratch.headers.items,
+        headers.items,
         options.body_length,
         options.trailer_names.len != 0,
     );
 
     const trailers_requested = hasHeader(
-        scratch.headers.items,
+        headers.items,
         "trailer",
     ) or options.trailer_names.len != 0;
     const trailer_headers: []const http1.Header = if (trailers_requested) blk: {
@@ -323,21 +350,21 @@ fn prepareStreamingRequest(
             &trailers.headers,
             &trailers.name_storage,
             allocator,
-            scratch.headers.items,
+            headers.items,
             options.trailer_names,
         );
         break :blk trailers.headers.items;
     } else &.{};
     const explicit_chunked = try chunkedWriteFraming(
         options.version,
-        scratch.headers.items,
+        headers.items,
         trailer_headers,
     );
     if (trailers_requested and !explicit_chunked) {
         return error.InvalidTrailer;
     }
     const declared_length = try http1.contentLength(
-        scratch.headers.items,
+        headers.items,
     );
     const use_chunked = explicit_chunked or
         (declared_length == null and options.body_length == null and
@@ -364,7 +391,7 @@ fn prepareStreamingRequest(
         fixed_length;
     try http1.validateRequestExpectForWrite(
         options.version,
-        scratch.headers.items,
+        headers.items,
         if (use_chunked)
             options.body_length == null or options.body_length.? != 0
         else
@@ -373,7 +400,7 @@ fn prepareStreamingRequest(
 
     var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeadersInPlace(
-        &scratch.headers,
+        &headers,
         allocator,
         fixed_length,
         trailer_headers,
@@ -387,7 +414,7 @@ fn prepareStreamingRequest(
         scratch,
         null,
     );
-    try encodeRequestHead(allocator, options, scratch);
+    try encodeRequestHead(allocator, options, headers.items, scratch);
     return .{
         .head = scratch.encoded.items,
         .framing = if (use_chunked)
@@ -396,7 +423,7 @@ fn prepareStreamingRequest(
             .{ .fixed = fixed_length },
         .reusable_after_finish = http1.headersKeepAlive(
             options.version,
-            scratch.headers.items,
+            headers.items,
         ),
         .expected_length = expected_length,
         .header_name_casing = options.header_name_casing,
@@ -425,6 +452,19 @@ fn prepareStreamingResponseWithDefaultDate(
 ) Error!StreamingHead {
     if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
+    var headers_stack: [header_staging_capacity]http1.Header = undefined;
+    const headers_buffer = try stackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        std.math.add(usize, options.headers.len, 3) catch
+            return error.OutOfMemory,
+    );
+    defer freeStackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        headers_buffer,
+    );
+    var headers = std.ArrayList(http1.Header).initBuffer(headers_buffer);
     try http1.validateStatusCode(options.status);
     try http1.validateReasonPhrase(options.reason);
     try http1.validateConnectionHeadersForWrite(
@@ -541,7 +581,7 @@ fn prepareStreamingResponseWithDefaultDate(
         options.body_length orelse declared_length orelse 0;
     var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeaders(
-        &scratch.headers,
+        &headers,
         allocator,
         options.headers,
         if (suppress_body)
@@ -558,7 +598,12 @@ fn prepareStreamingResponseWithDefaultDate(
         scratch,
         if (responseStatusIsFinal(options.status)) default_date else null,
     );
-    try encodeStreamingResponseHead(allocator, options, scratch);
+    try encodeStreamingResponseHead(
+        allocator,
+        options,
+        headers.items,
+        scratch,
+    );
 
     const successful_connect = options.request_method != null and
         options.request_method.? == .CONNECT and
@@ -1397,37 +1442,46 @@ pub fn prepareRequest(
 ) Error!MessageParts {
     if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
+    var headers_stack: [header_staging_capacity]http1.Header = undefined;
+    const headers_buffer = try stackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        std.math.add(usize, options.headers.len, 4) catch
+            return error.OutOfMemory,
+    );
+    defer freeStackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        headers_buffer,
+    );
+    var headers = std.ArrayList(http1.Header).initBuffer(headers_buffer);
     try http1.validateRequestTargetForMethod(options.method, options.target);
     const target_authority = if (options.method == .CONNECT)
         options.target
     else
         http1.absoluteFormAuthority(options.target);
     const synthesized_host = options.host orelse target_authority;
-    try appendRequestHeadersWithHost(
-        &scratch.headers,
-        allocator,
+    appendRequestHeadersWithHost(
+        &headers,
         options.headers,
         synthesized_host,
     );
-    try appendRequiredTeConnectionOption(
-        &scratch.headers,
-        allocator,
-    );
+    appendRequiredTeConnectionOption(&headers);
     try http1.validateConnectionHeadersForWrite(
         options.version,
-        scratch.headers.items,
+        headers.items,
     );
     try http1.validateRequestTeForWrite(
         options.version,
-        scratch.headers.items,
+        headers.items,
     );
     try http1.validateHostHeaderBlock(
         options.version,
-        scratch.headers.items,
+        headers.items,
     );
     if (target_authority) |authority| {
         const host = wire.findHeader(
-            scratch.headers.items,
+            headers.items,
             "host",
         ) orelse return error.InvalidHost;
         if (!std.ascii.eqlIgnoreCase(
@@ -1439,33 +1493,33 @@ pub fn prepareRequest(
     }
     try http1.validateOutgoingRequestBodyForMethod(
         options.method,
-        scratch.headers.items,
+        headers.items,
         options.body,
         options.trailers,
     );
     try http1.validateTrailerDeclarations(
-        scratch.headers.items,
+        headers.items,
         options.trailers,
     );
     const use_chunked = try chunkedWriteFraming(
         options.version,
-        scratch.headers.items,
+        headers.items,
         options.trailers,
     );
     try validateDeclaredRequestBodyLength(
-        scratch.headers.items,
+        headers.items,
         options.body.len,
         use_chunked,
     );
     try http1.validateRequestExpectForWrite(
         options.version,
-        scratch.headers.items,
+        headers.items,
         options.body.len != 0,
     );
 
     var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeadersInPlace(
-        &scratch.headers,
+        &headers,
         allocator,
         options.body.len,
         options.trailers,
@@ -1480,7 +1534,7 @@ pub fn prepareRequest(
         null,
     );
 
-    try encodeRequestHead(allocator, options, scratch);
+    try encodeRequestHead(allocator, options, headers.items, scratch);
     if (use_chunked) {
         const chunks = [_][]const u8{options.body};
         try encodeChunked(
@@ -1608,7 +1662,6 @@ fn prepareResponsePartsWithDefaultDate(
     );
     for (responses) |response| {
         scratch.encoded.clearRetainingCapacity();
-        scratch.headers.clearRetainingCapacity();
         if (scratch.trailers) |trailers| {
             trailers.value.clearRetainingCapacity();
         }
@@ -1679,7 +1732,7 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 96), @sizeOf(BatchScratch));
-        try std.testing.expectEqual(@as(usize, 72), @sizeOf(Scratch));
+        try std.testing.expectEqual(@as(usize, 48), @sizeOf(Scratch));
         try std.testing.expectEqual(
             @as(usize, 20),
             content_length_buffer_len,
@@ -1714,7 +1767,7 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     try std.testing.expect(!no_alloc.has_induced_failure);
 }
 
-test "HTTP/1 request preparation shares one header descriptor buffer" {
+test "HTTP/1 request preparation uses stack-first header descriptors" {
     var tracking = std.testing.FailingAllocator.init(
         std.testing.allocator,
         .{},
@@ -1739,7 +1792,7 @@ test "HTTP/1 request preparation shares one header descriptor buffer" {
         request.header,
         "Content-Length: 4\r\n",
     ) != null);
-    try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
+    try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
     try std.testing.expectEqual(@as(usize, 0), tracking.resize_index);
 
     const allocations = tracking.allocations;
@@ -1756,6 +1809,71 @@ test "HTTP/1 request preparation shares one header descriptor buffer" {
     ) != null);
     try std.testing.expectEqual(
         allocations,
+        tracking.allocations,
+    );
+}
+
+test "HTTP/1 header staging uses stack and one exact overflow allocation" {
+    const allocator = std.testing.allocator;
+    var stack: [header_staging_capacity]http1.Header = undefined;
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const common = try stackFirstHeaderBuffer(
+        no_alloc.allocator(),
+        &stack,
+        stack.len,
+    );
+    defer freeStackFirstHeaderBuffer(
+        no_alloc.allocator(),
+        &stack,
+        common,
+    );
+    try std.testing.expectEqual(stack[0..].ptr, common.ptr);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        stackFirstHeaderBuffer(
+            no_alloc.allocator(),
+            &stack,
+            stack.len + 1,
+        ),
+    );
+    try std.testing.expect(no_alloc.has_induced_failure);
+
+    const overflow = try stackFirstHeaderBuffer(
+        allocator,
+        &stack,
+        stack.len + 1,
+    );
+    defer freeStackFirstHeaderBuffer(allocator, &stack, overflow);
+    try std.testing.expect(overflow.ptr != stack[0..].ptr);
+    try std.testing.expectEqual(stack.len + 1, overflow.len);
+
+    var input: [header_staging_capacity - 3]http1.Header = undefined;
+    for (&input) |*header| {
+        header.* = .{ .name = "X-Test", .value = "value" };
+    }
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var scratch = Scratch{};
+    defer scratch.deinit(tracked);
+    const request = try prepareRequest(tracked, .{
+        .host = "example.test",
+        .headers = &input,
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "X-Test: value\r\n",
+    ) != null);
+    // The exact descriptor fallback is already released when the encoded head
+    // is returned; only Scratch's encoded-byte allocation remains live.
+    try std.testing.expectEqual(
+        tracking.deallocations + 1,
         tracking.allocations,
     );
 }
@@ -1950,9 +2068,22 @@ fn prepareResponseFramingAndHead(
         options.status,
         options.request_method,
     );
+    var headers_stack: [header_staging_capacity]http1.Header = undefined;
+    const headers_buffer = try stackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        std.math.add(usize, options.headers.len, 3) catch
+            return error.OutOfMemory,
+    );
+    defer freeStackFirstHeaderBuffer(
+        allocator,
+        &headers_stack,
+        headers_buffer,
+    );
+    var headers = std.ArrayList(http1.Header).initBuffer(headers_buffer);
     var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeaders(
-        &scratch.headers,
+        &headers,
         allocator,
         options.headers,
         options.body.len,
@@ -1966,7 +2097,7 @@ fn prepareResponseFramingAndHead(
         scratch,
         default_date,
     );
-    try encodeResponseHead(allocator, options, scratch);
+    try encodeResponseHead(allocator, options, headers.items, scratch);
     return .{
         .use_chunked = use_chunked,
         .suppress_body = suppress_body,
@@ -1976,6 +2107,7 @@ fn prepareResponseFramingAndHead(
 fn encodeResponseHead(
     allocator: std.mem.Allocator,
     options: ResponseOptions,
+    headers: []const http1.Header,
     scratch: *Scratch,
 ) Error!void {
     const encoded = &scratch.encoded;
@@ -1988,7 +2120,7 @@ fn encodeResponseHead(
     try writeHeaderLines(
         encoded,
         allocator,
-        scratch.headers.items,
+        headers,
         options.header_name_casing,
     );
     try encoded.appendSlice(allocator, "\r\n");
@@ -1997,6 +2129,7 @@ fn encodeResponseHead(
 fn encodeRequestHead(
     allocator: std.mem.Allocator,
     options: anytype,
+    headers: []const http1.Header,
     scratch: *Scratch,
 ) Error!void {
     const encoded = &scratch.encoded;
@@ -2009,7 +2142,7 @@ fn encodeRequestHead(
     try writeHeaderLines(
         encoded,
         allocator,
-        scratch.headers.items,
+        headers,
         options.header_name_casing,
     );
     try encoded.appendSlice(allocator, "\r\n");
@@ -2018,6 +2151,7 @@ fn encodeRequestHead(
 fn encodeStreamingResponseHead(
     allocator: std.mem.Allocator,
     options: StreamingResponseOptions,
+    headers: []const http1.Header,
     scratch: *Scratch,
 ) Error!void {
     const encoded = &scratch.encoded;
@@ -2030,7 +2164,7 @@ fn encodeStreamingResponseHead(
     try writeHeaderLines(
         encoded,
         allocator,
-        scratch.headers.items,
+        headers,
         options.header_name_casing,
     );
     try encoded.appendSlice(allocator, "\r\n");
@@ -2038,15 +2172,10 @@ fn encodeStreamingResponseHead(
 
 fn appendRequestHeadersWithHost(
     list: *std.ArrayList(http1.Header),
-    allocator: std.mem.Allocator,
     headers: []const http1.Header,
     host: ?[]const u8,
-) Error!void {
+) void {
     var has_host = false;
-    // Reserve Host, a synthesized Connection: TE marker, and the two largest
-    // framing-default additions up front. Request normalization and final
-    // rendering intentionally share this one descriptor allocation.
-    try list.ensureUnusedCapacity(allocator, headers.len + 4);
     for (headers) |header| {
         if (header.eqlName("host")) has_host = true;
         list.appendAssumeCapacity(header);
@@ -2060,14 +2189,13 @@ fn appendRequestHeadersWithHost(
 
 fn appendRequiredTeConnectionOption(
     headers: *std.ArrayList(http1.Header),
-    allocator: std.mem.Allocator,
-) Error!void {
+) void {
     if (!hasHeader(headers.items, "te") or
         wire.anyHeaderContainsToken(headers.items, "connection", "te"))
     {
         return;
     }
-    try headers.append(allocator, .{ .name = "Connection", .value = "TE" });
+    headers.appendAssumeCapacity(.{ .name = "Connection", .value = "TE" });
 }
 
 fn prepareTrailerNames(
@@ -2246,7 +2374,6 @@ fn appendDefaultedHeaders(
 ) Error!void {
     if (!use_chunked and trailers.len != 0) return error.InvalidTrailer;
     var presence: DefaultedHeaderPresence = .{};
-    try list.ensureUnusedCapacity(allocator, headers.len + 3);
     for (headers) |header| {
         presence.observe(header);
         if (use_chunked and header.eqlName("content-length")) continue;
@@ -2289,7 +2416,6 @@ fn appendDefaultedHeadersInPlace(
         retained += 1;
     }
     list.items.len = retained;
-    try list.ensureUnusedCapacity(allocator, 3);
     return appendMissingDefaultedHeadersAssumeCapacity(
         list,
         allocator,
