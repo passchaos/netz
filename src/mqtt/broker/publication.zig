@@ -241,10 +241,16 @@ pub const Publication = struct {
         );
         if (remaining == 0) return false;
         if (protocol == .v3_1_1) return true;
-        try out.ensureTotalCapacity(
-            allocator,
-            self.properties.len + subscription_identifiers.len,
-        );
+        const required = std.math.add(
+            usize,
+            self.properties.len,
+            subscription_identifiers.len,
+        ) catch return error.InvalidProperty;
+        // Stack-first broker writers reserve this exact capacity before the
+        // call; ordinary heap-backed callers retain the allocation fallback.
+        if (out.capacity < required) {
+            try out.ensureTotalCapacity(allocator, required);
+        }
         for (self.properties) |property| {
             if (property == .four_byte and
                 property.four_byte.id == .message_expiry_interval)
@@ -359,6 +365,23 @@ test "publication strips aliases and decrements expiry at queue write" {
         @as(?usize, 7),
         mqtt.subscriptionIdentifier(properties.items),
     );
+
+    var property_stack: [2]mqtt.Property = undefined;
+    var stack_properties = std.ArrayList(mqtt.Property).initBuffer(
+        &property_stack,
+    );
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expect(try publication.appendDeliveryProperties(
+        &stack_properties,
+        no_alloc.allocator(),
+        .v5,
+        7,
+        std.Io.Timestamp.fromNanoseconds(5 * std.time.ns_per_s),
+    ));
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 2), stack_properties.items.len);
 
     properties.clearRetainingCapacity();
     try std.testing.expect(try publication.appendDeliveryProperties(

@@ -1120,14 +1120,14 @@ RSS was effectively unchanged. The artifact is
 `zig-out/mqtt-session-plan-ab/run.20260930`; the full matrix completed all 40
 runs, while the fixed-binary result remains the causal evidence.
 
-Outgoing live fanout and durable Session replay now also reuse the existing
-connection-owned property scratch while holding that connection's writer
-mutex. Property descriptors continue to borrow their immutable Publication or
-Session values only through the synchronous encode/write call, but the backing
-descriptor array grows at most to the connection's high-water mark instead of
-being allocated and freed for every delivery. A fail-first second Session
-write proves that a warmed property-bearing Topic Alias replay needs no new
-allocation. The three-sample five-shape allocator matrix at
+Outgoing live fanout and durable Session replay use eight caller-stack property
+slots while holding that connection's writer mutex. Property descriptors
+continue to borrow their immutable Publication or Session values only through
+the synchronous encode/write call. Larger sets use one exact connection-owned
+overflow slice whose capacity is retained, preserving allocation-free warmed
+delivery without carrying a full `ArrayList` in every connection. A fail-first
+second Session write proves that a warmed property-bearing Topic Alias replay
+needs no new allocation. The earlier three-sample five-shape allocator matrix at
 `zig-out/mqtt-property-scratch-final2` (22,231,273 bytes; summary SHA-256
 `737976e8f6a1a6358bb2cda094c3c9e60741ff9dcee2ce7e7a982520390382a8`)
 completed all fifteen broker runs with `live_bytes=0`. Against the preceding
@@ -3536,9 +3536,11 @@ proxy evidence for the entire suite.
    level. The TCP transport retains a 448-byte, seven-cache-line read-ahead
    region that still covers the benchmark's complete four-packet small-message
    window; larger packets keep their exact-allocation fallback. None of these
-   changes adds an allocation. Together they reduce the audited 64-bit
-   `runtime.Connection` from 1,408 to 792 bytes (616 bytes per ordinary QoS 0
-   live connection without aliases). The
+   changes adds an allocation. Stack-first outgoing property staging now keeps
+   eight descriptors in caller storage and retains only an exact overflow
+   slice for larger sets. Together these changes reduce the audited 64-bit
+   `runtime.Connection` from 1,408 to 784 bytes (624 bytes saved per ordinary
+   QoS 0 live connection without aliases). The
    four delivery/route/Session
    scratch lists, transient QoS map, counters, and optional delivery-writer
    pointer now share one 152-byte `ClientBuffers` descriptor allocated only
@@ -3571,9 +3573,9 @@ proxy evidence for the entire suite.
    Delivery policy dispatch keeps the owned global/listener callback tables
    behind borrowed pointers and resolves a destination Session's Client ID only
    when one of those tables actually supplies a delivery callback. Retained
-   replay shares the connection's bounded Session-property scratch rather than
-   allocating and freeing a temporary list for every stored message. A
-   fail-on-first-allocation test proves same-capacity scratch reuse while
+   replay uses the same stack-first property staging and retained overflow
+   rather than allocating and freeing a temporary list for every stored
+   message. A fail-on-first-allocation test proves common stack reuse while
    preserving Message Expiry rewriting; the fixed five-shape broker comparison
    remained within its existing mixed run-to-run range, so this is allocation
    and code-path evidence rather than a throughput claim.

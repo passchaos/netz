@@ -1493,10 +1493,11 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # median broker throughput 55.7%.
 # Small Session-route plans use caller-owned scratch; fixed-binary fanout-32
 # A/B improved median broker throughput 2.7% while serial remained neutral.
-# Online fanout and durable Session PUBLISHes reuse each connection's retained
-# property scratch. The verified three-sample allocator matrix cuts allocation
-# counts by 25.7-69.5% across all five shapes; timing remains intentionally
-# excluded from this instrumentation-heavy diagnostic.
+# Online fanout and durable Session PUBLISHes use eight stack-first property
+# descriptors and retain one exact overflow slice only for larger sets. The
+# earlier verified three-sample allocator matrix cuts allocation counts by
+# 25.7-69.5% across all five shapes; timing remains intentionally excluded from
+# this instrumentation-heavy diagnostic.
 # The broker's single-reader TCP loop also supplies 128 bytes of caller storage
 # for ACKs and common small PUBLISH packets. Eligible fragmented packets remain
 # in connection-owned read-ahead across timeouts, while oversized packets, TLS,

@@ -6547,17 +6547,28 @@ pub const Broker = struct {
                 },
                 else => return err,
             };
-            // `flushSlot` holds this connection's writer mutex, so the
-            // connection-level property scratch is exclusively owned for the
-            // complete prepare/alias/encode/write transaction. Retain its
-            // capacity across deliveries instead of allocating one temporary
-            // property array for every routed PUBLISH.
-            const properties = &connection.write_property_scratch;
-            properties.clearRetainingCapacity();
-            defer properties.clearRetainingCapacity();
-            const identifier_count =
-                delivery.additional_subscription_identifiers.len +
-                @intFromBool(delivery.subscription_identifier != null);
+            const identifier_count = std.math.add(
+                usize,
+                delivery.additional_subscription_identifiers.len,
+                @intFromBool(delivery.subscription_identifier != null),
+            ) catch return error.OutOfMemory;
+            const property_capacity = std.math.add(
+                usize,
+                delivery.publication.properties.len,
+                identifier_count,
+            ) catch return error.OutOfMemory;
+            const property_capacity_with_alias = std.math.add(
+                usize,
+                property_capacity,
+                1,
+            ) catch return error.OutOfMemory;
+            var property_stack: [runtime.write_property_staging_capacity]mqtt.Property =
+                undefined;
+            var property_list = try connection.writePropertyList(
+                &property_stack,
+                property_capacity_with_alias,
+            );
+            const properties = &property_list;
             var identifiers_stack: [8]usize = undefined;
             const identifiers = if (identifier_count <= identifiers_stack.len)
                 identifiers_stack[0..identifier_count]
@@ -6583,7 +6594,7 @@ pub const Broker = struct {
                 continue;
             }
             const outgoing_topic = try connection
-                .prepareAutomaticTopicAlias(
+                .prepareAutomaticTopicAliasAssumeCapacity(
                 visible_topic,
                 properties,
             );

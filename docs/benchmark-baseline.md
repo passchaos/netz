@@ -5498,9 +5498,13 @@ availability into one 16-bit word, and uses a packed presence bit for the full
 raw u8 CONNECT protocol level. Its TCP parser also keeps a seven-cache-line,
 448-byte read-ahead region: this still holds the benchmark's complete
 four-packet 64-byte-payload publish window, while larger packets retain the
-existing exact-allocation path. Together these changes reduce the audited
-64-bit `runtime.Connection` from 1,408 to 792 bytes (616 bytes per ordinary QoS
-0 live connection without aliases). At 64 simultaneous connections the final
+existing exact-allocation path. Outgoing property filtering and synthesis now
+use eight caller-stack descriptors; larger sets retain one exact connection-
+owned overflow slice, removing the previous 24-byte `ArrayList` from every
+connection without reintroducing warmed large-set churn. Together these changes
+reduce the audited 64-bit `runtime.Connection` from 1,408 to 784 bytes (624
+bytes saved per ordinary QoS 0 live connection without aliases). At 64
+simultaneous connections the final
 read-ahead reduction alone removes 4,096 bytes of fixed connection state. The
 compile-time layout result is intentionally not presented as a process-RSS
 claim. A fixed-binary four-sample five-shape comparison against the 512-byte
@@ -5516,9 +5520,9 @@ callback tables behind borrowed pointers. Before resolving a destination
 Session's Client ID, live fanout, retained replay, and durable Session drain
 first check whether either policy actually supplies a delivery callback. The
 default no-ACL path therefore avoids the otherwise unused identity lookup.
-Retained replay also reuses the connection's existing property scratch instead
+Retained replay also uses the connection's stack-first property staging instead
 of allocating and freeing a temporary property list for every stored message;
-a fail-on-first-allocation unit check proves that a warmed same-size rebuild
+a fail-on-first-allocation unit check proves that a common same-size rebuild
 requires no allocation and still rewrites or removes Message Expiry correctly.
 
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
