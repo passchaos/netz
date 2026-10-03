@@ -12,6 +12,8 @@ Run:
 ```sh
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
+zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
+  --payload-bytes=1024 --iterations=10000
 zig build bench-webtransport-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all
 zig build bench-webtransport-stream -Doptimize=ReleaseFast -- --send-all --stream-slices=8

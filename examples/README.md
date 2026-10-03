@@ -556,11 +556,13 @@ so individual 1-RTT features are easy to inspect:
   and a strict dual-log verifier requires exact per-stream and aggregate proof
   from both endpoints before accepting a sample.
 - `bench-webtransport-datagram` keeps its lightweight ping-pong baseline by
-  default; `--burst --iterations=N --send-timeout-ms=N` switches to a real
-  QUIC/TLS + HTTP/3 WebTransport session and measures deadline-bounded
-  DATAGRAM sends under congestion backpressure. `--batch-size=N` (up to 64)
-  groups the burst into ordered socket batches and reports both logical
-  DATAGRAM count and API call count.
+  default; `--payload-bytes=1..1024` selects an exact payload size while
+  preserving the historical default when omitted. `--burst`,
+  `--iterations=N`, and `--send-timeout-ms=N` switch to a real QUIC/TLS +
+  HTTP/3 WebTransport session and measure deadline-bounded DATAGRAM sends under
+  congestion backpressure. `--batch-size=N` (up to 64) groups the burst into
+  ordered socket batches and reports both logical DATAGRAM count and API call
+  count.
 - `bench-webtransport-stream` measures real-handshake associated STREAM
   transfer, fair cross-stream batching, cancellation, loss, and reordering.
   `--send-timeout-ms=N` supplies one absolute budget shared by every payload

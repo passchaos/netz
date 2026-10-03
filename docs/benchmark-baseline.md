@@ -5976,6 +5976,8 @@ Validated on 2026-08-17:
 ```sh
 zig build run-webtransport-handshake-stream -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast
+zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
+  --payload-bytes=1024 --iterations=10000
 ```
 
 ```text
@@ -6052,6 +6054,9 @@ with zero timeouts. The 35-byte workload measured 5.808 us p50 / 15.416 us
 p99 send latency, 5.11 logical MiB/s, and the exact checksum 3,549,000. This is an
 internal backpressure regression baseline, not a cross-stack throughput claim.
 The original cleartext ping-pong mode and output remain the default.
+Both ping-pong and authenticated burst modes accept
+`--payload-bytes=1..1024`. Omitting it preserves their historical 27-byte and
+35-byte payloads respectively, so existing baseline checksums remain stable.
 After the protected stack-send integration, the same 1,000-DATAGRAM bounded
 burst again attempted/sent/received all 1,000 with zero timeout and checksum
 3,549,000. The loaded-host sample was 10.483 us p50 / 17.998 us p99 and

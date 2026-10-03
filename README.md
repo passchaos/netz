@@ -1612,6 +1612,7 @@ taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mo
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=service --frame=datagram --warmup=500 --iterations=10000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_copy --frame=datagram --warmup=500 --iterations=10000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_borrowed --frame=datagram --warmup=500 --iterations=10000
+taskset -c 0 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- --payload-bytes=1024 --iterations=10000
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 zig build bench-quic-ticket-keyring -Doptimize=ReleaseFast

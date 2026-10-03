@@ -3,22 +3,26 @@ const netz = @import("netz");
 
 const default_iterations: usize = 10_000;
 const max_batch_size: usize = netz.quic.one_rtt.max_batch_packets;
+const default_ping_payload = "webtransport bench datagram";
+const default_burst_payload = "webtransport bounded burst datagram";
+const max_payload_bytes: usize = 1024;
 
 const Config = struct {
     iterations: usize = default_iterations,
     send_timeout_ms: i64 = 1000,
     burst: bool = false,
     batch_size: usize = 1,
+    payload_bytes: ?usize = null,
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const config = try parseArgs(init, allocator);
     if (config.burst) return runBurst(allocator, config);
-    return runPingPong(allocator, config.iterations);
+    return runPingPong(allocator, config);
 }
 
-fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
+fn runPingPong(allocator: std.mem.Allocator, config: Config) !void {
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
@@ -59,7 +63,7 @@ fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
         }
     };
 
-    var shared = Shared{ .server = &server, .iterations = iterations };
+    var shared = Shared{ .server = &server, .iterations = config.iterations };
     var server_task = io.async(Shared.run, .{&shared});
     defer server_task.cancel(io);
 
@@ -76,10 +80,11 @@ fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
     );
     defer client.deinit();
 
-    const payload = "webtransport bench datagram";
+    var payload_storage: [max_payload_bytes]u8 = undefined;
+    const payload = benchmarkPayload(&payload_storage, config);
     const start = nowNs(io);
     var checksum: usize = 0;
-    for (0..iterations) |_| {
+    for (0..config.iterations) |_| {
         try client.sendDatagram(payload);
         var response = try client.receiveDatagram();
         defer response.deinit(allocator);
@@ -90,7 +95,7 @@ fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
         checksum +%= response.datagram.payload[0];
     }
     const elapsed = nowNs(io) -| start;
-    const datagrams = iterations * 2;
+    const datagrams = config.iterations * 2;
     const datagrams_per_second = if (elapsed == 0)
         0
     else
@@ -111,11 +116,11 @@ fn runPingPong(allocator: std.mem.Allocator, iterations: usize) !void {
         \\  datagrams/s: {d}
         \\
     , .{
-        iterations,
+        config.iterations,
         datagrams,
         payload.len,
         checksum,
-        elapsed / iterations,
+        elapsed / config.iterations,
         elapsed / datagrams,
         datagrams_per_second,
     });
@@ -133,7 +138,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         [_]u8{ 0x57, 0x54, 0x44, 0x01, 0x57, 0x54, 0x44, 0x02 };
     const client_cid = [_]u8{ 0x57, 0x54, 0x44, 0x03 };
     const server_cid = [_]u8{ 0x57, 0x54, 0x44, 0x04 };
-    const payload_len = "webtransport bounded burst datagram".len;
+    const payload_len = payloadLen(config);
     const queued_bytes = std.math.mul(
         usize,
         config.iterations,
@@ -248,10 +253,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
     server_task.await(io);
     if (shared.err) |err| return err;
     if (shared.received != result.sent) return error.InvalidDatagramCount;
-    var expected_checksum: u64 = 0;
-    for ("webtransport bounded burst datagram") |byte| {
-        expected_checksum +%= byte;
-    }
+    var expected_checksum = payloadChecksum(config);
     expected_checksum *%= result.sent;
     if (shared.checksum != expected_checksum) return error.InvalidChecksum;
     printBurstResult(result, shared.received, shared.checksum);
@@ -276,7 +278,8 @@ fn runBurstSends(
     sent_count: *std.atomic.Value(usize),
     config: Config,
 ) !BurstSendResult {
-    const payload = "webtransport bounded burst datagram";
+    var payload_storage: [max_payload_bytes]u8 = undefined;
+    const payload = benchmarkPayload(&payload_storage, config);
     const latencies = try allocator.alloc(u64, config.iterations);
     defer allocator.free(latencies);
     const started = nowNs(io);
@@ -394,6 +397,12 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
                 10,
             );
             if (config.iterations == 0) return error.InvalidArgument;
+        } else if (std.mem.startsWith(u8, arg, "--payload-bytes=")) {
+            config.payload_bytes = try std.fmt.parseInt(
+                usize,
+                arg["--payload-bytes=".len..],
+                10,
+            );
         } else if (std.mem.startsWith(u8, arg, "--send-timeout-ms=")) {
             config.send_timeout_ms = try std.fmt.parseInt(
                 i64,
@@ -406,10 +415,51 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
     if (config.batch_size == 0 or config.batch_size > max_batch_size) {
         return error.InvalidArgument;
     }
+    if (config.payload_bytes) |payload_bytes| {
+        if (payload_bytes == 0 or payload_bytes > max_payload_bytes) {
+            return error.InvalidArgument;
+        }
+    }
     if (!config.burst and config.batch_size != 1) {
         return error.InvalidArgument;
     }
     return config;
+}
+
+fn payloadLen(config: Config) usize {
+    return config.payload_bytes orelse if (config.burst)
+        default_burst_payload.len
+    else
+        default_ping_payload.len;
+}
+
+fn benchmarkPayload(
+    storage: *[max_payload_bytes]u8,
+    config: Config,
+) []const u8 {
+    if (config.payload_bytes) |payload_bytes| {
+        @memset(storage[0..payload_bytes], 0x5a);
+        return storage[0..payload_bytes];
+    }
+    const payload = if (config.burst)
+        default_burst_payload
+    else
+        default_ping_payload;
+    @memcpy(storage[0..payload.len], payload);
+    return storage[0..payload.len];
+}
+
+fn payloadChecksum(config: Config) u64 {
+    if (config.payload_bytes) |payload_bytes| {
+        return 0x5a * @as(u64, @intCast(payload_bytes));
+    }
+    const payload = if (config.burst)
+        default_burst_payload
+    else
+        default_ping_payload;
+    var checksum: u64 = 0;
+    for (payload) |byte| checksum +%= byte;
+    return checksum;
 }
 
 fn lessThanU64(_: void, a: u64, b: u64) bool {
