@@ -132,20 +132,135 @@ const BatchScratch = struct {
 };
 
 const TrailerScratch = struct {
-    headers: std.ArrayList(http1.Header) = .empty,
-    name_storage: std.ArrayList(u8) = .empty,
+    /// The first word stores the logical header count. Aligned descriptors and
+    /// their copied names follow in the same allocation.
+    storage: std.ArrayList(usize) = .empty,
 
     fn reset(self: *TrailerScratch) void {
-        self.headers.clearRetainingCapacity();
-        self.name_storage.clearRetainingCapacity();
+        self.storage.clearRetainingCapacity();
+    }
+
+    fn prepare(
+        self: *TrailerScratch,
+        allocator: std.mem.Allocator,
+        initial_headers: []const http1.Header,
+        names: []const []const u8,
+    ) Error![]const http1.Header {
+        self.reset();
+        var candidate_count: usize = names.len;
+        var name_storage_len: usize = 0;
+        for (initial_headers) |header| {
+            if (!header.eqlName("trailer")) continue;
+            var values = std.mem.splitScalar(u8, header.value, ',');
+            while (values.next()) |raw_name| {
+                const name = std.mem.trim(u8, raw_name, " \t");
+                candidate_count = std.math.add(
+                    usize,
+                    candidate_count,
+                    1,
+                ) catch return error.InvalidTrailer;
+                name_storage_len = std.math.add(
+                    usize,
+                    name_storage_len,
+                    name.len,
+                ) catch return error.InvalidTrailer;
+            }
+        }
+        for (names) |name| {
+            name_storage_len = std.math.add(
+                usize,
+                name_storage_len,
+                name.len,
+            ) catch return error.InvalidTrailer;
+        }
+
+        const headers_offset = std.mem.alignForward(
+            usize,
+            @sizeOf(usize),
+            @alignOf(http1.Header),
+        );
+        const header_bytes = std.math.mul(
+            usize,
+            candidate_count,
+            @sizeOf(http1.Header),
+        ) catch return error.InvalidTrailer;
+        const names_offset = std.math.add(
+            usize,
+            headers_offset,
+            header_bytes,
+        ) catch return error.InvalidTrailer;
+        const total_bytes = std.math.add(
+            usize,
+            names_offset,
+            name_storage_len,
+        ) catch return error.InvalidTrailer;
+        const word_count = std.math.divCeil(
+            usize,
+            total_bytes,
+            @sizeOf(usize),
+        ) catch return error.InvalidTrailer;
+        try self.storage.resize(allocator, word_count);
+        self.storage.items[0] = 0;
+
+        const bytes = std.mem.sliceAsBytes(self.storage.items);
+        const header_storage: []align(@alignOf(http1.Header)) u8 = @alignCast(
+            bytes[headers_offset..][0..header_bytes],
+        );
+        var headers = std.ArrayList(http1.Header).initBuffer(
+            std.mem.bytesAsSlice(http1.Header, header_storage),
+        );
+        var name_storage = std.ArrayList(u8).initBuffer(
+            bytes[names_offset..][0..name_storage_len],
+        );
+
+        var explicit_trailer_header = false;
+        for (initial_headers) |header| {
+            if (!header.eqlName("trailer")) continue;
+            explicit_trailer_header = true;
+            var values = std.mem.splitScalar(u8, header.value, ',');
+            while (values.next()) |raw_name| {
+                try appendTrailerName(
+                    &headers,
+                    &name_storage,
+                    std.mem.trim(u8, raw_name, " \t"),
+                );
+            }
+        }
+        for (names) |name| {
+            if (explicit_trailer_header) {
+                if (!headerNamePresent(headers.items, name)) {
+                    return error.InvalidTrailer;
+                }
+            } else {
+                try appendTrailerName(&headers, &name_storage, name);
+            }
+        }
+        try http1.validateTrailers(headers.items);
+        self.storage.items[0] = headers.items.len;
+        return headers.items;
+    }
+
+    fn headerItems(self: *const TrailerScratch) []const http1.Header {
+        if (self.storage.items.len == 0) return &.{};
+        const header_count = self.storage.items[0];
+        const header_bytes = header_count * @sizeOf(http1.Header);
+        const bytes = std.mem.sliceAsBytes(self.storage.items);
+        const header_storage: []align(@alignOf(http1.Header)) const u8 =
+            @alignCast(bytes[trailer_headers_offset..][0..header_bytes]);
+        return std.mem.bytesAsSlice(http1.Header, header_storage);
     }
 
     fn deinit(self: *TrailerScratch, allocator: std.mem.Allocator) void {
-        self.headers.deinit(allocator);
-        self.name_storage.deinit(allocator);
+        self.storage.deinit(allocator);
         self.* = undefined;
     }
 };
+
+const trailer_headers_offset = std.mem.alignForward(
+    usize,
+    @sizeOf(usize),
+    @alignOf(http1.Header),
+);
 
 const trailer_value_staging_capacity = 256;
 
@@ -366,7 +481,7 @@ pub const Scratch = struct {
 
     pub fn trailerHeaders(self: *const Scratch) []const http1.Header {
         const trailers = self.trailers orelse return &.{};
-        return trailers.headers.items;
+        return trailers.headerItems();
     }
 
     pub fn streamingChunkScratch(
@@ -478,14 +593,11 @@ fn prepareStreamingRequest(
     ) or options.trailer_names.len != 0;
     const trailer_headers: []const http1.Header = if (trailers_requested) blk: {
         const trailers = try scratch.trailerScratch(allocator);
-        try prepareTrailerNames(
-            &trailers.headers,
-            &trailers.name_storage,
+        break :blk try trailers.prepare(
             allocator,
             headers.items,
             options.trailer_names,
         );
-        break :blk trailers.headers.items;
     } else &.{};
     const explicit_chunked = try chunkedWriteFraming(
         options.version,
@@ -614,14 +726,11 @@ fn prepareStreamingResponseWithDefaultDate(
         options.trailer_names.len != 0;
     const trailer_headers: []const http1.Header = if (trailers_requested) blk: {
         const trailers = try scratch.trailerScratch(allocator);
-        try prepareTrailerNames(
-            &trailers.headers,
-            &trailers.name_storage,
+        break :blk try trailers.prepare(
             allocator,
             options.headers,
             options.trailer_names,
         );
-        break :blk trailers.headers.items;
     } else &.{};
     try http1.validateOutgoingResponseBodyForStatus(
         options.status,
@@ -2115,7 +2224,7 @@ test "HTTP/1 write scratch allocates multi-chunk state lazily" {
 test "HTTP/1 write scratch allocates trailer state only when requested" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 48), @sizeOf(TrailerScratch));
+        try std.testing.expectEqual(@as(usize, 24), @sizeOf(TrailerScratch));
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Scratch, "trailers")),
@@ -2151,6 +2260,23 @@ test "HTTP/1 write scratch allocates trailer state only when requested" {
     );
     try std.testing.expect(scratch.trailers == null);
 
+    const trailer_scratch = try scratch.trailerScratch(allocator);
+    var failing_storage = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        trailer_scratch.prepare(
+            failing_storage.allocator(),
+            &.{.{ .name = "Trailer", .value = "Digest" }},
+            &.{},
+        ),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        scratch.trailerHeaders().len,
+    );
+
     const options = StreamingRequestOptions{
         .method = .POST,
         .host = "localhost",
@@ -2174,6 +2300,18 @@ test "HTTP/1 write scratch allocates trailer state only when requested" {
     );
     try std.testing.expectEqual(StreamingFraming.chunked, warmed.framing);
     try std.testing.expect(!no_alloc.has_induced_failure);
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var counted_scratch = Scratch{};
+    defer counted_scratch.deinit(tracked);
+    const counted = try counted_scratch.trailerScratch(tracked);
+    _ = try counted.prepare(
+        tracked,
+        &.{.{ .name = "Trailer", .value = "Digest" }},
+        &.{},
+    );
+    try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
 }
 
 test "HTTP/1 Trailer value staging uses stack and exact fallback" {
@@ -2455,71 +2593,6 @@ fn appendRequiredTeConnectionOption(
         return;
     }
     headers.appendAssumeCapacity(.{ .name = "Connection", .value = "TE" });
-}
-
-fn prepareTrailerNames(
-    headers: *std.ArrayList(http1.Header),
-    storage: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    initial_headers: []const http1.Header,
-    names: []const []const u8,
-) Error!void {
-    var candidate_count: usize = names.len;
-    var storage_len: usize = 0;
-    for (initial_headers) |header| {
-        if (!header.eqlName("trailer")) continue;
-        var values = std.mem.splitScalar(u8, header.value, ',');
-        while (values.next()) |raw_name| {
-            const name = std.mem.trim(u8, raw_name, " \t");
-            candidate_count = std.math.add(
-                usize,
-                candidate_count,
-                1,
-            ) catch return error.InvalidTrailer;
-            storage_len = std.math.add(
-                usize,
-                storage_len,
-                name.len,
-            ) catch return error.InvalidTrailer;
-        }
-    }
-    for (names) |name| {
-        storage_len = std.math.add(
-            usize,
-            storage_len,
-            name.len,
-        ) catch return error.InvalidTrailer;
-    }
-    // The writer retains these descriptors until finishTrailers. Copy the
-    // caller's names into connection-owned scratch and reserve once so later
-    // appends cannot move bytes underneath earlier Header slices.
-    try storage.ensureUnusedCapacity(allocator, storage_len);
-    try headers.ensureUnusedCapacity(allocator, candidate_count);
-
-    var explicit_trailer_header = false;
-    for (initial_headers) |header| {
-        if (!header.eqlName("trailer")) continue;
-        explicit_trailer_header = true;
-        var values = std.mem.splitScalar(u8, header.value, ',');
-        while (values.next()) |raw_name| {
-            const name = std.mem.trim(u8, raw_name, " \t");
-            try appendTrailerName(headers, storage, name);
-        }
-    }
-
-    for (names) |name| {
-        if (explicit_trailer_header) {
-            if (!headerNamePresent(headers.items, name)) {
-                // A caller-supplied Trailer header is authoritative. Silently
-                // adding a different name to writer state would emit a field
-                // that was never announced on the wire.
-                return error.InvalidTrailer;
-            }
-        } else {
-            try appendTrailerName(headers, storage, name);
-        }
-    }
-    try http1.validateTrailers(headers.items);
 }
 
 fn appendTrailerName(

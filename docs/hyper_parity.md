@@ -207,8 +207,10 @@ benchmark response:
   are likewise allocated only when a writer must retain them through
   `finishTrailers`; generated `Trailer:` values use 256 stack bytes with an
   exact temporary fallback. Complete-message trailers therefore create no
-  persistent trailer state, while streaming state falls from 72 to 48 bytes.
-  Multi-chunk streaming descriptors and iovecs share one
+  persistent trailer state. The retained streaming descriptors and copied
+  names share one pointer-aligned backing allocation, reducing that state from
+  72 to 24 bytes and its first-use allocations from three to two. Multi-chunk
+  streaming descriptors and iovecs likewise share one
   pointer-aligned backing allocation in a 24-byte lazy state, reducing first
   use from three allocations to two while retaining warmed capacity. Each
   hexadecimal chunk header reserves the exact platform maximum (18 bytes on

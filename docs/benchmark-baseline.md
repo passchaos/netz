@@ -185,8 +185,11 @@ independently allocated only when a writer must retain an announcement through
 `finishTrailers`, reducing the scratch again to 192 bytes. The generated
 `Trailer:` value uses a 256-byte stack-first buffer with an exact temporary
 fallback; complete messages therefore create no persistent trailer state, and
-the retained streaming state is 48 rather than 72 bytes. The descriptor and
-iovec views used only by multi-chunk streaming writes now share one
+the retained streaming state first fell from 72 to 48 bytes. Its name
+descriptors and copied bytes now share one pointer-aligned backing allocation,
+reducing that state again to 24 bytes and its first-use allocations from three
+to two while retaining warmed capacity. The descriptor and iovec views used
+only by multi-chunk streaming writes likewise share one
 pointer-aligned backing allocation in a 24-byte state, rather than two backing
 allocations in a 48-byte state. Their per-chunk hexadecimal staging is the
 platform's exact maximum width (18 bytes on 64-bit targets) rather than 32
