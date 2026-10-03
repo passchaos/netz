@@ -460,11 +460,43 @@ fn receiveConnectDatagramFromSession(
     }
 }
 
+fn receiveConnectDatagramIntoFromSession(
+    session: anytype,
+    stream_id: u62,
+    output: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) ReceiveTimeoutError![]u8 {
+    while (true) {
+        if (try session.pollConnectDatagramInto(stream_id, output)) |payload| {
+            return payload;
+        }
+        var target = connect_datagram.ReceiveIntoTarget.init(
+            stream_id,
+            output,
+        );
+        if (@TypeOf(session) == *HandshakeServerSession) {
+            try session.receiveDetachedRequestProgressInto(
+                stream_id,
+                deadline,
+                &target,
+            );
+        } else {
+            try session.receiveDetachedResponseProgressInto(
+                stream_id,
+                deadline,
+                &target,
+            );
+        }
+        if (try target.finish()) |payload| return payload;
+    }
+}
+
 const observeConnectDatagramTerminal = connect_datagram_routing.observeTerminal;
 const ensureConnectDatagramSendSideOpen =
     connect_datagram_routing.ensureSendSideOpen;
 const connectDatagramTerminalError = connect_datagram_routing.terminalError;
 const pollConnectDatagramRegistry = connect_datagram_routing.poll;
+const pollConnectDatagramRegistryInto = connect_datagram_routing.pollInto;
 const drainConnectDatagrams = connect_datagram_routing.drain;
 
 /// Replay HTTP DATAGRAM frames in their authenticated QUIC packet order. The
@@ -474,6 +506,8 @@ const drainConnectDatagrams = connect_datagram_routing.drain;
 /// DATAGRAM in that same packet is then dropped by `Registry.route`, while a
 /// preceding one remains queued for delivery.
 const routeConnectDatagramsFromPacket = connect_datagram_routing.routePacket;
+const routeConnectDatagramsFromPacketInto =
+    connect_datagram_routing.routePacketInto;
 
 const client_control_stream_id: u62 = 2;
 const client_qpack_encoder_stream_id: u62 = 6;
@@ -7118,18 +7152,14 @@ pub const HandshakeServerSession = struct {
         self: *HandshakeServerSession,
         detached_stream_id: u62,
     ) Error!void {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
-        if (!self.connect_datagrams.contains(detached_stream_id)) {
-            return error.UnexpectedStream;
-        }
-        try self.receive_packets.visit(
-            &self.established.connection,
-            .{ self, detached_stream_id },
-            visitDetachedServerRequestPacket,
-        );
-        if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
-            try self.sendQpackFeedback();
-        }
+        return self.receiveDetachedRequestProgressInto(
+            detached_stream_id,
+            null,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
     }
 
     pub fn receiveDetachedRequestProgressWithTimeout(
@@ -7153,17 +7183,43 @@ pub const HandshakeServerSession = struct {
         detached_stream_id: u62,
         deadline: std.Io.Clock.Timestamp,
     ) (Error || quic.runtime.ReceiveTimeoutError)!void {
-        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.receiveDetachedRequestProgressInto(
+            detached_stream_id,
+            deadline,
+            null,
+        );
+    }
+
+    fn receiveDetachedRequestProgressInto(
+        self: *HandshakeServerSession,
+        detached_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+        datagram_target: ?*connect_datagram.ReceiveIntoTarget,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
         if (!self.connect_datagrams.contains(detached_stream_id)) {
             return error.UnexpectedStream;
         }
-        try self.receive_packets.visitWithDeadline(
-            &self.established.connection,
-            deadline,
-            .{ self, detached_stream_id },
-            visitDetachedServerRequestPacket,
-        );
+        const context = DetachedServerRequestContext{
+            .session = self,
+            .detached_stream_id = detached_stream_id,
+            .datagram_target = datagram_target,
+        };
+        if (deadline) |absolute| {
+            try self.receive_packets.visitWithDeadline(
+                &self.established.connection,
+                absolute,
+                context,
+                visitDetachedServerRequestPacket,
+            );
+        } else {
+            try self.receive_packets.visit(
+                &self.established.connection,
+                context,
+                visitDetachedServerRequestPacket,
+            );
+        }
         if (self.qpack_decode.pendingDecoderInstructions().len != 0) {
             try self.sendQpackFeedback();
         }
@@ -7190,7 +7246,10 @@ pub const HandshakeServerSession = struct {
             self.receive_packets.ack_pending = true;
         };
         try visitDetachedServerRequestPacket(
-            .{ self, detached_stream_id },
+            .{
+                .session = self,
+                .detached_stream_id = detached_stream_id,
+            },
             packetView(packet.*),
         );
         self.flushRequestPacketFeedbackOnce() catch |err| switch (err) {
@@ -7536,6 +7595,28 @@ pub const HandshakeServerSession = struct {
         );
     }
 
+    pub fn pollConnectDatagramInto(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        output: []u8,
+    ) Error!?[]u8 {
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .receive,
+        );
+        return pollConnectDatagramRegistryInto(
+            &self.connect_datagrams,
+            &self.established.connection,
+            stream_id,
+            output,
+        );
+    }
+
     pub fn receiveConnectDatagram(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -7569,6 +7650,57 @@ pub const HandshakeServerSession = struct {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return receiveConnectDatagramFromSession(self, stream_id, deadline);
+    }
+
+    pub fn receiveConnectDatagramInto(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        output: []u8,
+    ) Error![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return receiveConnectDatagramIntoFromSession(
+            self,
+            stream_id,
+            output,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveConnectDatagramIntoWithTimeout(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        output: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveConnectDatagramIntoWithDeadline(
+            stream_id,
+            output,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveConnectDatagramIntoWithDeadline(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        output: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return receiveConnectDatagramIntoFromSession(
+            self,
+            stream_id,
+            output,
+            deadline,
+        );
     }
 
     pub fn closeConnectDatagramAssociation(
@@ -14182,6 +14314,7 @@ pub const HandshakeClient = struct {
         self.receiveDetachedResponseProgressInternal(
             detached_stream_id,
             null,
+            null,
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
@@ -14217,6 +14350,7 @@ pub const HandshakeClient = struct {
         try self.receiveDetachedResponseProgressInternal(
             detached_stream_id,
             deadline,
+            null,
         );
     }
 
@@ -14224,6 +14358,7 @@ pub const HandshakeClient = struct {
         self: *HandshakeClient,
         detached_stream_id: u62,
         deadline: ?std.Io.Clock.Timestamp,
+        datagram_target: ?*connect_datagram.ReceiveIntoTarget,
     ) ReceiveTimeoutError!void {
         if (self.callback_reader_active) return error.ConcurrentRead;
         var context: ConnectionResponseReceiveContext = .{
@@ -14238,6 +14373,7 @@ pub const HandshakeClient = struct {
             .request_lifecycle = &self.request_lifecycle,
             .detached_stream_id = detached_stream_id,
             .detached_streams = &self.connect_datagrams,
+            .datagram_target = datagram_target,
         };
         if (deadline) |absolute| {
             try self.receive_packets.visitWithDeadline(
@@ -14254,6 +14390,19 @@ pub const HandshakeClient = struct {
             );
         }
         try self.flushResponsePacketFeedback();
+    }
+
+    fn receiveDetachedResponseProgressInto(
+        self: *HandshakeClient,
+        detached_stream_id: u62,
+        deadline: ?std.Io.Clock.Timestamp,
+        datagram_target: *connect_datagram.ReceiveIntoTarget,
+    ) ReceiveTimeoutError!void {
+        return self.receiveDetachedResponseProgressInternal(
+            detached_stream_id,
+            deadline,
+            datagram_target,
+        );
     }
 
     pub fn connectDatagramsNegotiated(self: HandshakeClient) bool {
@@ -14583,6 +14732,29 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn pollConnectDatagramInto(
+        self: *HandshakeClient,
+        stream_id: u62,
+        output: []u8,
+    ) Error!?[]u8 {
+        if (self.callback_reader_active) return error.ConcurrentRead;
+        try connect_datagram.validateStreamId(stream_id);
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        try ensureConnectDatagramsNegotiated(
+            self.control.settings,
+            self.established.connection,
+            .receive,
+        );
+        return pollConnectDatagramRegistryInto(
+            &self.connect_datagrams,
+            &self.established.connection,
+            stream_id,
+            output,
+        );
+    }
+
     pub fn receiveConnectDatagram(
         self: *HandshakeClient,
         stream_id: u62,
@@ -14616,6 +14788,57 @@ pub const HandshakeClient = struct {
         if (self.dispatcher_bound) return error.InvalidDispatcherState;
         _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
         return receiveConnectDatagramFromSession(self, stream_id, deadline);
+    }
+
+    pub fn receiveConnectDatagramInto(
+        self: *HandshakeClient,
+        stream_id: u62,
+        output: []u8,
+    ) Error![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        return receiveConnectDatagramIntoFromSession(
+            self,
+            stream_id,
+            output,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn receiveConnectDatagramIntoWithTimeout(
+        self: *HandshakeClient,
+        stream_id: u62,
+        output: []u8,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveConnectDatagramIntoWithDeadline(
+            stream_id,
+            output,
+            .fromNow(
+                self.connectionIo(),
+                .{ .raw = timeout, .clock = .awake },
+            ),
+        );
+    }
+
+    pub fn receiveConnectDatagramIntoWithDeadline(
+        self: *HandshakeClient,
+        stream_id: u62,
+        output: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError![]u8 {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return receiveConnectDatagramIntoFromSession(
+            self,
+            stream_id,
+            output,
+            deadline,
+        );
     }
 
     pub fn closeConnectDatagramAssociation(
@@ -23291,11 +23514,18 @@ fn visitStreamingServerRequestPacket(
     );
 }
 
+const DetachedServerRequestContext = struct {
+    session: *HandshakeServerSession,
+    detached_stream_id: u62,
+    datagram_target: ?*connect_datagram.ReceiveIntoTarget = null,
+};
+
 fn visitDetachedServerRequestPacket(
-    context: struct { *HandshakeServerSession, u62 },
+    context: DetachedServerRequestContext,
     packet: quic.one_rtt.ReceivedPacketView,
 ) Error!void {
-    const session, const detached_stream_id = context;
+    const session = context.session;
+    const detached_stream_id = context.detached_stream_id;
     _ = applyServerRequestPacketFrames(
         packet.from,
         packet.frames,
@@ -23318,11 +23548,12 @@ fn visitDetachedServerRequestPacket(
         );
         return err;
     };
-    try routeConnectDatagramsFromPacket(
+    try routeConnectDatagramsFromPacketInto(
         &session.connect_datagrams,
         &session.established.connection,
         packet.frames,
         packet.packet_number,
+        context.datagram_target,
     );
 }
 
@@ -23713,6 +23944,7 @@ const ConnectionResponseReceiveContext = struct {
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
     detached_streams: ?*connect_datagram.Registry = null,
+    datagram_target: ?*connect_datagram.ReceiveIntoTarget = null,
 };
 
 fn visitConnectionResponsePacket(
@@ -23743,11 +23975,12 @@ fn visitConnectionResponsePacket(
         packet.frames,
     );
     if (context.detached_streams) |registry| {
-        try routeConnectDatagramsFromPacket(
+        try routeConnectDatagramsFromPacketInto(
             registry,
             context.connection,
             packet.frames,
             packet.packet_number,
+            context.datagram_target,
         );
     }
 }

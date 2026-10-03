@@ -13,6 +13,7 @@ const Config = struct {
     burst: bool = false,
     batch_size: usize = 1,
     max_in_flight: ?usize = null,
+    receive_into: bool = false,
     payload_bytes: ?usize = null,
 };
 
@@ -171,6 +172,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         server: *netz.webtransport.runtime.HandshakeServer,
         sent: *std.atomic.Value(usize),
         done: *std.Io.Event,
+        receive_into: bool,
         received: std.atomic.Value(usize) = .init(0),
         checksum: u64 = 0,
         err: ?anyerror = null,
@@ -185,28 +187,50 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
             var accepted = try self.server.accept();
             defer accepted.deinit();
             var post_done_timeouts: usize = 0;
+            var receive_buffer: [max_payload_bytes]u8 = undefined;
             while (!self.done.isSet() or
                 self.received.load(.acquire) < self.sent.load(.acquire))
             {
-                var datagram = accepted.receiveDatagramWithTimeout(
-                    .fromMilliseconds(10),
-                ) catch |err| switch (err) {
-                    error.Timeout => {
-                        if (self.done.isSet()) {
-                            post_done_timeouts += 1;
-                            if (post_done_timeouts == 100) {
-                                return error.MissingDatagram;
+                if (self.receive_into) {
+                    const payload = accepted.receiveDatagramIntoWithTimeout(
+                        &receive_buffer,
+                        .fromMilliseconds(10),
+                    ) catch |err| switch (err) {
+                        error.Timeout => {
+                            if (self.done.isSet()) {
+                                post_done_timeouts += 1;
+                                if (post_done_timeouts == 100) {
+                                    return error.MissingDatagram;
+                                }
                             }
-                        }
-                        continue;
-                    },
-                    else => return err,
-                };
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    for (payload) |byte| self.checksum +%= byte;
+                } else {
+                    var datagram = accepted.receiveDatagramWithTimeout(
+                        .fromMilliseconds(10),
+                    ) catch |err| switch (err) {
+                        error.Timeout => {
+                            if (self.done.isSet()) {
+                                post_done_timeouts += 1;
+                                if (post_done_timeouts == 100) {
+                                    return error.MissingDatagram;
+                                }
+                            }
+                            continue;
+                        },
+                        else => return err,
+                    };
+                    defer datagram.deinit(
+                        accepted.h3.established.connection.endpoint.allocator,
+                    );
+                    for (datagram.datagram.payload) |byte| {
+                        self.checksum +%= byte;
+                    }
+                }
                 post_done_timeouts = 0;
-                defer datagram.deinit(
-                    accepted.h3.established.connection.endpoint.allocator,
-                );
-                for (datagram.datagram.payload) |byte| self.checksum +%= byte;
                 _ = self.received.fetchAdd(1, .release);
             }
         }
@@ -217,6 +241,7 @@ fn runBurstHandshake(allocator: std.mem.Allocator, config: Config) !void {
         .server = &server,
         .sent = &sent,
         .done = &done,
+        .receive_into = config.receive_into,
     };
     var server_task = io.async(Shared.run, .{&shared});
     defer server_task.cancel(io);
@@ -268,6 +293,7 @@ const BurstSendResult = struct {
     timed_out: usize,
     batch_size: usize,
     max_in_flight: usize,
+    receive_into: bool,
     send_calls: usize,
     payload_bytes: usize,
     elapsed_ns: u64,
@@ -351,6 +377,7 @@ fn runBurstSends(
         .timed_out = timeout_count,
         .batch_size = config.batch_size,
         .max_in_flight = config.max_in_flight orelse 0,
+        .receive_into = config.receive_into,
         .send_calls = send_calls,
         .payload_bytes = payload.len,
         .elapsed_ns = elapsed,
@@ -368,7 +395,8 @@ fn printBurstResult(
         "WebTransport real-handshake bounded DATAGRAM burst: " ++
             "io_backend=zio-std-io attempted={d} " ++
             "sent={d} timed_out={d} received={d} payload_bytes={d} " ++
-            "batch_size={d} max_in_flight={d} send_calls={d} " ++
+            "batch_size={d} max_in_flight={d} receive_mode={s} " ++
+            "send_calls={d} " ++
             "logical_MiB/s={d:.2} send_p50_ns={d} send_p99_ns={d} " ++
             "checksum={d}\n",
         .{
@@ -379,6 +407,7 @@ fn printBurstResult(
             result.payload_bytes,
             result.batch_size,
             result.max_in_flight,
+            if (result.receive_into) "caller-buffer" else "owning",
             result.send_calls,
             mibPerSecond(
                 result.sent * result.payload_bytes,
@@ -402,6 +431,8 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--burst")) {
             config.burst = true;
+        } else if (std.mem.eql(u8, arg, "--receive-into")) {
+            config.receive_into = true;
         } else if (std.mem.startsWith(u8, arg, "--batch-size=")) {
             config.batch_size = try std.fmt.parseInt(
                 usize,
@@ -448,7 +479,9 @@ fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Config {
         if (max_in_flight == 0) return error.InvalidArgument;
     }
     if (!config.burst and
-        (config.batch_size != 1 or config.max_in_flight != null))
+        (config.batch_size != 1 or
+            config.max_in_flight != null or
+            config.receive_into))
     {
         return error.InvalidArgument;
     }

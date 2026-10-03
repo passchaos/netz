@@ -1073,7 +1073,8 @@ Current protocol coverage includes:
   DATAGRAM routing/terminal/error handling under
   `http3/runtime/datagram/routing.zig`, and a handshake-backed
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
-  WebTransport payload-size accounting, batch receive helpers, modern
+  WebTransport payload-size accounting, batch receive helpers, caller-buffer
+  single-DATAGRAM receive with non-consuming short-buffer retry, modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with
   per-session limits, prevalidated transactional cross-stream packet-batch writes that
@@ -1613,7 +1614,7 @@ taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mo
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_copy --frame=datagram --warmup=500 --iterations=10000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_borrowed --frame=datagram --warmup=500 --iterations=10000
 taskset -c 0 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- --payload-bytes=1024 --iterations=10000
-taskset -c 0 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- --burst --batch-size=16 --max-in-flight=64 --payload-bytes=1024 --iterations=10000
+taskset -c 0 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- --burst --batch-size=16 --max-in-flight=64 --receive-into --payload-bytes=1024 --iterations=10000
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 zig build bench-quic-ticket-keyring -Doptimize=ReleaseFast

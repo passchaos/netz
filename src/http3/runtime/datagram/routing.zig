@@ -101,6 +101,20 @@ pub fn poll(
     return null;
 }
 
+pub fn pollInto(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+    stream_id: u62,
+    output: []u8,
+) runtime_error.Error!?[]u8 {
+    observeTerminal(registry, connection, stream_id);
+    if (try registry.pollInto(stream_id, output)) |payload| return payload;
+    if (try registry.drainedTerminal(stream_id)) |terminal| {
+        return terminalError(terminal);
+    }
+    return null;
+}
+
 pub fn drain(
     registry: *connect_datagram.Registry,
     connection: *quic.one_rtt.Connection,
@@ -130,6 +144,22 @@ pub fn routePacket(
     frames: []const quic.Frame,
     packet_number: u64,
 ) runtime_error.Error!void {
+    return routePacketInto(
+        registry,
+        connection,
+        frames,
+        packet_number,
+        null,
+    );
+}
+
+pub fn routePacketInto(
+    registry: *connect_datagram.Registry,
+    connection: *quic.one_rtt.Connection,
+    frames: []const quic.Frame,
+    packet_number: u64,
+    target: ?*connect_datagram.ReceiveIntoTarget,
+) runtime_error.Error!void {
     const frame_datagrams = countPacketDatagrams(frames);
     const retained_datagrams = if (frame_datagrams == 0)
         0
@@ -145,7 +175,7 @@ pub fn routePacket(
         .datagram => |datagram| {
             defer datagram_index += 1;
             const routed = if (datagram_index >= dropped_datagrams)
-                registry.route(datagram.data)
+                registry.routeInto(datagram.data, target)
             else
                 connect_datagram.Registry.validate(datagram.data);
             routed catch |err| switch (err) {

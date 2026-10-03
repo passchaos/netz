@@ -566,6 +566,9 @@ so individual 1-RTT features are easy to inspect:
   yet consumed DATAGRAMs outstanding, allowing long large-payload runs without
   measuring avoidable loopback UDP queue loss. It is burst-only; omitting it
   retains the original unbounded sender (`max_in_flight=0` in the result).
+  `--receive-into` selects the authenticated session's caller-buffer receive
+  API and reports `receive_mode=caller-buffer`; the default owning path remains
+  available as `receive_mode=owning` for allocation/performance comparisons.
 - `bench-webtransport-stream` measures real-handshake associated STREAM
   transfer, fair cross-stream batching, cancellation, loss, and reordering.
   `--send-timeout-ms=N` supplies one absolute budget shared by every payload

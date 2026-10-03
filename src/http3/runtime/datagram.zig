@@ -20,6 +20,43 @@ pub const EncodedBatch = struct {
     datagrams: []const []const u8,
 };
 
+/// One synchronous caller-buffer delivery target used while an authenticated
+/// packet is being routed. Only the first matching DATAGRAM is delivered
+/// directly; later matches retain the ordinary bounded-queue semantics.
+pub const ReceiveIntoTarget = struct {
+    const State = union(enum) {
+        pending,
+        received: usize,
+        buffer_too_short,
+    };
+
+    stream_id: u62,
+    output: []u8,
+    state: State = .pending,
+
+    pub fn init(stream_id: u62, output: []u8) ReceiveIntoTarget {
+        return .{ .stream_id = stream_id, .output = output };
+    }
+
+    fn deliver(self: *ReceiveIntoTarget, payload: []const u8) bool {
+        if (self.state != .pending or payload.len > self.output.len) {
+            if (self.state == .pending) self.state = .buffer_too_short;
+            return false;
+        }
+        @memcpy(self.output[0..payload.len], payload);
+        self.state = .{ .received = payload.len };
+        return true;
+    }
+
+    pub fn finish(self: ReceiveIntoTarget) error{BufferTooShort}!?[]u8 {
+        return switch (self.state) {
+            .pending => null,
+            .received => |len| self.output[0..len],
+            .buffer_too_short => error.BufferTooShort,
+        };
+    }
+};
+
 pub const Limits = struct {
     max_associations: usize,
     max_queued_per_association: usize,
@@ -117,6 +154,11 @@ pub const Registry = struct {
                 self.head = 0;
             }
             return payload;
+        }
+
+        fn peek(self: Association) ?[]u8 {
+            if (self.count() == 0) return null;
+            return self.queue.items[self.head];
         }
     };
 
@@ -234,6 +276,18 @@ pub const Registry = struct {
     /// Route one encoded RFC 9297 HTTP Datagram. Unknown associations are
     /// deliberately ignored, including late datagrams for a closed CONNECT.
     pub fn route(self: *Registry, encoded: []const u8) !void {
+        return self.routeInto(encoded, null);
+    }
+
+    /// Route one encoded HTTP Datagram while optionally copying the first
+    /// matching application payload into caller storage. A short output does
+    /// not consume the payload: it is retained in the association queue and
+    /// reported after packet processing completes.
+    pub fn routeInto(
+        self: *Registry,
+        encoded: []const u8,
+        target: ?*ReceiveIntoTarget,
+    ) !void {
         const datagram = try http3.Datagram.parse(encoded);
         const stream_id: u62 = @intCast(datagram.quarter_stream_id << 2);
         const index = self.index.get(stream_id) orelse return;
@@ -241,6 +295,11 @@ pub const Registry = struct {
         // request stream's receive side has closed. A recorded terminal state
         // also protects against frame ordering within one QUIC packet.
         if (self.associations.items[index].terminal != null) return;
+        if (target) |direct| {
+            if (direct.stream_id == stream_id and
+                direct.state == .pending and
+                direct.deliver(datagram.payload)) return;
+        }
         try self.associations.items[index].push(
             self.allocator,
             datagram.payload,
@@ -361,6 +420,25 @@ pub const Registry = struct {
         return .{ .stream_id = stream_id, .payload = payload };
     }
 
+    /// Copy the oldest retained payload into caller storage. Buffer failure is
+    /// non-consuming so the application can retry with a larger destination.
+    pub fn pollInto(
+        self: *Registry,
+        stream_id: u62,
+        output: []u8,
+    ) !?[]u8 {
+        try validateStreamId(stream_id);
+        const index = self.index.get(stream_id) orelse
+            return error.UnexpectedStream;
+        const association = &self.associations.items[index];
+        const payload = association.peek() orelse return null;
+        if (payload.len > output.len) return error.BufferTooShort;
+        const owned = association.pop().?;
+        defer self.allocator.free(owned);
+        @memcpy(output[0..owned.len], owned);
+        return output[0..owned.len];
+    }
+
     pub fn queuedCount(self: Registry, stream_id: u62) !usize {
         try validateStreamId(stream_id);
         const index = self.index.get(stream_id) orelse
@@ -416,6 +494,71 @@ test "HTTP/3 CONNECT datagram registry demultiplexes and bounds FIFO queues" {
     try registry.route(encoded.items);
     try std.testing.expectError(error.UnexpectedStream, registry.poll(8));
     try std.testing.expectError(error.UnexpectedStream, registry.register(2));
+}
+
+test "HTTP/3 CONNECT datagram caller buffer preserves queue semantics" {
+    const allocator = std.testing.allocator;
+    var registry = Registry.init(allocator, .{
+        .max_associations = 2,
+        .max_queued_per_association = 2,
+        .max_queued_bytes_per_association = 64,
+    });
+    defer registry.deinit();
+    try registry.register(0);
+    try registry.register(4);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try (http3.Datagram{
+        .quarter_stream_id = 0,
+        .payload = "direct",
+    }).write(&encoded, allocator);
+    var direct_storage: [6]u8 = undefined;
+    var direct = ReceiveIntoTarget.init(0, &direct_storage);
+    {
+        var no_alloc = std.testing.FailingAllocator.init(
+            allocator,
+            .{ .fail_index = 0 },
+        );
+        registry.allocator = no_alloc.allocator();
+        defer registry.allocator = allocator;
+        try registry.routeInto(encoded.items, &direct);
+        try std.testing.expect(!no_alloc.has_induced_failure);
+    }
+    try std.testing.expectEqualStrings("direct", (try direct.finish()).?);
+    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
+
+    encoded.clearRetainingCapacity();
+    try (http3.Datagram{
+        .quarter_stream_id = 1,
+        .payload = "other",
+    }).write(&encoded, allocator);
+    var unmatched = ReceiveIntoTarget.init(0, &direct_storage);
+    try registry.routeInto(encoded.items, &unmatched);
+    try std.testing.expect((try unmatched.finish()) == null);
+    try std.testing.expectEqual(@as(usize, 1), try registry.queuedCount(4));
+
+    encoded.clearRetainingCapacity();
+    try (http3.Datagram{
+        .quarter_stream_id = 0,
+        .payload = "too-large",
+    }).write(&encoded, allocator);
+    var short_storage: [2]u8 = undefined;
+    var short = ReceiveIntoTarget.init(0, &short_storage);
+    try registry.routeInto(encoded.items, &short);
+    try std.testing.expectError(error.BufferTooShort, short.finish());
+    try std.testing.expectEqual(@as(usize, 1), try registry.queuedCount(0));
+    try std.testing.expectError(
+        error.BufferTooShort,
+        registry.pollInto(0, &short_storage),
+    );
+    try std.testing.expectEqual(@as(usize, 1), try registry.queuedCount(0));
+    var retry_storage: [9]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "too-large",
+        (try registry.pollInto(0, &retry_storage)).?,
+    );
+    try std.testing.expectEqual(@as(usize, 0), try registry.queuedCount(0));
 }
 
 test "HTTP/3 CONNECT datagram registry isolates unknown associations" {

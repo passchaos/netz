@@ -5979,7 +5979,7 @@ zig build bench-webtransport-datagram -Doptimize=ReleaseFast
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
   --payload-bytes=1024 --iterations=10000
 zig build bench-webtransport-datagram -Doptimize=ReleaseFast -- \
-  --burst --batch-size=16 --max-in-flight=64 \
+  --burst --batch-size=16 --max-in-flight=64 --receive-into \
   --payload-bytes=1024 --iterations=10000
 ```
 
@@ -6066,6 +6066,22 @@ DATAGRAMs remain unconsumed, so long 1024-byte loopback runs exercise sustained
 QUIC/HTTP3 processing instead of overflowing the local UDP queue. The option
 is burst-only and opt-in; omitted runs retain the historical unbounded sender
 and report `max_in_flight=0`.
+`--receive-into` switches the authenticated receiver to the new caller-buffer
+API. Fresh matching payloads are copied directly from authenticated packet
+storage; a short caller buffer retains the DATAGRAM in the ordinary bounded
+association queue, so retry does not silently consume it. The owning APIs and
+the benchmark default remain unchanged.
+
+For 1,000 1024-byte DATAGRAMs, allocation telemetry fell from 2,221 to 1,220
+allocations and removed all 1,000 per-DATAGRAM 1024-byte association payload
+allocations (1,024,144 fewer allocated bytes overall in that run). Nine
+alternating CPU-0 ReleaseFast pairs at 100,000 DATAGRAMs, batch 16, and window
+64 compared owning and caller-buffer modes from fixed binaries. Median logical
+throughput rose from 99.19 to 100.69 MiB/s (1.5%), caller-buffer won 7/9 pairs,
+and median send p50 fell from 4,397 to 4,352 ns. A separate cross-build run was
+directionally consistent (98.24 to 100.10 MiB/s, 9/9 wins). The 35-byte shape
+did not show a stable throughput gain, so caller-buffer receive is opt-in and
+the owning path remains the default.
 After the protected stack-send integration, the same 1,000-DATAGRAM bounded
 burst again attempted/sent/received all 1,000 with zero timeout and checksum
 3,549,000. The loaded-host sample was 10.483 us p50 / 17.998 us p99 and
