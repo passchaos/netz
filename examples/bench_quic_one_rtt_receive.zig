@@ -7,7 +7,7 @@ const default_iterations: usize = 1_000;
 const default_warmup_iterations: usize = 100;
 
 const Mode = enum { all, gro, gro_service, plain, service, visitor };
-const FrameShape = enum { padding, stream, stream_gap };
+const FrameShape = enum { padding, stream, stream_gap, datagram };
 
 const Options = struct {
     mode: Mode = .all,
@@ -263,6 +263,10 @@ fn measureVisitor(
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
+        .local_max_datagram_frame_size = if (frame_shape == .datagram)
+            65_535
+        else
+            null,
     });
     defer server.deinit();
 
@@ -438,6 +442,10 @@ fn measure(
         .local_connection_id = &server_cid,
         .peer_connection_id = &client_cid,
         .local_endpoint = .server,
+        .local_max_datagram_frame_size = if (frame_shape == .datagram)
+            65_535
+        else
+            null,
     });
     defer server.deinit();
 
@@ -608,6 +616,32 @@ fn fillPayload(
         out[0] = @intFromEnum(netz.quic.FrameType.ping);
         @memset(out[1..], @intFromEnum(netz.quic.FrameType.padding));
         return out;
+    }
+
+    if (frame_shape == .datagram) {
+        const datagram_data = [_]u8{0x5a} ** payload_size;
+        var data_len = payload_size - 4;
+        while (true) {
+            const frame = netz.quic.Frame{ .datagram = .{
+                .data = datagram_data[0..data_len],
+                .length_present = true,
+            } };
+            const frame_len = try frame.wireLen();
+            if (frame_len == payload_size) {
+                var fixed = std.heap.FixedBufferAllocator.init(out);
+                var encoded = try std.ArrayList(u8).initCapacity(
+                    fixed.allocator(),
+                    payload_size,
+                );
+                try frame.write(&encoded, fixed.allocator());
+                return encoded.items;
+            }
+            if (frame_len > payload_size) {
+                data_len -= frame_len - payload_size;
+            } else {
+                data_len += payload_size - frame_len;
+            }
+        }
     }
 
     const stream_data = [_]u8{0x5a} ** payload_size;

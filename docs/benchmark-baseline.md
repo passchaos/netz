@@ -71,6 +71,7 @@ taskset -c 0 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- --scena
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=service --frame=datagram --warmup=500 --iterations=10000
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
@@ -1201,10 +1202,13 @@ AES-256, ChaCha20, and SM4 tests verify both successful open and byte-for-byte
 preservation on phase mismatch.
 
 The receive benchmark now accepts `--mode=all|gro|plain|service|visitor`,
-`--frame=padding|stream`, `--warmup=N`, and `--iterations=N`. The STREAM shape
-fills each 1,152-byte plaintext with one ordered stream-zero frame, drains it
-through `pollStreamId`, and verifies the exact byte total, so it includes the
-receive preflight and stream-buffer path that padding-only packets do not.
+`--frame=padding|stream|stream_gap|datagram`, `--warmup=N`, and
+`--iterations=N`. The STREAM shape fills each 1,152-byte plaintext with one
+ordered stream-zero frame, drains it through `pollStreamId`, and verifies the
+exact byte total, so it includes the receive preflight and stream-buffer path
+that padding-only packets do not. The DATAGRAM shape likewise fills the
+plaintext with exactly one length-bearing frame and enables the receiver's
+local RFC 9221 limit, isolating the common one-frame receive preflight.
 
 For the common one-STREAM packet, receive preflight now builds only one
 `RecvState.Preflight` and a one-frame descriptor store. It retains the same
@@ -1225,6 +1229,26 @@ after this first-stage preflight change measured GRO 1347, allocating plain
 1532, in-place service 1320, and borrowed visitor 1322 ns/packet over 270,000
 packets per path. These are internal same-host regression measurements, not a
 cross-library throughput comparison.
+
+The common one-DATAGRAM packet now validates its negotiated frame-size limit
+directly before packet mutation instead of constructing unused STREAM,
+connection-ID, and path-validation shadows. Disabled negotiation, both wire
+types, frame-size failure diagnostics, and whole-packet no-side-effect behavior
+remain covered by the existing DATAGRAM receive tests. On 2026-10-03, fixed
+ReleaseFast binaries
+(`660ec6badcf1d8b3cec444c78adbca2f3dfbd391fd7acd5ad500a7c1335392b9`
+baseline and
+`94f30fabbea57d0aa5b1a5f9a91e4eedf677be353b2a9cf6b7aab61fdeceb4c6`
+candidate) were pinned to CPU 0 and alternated in nine pairs. Every invocation
+used 500 warmups and 10,000 measured batches of 54 packets. The service-path
+median fell from 2,849 to 2,812 ns/packet, a 1.30% reduction, with the
+candidate faster in 9/9 pairs. A fresh five-sample 1024-byte/window-16 Quinn
+matrix then measured netz p50 at 181.084 us against a fixed Quinn server and
+219.177 us against a fixed netz server, versus Quinn-client medians of 156.389
+and 183.814 us. That separately scheduled, implementation-packetized matrix is
+directional compatibility evidence; the fixed-binary receive result is the
+causal performance evidence, and the large-payload cross-stack gap remains
+open.
 
 The new connection-level suite test passes a FIN-terminated single STREAM and a
 second STREAM after a key-phase update through `Connection.receivePacket` for

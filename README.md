@@ -589,7 +589,11 @@ Current protocol coverage includes:
   monotonic sent-packet insertion fast paths, best-effort indexed-or-sorted exact sent-packet lookup with tail fast paths and O(1) index invalidation after metadata compaction, and cached latest ordinary ACK-eliciting PTO anchors with PMTU-probe fallback scans,
   no-new-ACK short-circuiting with sorted-range scan breaks and lower-bound ACK probes, lookup-free tail-forget fast paths, cached sortedness for
   ACK/loss scans, single-pass ACK marking, pointer-based recovery compaction that recycles matches in place and copies only moved survivors, binary-searched clean single-range recovery ACK retirement with conservative retransmission/multi-range/unsorted fallback, plus single-pass outbound frame sizing/recovery/ACK/flight classification,
-  receive-frame semantic preflight before multi-frame side effects, preallocated single-byte, single-, double-, triple-varint, fixed PATH, ACK_FREQUENCY, variable-payload, CRYPTO, STREAM, DATAGRAM, NEW_CONNECTION_ID, and close frame writes, and direct adaptive truncated packet-number
+  receive-frame semantic preflight before multi-frame side effects with
+  shape-specific single-STREAM and single-DATAGRAM validation, preallocated
+  single-byte, single-, double-, triple-varint, fixed PATH, ACK_FREQUENCY,
+  variable-payload, CRYPTO, STREAM, DATAGRAM, NEW_CONNECTION_ID, and close
+  frame writes, and direct adaptive truncated packet-number
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with pre-reserved assume-capacity STREAM frame batches, preallocated receive-state clones, and empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,
   zero-consume skips, contiguous duplicate-overlap fast paths, conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
@@ -1607,6 +1611,7 @@ taskset -c 0 zig build bench-quic-one-rtt-send -Doptimize=ReleaseFast -- \
 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=service --frame=datagram --warmup=500 --iterations=10000
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 zig build bench-quic-ticket-keyring -Doptimize=ReleaseFast

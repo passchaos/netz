@@ -13227,6 +13227,12 @@ pub const Connection = struct {
             triggering_frame_index.* = null;
             return null;
         }
+        if (frames.len == 1 and frames[0] == .datagram) {
+            triggering_frame_index.* = 0;
+            try self.validateDatagramFrame(frames[0].datagram);
+            triggering_frame_index.* = null;
+            return null;
+        }
         var recv_data_total = self.recv_data_total;
         var stack_recv_streams: [16]RecvStreamPreflightEntry = undefined;
         var recv_streams: std.ArrayList(RecvStreamPreflightEntry) =
