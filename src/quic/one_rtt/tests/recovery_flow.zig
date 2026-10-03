@@ -1304,6 +1304,38 @@ test "QUIC DATAGRAM batch validates all input and commits socket prefix" {
     });
     defer server.deinit();
 
+    var packet_number_boundary = try one_rtt.Connection.init(
+        &client_endpoint,
+        .{
+            .peer = server_endpoint.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "boundary-local",
+            .peer_connection_id = "boundary-peer",
+            .max_frames_per_packet = 1,
+            .peer_max_datagram_frame_size = 65_535,
+            .enable_pacing = false,
+        },
+    );
+    defer packet_number_boundary.deinit();
+    one_rtt.testing.setNextPacketNumber(&packet_number_boundary, 126);
+    const boundary_max = packet_number_boundary.maxDatagramPayloadSize() orelse
+        return error.TestUnexpectedResult;
+    const boundary_payload = try allocator.alloc(u8, boundary_max);
+    defer allocator.free(boundary_payload);
+    try packet_number_boundary.validateDatagrams(&.{boundary_payload});
+    try std.testing.expectError(
+        error.DatagramTooLarge,
+        packet_number_boundary.validateDatagrams(&.{
+            boundary_payload,
+            boundary_payload,
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(u64, 126),
+        packet_number_boundary.next_packet_number,
+    );
+
     const maximum = client.maxDatagramPayloadSize() orelse
         return error.TestUnexpectedResult;
     const oversized = try allocator.alloc(u8, maximum + 1);

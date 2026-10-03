@@ -976,6 +976,42 @@ than the causal claim. Two broader experiments were rejected: retaining the
 first packet plan regressed the isolated median about 2.6%, while replacing
 the payload-limit search with a fixed-point solver was timing-neutral.
 
+The next batch-validation step observes that one QUIC packet per logical
+payload is a conservative upper bound. After validating every payload length,
+a post-handshake batch whose worst-case last packet number is legal and keeps
+the first packet's encoded width can return without materializing a duplicate
+packet plan. Width transitions, packet-number exhaustion, HANDSHAKE_DONE, and
+pending ACK_FREQUENCY still use the original exact planner. A regression fixes
+both sides of that split: two maximum-size packets spanning the 126/127
+one-byte/two-byte packet-number boundary fail before emission, while an empty
+batch remains a successful no-op even when DATAGRAM was not negotiated.
+
+Nine CPU-0 fixed-binary pairs compared the `f9cb3079` baseline
+(`0d18e397a315ee23befc2423af5507f1eeb453aeae3631ed8906e2ba208523f7`)
+with candidate
+`58420be3b97038e73232d3decb28fcebb5c055371085d3319c4e06da4d403bff`.
+Each arm used 500 warmups and 10,000 measured 32-payload batches:
+
+| Payload | Baseline median | Candidate median | Time reduction | Pair wins |
+|---:|---:|---:|---:|---:|
+| 32 B | 138 ns/payload | 129 ns/payload | 6.5% | 9/9 |
+| 256 B | 471 ns/payload | 462 ns/payload | 1.9% | 9/9 |
+| 1024 B | 1,577 ns/payload | 1,570 ns/payload | 0.4% | 6/9 |
+
+The complete capture SHA-256 is
+`ddf91cbc6021d61f61c9803a8b792798e7be9220b26450d353bff455c2c24354`.
+The 1024-byte result is deliberately treated as neutral. Five-sample external
+Quinn matrices with the final client/server binaries
+`e6912daadffb9c47893b06c73ae4888849ec6437b06a8d52fcc48a9fe35e3e55` /
+`271577bbb862cf3a809f7dca3f4d544dfa03164067baa0767b526c79f63c861e`
+measured 32-byte netz p50 at 53.352 us against a fixed Quinn server and
+49.157 us against a fixed netz server, respectively 1.195x and 1.060x the
+Quinn client rate. The 1024-byte p50 remained within the preceding netz range
+at 182.242/219.381 us; its cross-stack gap therefore remains open. The 32-byte
+and 1024-byte matrix-log hashes are
+`b66c5f902850708e8e36444ac81a8c984811662b945390de399c4f65c0a90dc4`
+and `6682ccbe832c55713f521b16c9d7014c2c5817fe06c7336a9550eedf169addda`.
+
 ### Raw QUIC DATAGRAM latency against Quinn
 
 The native Quinn RFC 9221 fixture now also supports a strict raw DATAGRAM

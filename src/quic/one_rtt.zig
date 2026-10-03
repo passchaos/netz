@@ -3455,6 +3455,29 @@ pub const Connection = struct {
         for (payloads) |payload| {
             if (payload.len > max_payload) return error.DatagramTooLarge;
         }
+        if (!self.handshake_status.needsHandshakeDone() and
+            self.pending_ack_frequency_request == null)
+        {
+            const last_packet_number = std.math.add(
+                u64,
+                self.next_packet_number,
+                payloads.len - 1,
+            ) catch return error.InvalidPacketNumber;
+            if (last_packet_number <= quic.protection.max_packet_number and
+                quic.protection.packetNumberLen(
+                    self.next_packet_number,
+                    self.sent.largestAcknowledged(),
+                ) == quic.protection.packetNumberLen(
+                    last_packet_number,
+                    self.sent.largestAcknowledged(),
+                ))
+            {
+                // At most one packet per payload is required. If even that
+                // upper bound stays within one packet-number width, the
+                // per-payload limit above proves every possible grouping fits.
+                return;
+            }
+        }
         var payload_offset: usize = 0;
         var packet_offset: usize = 0;
         while (payload_offset < payloads.len) {
