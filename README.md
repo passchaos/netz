@@ -1498,6 +1498,11 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # earlier verified three-sample allocator matrix cuts allocation counts by
 # 25.7-69.5% across all five shapes; timing remains intentionally excluded from
 # this instrumentation-heavy diagnostic.
+# Subscriber delivery queues prewarm only the common 16-message asynchronous
+# window, then reclaim consumed prefix storage and grow geometrically up to the
+# configured hard limit during transactional route preflight. A fixed-binary
+# three-sample allocator comparison reduced fanout-32 and balanced-32x32 broker
+# peak live bytes by 34.1% and 31.2% without adding allocation calls.
 # The broker's single-reader TCP loop also supplies 128 bytes of caller storage
 # for ACKs and common small PUBLISH packets. Eligible fragmented packets remain
 # in connection-owned read-ahead across timeouts, while oversized packets, TLS,

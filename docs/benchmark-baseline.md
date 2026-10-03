@@ -5466,12 +5466,12 @@ completing 6,400 deliveries and checksum 356,160. This short shape is memory
 evidence rather than a throughput result.
 The maintained Mosquitto comparison can now set `MQTT_STATS=true` to sample
 both broker processes from `/proc/PID/status` every 2 ms and emit verifier-
-checked memory records. The broker now moves the 3-KiB parsed pending client
-out of each finite connection coroutine and isolates large certificate,
-refusal, accepted-client, and Session admission frames from the steady-state
-read loop, and reserves the full live-delivery queue only before a restored or
-new subscription becomes routable. The configured 1,024-delivery capacity and
-allocation-free route mutation are unchanged. Seven `c3fe1516` parent/current
+checked memory records. At this historical stage, the broker moved the 3-KiB
+parsed pending client out of each finite connection coroutine, isolated large
+certificate, refusal, accepted-client, and Session admission frames from the
+steady-state read loop, and deferred the full live-delivery queue allocation
+until a restored or new subscription became routable. The later demand-driven
+queue change below replaces that full reservation. Seven `c3fe1516`
 runs of the same fixed-binary 64-connection shape measured netz at
 5,868-7,844 / 5,884-5,948 KiB, with medians falling from 6,188 to 5,932 KiB
 (4.1%). Mosquitto measured 3,820-3,916 / 3,800-3,904 KiB, with medians 3,904
@@ -5524,6 +5524,54 @@ Retained replay also uses the connection's stack-first property staging instead
 of allocating and freeing a temporary property list for every stored message;
 a fail-on-first-allocation unit check proves that a common same-size rebuild
 requires no allocation and still rewrites or removes Message Expiry correctly.
+
+Subscriber delivery queues now prewarm only
+`min(max_queued_deliveries_per_connection, 16)` entries instead of allocating
+their complete configured hard limit when a subscription becomes visible.
+Slow-consumer queues reclaim consumed prefix storage first and otherwise grow
+geometrically during route preflight, capped by the same hard limit. All
+fallible growth happens before a Publication or queue entry is committed, so
+the actual fanout mutation remains allocation-free and an OOM cannot expose a
+partial route. A 64-bit `Delivery` is 48 bytes; with the matrix's 2,048 and
+3,200 limits, the former policy reserved 96 and 150 KiB per subscriber even
+when its live queue was empty.
+
+Three fixed-binary QoS 1 allocator samples compared broker binaries
+`0e0223d51df6dad9d99e683f78e96e84975358f9955a8c5a314f5f362e87d1db`
+and
+`5ec1526f842612a4bf33302f45bf74c8df404642f234c10a8ba5fc23317a9688`.
+Allocation calls were unchanged in every shape. Fanout-32 cumulative requested
+bytes fell from 9,617,559 to 6,496,407 and median peak live bytes from
+9,164,653 to 6,043,501 (34.1%). Balanced-32x32 cumulative bytes fell from
+11,734,165 to 8,221,333 and peak live bytes from 11,131,511 to 7,658,907
+(31.2%). Under 3,600-second durable QoS 2 Sessions, fanout-32 peak live bytes
+fell from 9,197,580 to 6,081,916 (33.9%) and balanced-32x32 from 11,098,901 to
+6,203,237 (44.1%). Every run ended at zero live bytes. Baseline/candidate QoS 1
+allocator summary hashes are
+`22b363ffd497acdec8f98581e1939e0812c8dbc2dbd5fd97f43e35a1f667cbc8`
+and `21eb0bc71d14288141db33ba684e72249e6023230f9ecece3bb4b19dbbe665d8`;
+durable QoS 2 hashes are
+`720fc00f6684ca50b4d0ba7ba34bcda2a677c8984b712dc3cb696e7d738fbd14`
+and `390d35bf912b6bb61c4d06ae8adf791d39cc8e8f13004629d542f53c767fe49e`.
+
+The complete four-sample QoS 1, transient QoS 2, and durable QoS 2 matrices
+also completed all 240 broker runs with exact delivery counts and checksums.
+QoS 1 median Netz RSS fell in every shape, including 5,242 to 5,012 KiB for
+fanout-32 and 7,542 to 7,090 KiB for balanced-32x32. Transient QoS 2 RSS also
+fell in every shape; durable QoS 2 fell in four of five, while its 4-KiB shape
+rose 112 KiB. Throughput moved in both directions across the QoS variants, so
+these separate ABBA matrices are retained as compatibility/no-obvious-
+regression evidence rather than a causal speedup claim. Their baseline and
+candidate summary hashes are, respectively,
+`fe57ef8d988d8c48db5576fcbba1ec1b7dd13fa134dde5d0d970bd18d175e2f2` /
+`eec99c442c06e39e8631bde232d34464832a1078fe3dbdc5d0a8d8705417a8bf`
+for QoS 1,
+`b5f5fd51b09e6db2b7d70ad3b15c2512124b54e6ee46048664520f5b13241d46` /
+`b2033bda248e3fb9bbf1061c4272b1f6770460d036303bf7d47d617d9b1977ce`
+for transient QoS 2, and
+`19c9a0b6b3570baaa942eed8841632824d8595e0356ee4b7a5e2737fe3e2d36f` /
+`43bf8a8e89123009a45e1a7c51eadd4cc10d63ae181ed6c372e51ad6d417a068`
+for durable QoS 2.
 
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and

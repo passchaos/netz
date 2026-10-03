@@ -3488,9 +3488,9 @@ proxy evidence for the entire suite.
    validated broker-process RSS records. Finite broker admission now keeps
    the parsed pending client on the heap, isolates certificate, refusal,
    accepted-client and Session setup frames from the parked read loop, and
-   allocates the live delivery queue only before a restored or new
-   subscription becomes routable; the configured queue bound and
-   allocation-free route mutation remain unchanged. Seven `c3fe1516`
+   prewarms a live delivery queue only before a restored or new subscription
+   becomes routable; the configured queue bound and allocation-free route
+   commit remain unchanged. Seven `c3fe1516`
    parent/current 64-connection runs measured netz at
    5,868-7,844 / 5,884-5,948 KiB
    (6,188 / 5,932 KiB medians, a 4.1% reduction) and Mosquitto at
@@ -3579,6 +3579,26 @@ proxy evidence for the entire suite.
    preserving Message Expiry rewriting; the fixed five-shape broker comparison
    remained within its existing mixed run-to-run range, so this is allocation
    and code-path evidence rather than a throughput claim.
+   Subscriber delivery backing now follows the same demand-driven principle as
+   Mosquitto's per-client message nodes: SUBSCRIBE prewarms only the common
+   16-message asynchronous window rather than the configured hard maximum.
+   Route preflight first reclaims any consumed prefix, then grows geometrically
+   but never beyond that maximum; every fallible allocation precedes the
+   Publication and queue commit, so failure cannot expose a partial fanout.
+   The queue append itself remains allocation-free. On 64-bit targets each
+   `Delivery` is 48 bytes, so the 2,048- and 3,200-message benchmark limits no
+   longer reserve 96 and 150 KiB respectively for every subscriber before a
+   backlog exists. Three fixed-binary QoS 1 allocator samples kept allocation
+   calls unchanged in all five shapes while reducing fanout-32 median peak live
+   bytes from 9,164,653 to 6,043,501 (34.1%) and balanced-32x32 from
+   11,131,511 to 7,658,907 (31.2%). With 3,600-second durable QoS 2 Sessions,
+   which do not use this transient queue for QoS 1/2 delivery, the corresponding
+   reductions were 9,197,580 to 6,081,916 (33.9%) and 11,098,901 to
+   6,203,237 (44.1%). All 60 allocator runs freed every counted byte. Complete QoS 1,
+   transient QoS 2, and durable QoS 2 four-sample matrices preserved exact
+   delivery counts and checksums across all 240 broker runs; their timing moved
+   in both directions, so
+   this is a memory result rather than a general throughput claim.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

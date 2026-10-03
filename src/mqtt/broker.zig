@@ -665,6 +665,71 @@ const ClientSlot = struct {
         try buffers.queue.ensureTotalCapacityPrecise(allocator, capacity);
     }
 
+    /// Reserve queue storage before a route becomes observable. The common
+    /// asynchronous window is allocated at subscription time; a genuinely
+    /// slow consumer grows geometrically only as its live backlog grows.
+    /// Queue mutation after this preflight remains allocation-free.
+    fn ensureDeliveryReservationCapacity(
+        self: *ClientSlot,
+        allocator: std.mem.Allocator,
+        additional: usize,
+        limit: usize,
+    ) Error!void {
+        std.debug.assert(additional != 0);
+        const buffers = try self.ensureBuffers(allocator);
+        const reserved = std.math.add(
+            usize,
+            buffers.route_reservations,
+            additional,
+        ) catch return error.OutOfMemory;
+        const required_live = std.math.add(
+            usize,
+            self.queuedCount(),
+            reserved,
+        ) catch return error.OutOfMemory;
+        std.debug.assert(required_live <= limit);
+
+        var required_tail = std.math.add(
+            usize,
+            buffers.queue.items.len,
+            reserved,
+        ) catch return error.OutOfMemory;
+        if (required_tail <= buffers.queue.capacity) return;
+
+        // A consumed prefix is already paid-for bounded storage. Reclaim it
+        // before asking the allocator to grow the backing slice.
+        if (buffers.queue_head != 0) {
+            self.compactDeliveryQueue();
+            required_tail = std.math.add(
+                usize,
+                buffers.queue.items.len,
+                reserved,
+            ) catch return error.OutOfMemory;
+            if (required_tail <= buffers.queue.capacity) return;
+        }
+
+        const geometric_capacity = std.math.add(
+            usize,
+            buffers.queue.capacity,
+            @max(buffers.queue.capacity / 2, 1),
+        ) catch limit;
+        const target_capacity = @min(
+            limit,
+            @max(
+                required_tail,
+                @max(
+                    transient_delivery_async_high_watermark,
+                    geometric_capacity,
+                ),
+            ),
+        );
+        std.debug.assert(target_capacity >= required_tail);
+        try buffers.queue.ensureTotalCapacityPrecise(
+            allocator,
+            target_capacity,
+        );
+    }
+
     fn clearQueue(self: *ClientSlot) void {
         const buffers = self.buffers orelse return;
         for (buffers.queue.items[buffers.queue_head..]) |*delivery| {
@@ -895,18 +960,23 @@ const ClientSlot = struct {
         if (buffers.queue_head >= 64 and
             buffers.queue_head * 2 >= buffers.queue.items.len)
         {
-            const remaining = buffers.queue.items.len - buffers.queue_head;
-            if (remaining != 0) {
-                std.mem.copyForwards(
-                    Delivery,
-                    buffers.queue.items[0..remaining],
-                    buffers.queue.items[buffers.queue_head..],
-                );
-            }
-            buffers.queue.items.len = remaining;
-            buffers.queue_head = 0;
+            self.compactDeliveryQueue();
         }
         return delivery;
+    }
+
+    fn compactDeliveryQueue(self: *ClientSlot) void {
+        const buffers = self.buffers.?;
+        const remaining = self.queuedCount();
+        if (remaining != 0) {
+            std.mem.copyForwards(
+                Delivery,
+                buffers.queue.items[0..remaining],
+                buffers.queue.items[buffers.queue_head..],
+            );
+        }
+        buffers.queue.items.len = remaining;
+        buffers.queue_head = 0;
     }
 
     fn pushFront(self: *ClientSlot, delivery: Delivery) void {
@@ -943,14 +1013,7 @@ const ClientSlot = struct {
         if (buffers.queue.items.len == buffers.queue.capacity and
             buffers.queue_head != 0)
         {
-            const remaining = self.queuedCount();
-            std.mem.copyForwards(
-                Delivery,
-                buffers.queue.items[0..remaining],
-                buffers.queue.items[buffers.queue_head..],
-            );
-            buffers.queue.items.len = remaining;
-            buffers.queue_head = 0;
+            self.compactDeliveryQueue();
         }
         std.debug.assert(buffers.queue.items.len < buffers.queue.capacity);
         buffers.queue.appendAssumeCapacity(delivery);
@@ -4022,8 +4085,11 @@ pub const Broker = struct {
             if (session_stats.subscription_count != 0) {
                 try slot.ensureDeliveryCapacity(
                     self.allocator,
-                    self.options.limits
-                        .max_queued_deliveries_per_connection,
+                    @min(
+                        self.options.limits
+                            .max_queued_deliveries_per_connection,
+                        transient_delivery_async_high_watermark,
+                    ),
                 );
             }
         };
@@ -4739,15 +4805,18 @@ pub const Broker = struct {
         // emitted before either retained replay or those live deliveries.
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
-        // Reserve before publishing any new route. This preserves the
-        // allocation-free route/queue mutation invariant while avoiding a
-        // full queue allocation for connections that only publish.
+        // Warm the common asynchronous queue window before publishing a new
+        // route. Larger slow-consumer backlogs grow transactionally during
+        // route preflight instead of charging every subscriber the hard cap.
         for (reasons) |reason| {
             if (reason != 0xff) continue;
             try slot.ensureDeliveryCapacity(
                 self.allocator,
-                self.options.limits
-                    .max_queued_deliveries_per_connection,
+                @min(
+                    self.options.limits
+                        .max_queued_deliveries_per_connection,
+                    transient_delivery_async_high_watermark,
+                ),
             );
             break;
         }
@@ -5738,6 +5807,15 @@ pub const Broker = struct {
                 self.publish_counters.recordDropped();
                 continue;
             }
+            destination.ensureDeliveryReservationCapacity(
+                self.allocator,
+                1,
+                self.options.limits
+                    .max_queued_deliveries_per_connection,
+            ) catch |err| {
+                self.releaseRouteReservations(matches[0..plan_count]);
+                return err;
+            };
             destination_buffers.route_reservations += 1;
             matches[plan_count] = match;
             plan_count += 1;
@@ -7170,8 +7248,11 @@ test "MQTT Will route failure consumes a partially committed publication" {
     try std.testing.expect(broker.wills.pollOneDue(now) == null);
 }
 
-test "MQTT delivery queue storage is reserved only for subscribers" {
+test "MQTT delivery queues use bounded eager staging and lazy growth" {
     const allocator = std.testing.allocator;
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(@as(usize, 48), @sizeOf(Delivery));
+    }
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -7248,8 +7329,12 @@ test "MQTT delivery queue storage is reserved only for subscribers" {
         broker.options.auto_client_id_prefix,
         &subscriber_progress,
     );
+    try std.testing.expectEqual(
+        @as(usize, transient_delivery_async_high_watermark),
+        broker.slots[subscriber_slot].buffers.?.queue.capacity,
+    );
     try std.testing.expect(
-        broker.slots[subscriber_slot].buffers.?.queue.capacity >=
+        broker.slots[subscriber_slot].buffers.?.queue.capacity <
             queue_capacity,
     );
     broker.abortRegistration(
@@ -7259,6 +7344,98 @@ test "MQTT delivery queue storage is reserved only for subscribers" {
     );
     try std.testing.expect(broker.slots[subscriber_slot].buffers == null);
     broker.releaseClaimedSlot(subscriber_slot);
+}
+
+test "MQTT delivery queue growth is transactional and bounded" {
+    const allocator = std.testing.allocator;
+    var slot: ClientSlot = .{};
+    defer slot.clearBuffers(allocator);
+
+    try slot.ensureDeliveryCapacity(allocator, 2);
+    const buffers = slot.buffers.?;
+    buffers.route_reservations = 2;
+
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        slot.ensureDeliveryReservationCapacity(
+            failing.allocator(),
+            1,
+            64,
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 2), buffers.queue.capacity);
+    try std.testing.expectEqual(@as(usize, 2), buffers.route_reservations);
+
+    buffers.route_reservations = 0;
+    try slot.ensureDeliveryReservationCapacity(allocator, 3, 64);
+    try std.testing.expect(buffers.queue.capacity >= 3);
+    try std.testing.expect(buffers.queue.capacity <= 64);
+
+    var no_allocation = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try slot.ensureDeliveryReservationCapacity(
+        no_allocation.allocator(),
+        1,
+        64,
+    );
+    try std.testing.expect(!no_allocation.has_induced_failure);
+}
+
+test "MQTT delivery queue reservations reclaim a consumed prefix" {
+    const allocator = std.testing.allocator;
+    var slot: ClientSlot = .{};
+    defer slot.clearBuffers(allocator);
+    try slot.ensureDeliveryCapacity(allocator, 4);
+
+    const publication = try Publication.createFromPublish(
+        allocator,
+        .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = "queue/compact",
+            .packet_id = 1,
+            .properties = &.{},
+            .payload = "payload",
+        },
+        2,
+        std.Io.Timestamp.fromNanoseconds(0),
+    );
+    const buffers = slot.buffers.?;
+    buffers.queue.items.len = 4;
+    buffers.queue.items[2] = .{
+        .publication = publication,
+        .qos = .at_least_once,
+        .retain = false,
+    };
+    buffers.queue.items[3] = .{
+        .publication = publication,
+        .qos = .at_least_once,
+        .retain = false,
+    };
+    buffers.queue_head = 2;
+
+    var no_allocation = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try slot.ensureDeliveryReservationCapacity(
+        no_allocation.allocator(),
+        2,
+        64,
+    );
+    try std.testing.expect(!no_allocation.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), buffers.queue_head);
+    try std.testing.expectEqual(@as(usize, 2), buffers.queue.items.len);
+    try std.testing.expectEqual(@as(usize, 4), buffers.queue.capacity);
+    try std.testing.expectEqual(publication, buffers.queue.items[0].publication);
+    try std.testing.expectEqual(publication, buffers.queue.items[1].publication);
 }
 
 test "MQTT publisher route plans reuse bounded slot storage" {
