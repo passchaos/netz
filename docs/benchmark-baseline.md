@@ -947,6 +947,35 @@ five-pair STREAM-batch control was timing-neutral amid a host-speed shift
 (165.471 versus 166.287 us/batch medians with overlapping samples), as expected
 because it still instantiates the generic path. This isolates the improvement
 to pure DATAGRAM bookkeeping; it is not an end-to-end result.
+
+The public batch preflight now computes the negotiated/path-limited maximum
+DATAGRAM payload once per non-empty input slice rather than once per logical
+payload. Every payload length is still checked before packet grouping, and the
+existing complete packet-plan pass still rejects MTU or packet-number failure
+before the first socket submission. An empty batch remains a successful no-op
+even when DATAGRAM was not negotiated. Nine CPU-0 fixed-binary pairs used 500
+warmups and 10,000 measured 32-payload batches per arm. Baseline/candidate
+binaries were
+`200c9723c02eba3cc0cdeedde9367655ea998a0d0ba8c259e19f76686c435700`
+and `0d18e397a315ee23befc2423af5507f1eeb453aeae3631ed8906e2ba208523f7`:
+
+| Payload | Baseline median | Candidate median | Time reduction | Pair wins |
+|---:|---:|---:|---:|---:|
+| 32 B | 177 ns/payload | 138 ns/payload | 22.0% | 9/9 |
+| 256 B | 514 ns/payload | 472 ns/payload | 8.2% | 9/9 |
+| 1024 B | 1,596 ns/payload | 1,549 ns/payload | 2.9% | 9/9 |
+
+The 1024-byte capture hash is
+`da8dcef8492b6308c367ece59ac01eca087c38a729cc0488a535c15438200717`.
+The separate 32/256-byte capture uses the same binary pair and hashes to
+`6584564b2c5f33d28b69911ce1ef7e8f6dcfffc2e8b3eb85de7282d4f3774876`.
+A repeated five-sample Quinn matrix moved the netz-client/fixed-Quinn-server
+p50 from 183.233 to 181.751 us across separately scheduled runs; Quinn's own
+median also moved, so that result is directional compatibility evidence rather
+than the causal claim. Two broader experiments were rejected: retaining the
+first packet plan regressed the isolated median about 2.6%, while replacing
+the payload-limit search with a fixed-point solver was timing-neutral.
+
 ### Raw QUIC DATAGRAM latency against Quinn
 
 The native Quinn RFC 9221 fixture now also supports a strict raw DATAGRAM

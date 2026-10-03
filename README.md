@@ -805,6 +805,8 @@ Current protocol coverage includes:
   nibble-correct four-pass AES vectors, caller-provided nonce entropy, and
   transactional local-CID/reset-token issuance,
   transport/application CONNECTION_CLOSE state including frame-payload, ACK, ACK_FREQUENCY negotiation, DATAGRAM negotiation, stream-limit/state/flow-control/final-size/data-conflict, server-only frame, and selected semantic error close emission, indexed PATH_CHALLENGE/PATH_RESPONSE validation state with preallocated clone copies and empty-outstanding challenge/response lookup skips, single-lookup duplicate challenge/response suppression, and caller-storage batch drains/sends wired into 1-RTT,
+  including one invariant payload-limit calculation per DATAGRAM batch while
+  retaining complete pre-send packet-number and MTU validation,
   peer-migration helpers and authenticated non-probing packet receive handling
   that honor disable_active_migration, preserve RTT while resetting
   tuple-local congestion/PMTU/ECN/PTO state for NAT rebinding, apply a server

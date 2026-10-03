@@ -3449,7 +3449,12 @@ pub const Connection = struct {
         self: Connection,
         payloads: []const []const u8,
     ) Error!void {
-        for (payloads) |payload| try self.validateDatagramSend(payload);
+        if (payloads.len == 0) return;
+        const max_payload = self.maxDatagramPayloadSize() orelse
+            return error.DatagramsNotEnabled;
+        for (payloads) |payload| {
+            if (payload.len > max_payload) return error.DatagramTooLarge;
+        }
         var payload_offset: usize = 0;
         var packet_offset: usize = 0;
         while (payload_offset < payloads.len) {

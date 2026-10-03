@@ -7471,6 +7471,10 @@ test "QUIC 1-RTT DATAGRAM enforces negotiation and frame-size limits" {
         .peer_connection_id = &cid,
     });
     defer no_dgram.deinit();
+    var empty_committed: usize = 99;
+    try no_dgram.validateDatagrams(&.{});
+    try no_dgram.sendDatagrams(&.{}, &empty_committed);
+    try std.testing.expectEqual(@as(usize, 0), empty_committed);
     try std.testing.expectError(error.DatagramsNotEnabled, no_dgram.sendDatagram("disabled"));
     try one_rtt.sendFrames(&endpoint, endpoint.address(), keys, .{
         .destination_connection_id = &cid,
