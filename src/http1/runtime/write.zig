@@ -107,26 +107,82 @@ const BatchPart = union(enum) {
     borrowed: []const u8,
 };
 
+const BatchVectors = struct {
+    descriptors: []BatchPart,
+    parts: [][]const u8,
+};
+
 const BatchScratch = struct {
     /// Independent contiguous transport staging. This cannot share `encoded`:
     /// prepared message heads may still borrow that storage while a
     /// connection-level flatten policy copies all parts.
     flattened: std.ArrayList(u8) = .empty,
     encoded: std.ArrayList(u8) = .empty,
-    parts: std.ArrayList([]const u8) = .empty,
-    part_descriptors: std.ArrayList(BatchPart) = .empty,
+    vectors: std.ArrayList(usize) = .empty,
 
     fn reset(self: *BatchScratch) void {
         self.encoded.clearRetainingCapacity();
-        self.parts.clearRetainingCapacity();
-        self.part_descriptors.clearRetainingCapacity();
+        self.vectors.clearRetainingCapacity();
+    }
+
+    fn prepareVectors(
+        self: *BatchScratch,
+        allocator: std.mem.Allocator,
+        part_capacity: usize,
+    ) Error!BatchVectors {
+        const descriptor_bytes = std.math.mul(
+            usize,
+            part_capacity,
+            @sizeOf(BatchPart),
+        ) catch return error.ContentLengthOverflow;
+        _ = std.math.add(
+            usize,
+            descriptor_bytes,
+            @alignOf([]const u8) - 1,
+        ) catch return error.ContentLengthOverflow;
+        const parts_offset = std.mem.alignForward(
+            usize,
+            descriptor_bytes,
+            @alignOf([]const u8),
+        );
+        const parts_bytes = std.math.mul(
+            usize,
+            part_capacity,
+            @sizeOf([]const u8),
+        ) catch return error.ContentLengthOverflow;
+        const total_bytes = std.math.add(
+            usize,
+            parts_offset,
+            parts_bytes,
+        ) catch return error.ContentLengthOverflow;
+        const word_count = std.math.divCeil(
+            usize,
+            total_bytes,
+            @sizeOf(usize),
+        ) catch return error.ContentLengthOverflow;
+        try self.vectors.resize(allocator, word_count);
+
+        const bytes = std.mem.sliceAsBytes(self.vectors.items);
+        const descriptor_storage: []align(@alignOf(BatchPart)) u8 =
+            @alignCast(bytes[0..descriptor_bytes]);
+        const parts_storage: []align(@alignOf([]const u8)) u8 =
+            @alignCast(bytes[parts_offset..][0..parts_bytes]);
+        return .{
+            .descriptors = std.mem.bytesAsSlice(
+                BatchPart,
+                descriptor_storage,
+            ),
+            .parts = std.mem.bytesAsSlice(
+                []const u8,
+                parts_storage,
+            ),
+        };
     }
 
     fn deinit(self: *BatchScratch, allocator: std.mem.Allocator) void {
         self.flattened.deinit(allocator);
         self.encoded.deinit(allocator);
-        self.parts.deinit(allocator);
-        self.part_descriptors.deinit(allocator);
+        self.vectors.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -1903,10 +1959,19 @@ fn prepareResponsePartsWithDefaultDate(
 ) Error![]const []const u8 {
     const batch = try scratch.batchScratch(allocator);
     batch.reset();
-    try batch.part_descriptors.ensureTotalCapacity(
+    const part_capacity = std.math.mul(
+        usize,
+        responses.len,
+        2,
+    ) catch return error.ContentLengthOverflow;
+    const buffers = try batch.prepareVectors(
         allocator,
-        responses.len *| 2,
+        part_capacity,
     );
+    var part_descriptors = std.ArrayList(BatchPart).initBuffer(
+        buffers.descriptors,
+    );
+    var parts = std.ArrayList([]const u8).initBuffer(buffers.parts);
     for (responses) |response| {
         scratch.encoded.clearRetainingCapacity();
 
@@ -1924,7 +1989,7 @@ fn prepareResponsePartsWithDefaultDate(
             allocator,
             scratch.encoded.items,
         );
-        batch.part_descriptors.appendAssumeCapacity(.{
+        part_descriptors.appendAssumeCapacity(.{
             .encoded = .{
                 .start = head_start,
                 .len = scratch.encoded.items.len,
@@ -1946,36 +2011,32 @@ fn prepareResponsePartsWithDefaultDate(
                     allocator,
                     scratch.encoded.items,
                 );
-                batch.part_descriptors.appendAssumeCapacity(.{
+                part_descriptors.appendAssumeCapacity(.{
                     .encoded = .{
                         .start = chunk_start,
                         .len = scratch.encoded.items.len,
                     },
                 });
             } else {
-                batch.part_descriptors.appendAssumeCapacity(.{
+                part_descriptors.appendAssumeCapacity(.{
                     .borrowed = response.body,
                 });
             }
         }
     }
-    try batch.parts.ensureTotalCapacity(
-        allocator,
-        batch.part_descriptors.items.len,
-    );
-    for (batch.part_descriptors.items) |descriptor| {
-        batch.parts.appendAssumeCapacity(switch (descriptor) {
+    for (part_descriptors.items) |descriptor| {
+        parts.appendAssumeCapacity(switch (descriptor) {
             .encoded => |range| batch.encoded.items[range.start .. range.start + range.len],
             .borrowed => |body| body,
         });
     }
-    return batch.parts.items;
+    return parts.items;
 }
 
 test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 96), @sizeOf(BatchScratch));
+        try std.testing.expectEqual(@as(usize, 72), @sizeOf(BatchScratch));
         try std.testing.expectEqual(@as(usize, 48), @sizeOf(Scratch));
         try std.testing.expectEqual(
             @as(usize, 20),
@@ -2009,6 +2070,33 @@ test "HTTP/1 write scratch allocates batch state lazily" {
         @intFromPtr(try scratch.batchScratch(no_alloc.allocator())),
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
+
+    var failing_vectors = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        batch.prepareVectors(failing_vectors.allocator(), 4),
+    );
+    try std.testing.expectEqual(@as(usize, 0), batch.vectors.items.len);
+
+    const vectors = try batch.prepareVectors(allocator, 4);
+    try std.testing.expectEqual(@as(usize, 4), vectors.descriptors.len);
+    try std.testing.expectEqual(@as(usize, 4), vectors.parts.len);
+
+    var warmed_vectors = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    _ = try batch.prepareVectors(warmed_vectors.allocator(), 4);
+    try std.testing.expect(!warmed_vectors.has_induced_failure);
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var counted_scratch = Scratch{};
+    defer counted_scratch.deinit(tracked);
+    const counted = try counted_scratch.batchScratch(tracked);
+    _ = try counted.prepareVectors(tracked, 4);
+    try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
 }
 
 test "HTTP/1 request preparation uses stack-first header descriptors" {

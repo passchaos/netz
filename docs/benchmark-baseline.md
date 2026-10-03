@@ -179,10 +179,14 @@ implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 
 The response-batch encoded bytes, slice list, and offset descriptors now share
 one state allocated on first batch use instead of three empty `ArrayList`s in
-every connection. On 64-bit targets this reduces `runtime_write.Scratch` from
-320 to 256 bytes. Streaming `Trailer` names and their backing bytes are
-independently allocated only when a writer must retain an announcement through
-`finishTrailers`, reducing the scratch again to 192 bytes. The generated
+every connection. The slice and offset-descriptor views additionally share one
+pointer-aligned backing allocation, reducing that state from 96 to 72 bytes
+and its metadata backing allocations from two to one while retaining warmed
+capacity. On 64-bit targets the initial lazy extraction reduces
+`runtime_write.Scratch` from 320 to 256 bytes. Streaming `Trailer` names and
+their backing bytes are independently allocated only when a writer must retain
+an announcement through `finishTrailers`, reducing the scratch again to 192
+bytes. The generated
 `Trailer:` value uses a 256-byte stack-first buffer with an exact temporary
 fallback; complete messages therefore create no persistent trailer state, and
 the retained streaming state first fell from 72 to 48 bytes. Its name
