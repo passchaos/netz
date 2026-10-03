@@ -187,15 +187,16 @@ descriptor and iovec lists used only by multi-chunk streaming writes share a
 48-byte state allocated on first use. The independent flatten buffer now lives
 beside response-batch storage: default small pipelines already own that state,
 while an explicit single-message `flatten` policy creates it on first use.
-The persistent Content-Length rendering array is sized to the platform's exact
-maximum decimal `usize` width instead of a fixed 32 bytes. Request Host/TE
-normalization and final default-header assembly now mutate one retained
-descriptor list rather than allocating and copying through two. A
+Content-Length rendering now uses a call-local array sized to the platform's
+exact maximum decimal `usize` width instead of retaining a fixed 32-byte array
+on every connection. Request Host/TE normalization and final default-header
+assembly also mutate one retained descriptor list rather than allocating and
+copying through two. A
 representative cold POST therefore falls from three scratch allocations and
 710 requested bytes to two allocations and 486 bytes; switching the warmed
 scratch to the equivalent streaming request needs no new allocation. Together
-these changes reduce the scratch from 320 to 96 bytes, `Client` from 720 to 496
-bytes, and `Connection` from 656 to 432 bytes. Fail-first tests keep each state
+these changes reduce the scratch from 320 to 72 bytes, `Client` from 720 to 480
+bytes, and `Connection` from 656 to 400 bytes. Fail-first tests keep each state
 absent after allocation failure, and warmed request, batch, and chunk metadata
 retains capacity. These are fixed-layout and allocation-lifetime results rather
 than a latency claim.

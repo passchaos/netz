@@ -180,7 +180,6 @@ pub const Scratch = struct {
     headers: std.ArrayList(http1.Header) = .empty,
     trailers: ?*TrailerScratch = null,
     streaming_chunks: ?*StreamingChunkScratch = null,
-    content_length: [content_length_buffer_len]u8 = undefined,
 
     fn reset(self: *Scratch) void {
         self.encoded.clearRetainingCapacity();
@@ -372,6 +371,7 @@ fn prepareStreamingRequest(
             fixed_length != 0,
     );
 
+    var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeadersInPlace(
         &scratch.headers,
         allocator,
@@ -383,7 +383,7 @@ fn prepareStreamingRequest(
             fixed_length,
             trailer_headers,
         ),
-        &scratch.content_length,
+        &content_length,
         scratch,
         null,
     );
@@ -539,6 +539,7 @@ fn prepareStreamingResponseWithDefaultDate(
         0
     else
         options.body_length orelse declared_length orelse 0;
+    var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeaders(
         &scratch.headers,
         allocator,
@@ -553,7 +554,7 @@ fn prepareStreamingResponseWithDefaultDate(
             options.status,
             options.request_method,
         ),
-        &scratch.content_length,
+        &content_length,
         scratch,
         if (responseStatusIsFinal(options.status)) default_date else null,
     );
@@ -1462,6 +1463,7 @@ pub fn prepareRequest(
         options.body.len != 0,
     );
 
+    var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeadersInPlace(
         &scratch.headers,
         allocator,
@@ -1473,7 +1475,7 @@ pub fn prepareRequest(
             options.body.len,
             options.trailers,
         ),
-        &scratch.content_length,
+        &content_length,
         scratch,
         null,
     );
@@ -1531,13 +1533,12 @@ fn prepareResponseWithDefaultDate(
 ) Error!MessageParts {
     if (options.version == .http_0_9) return error.InvalidVersion;
     scratch.reset();
-    const framing = try prepareResponseFraming(
+    const framing = try prepareResponseFramingAndHead(
         allocator,
         options,
         default_date,
         scratch,
     );
-    try encodeResponseHead(allocator, options, scratch);
 
     if (framing.suppress_body) {
         return .{ .header = scratch.encoded.items, .body = &.{} };
@@ -1612,7 +1613,7 @@ fn prepareResponsePartsWithDefaultDate(
             trailers.value.clearRetainingCapacity();
         }
 
-        const framing = try prepareResponseFraming(
+        const framing = try prepareResponseFramingAndHead(
             allocator,
             response,
             if (responseStatusIsFinal(response.status))
@@ -1621,7 +1622,6 @@ fn prepareResponsePartsWithDefaultDate(
                 null,
             scratch,
         );
-        try encodeResponseHead(allocator, response, scratch);
         const head_start = batch.encoded.items.len;
         try batch.encoded.appendSlice(
             allocator,
@@ -1679,10 +1679,10 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 96), @sizeOf(BatchScratch));
-        try std.testing.expectEqual(@as(usize, 96), @sizeOf(Scratch));
+        try std.testing.expectEqual(@as(usize, 72), @sizeOf(Scratch));
         try std.testing.expectEqual(
             @as(usize, 20),
-            @sizeOf(@FieldType(Scratch, "content_length")),
+            content_length_buffer_len,
         );
         try std.testing.expectEqual(
             @as(usize, 8),
@@ -1757,6 +1757,29 @@ test "HTTP/1 request preparation shares one header descriptor buffer" {
     try std.testing.expectEqual(
         allocations,
         tracking.allocations,
+    );
+}
+
+test "HTTP/1 Content-Length staging fits the largest usize" {
+    const allocator = std.testing.allocator;
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+
+    const request = try prepareStreamingRequest(allocator, .{
+        .method = .POST,
+        .host = "example.test",
+        .body_length = std.math.maxInt(usize),
+    }, &scratch);
+    const prefix = "Content-Length: ";
+    const start = (std.mem.indexOf(u8, request.head, prefix) orelse
+        return error.TestUnexpectedResult) + prefix.len;
+    const end = std.mem.indexOfPos(u8, request.head, start, "\r\n") orelse
+        return error.TestUnexpectedResult;
+    const rendered = request.head[start..end];
+    try std.testing.expectEqual(content_length_buffer_len, rendered.len);
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        try std.fmt.parseInt(usize, rendered, 10),
     );
 }
 
@@ -1875,7 +1898,7 @@ const ResponseFraming = struct {
     suppress_body: bool,
 };
 
-fn prepareResponseFraming(
+fn prepareResponseFramingAndHead(
     allocator: std.mem.Allocator,
     options: ResponseOptions,
     default_date: ?[]const u8,
@@ -1927,6 +1950,7 @@ fn prepareResponseFraming(
         options.status,
         options.request_method,
     );
+    var content_length: [content_length_buffer_len]u8 = undefined;
     try appendDefaultedHeaders(
         &scratch.headers,
         allocator,
@@ -1938,10 +1962,11 @@ fn prepareResponseFraming(
             options.status,
             options.request_method,
         ),
-        &scratch.content_length,
+        &content_length,
         scratch,
         default_date,
     );
+    try encodeResponseHead(allocator, options, scratch);
     return .{
         .use_chunked = use_chunked,
         .suppress_body = suppress_body,
