@@ -783,26 +783,25 @@ this subsection predate that migration unless explicitly labeled otherwise and
 remain historical Threaded evidence; the backend change itself is not a crypto
 throughput claim.
 
-Every AES connection keeps an AES header-protection key schedule for each
-current send/receive key generation. Builds linked to Vail's optional
-AWS-LC-compatible backend additionally keep an initialized AES-GCM context.
-This matches the connection-owned packet/header key design in Quinn, quiche,
-and s2n-quic: key setup is paid when the connection is created or its key phase
-changes rather than once per packet. AES-128-GCM and AES-256-GCM use the
-prepared path; ChaCha20 and SM4 retain the allocation-free Zig path.
+Every AES connection keeps an AES header-protection key schedule and Vail's
+pure-Zig AES-GCM context for each current send/receive key generation. The
+context retains the expanded AES key and GHASH table, matching the
+connection-owned packet/header key design in Quinn, quiche, and s2n-quic: key
+setup is paid when the connection is created or its key phase changes rather
+than once per packet. AES-128-GCM and AES-256-GCM use the prepared path;
+ChaCha20 and SM4 retain the allocation-free one-shot Zig path.
 
 The short-packet benchmark reports value-key and prepared-key seal/open paths
-separately. It distinguishes always-available prepared connection keys from
-the optional prepared AEAD context. To reproduce with an AWS-LC checkout whose
-static library has been built under `build/crypto`, run:
+separately. The prepared implementation is self-contained Zig and requires no
+external crypto library. Run:
 
 ```sh
-taskset -c 0 zig build bench-quic-short-packet -Doptimize=ReleaseFast \
-  -Daws-lc-path=/path/to/aws-lc -Daws-lc-link=true
+taskset -c 0 zig build bench-quic-short-packet -Doptimize=ReleaseFast
 ```
 
-Five CPU-0 runs on 2026-09-12 used the BoringSSL-compatible static crypto
-library already built by the local tquic checkout. Medians are reported below.
+Five historical CPU-0 runs on 2026-09-12 used the former
+BoringSSL-compatible backend built by the local tquic checkout. Medians are
+reported below.
 Every operation includes short-header construction/removal and header
 protection, so these figures measure the complete protected short-packet
 primitive rather than AEAD alone.
@@ -821,12 +820,12 @@ proves that AES connections select prepared send/receive keys and continue
 exchanging STREAM data across a key update, while ChaCha20 and SM4 remain on
 their existing paths.
 
-On 2026-09-18, seven CPU-0 runs of one fixed default-backend binary (without
-AWS-LC) measured AES-128 prepared seal at 244-250 ns versus 292-381 ns for the
+On 2026-09-18, seven CPU-0 runs of the prior pure-Zig backend measured
+AES-128 prepared seal at 244-250 ns versus 292-381 ns for the
 value-key path (1.19-1.54x), and prepared open at 302-303 ns versus 328-332 ns
 (1.08-1.09x). AES-256 prepared seal measured 269-271 ns versus 324-346 ns
 (1.19-1.28x), and prepared open measured 380 ns versus 395 ns (1.03-1.04x).
-The pure-Zig prepared path calls the same AEAD primitive directly and caches
+That earlier prepared path called the same one-shot AEAD primitive and cached
 only the AES header schedule; the ChaCha control remained 0.99-1.02x. Each AES
 connection consequently owns two 432-byte prepared-key objects in one
 allocation. ChaCha20 and SM4 connections retain no prepared-key allocation.
@@ -876,6 +875,26 @@ seven CPU-0 order-alternated H3 pairs moved the four-stream 16-MiB upload
 median from 160.63 to 163.40 MiB/s (+1.7%, 6/7 wins). Every three-iteration arm
 verified 50,331,648 bytes and status total 2,400; this is a small
 workload-specific result, not a general throughput claim.
+
+Vail `854a041` replaced the optional external backend with a reusable pure-Zig
+AES-GCM context that caches both the expanded AES key and GHASH table. Its
+x86_64 VAES/VPCLMUL path is faster than the former AWS-LC backend; this ARM64
+host uses the portable implementation. The netz prepared wrapper is now 992
+bytes (1,984 bytes for the connection's send/receive pair). One diagnostic
+100,000-operation run measured AES-128 prepared seal/open at 204/283 ns versus
+337/332 ns for the value-key path, and AES-256 at 220/334 ns versus 326/371 ns.
+Nine CPU-0 fixed-binary pairs compared
+the prior Vail binary
+`1a0a233084afcfcd1b7c2a84d559bf1af7edc196edb523996cb14666e1efec70`
+with the new pure-Zig binary
+`6d4f9cc5b90f43c80c52e3872efcb1cae01424a6f2c9f6e08a96bae86d6e8738`.
+The 1,149-byte DATAGRAM receive median fell from 2,771 to 2,754 ns/packet
+(0.61%, 8/9 wins). A separately scheduled five-sample
+1024-byte/window-16 Quinn matrix measured netz at 178.769 us against a fixed
+Quinn server and 216.974 us against a fixed netz server, versus Quinn-client
+medians of 163.612 and 180.510 us. This ARM64 result is directional evidence;
+the larger x86 acceleration and the remaining event-loop/payload-delivery gap
+need their own fixed-peer runs.
 
 ### QUIC 1-RTT send
 
@@ -1254,10 +1273,11 @@ baseline and
 candidate) were pinned to CPU 0 and alternated in nine pairs. Every invocation
 used 500 warmups and 10,000 measured batches of 54 packets. The service-path
 median fell from 2,849 to 2,812 ns/packet, a 1.30% reduction, with the
-candidate faster in 9/9 pairs. A fresh five-sample 1024-byte/window-16 Quinn
-matrix then measured netz p50 at 181.084 us against a fixed Quinn server and
-219.177 us against a fixed netz server, versus Quinn-client medians of 156.389
-and 183.814 us. That separately scheduled, implementation-packetized matrix is
+candidate faster in 9/9 pairs. The latest five-sample 1024-byte/window-16 Quinn
+matrix, after the Vail pure-Zig AES-GCM update, measured netz p50 at 178.769 us
+against a fixed Quinn server and 216.974 us against a fixed netz server, versus
+Quinn-client medians of 163.612 and 180.510 us. That separately scheduled,
+implementation-packetized matrix is
 directional compatibility evidence; the fixed-binary receive result is the
 causal performance evidence, and the large-payload cross-stack gap remains
 open.

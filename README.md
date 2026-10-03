@@ -1219,9 +1219,6 @@ zig build test
 zig build release-source
 # Extract the archive in isolation and compile its public-package test.
 zig build verify-release-source
-# Optional accelerated QUIC AES packet protection (requires a built AWS-LC or
-# BoringSSL-compatible prefix with build/crypto/libcrypto.a).
-zig build test -Daws-lc-path=/path/to/aws-lc -Daws-lc-link=true
 ```
 
 Runnable examples are under `examples/` and are wired into the build:
@@ -1764,8 +1761,8 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   and linear-time overlapping-subscription broker flush plans,
 - QUIC AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM short-packet
   sealing with caller-provided storage versus the allocating convenience
-  wrapper, plus connection-lifetime cached AES header keys and optional AWS-LC
-  packet contexts that avoid per-packet crypto setup and refresh on key updates,
+  wrapper, plus connection-lifetime pure-Zig AES-GCM and header-key contexts
+  that avoid per-packet key/GHASH setup and refresh on key updates,
 - bounded QUIC DATAGRAM receive queuing in an O(1) ring under
   `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
   direct full-queue reuse for equal-size payloads, a capacity-bounded

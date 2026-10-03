@@ -30,11 +30,9 @@ pub const aead_tag_len = traffic_crypto.tag_len;
 pub const header_protection_sample_len = traffic_crypto.sample_len;
 pub const header_protection_mask_len = traffic_crypto.mask_len;
 pub const max_packet_number: u64 = varint.max_value;
-/// AES connections can always retain their header-protection key schedule.
-/// A linked AWS-LC build additionally retains its packet AEAD context.
+/// AES connections retain both header-protection and packet AEAD contexts.
 pub const prepared_packet_protection_enabled = true;
-pub const prepared_aead_context_enabled =
-    vail.crypto.backend.aws_lc_linked;
+pub const prepared_aead_context_enabled = true;
 /// RFC 9001 Section 6.6 / Appendix B.1 limits for AEAD_AES_128_GCM.
 pub const aes_128_gcm_confidentiality_limit =
     CipherSuite.aes_128_gcm_sha256.confidentialityLimit();
@@ -109,11 +107,10 @@ pub const PacketProtectionKeys = struct {
 
 /// Packet-protection keys prepared for repeated use by a live connection.
 ///
-/// Vail keeps an initialized AEAD context when the optional AWS-LC backend is
-/// linked, while this wrapper also retains the AES header-protection schedule,
-/// matching the persistent packet/header-key design used by quiche. Other
-/// builds retain the same allocation-free pure-Zig AEAD primitives. This type
-/// owns backend state and must be deinitialized exactly once.
+/// Vail keeps an initialized pure-Zig AEAD context while this wrapper also
+/// retains the AES header-protection schedule, matching the persistent
+/// packet/header-key design used by Quinn and quiche. This type owns prepared
+/// key state and must be deinitialized exactly once.
 pub const PreparedPacketProtectionKeys = struct {
     const HeaderProtection = union(enum) {
         generic,
@@ -185,15 +182,6 @@ pub const PreparedPacketProtectionKeys = struct {
         ciphertext: []u8,
         tag: *[aead_tag_len]u8,
     ) error{InvalidPayloadLength}!void {
-        if (!comptime prepared_aead_context_enabled) {
-            return self.inner.keys.protect(
-                packet_number,
-                associated_data,
-                plaintext,
-                ciphertext,
-                tag,
-            );
-        }
         return self.inner.protect(
             packet_number,
             associated_data,
@@ -212,15 +200,6 @@ pub const PreparedPacketProtectionKeys = struct {
         plaintext: []u8,
     ) (error{InvalidPayloadLength} ||
         std.crypto.errors.AuthenticationError)!void {
-        if (!comptime prepared_aead_context_enabled) {
-            return self.inner.keys.open(
-                packet_number,
-                associated_data,
-                ciphertext,
-                tag,
-                plaintext,
-            );
-        }
         return self.inner.open(
             packet_number,
             associated_data,
@@ -1904,10 +1883,9 @@ fn sealShortPacketInPlaceWithProvider(
 
     const payload = out[payload_offset .. payload_offset + options.payload.len];
     const tag = out[payload_offset + options.payload.len ..][0..aead_tag_len];
-    // Vail's linked AWS-LC backend explicitly allows `in == out`, and the
-    // pure-Zig AEAD implementations encrypt via stream XOR before MACing the
-    // resulting ciphertext. Keep this helper restricted to exact in-place
-    // sealing rather than permitting partially-overlapping aliases.
+    // Vail's prepared and one-shot AEAD implementations support `in == out`.
+    // Keep this helper restricted to exact in-place sealing rather than
+    // permitting partially-overlapping aliases.
     try provider.protect(options.packet_number, out[0..payload_offset], payload, payload, tag);
     try applyHeaderProtectionWithProvider(provider, .short, out, pn_offset);
     return out;
