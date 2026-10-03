@@ -182,12 +182,14 @@ one state allocated on first batch use instead of three empty `ArrayList`s in
 every connection. On 64-bit targets this reduces `runtime_write.Scratch` from
 320 to 256 bytes. Trailer-name descriptors, their backing names, and generated
 `Trailer` field values are independently allocated only when a message declares
-or supplies trailers, reducing the scratch again to 192 bytes. Together these
-changes reduce `Client` from 720 to 592 bytes and `Connection` from 656 to 528
-bytes. Fail-first tests keep each state absent after allocation failure, and an
-identical warmed batch completes with a failing allocator without a new
-allocation. These are fixed-layout and allocation-lifetime results rather than
-a latency claim.
+or supplies trailers, reducing the scratch again to 192 bytes. Finally, the
+descriptor and iovec lists used only by multi-chunk streaming writes share a
+48-byte state allocated on first use, reducing the scratch to 152 bytes. After
+structure alignment, these changes reduce `Client` from 720 to 560 bytes and
+`Connection` from 656 to 480 bytes. Fail-first tests keep each state absent
+after allocation failure, and warmed batch/chunk metadata retains capacity.
+These are fixed-layout and allocation-lifetime results rather than a latency
+claim.
 
 The pipeline runner now accepts
 `--write-strategy=auto|vectored|flatten` and reports the selected policy, so

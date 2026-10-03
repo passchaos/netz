@@ -205,7 +205,9 @@ benchmark response:
   empty containers from ordinary client and server connections while retaining
   their warmed capacity. Trailer-name descriptors, backing names, and generated
   `Trailer` values are likewise allocated only for messages that declare or
-  supply trailers;
+  supply trailers. The two descriptor/iovec lists used by multi-chunk streaming
+  writes are also allocated together on first use and retain their warmed
+  capacity;
 - complete requests, single responses, and both coalesced and borrowed response
   batches finish all validation and allocation before transport I/O. Once a
   write begins, any transport error permanently retires the HTTP/1 connection:

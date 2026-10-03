@@ -145,6 +145,25 @@ const TrailerScratch = struct {
     }
 };
 
+pub const StreamingChunkScratch = struct {
+    descriptors: std.ArrayList(u8) = .empty,
+    parts: std.ArrayList([]const u8) = .empty,
+
+    fn reset(self: *StreamingChunkScratch) void {
+        self.descriptors.clearRetainingCapacity();
+        self.parts.clearRetainingCapacity();
+    }
+
+    fn deinit(
+        self: *StreamingChunkScratch,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.descriptors.deinit(allocator);
+        self.parts.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
     /// Independent contiguous transport staging. This cannot share `encoded`:
@@ -155,8 +174,7 @@ pub const Scratch = struct {
     headers: std.ArrayList(http1.Header) = .empty,
     request_headers: std.ArrayList(http1.Header) = .empty,
     trailers: ?*TrailerScratch = null,
-    streaming_chunk_descriptors: std.ArrayList(u8) = .empty,
-    streaming_parts: std.ArrayList([]const u8) = .empty,
+    streaming_chunks: ?*StreamingChunkScratch = null,
     content_length: [32]u8 = undefined,
 
     fn reset(self: *Scratch) void {
@@ -164,8 +182,7 @@ pub const Scratch = struct {
         self.headers.clearRetainingCapacity();
         self.request_headers.clearRetainingCapacity();
         if (self.trailers) |trailers| trailers.reset();
-        self.streaming_chunk_descriptors.clearRetainingCapacity();
-        self.streaming_parts.clearRetainingCapacity();
+        if (self.streaming_chunks) |chunks| chunks.reset();
     }
 
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
@@ -181,8 +198,10 @@ pub const Scratch = struct {
             trailers.deinit(allocator);
             allocator.destroy(trailers);
         }
-        self.streaming_chunk_descriptors.deinit(allocator);
-        self.streaming_parts.deinit(allocator);
+        if (self.streaming_chunks) |chunks| {
+            chunks.deinit(allocator);
+            allocator.destroy(chunks);
+        }
         self.* = undefined;
     }
 
@@ -211,6 +230,17 @@ pub const Scratch = struct {
     pub fn trailerHeaders(self: *const Scratch) []const http1.Header {
         const trailers = self.trailers orelse return &.{};
         return trailers.headers.items;
+    }
+
+    pub fn streamingChunkScratch(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!*StreamingChunkScratch {
+        if (self.streaming_chunks) |chunks| return chunks;
+        const chunks = try allocator.create(StreamingChunkScratch);
+        chunks.* = .{};
+        self.streaming_chunks = chunks;
+        return chunks;
     }
 };
 
@@ -1643,7 +1673,7 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 72), @sizeOf(BatchScratch));
-        try std.testing.expectEqual(@as(usize, 192), @sizeOf(Scratch));
+        try std.testing.expectEqual(@as(usize, 152), @sizeOf(Scratch));
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Scratch, "batch")),
@@ -1670,6 +1700,43 @@ test "HTTP/1 write scratch allocates batch state lazily" {
     try std.testing.expectEqual(
         @intFromPtr(batch),
         @intFromPtr(try scratch.batchScratch(no_alloc.allocator())),
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 write scratch allocates multi-chunk state lazily" {
+    const allocator = std.testing.allocator;
+    if (@sizeOf(usize) == 8) {
+        try std.testing.expectEqual(
+            @as(usize, 48),
+            @sizeOf(StreamingChunkScratch),
+        );
+        try std.testing.expectEqual(
+            @as(usize, 8),
+            @sizeOf(@FieldType(Scratch, "streaming_chunks")),
+        );
+    }
+
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+    try std.testing.expect(scratch.streaming_chunks == null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        scratch.streamingChunkScratch(failing.allocator()),
+    );
+    try std.testing.expect(scratch.streaming_chunks == null);
+
+    const chunks = try scratch.streamingChunkScratch(allocator);
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectEqual(
+        @intFromPtr(chunks),
+        @intFromPtr(try scratch.streamingChunkScratch(no_alloc.allocator())),
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
 }

@@ -215,17 +215,19 @@ pub fn Writer(comptime RuntimeError: type) type {
                         non_empty,
                         3,
                     ) catch return error.ContentLengthOverflow;
-                    try self.scratch.streaming_chunk_descriptors.resize(
+                    const streaming = try self.scratch.streamingChunkScratch(
+                        self.allocator,
+                    );
+                    try streaming.descriptors.resize(
                         self.allocator,
                         descriptor_bytes,
                     );
-                    try self.scratch.streaming_parts.resize(
+                    try streaming.parts.resize(
                         self.allocator,
                         part_count,
                     );
-                    const descriptors =
-                        self.scratch.streaming_chunk_descriptors.items;
-                    const parts = self.scratch.streaming_parts.items;
+                    const descriptors = streaming.descriptors.items;
+                    const parts = streaming.parts.items;
 
                     var part_index: usize = 0;
                     var descriptor_offset: usize = 0;
