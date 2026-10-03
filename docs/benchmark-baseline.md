@@ -72,6 +72,8 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=service --frame=datagram --warmup=500 --iterations=10000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_copy --frame=datagram --warmup=500 --iterations=10000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_borrowed --frame=datagram --warmup=500 --iterations=10000
 zig build bench-quic-udp-batch -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-mqtt-tls -Doptimize=ReleaseFast
 ```
@@ -1194,6 +1196,26 @@ fixed Quinn client, the netz server p50 median moved from 44.009 to 43.205 us
 (1.8% lower, candidate faster in 4/5 pairs). The p99 samples were noisy and
 included a candidate high tail, so this is a small workload-specific p50
 improvement rather than a tail-latency or general QUIC performance claim.
+
+Latency-sensitive consumers can instead use
+`visitDatagramBatchIntoServicingTimers` or its deadline variant. These methods
+receive into caller-owned raw storage, apply and acknowledge the complete
+authenticated packet batch, and synchronously visit each DATAGRAM payload
+without copying it into either the bounded queue or a second application
+buffer. Payload views expire when their callback returns, recursive receive is
+rejected with `ConcurrencyUnavailable`, and pre-existing queued payloads remain
+untouched. A real-UDP test covers packed ordered delivery, zero queue growth,
+callback-error cleanup, recursive-receive rejection, and an allocation-free
+warmed receive under a fail-first allocator. One frozen ReleaseFast binary
+(`f0962826104e29c03796e0672c861c2c55e68499242a60984937a8431f3ce375`)
+alternated copy and borrowed modes over nine CPU-0 pairs, each with 500 warmups
+and 10,000 measured 54-packet batches. The median fell from 2,694 to 2,626
+ns/packet (2.52%), with borrowed delivery faster in all nine pairs.
+A separate nine-pair fixed-binary control compared the pre-API binary
+`efa4d5674787773e7933fc1f0f9938b44e9920b5951c3d0f8fe410b70c9e9c87`
+with the same final binary in the existing queue-backed service mode. Medians
+were 2,608 and 2,607 ns/packet with 4/9 candidate wins, which is treated as
+neutral and rules out a material regression for existing users.
 Single DATAGRAM sends now also append a pending delayed ACK when both frames
 fit the path packet. This matches the unified packet builders in Quinn, quiche,
 and s2n-quic and avoids a separate ACK packet in request/response workloads. A

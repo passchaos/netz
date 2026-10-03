@@ -173,6 +173,125 @@ test "QUIC 1-RTT caller-buffer DATAGRAM receive preserves ordering and storage" 
         error.Timeout,
         server.receiveDatagramWithTimeout(&out, .zero),
     );
+
+    const borrowed_payloads = [_][]const u8{
+        "borrow-a",
+        "borrow-b",
+        "borrow-c",
+    };
+    sent_count = 0;
+    try client.sendDatagramsWithTimeout(
+        &borrowed_payloads,
+        &sent_count,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(borrowed_payloads.len, sent_count);
+    const BorrowedContext = struct {
+        connection: *one_rtt.Connection,
+        expected: []const []const u8,
+        next: usize = 0,
+
+        fn visit(self: *@This(), payload: []const u8) !void {
+            if (self.next >= self.expected.len) {
+                return error.UnexpectedDatagram;
+            }
+            try std.testing.expectEqualStrings(
+                self.expected[self.next],
+                payload,
+            );
+            var nested: [1]u8 = undefined;
+            try std.testing.expectError(
+                error.ConcurrencyUnavailable,
+                self.connection.receiveDatagramWithTimeout(
+                    &nested,
+                    .fromSeconds(1),
+                ),
+            );
+            self.next += 1;
+        }
+    };
+    var borrowed_context: BorrowedContext = .{
+        .connection = &server,
+        .expected = &borrowed_payloads,
+    };
+    var raw_storage: [borrowed_payloads.len * 4096]u8 = undefined;
+    var raw_datagrams: [borrowed_payloads.len]quic.runtime.ReceivedBytesView =
+        undefined;
+    while (borrowed_context.next < borrowed_payloads.len) {
+        const delivered = try server
+            .visitDatagramBatchIntoServicingTimersDeadline(
+            &raw_storage,
+            &raw_datagrams,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+            &borrowed_context,
+            BorrowedContext.visit,
+        );
+        try std.testing.expect(delivered != 0);
+    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.datagramReceiveQueueLen(),
+    );
+
+    const RejectVisitor = struct {
+        fn visit(_: void, _: []const u8) !void {
+            return error.StopVisitor;
+        }
+    };
+    try client.sendDatagram("callback-error");
+    try std.testing.expectError(
+        error.StopVisitor,
+        server.visitDatagramBatchIntoServicingTimersDeadline(
+            &raw_storage,
+            &raw_datagrams,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+            {},
+            RejectVisitor.visit,
+        ),
+    );
+    try client.sendDatagram("after-error");
+    try std.testing.expectEqualStrings(
+        "after-error",
+        try server.receiveDatagramWithTimeout(&out, .fromSeconds(1)),
+    );
+
+    const no_alloc_payloads = [_][]const u8{"borrowed-steady"};
+    try client.sendDatagram(no_alloc_payloads[0]);
+    var no_alloc_context: BorrowedContext = .{
+        .connection = &server,
+        .expected = &no_alloc_payloads,
+    };
+    var borrowed_fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    const borrowed_delivered = blk: {
+        server_endpoint.allocator = borrowed_fail.allocator();
+        defer server_endpoint.allocator = allocator;
+        break :blk try server
+            .visitDatagramBatchIntoServicingTimersDeadline(
+            &raw_storage,
+            &raw_datagrams,
+            .fromNow(io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(1),
+            }),
+            &no_alloc_context,
+            BorrowedContext.visit,
+        );
+    };
+    try std.testing.expectEqual(@as(usize, 1), borrowed_delivered);
+    try std.testing.expect(!borrowed_fail.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        server.datagramReceiveQueueLen(),
+    );
 }
 
 test "QUIC 1-RTT caller-buffer DATAGRAM receive rejects disabled negotiation" {

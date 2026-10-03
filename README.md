@@ -600,7 +600,8 @@ Current protocol coverage includes:
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
   MTU-bounded multi-frame batch packing with exact logical-prefix progress,
   configurable receive queues plus caller-buffer single and up-to-64-item
-  blocking/timeout/deadline reads, automatic
+  blocking/timeout/deadline reads, synchronous borrowed batch visitation for
+  zero-copy application inspection, automatic
   pending-ACK coalescing on single DATAGRAM sends, max-payload calculation,
   queue overflow/drop counters, and
   oversized/disabled DATAGRAM rejection,
@@ -1609,6 +1610,8 @@ zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=visitor --frame=stream_gap --warmup=200 --iterations=5000
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=service --frame=datagram --warmup=500 --iterations=10000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_copy --frame=datagram --warmup=500 --iterations=10000
+taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- --mode=datagram_borrowed --frame=datagram --warmup=500 --iterations=10000
 zig build bench-quic-ack-ranges -Doptimize=ReleaseFast
 zig build bench-quic-stream-window -Doptimize=ReleaseFast
 zig build bench-quic-ticket-keyring -Doptimize=ReleaseFast

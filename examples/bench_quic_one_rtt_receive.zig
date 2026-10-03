@@ -6,7 +6,16 @@ const payload_size: usize = 1152;
 const default_iterations: usize = 1_000;
 const default_warmup_iterations: usize = 100;
 
-const Mode = enum { all, gro, gro_service, plain, service, visitor };
+const Mode = enum {
+    all,
+    gro,
+    gro_service,
+    plain,
+    service,
+    visitor,
+    datagram_copy,
+    datagram_borrowed,
+};
 const FrameShape = enum { padding, stream, stream_gap, datagram };
 
 const Options = struct {
@@ -384,8 +393,143 @@ fn measureMode(
             frame_shape,
             iteration_count,
         ),
+        .datagram_copy => measureDatagramDelivery(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            false,
+            frame_shape,
+            iteration_count,
+        ),
+        .datagram_borrowed => measureDatagramDelivery(
+            allocator,
+            io,
+            keys,
+            client_cid,
+            server_cid,
+            true,
+            frame_shape,
+            iteration_count,
+        ),
         .all => error.InvalidArgument,
     };
+}
+
+const DatagramVisitContext = struct {
+    count: usize = 0,
+    bytes: usize = 0,
+    checksum: usize = 0,
+};
+
+fn observeDatagram(
+    context: *DatagramVisitContext,
+    payload: []const u8,
+) !void {
+    if (payload.len == 0) return error.UnexpectedPacketCount;
+    context.count += 1;
+    context.bytes += payload.len;
+    context.checksum +%= payload[0] + payload[payload.len - 1];
+}
+
+fn measureDatagramDelivery(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    keys: netz.quic.protection.PacketProtectionKeys,
+    client_cid: [4]u8,
+    server_cid: [4]u8,
+    borrowed: bool,
+    frame_shape: FrameShape,
+    iteration_count: usize,
+) !u64 {
+    if (frame_shape != .datagram) return error.InvalidArgument;
+    var server_endpoint = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer server_endpoint.deinit();
+    var client_endpoint = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1400 },
+    );
+    defer client_endpoint.deinit();
+    var server = try netz.quic.one_rtt.Connection.init(&server_endpoint, .{
+        .peer = client_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &server_cid,
+        .peer_connection_id = &client_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 65_535,
+        .max_datagram_queue_items = batch_size,
+    });
+    defer server.deinit();
+
+    var payload_storage: [batch_size][payload_size]u8 = undefined;
+    var packet_storage: [batch_size * 1400]u8 = undefined;
+    var datagrams: [batch_size][]const u8 = undefined;
+    var copied_storage: [batch_size][payload_size]u8 = undefined;
+    var copied: [batch_size][]u8 = undefined;
+    var raw_storage: [batch_size * 1400]u8 = undefined;
+    var raw_datagrams: [batch_size]netz.quic.runtime.ReceivedBytesView =
+        undefined;
+    var total_ns: u64 = 0;
+    var first_packet_number: u64 = 0;
+    var stream_offset: u64 = 0;
+    var observed_bytes: usize = 0;
+    var checksum: usize = 0;
+    for (0..iteration_count) |_| {
+        _ = try sealPacketBatch(
+            &packet_storage,
+            &payload_storage,
+            &datagrams,
+            keys,
+            &server_cid,
+            first_packet_number,
+            .datagram,
+            &stream_offset,
+        );
+        try client_endpoint.sendManyBytes(server_endpoint.address(), &datagrams);
+
+        for (&copied_storage, &copied) |*storage, *output| {
+            output.* = storage;
+        }
+        var context: DatagramVisitContext = .{};
+        const started = nowNs(io);
+        if (borrowed) {
+            while (context.count < batch_size) {
+                _ = try server.visitDatagramBatchIntoServicingTimers(
+                    &raw_storage,
+                    &raw_datagrams,
+                    &context,
+                    observeDatagram,
+                );
+            }
+        } else {
+            var received_count: usize = 0;
+            try server.receiveDatagrams(&copied, &received_count);
+            if (received_count != batch_size) {
+                return error.UnexpectedPacketCount;
+            }
+            for (copied) |payload| try observeDatagram(&context, payload);
+        }
+        total_ns +|= nowNs(io) -| started;
+        if (context.count != batch_size) return error.UnexpectedPacketCount;
+        observed_bytes += context.bytes;
+        checksum +%= context.checksum;
+        first_packet_number += batch_size;
+    }
+    const expected_payload_bytes = payload_size - 3;
+    if (observed_bytes != iteration_count * batch_size * expected_payload_bytes) {
+        return error.UnexpectedPacketCount;
+    }
+    std.mem.doNotOptimizeAway(checksum);
+    return total_ns;
 }
 
 const VisitContext = struct {

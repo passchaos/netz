@@ -5,11 +5,17 @@ pub const Target = struct {
     outputs: [][]u8,
     delivered_count: usize = 0,
     buffer_too_small: bool = false,
+    visitor_consumes: bool = false,
 
     /// Consume frames into caller-owned buffers while a direct receive is
-    /// active. Frames beyond the requested batch remain available to the
+    /// active, or mark them consumed when a synchronous borrowed visitor owns
+    /// delivery. Frames beyond a copying target remain available to the
     /// bounded queue path.
     pub fn consume(self: *Target, payload: []const u8) bool {
+        if (self.visitor_consumes) {
+            self.delivered_count +|= 1;
+            return true;
+        }
         if (self.delivered_count == self.outputs.len or
             self.buffer_too_small) return false;
         const out = self.outputs[self.delivered_count];
@@ -120,4 +126,15 @@ test "caller-buffer target fills a batch and leaves later frames queued" {
     try std.testing.expectEqual(@as(usize, 2), target.delivered_count);
     try std.testing.expectEqualStrings("first", outputs[0]);
     try std.testing.expectEqualStrings("second", outputs[1]);
+}
+
+test "borrowed visitor target consumes without copying" {
+    var target: Target = .{
+        .outputs = &.{},
+        .visitor_consumes = true,
+    };
+    try std.testing.expect(target.consume("first"));
+    try std.testing.expect(target.consume("second"));
+    try std.testing.expectEqual(@as(usize, 2), target.delivered_count);
+    try std.testing.expect(!target.buffer_too_small);
 }

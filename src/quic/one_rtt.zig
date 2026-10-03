@@ -3812,6 +3812,54 @@ pub const Connection = struct {
         );
     }
 
+    /// Receive and apply one socket batch, invoking `visitor` for every QUIC
+    /// DATAGRAM payload without copying it into the connection queue or an
+    /// application buffer. Each payload is borrowed from transient packet
+    /// storage and is valid only for the duration of its callback. Recursive
+    /// receive attempts on the same connection return
+    /// `error.ConcurrencyUnavailable`.
+    ///
+    /// The caller supplies raw receive storage and descriptor slots so the
+    /// steady path performs no receive-buffer allocation. Existing queued
+    /// DATAGRAMs are intentionally unaffected; this is a packet-pump API for
+    /// consumers that own DATAGRAM delivery from their first receive.
+    pub fn visitDatagramBatchIntoServicingTimers(
+        self: *Connection,
+        storage: []u8,
+        datagrams: []quic.runtime.ReceivedBytesView,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || quic.runtime.ReceiveTimeoutError ||
+        callbackErrorSet(visitor))!usize {
+        return self.visitDatagramBatchIntoServicingTimersUntil(
+            storage,
+            datagrams,
+            null,
+            context,
+            visitor,
+        );
+    }
+
+    /// Absolute-deadline counterpart to
+    /// `visitDatagramBatchIntoServicingTimers`.
+    pub fn visitDatagramBatchIntoServicingTimersDeadline(
+        self: *Connection,
+        storage: []u8,
+        datagrams: []quic.runtime.ReceivedBytesView,
+        deadline: std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || quic.runtime.ReceiveTimeoutError ||
+        callbackErrorSet(visitor))!usize {
+        return self.visitDatagramBatchIntoServicingTimersUntil(
+            storage,
+            datagrams,
+            try deadline_policy.usableAwake(self.endpoint.io, deadline),
+            context,
+            visitor,
+        );
+    }
+
     fn receiveDatagramUntil(
         self: *Connection,
         out: []u8,
@@ -11138,6 +11186,9 @@ pub const Connection = struct {
         while (true) {
             const target = self.datagram_receive_target orelse
                 return error.Unexpected;
+            if (target.visitor_consumes) {
+                return error.ConcurrencyUnavailable;
+            }
             const remaining = target.outputs.len - target.delivered_count;
             if (remaining == 0) return 0;
             const batch_len = @min(
@@ -11541,6 +11592,94 @@ pub const Connection = struct {
                 },
                 else => |other| return @errorCast(other),
             };
+        }
+    }
+
+    fn visitDatagramBatchIntoServicingTimersUntil(
+        self: *Connection,
+        storage: []u8,
+        datagrams: []quic.runtime.ReceivedBytesView,
+        caller_deadline: ?std.Io.Clock.Timestamp,
+        context: anytype,
+        comptime visitor: anytype,
+    ) (Error || quic.runtime.ReceiveTimeoutError ||
+        callbackErrorSet(visitor))!usize {
+        if (!self.datagramReceiveEnabled()) {
+            return error.DatagramsNotEnabled;
+        }
+        if (self.datagram_receive_target != null) {
+            return error.ConcurrencyUnavailable;
+        }
+
+        const Context = @TypeOf(context);
+        const AdapterContext = struct {
+            ack: *BatchAckObservation,
+            context: Context,
+        };
+        const Adapter = struct {
+            fn visit(
+                adapter: *AdapterContext,
+                packet: ReceivedPacketView,
+            ) callbackErrorSet(visitor)!void {
+                try adapter.ack.observe(packet);
+                for (packet.frames) |frame| {
+                    if (frame == .datagram) {
+                        try visitor(adapter.context, frame.datagram.data);
+                    }
+                }
+            }
+        };
+        var ignored_outputs: [0][]u8 = .{};
+        var target: datagram_receive.Target = .{
+            .outputs = &ignored_outputs,
+            .visitor_consumes = true,
+        };
+        self.datagram_receive_target = &target;
+        defer self.datagram_receive_target = null;
+
+        while (true) {
+            const raw_count = try self.receiveDatagramsIntoServicingTimersUntil(
+                storage,
+                datagrams,
+                caller_deadline,
+            );
+            var ack: BatchAckObservation = .{
+                .largest_packet_number = self.received.largestReceived(),
+                .reordering_threshold = self.ack_reordering_threshold,
+            };
+            var adapter: AdapterContext = .{
+                .ack = &ack,
+                .context = context,
+            };
+            var completed: usize = 0;
+            const received_at_ns = self.monotonicNowNs();
+            for (datagrams[0..raw_count]) |datagram| {
+                var batch: quic.runtime.ReceivedBytesBatchView = .{
+                    .from = datagram.from,
+                    .received_on = datagram.received_on,
+                    .storage = datagram.bytes,
+                    .segment_size = datagram.bytes.len,
+                    .segment_count = 1,
+                    .ecn = datagram.ecn,
+                };
+                completed += try self.processReceivedDatagramBatchVisitingAt(
+                    &batch,
+                    received_at_ns,
+                    &adapter,
+                    Adapter.visit,
+                );
+            }
+            if (completed == 0) continue;
+            _ = try self.retransmitPacketThresholdLosses(max_batch_packets);
+            if (ack.ack_eliciting_count != 0) {
+                _ = self.sendAckForObservedPacketMetadata(
+                    ack.ack_eliciting_count,
+                    ack.reordered,
+                ) catch {};
+            }
+            if (target.delivered_count != 0) {
+                return target.delivered_count;
+            }
         }
     }
 

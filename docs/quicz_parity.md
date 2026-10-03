@@ -133,6 +133,12 @@ the recycle pool. A fail-first allocator test verifies the no-allocation
 overwrite and FIFO order. Nine CPU-0 fixed-binary service-path pairs reduced
 the 1,149-byte DATAGRAM median from 2,811 to 2,774 ns/packet (1.32%, 9/9 wins).
 
+A synchronous borrowed DATAGRAM batch visitor now applies and cumulatively
+acknowledges caller-buffer packets while delivering payload views without a
+queue or application-buffer copy. It retains callback-bounded lifetimes and
+rejects recursive receives. Nine alternating copy/borrowed modes in one frozen
+binary moved the 1,149-byte median from 2,694 to 2,626 ns/packet (2.52%, 9/9).
+
 Vail now provides a self-contained prepared AES-GCM context that caches the
 expanded AES key and GHASH table, replacing its optional external backend.
 Nine ARM64 fixed-binary pairs moved the same receive shape from 2,771 to 2,754
