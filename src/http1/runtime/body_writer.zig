@@ -166,7 +166,7 @@ pub fn Writer(comptime RuntimeError: type) type {
             switch (self.framing) {
                 .fixed => try self.writeParts(&.{data}),
                 .chunked => {
-                    var chunk_head_buffer: [32]u8 = undefined;
+                    var chunk_head_buffer: [runtime_write.chunk_header_buffer_len]u8 = undefined;
                     const chunk_head = std.fmt.bufPrint(
                         &chunk_head_buffer,
                         "{x}\r\n",
@@ -205,36 +205,22 @@ pub fn Writer(comptime RuntimeError: type) type {
             switch (self.framing) {
                 .fixed => try self.writeParts(chunks),
                 .chunked => {
-                    const descriptor_bytes = std.math.mul(
-                        usize,
-                        non_empty,
-                        32,
-                    ) catch return error.ContentLengthOverflow;
-                    const part_count = std.math.mul(
-                        usize,
-                        non_empty,
-                        3,
-                    ) catch return error.ContentLengthOverflow;
                     const streaming = try self.scratch.streamingChunkScratch(
                         self.allocator,
                     );
-                    try streaming.descriptors.resize(
+                    const buffers = try streaming.prepare(
                         self.allocator,
-                        descriptor_bytes,
+                        non_empty,
                     );
-                    try streaming.parts.resize(
-                        self.allocator,
-                        part_count,
-                    );
-                    const descriptors = streaming.descriptors.items;
-                    const parts = streaming.parts.items;
+                    const descriptors = buffers.descriptors;
+                    const parts = buffers.parts;
 
                     var part_index: usize = 0;
                     var descriptor_offset: usize = 0;
                     for (chunks) |chunk| {
                         if (chunk.len == 0) continue;
                         const destination =
-                            descriptors[descriptor_offset..][0..32];
+                            descriptors[descriptor_offset..][0..runtime_write.chunk_header_buffer_len];
                         const rendered = std.fmt.bufPrint(
                             destination,
                             "{x}\r\n",
@@ -244,7 +230,7 @@ pub fn Writer(comptime RuntimeError: type) type {
                         parts[part_index + 1] = chunk;
                         parts[part_index + 2] = "\r\n";
                         part_index += 3;
-                        descriptor_offset += 32;
+                        descriptor_offset += runtime_write.chunk_header_buffer_len;
                     }
                     try self.writeParts(parts);
                 },

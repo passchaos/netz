@@ -150,21 +150,85 @@ const TrailerScratch = struct {
     }
 };
 
+pub const chunk_header_buffer_len = std.fmt.count(
+    "{x}\r\n",
+    .{std.math.maxInt(usize)},
+);
+
+pub const StreamingChunkBuffers = struct {
+    descriptors: []u8,
+    parts: [][]const u8,
+};
+
 pub const StreamingChunkScratch = struct {
-    descriptors: std.ArrayList(u8) = .empty,
-    parts: std.ArrayList([]const u8) = .empty,
+    /// Chunk-size text and slice descriptors share one pointer-aligned backing
+    /// allocation. The two views are rebuilt after every resize.
+    storage: std.ArrayList(usize) = .empty,
 
     fn reset(self: *StreamingChunkScratch) void {
-        self.descriptors.clearRetainingCapacity();
-        self.parts.clearRetainingCapacity();
+        self.storage.clearRetainingCapacity();
+    }
+
+    pub fn prepare(
+        self: *StreamingChunkScratch,
+        allocator: std.mem.Allocator,
+        chunk_count: usize,
+    ) Error!StreamingChunkBuffers {
+        const descriptor_bytes = std.math.mul(
+            usize,
+            chunk_count,
+            chunk_header_buffer_len,
+        ) catch return error.ContentLengthOverflow;
+        _ = std.math.add(
+            usize,
+            descriptor_bytes,
+            @alignOf([]const u8) - 1,
+        ) catch return error.ContentLengthOverflow;
+        const parts_offset = std.mem.alignForward(
+            usize,
+            descriptor_bytes,
+            @alignOf([]const u8),
+        );
+        const part_count = std.math.mul(
+            usize,
+            chunk_count,
+            3,
+        ) catch return error.ContentLengthOverflow;
+        const parts_bytes = std.math.mul(
+            usize,
+            part_count,
+            @sizeOf([]const u8),
+        ) catch return error.ContentLengthOverflow;
+        const total_bytes = std.math.add(
+            usize,
+            parts_offset,
+            parts_bytes,
+        ) catch return error.ContentLengthOverflow;
+        const word_count = std.math.divCeil(
+            usize,
+            total_bytes,
+            @sizeOf(usize),
+        ) catch return error.ContentLengthOverflow;
+        try self.storage.resize(allocator, word_count);
+
+        const bytes = std.mem.sliceAsBytes(self.storage.items);
+        const parts_storage: []align(@alignOf([]const u8)) u8 = @alignCast(
+            bytes[parts_offset..][0..parts_bytes],
+        );
+        return .{
+            .descriptors = bytes[0..descriptor_bytes],
+            .parts = std.mem.bytesAsSlice(
+                []const u8,
+                parts_storage,
+            ),
+        };
     }
 
     fn deinit(
         self: *StreamingChunkScratch,
         allocator: std.mem.Allocator,
     ) void {
-        self.descriptors.deinit(allocator);
-        self.parts.deinit(allocator);
+        self.storage.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -1905,9 +1969,10 @@ test "HTTP/1 write scratch allocates multi-chunk state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(
-            @as(usize, 48),
+            @as(usize, 24),
             @sizeOf(StreamingChunkScratch),
         );
+        try std.testing.expectEqual(@as(usize, 18), chunk_header_buffer_len);
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Scratch, "streaming_chunks")),
@@ -1936,6 +2001,44 @@ test "HTTP/1 write scratch allocates multi-chunk state lazily" {
         @intFromPtr(try scratch.streamingChunkScratch(no_alloc.allocator())),
     );
     try std.testing.expect(!no_alloc.has_induced_failure);
+
+    var failing_storage = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    try std.testing.expectError(
+        error.OutOfMemory,
+        chunks.prepare(failing_storage.allocator(), 2),
+    );
+    try std.testing.expectEqual(@as(usize, 0), chunks.storage.items.len);
+
+    const buffers = try chunks.prepare(allocator, 2);
+    try std.testing.expectEqual(
+        @as(usize, 2 * chunk_header_buffer_len),
+        buffers.descriptors.len,
+    );
+    try std.testing.expectEqual(@as(usize, 6), buffers.parts.len);
+
+    var warmed = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    _ = try chunks.prepare(warmed.allocator(), 2);
+    try std.testing.expect(!warmed.has_induced_failure);
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var counted_scratch = Scratch{};
+    defer counted_scratch.deinit(tracked);
+    const counted = try counted_scratch.streamingChunkScratch(tracked);
+    _ = try counted.prepare(tracked, 2);
+    try std.testing.expectEqual(@as(usize, 2), tracking.allocations);
+
+    var max_header: [chunk_header_buffer_len]u8 = undefined;
+    const rendered = try std.fmt.bufPrint(
+        &max_header,
+        "{x}\r\n",
+        .{std.math.maxInt(usize)},
+    );
+    try std.testing.expectEqual(chunk_header_buffer_len, rendered.len);
 }
 
 test "HTTP/1 write scratch allocates trailer state only when requested" {
@@ -2730,7 +2833,7 @@ fn encodeChunked(
         // A zero-length chunk is the terminator. Empty payload slices therefore
         // emit no DATA, leaving one terminator after all chunks and trailers.
         if (chunk.len == 0) continue;
-        var tmp: [32]u8 = undefined;
+        var tmp: [chunk_header_buffer_len]u8 = undefined;
         const rendered = std.fmt.bufPrint(
             &tmp,
             "{x}\r\n",

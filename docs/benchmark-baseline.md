@@ -182,18 +182,22 @@ one state allocated on first batch use instead of three empty `ArrayList`s in
 every connection. On 64-bit targets this reduces `runtime_write.Scratch` from
 320 to 256 bytes. Trailer-name descriptors, their backing names, and generated
 `Trailer` field values are independently allocated only when a message declares
-or supplies trailers, reducing the scratch again to 192 bytes. Finally, the
-descriptor and iovec lists used only by multi-chunk streaming writes share a
-48-byte state allocated on first use. The independent flatten buffer now lives
-beside response-batch storage: default small pipelines already own that state,
-while an explicit single-message `flatten` policy creates it on first use.
+or supplies trailers, reducing the scratch again to 192 bytes. The descriptor
+and iovec views used only by multi-chunk streaming writes now share one
+pointer-aligned backing allocation in a 24-byte state, rather than two backing
+allocations in a 48-byte state. Their per-chunk hexadecimal staging is the
+platform's exact maximum width (18 bytes on 64-bit targets) rather than 32
+bytes, while warmed writes retain capacity. The independent flatten buffer now
+lives beside response-batch storage: default small pipelines already own that
+state, while an explicit single-message `flatten` policy creates it on first
+use.
 Content-Length rendering now uses a call-local array sized to the platform's
 exact maximum decimal `usize` width instead of retaining a fixed 32-byte array
 on every connection. Request Host/TE normalization and final default-header
 assembly also mutate one retained descriptor list rather than allocating and
-copying through two. A
-representative cold POST therefore falls from three scratch allocations and
-710 requested bytes first to two allocations and 486 bytes. Final header
+copying through two. A representative cold POST therefore falls from three
+scratch allocations and 710 requested bytes first to two allocations and 486
+bytes. Final header
 descriptors now use 16 uninitialized stack slots with a one-allocation exact
 fallback for larger sets, leaving only the encoded-byte allocation on that
 common cold request. Switching the warmed scratch to the equivalent streaming

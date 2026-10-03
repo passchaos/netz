@@ -205,14 +205,17 @@ benchmark response:
   empty containers from ordinary client and server connections while retaining
   their warmed capacity. Trailer-name descriptors, backing names, and generated
   `Trailer` values are likewise allocated only for messages that declare or
-  supply trailers. The two descriptor/iovec lists used by multi-chunk streaming
-  writes are also allocated together on first use and retain their warmed
-  capacity. Contiguous flattening reuses the response-batch allocation because
-  those buffers must coexist, removing its standalone empty list from ordinary
-  connections. Request Host/TE normalization, framing validation, generated
-  fields, and final encoding likewise share one reusable header-descriptor
-  list instead of copying through a second retained list. A representative
-  cold request first dropped from three scratch allocations to two. Final
+  supply trailers. Multi-chunk streaming descriptors and iovecs share one
+  pointer-aligned backing allocation in a 24-byte lazy state, reducing first
+  use from three allocations to two while retaining warmed capacity. Each
+  hexadecimal chunk header reserves the exact platform maximum (18 bytes on
+  64-bit targets) instead of 32. Contiguous flattening reuses the response-batch
+  allocation because those buffers must coexist, removing its standalone empty
+  list from ordinary connections. Request Host/TE normalization, framing
+  validation, generated fields, and final encoding likewise share one reusable
+  header-descriptor list instead of copying through a second retained list. A
+  representative cold request first dropped from three scratch allocations to
+  two. Final
   header descriptors now use 16 uninitialized stack slots with an exact
   allocation fallback for larger sets, leaving only the encoded-byte
   allocation on the common cold path; returned heads own their encoded bytes
