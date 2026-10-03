@@ -3643,6 +3643,26 @@ proxy evidence for the entire suite.
    from 19,090 to 19,362 publishes/s, the median paired ratio was 1.017, and the
    candidate won all seven pairs. This supports the targeted large-packet path,
    not a general broker throughput claim.
+   Released inbound QoS 2 transactions now extend the same shared ownership to
+   durable fanout without first allocating and copying another base message.
+   When persistent Sessions and multiple subscriptions make that route
+   possible, pending storage reserves an aligned Publication header; PUBREL
+   converts it in place, and the last concurrent destination release returns
+   it to the bounded pending cache through a synchronized allocator adapter.
+   The Session Store tracks persistent Session presence in O(1), while route
+   selection remains correctly deferred until PUBREL. Single-subscription and
+   pure transient brokers retain their prior storage path; this excludes a
+   measured transient large-payload regression from the adopted design.
+   Seven-sample fixed-binary durable allocator captures reduced fanout-32 from
+   833 to 745 allocations (10.6%), balanced-32x32 from 1,242 to 1,181 (4.9%),
+   and the 4-KiB shape from 2,431 to 2,400 allocations while reducing its
+   cumulative requested bytes 1.4% and peak live bytes 3.4%. A three-sample
+   transient control kept allocation counts and cumulative bytes unchanged in
+   all five shapes. A final seven-pair 4-KiB durable A/B completed 40,000
+   deliveries per arm with checksum 10,780,000; the candidate won every pair
+   and moved median throughput from 11,133 to 11,241 publishes/s (1.0%). This
+   is a targeted ownership/copy result rather than closure of the broader
+   durable QoS 2 scheduling gap.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

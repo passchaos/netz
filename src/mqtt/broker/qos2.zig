@@ -9,8 +9,10 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
 const persistence = @import("../persistence/codec.zig");
+const publication_mod = @import("publication.zig");
 const router = @import("../router.zig");
 const StorageCache = @import("../storage_cache.zig").Cache;
+const Publication = publication_mod.Publication;
 
 pub const Error = mqtt.Error || error{
     PendingLimitExceeded,
@@ -38,12 +40,27 @@ pub const Pending = struct {
     stored_at_ns: i96,
     expiry_interval: ?u32,
 
+    const storage_transferred_flag: usize = @as(usize, 1) <<
+        (@bitSizeOf(usize) - 1);
+    const publication_prefix_flag: usize = @as(usize, 1) <<
+        (@bitSizeOf(usize) - 2);
+    const allocation_len_mask: usize = ~(storage_transferred_flag |
+        publication_prefix_flag);
+
     pub fn create(
         allocator: std.mem.Allocator,
         publish: mqtt.Publish,
         now: std.Io.Timestamp,
     ) Error!Pending {
-        return createWithSource(allocator, publish, null, null, null, now);
+        return createWithSourceAndPrefix(
+            allocator,
+            publish,
+            null,
+            null,
+            null,
+            now,
+            false,
+        );
     }
 
     pub fn createWithSource(
@@ -54,6 +71,26 @@ pub const Pending = struct {
         source_listener_id: ?u64,
         now: std.Io.Timestamp,
     ) Error!Pending {
+        return createWithSourceAndPrefix(
+            allocator,
+            publish,
+            source_client_id,
+            source_username,
+            source_listener_id,
+            now,
+            false,
+        );
+    }
+
+    fn createWithSourceAndPrefix(
+        allocator: std.mem.Allocator,
+        publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+        reserve_publication_prefix: bool,
+    ) Error!Pending {
         return createWithSourceAndCache(
             allocator,
             null,
@@ -62,6 +99,7 @@ pub const Pending = struct {
             source_username,
             source_listener_id,
             now,
+            reserve_publication_prefix,
         );
     }
 
@@ -73,6 +111,7 @@ pub const Pending = struct {
         source_username: ?[]const u8,
         source_listener_id: ?u64,
         now: std.Io.Timestamp,
+        reserve_publication_prefix: bool,
     ) Error!Pending {
         if (source_client_id == null and
             (source_username != null or source_listener_id != null))
@@ -100,7 +139,7 @@ pub const Pending = struct {
             value.len
         else
             0;
-        const allocation_len = std.math.add(
+        const message_and_identity_len = std.math.add(
             usize,
             std.math.add(
                 usize,
@@ -109,31 +148,46 @@ pub const Pending = struct {
             ) catch return error.OutOfMemory,
             source_username_len,
         ) catch return error.OutOfMemory;
-        const allocation = if (cache) |value|
-            try value.acquire(allocation_len)
+        const publication_prefix_len: usize = if (reserve_publication_prefix)
+            @sizeOf(Publication)
         else
-            try allocator.alloc(u8, allocation_len);
+            0;
+        const allocation_len = std.math.add(
+            usize,
+            publication_prefix_len,
+            message_and_identity_len,
+        ) catch return error.OutOfMemory;
+        const allocation: publication_mod.Allocation = if (cache) |value|
+            @alignCast(try value.acquireThreadSafe(allocation_len))
+        else
+            try allocator.alignedAlloc(
+                u8,
+                .fromByteUnits(publication_mod.allocation_alignment),
+                allocation_len,
+            );
         errdefer if (cache) |value|
-            value.release(allocation)
+            value.releaseThreadSafe(allocation)
         else
             allocator.free(allocation);
-        const bytes = allocation[0..bytes_len];
+        if (allocation.len > allocation_len_mask) return error.OutOfMemory;
+        const storage = allocation[publication_prefix_len..];
+        const bytes = storage[0..bytes_len];
         @memcpy(bytes[0..publish.topic.len], publish.topic);
         @memcpy(bytes[publish.topic.len..], publish.payload);
         var identity_offset = bytes_len;
         const source_client_id_owned = if (source_client_id) |value| blk: {
-            const owned = allocation[identity_offset..][0..value.len];
+            const owned = storage[identity_offset..][0..value.len];
             @memcpy(owned, value);
             identity_offset += value.len;
             break :blk owned;
         } else null;
         const source_username_owned = if (source_username) |value| blk: {
-            const owned = allocation[identity_offset..][0..value.len];
+            const owned = storage[identity_offset..][0..value.len];
             @memcpy(owned, value);
             identity_offset += value.len;
             break :blk owned;
         } else null;
-        std.debug.assert(identity_offset <= allocation.len);
+        std.debug.assert(identity_offset <= storage.len);
         const property_result = owned_properties.clone(
             allocator,
             publish.properties,
@@ -145,7 +199,11 @@ pub const Pending = struct {
         return .{
             .allocator = allocator,
             .bytes = bytes,
-            .allocation_len = allocation.len,
+            .allocation_len = allocation.len |
+                (if (reserve_publication_prefix)
+                    publication_prefix_flag
+                else
+                    0),
             .topic_len = publish.topic.len,
             .retain = publish.retain,
             .source_client_id = source_client_id_owned,
@@ -168,12 +226,41 @@ pub const Pending = struct {
         cache: ?*StorageCache,
     ) void {
         owned_properties.deinit(self.allocator, self.properties);
-        const allocation = self.bytes.ptr[0..self.allocation_len];
-        if (cache) |value|
-            value.release(allocation)
-        else
-            self.allocator.free(allocation);
+        if (!self.storageTransferred()) {
+            const allocation = self.storageAllocation();
+            if (cache) |value|
+                value.releaseThreadSafe(allocation)
+            else
+                self.allocator.free(allocation);
+        }
         self.* = undefined;
+    }
+
+    fn storageAllocation(self: Pending) publication_mod.Allocation {
+        const address = @intFromPtr(self.bytes.ptr) -
+            self.publicationPrefixLen();
+        const pointer: [*]u8 = @ptrFromInt(address);
+        return @alignCast(pointer[0..self.storageLen()]);
+    }
+
+    pub fn canAdoptPublication(self: Pending) bool {
+        return !self.storageTransferred() and
+            self.publicationPrefixLen() == @sizeOf(Publication);
+    }
+
+    fn storageLen(self: Pending) usize {
+        return self.allocation_len & allocation_len_mask;
+    }
+
+    fn publicationPrefixLen(self: Pending) usize {
+        return if ((self.allocation_len & publication_prefix_flag) != 0)
+            @sizeOf(Publication)
+        else
+            0;
+    }
+
+    fn storageTransferred(self: Pending) bool {
+        return (self.allocation_len & storage_transferred_flag) != 0;
     }
 
     pub fn asPublish(
@@ -231,7 +318,11 @@ pub const Store = struct {
         var self = Store{
             .allocator = allocator,
             .maximum = maximum,
-            .storage_cache = .init(allocator, maximum),
+            .storage_cache = .initAligned(
+                allocator,
+                maximum,
+                .fromByteUnits(publication_mod.allocation_alignment),
+            ),
         };
         errdefer self.deinit();
         try self.entries.ensureTotalCapacity(
@@ -285,6 +376,48 @@ pub const Store = struct {
         source_listener_id: ?u64,
         now: std.Io.Timestamp,
     ) !bool {
+        return self.recordWithSourceOptions(
+            publisher_id,
+            publish,
+            source_client_id,
+            source_username,
+            source_listener_id,
+            now,
+            false,
+        );
+    }
+
+    pub fn recordWithSourceAndPublicationPrefix(
+        self: *Store,
+        publisher_id: router.SubscriberId,
+        publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+        reserve_publication_prefix: bool,
+    ) !bool {
+        return self.recordWithSourceOptions(
+            publisher_id,
+            publish,
+            source_client_id,
+            source_username,
+            source_listener_id,
+            now,
+            reserve_publication_prefix,
+        );
+    }
+
+    fn recordWithSourceOptions(
+        self: *Store,
+        publisher_id: router.SubscriberId,
+        publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+        reserve_publication_prefix: bool,
+    ) !bool {
         const packet_id = publish.packet_id orelse
             return error.InvalidPacketIdentifier;
         const key = Key{
@@ -303,6 +436,7 @@ pub const Store = struct {
             source_username,
             source_listener_id,
             now,
+            reserve_publication_prefix,
         );
         self.entries.putAssumeCapacityNoClobber(key, pending);
         return true;
@@ -322,6 +456,35 @@ pub const Store = struct {
 
     pub fn recycle(self: *Store, pending: *Pending) void {
         pending.deinitWithCache(&self.storage_cache);
+    }
+
+    /// Transfer a removed transaction's aligned cached backing into a shared
+    /// broker Publication. The Publication's allocator returns that block to
+    /// this Store's bounded cache after its final destination releases it.
+    pub fn adoptPublication(
+        self: *Store,
+        pending: *Pending,
+        publish: mqtt.Publish,
+        reference_count: usize,
+        now: std.Io.Timestamp,
+    ) publication_mod.Error!*Publication {
+        std.debug.assert(pending.canAdoptPublication());
+        const allocation = pending.storageAllocation();
+        const packet_bytes = allocation[@sizeOf(Publication)..];
+        const publication = try Publication.createFromPrefixedPublish(
+            self.storage_cache.asAllocator(),
+            publish,
+            reference_count,
+            now,
+            allocation,
+            packet_bytes,
+        );
+        // `publish.properties` still borrows nested values from the Pending
+        // record while route-specific Session properties are cloned. Keep
+        // those values alive until the caller recycles Pending after routing;
+        // only the message backing moves to Publication here.
+        pending.allocation_len |= Pending.storage_transferred_flag;
+        return publication;
     }
 
     pub fn removePublisher(
@@ -751,6 +914,133 @@ test "QoS 2 store reuses bounded pending storage" {
         @intFromPtr(second.bytes.ptr),
     );
     store.recycle(&second);
+}
+
+test "QoS 2 store transfers pending backing into a shared publication" {
+    var store = try Store.init(std.testing.allocator, 8);
+    defer store.deinit();
+    var source_properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = "source",
+        .value = "pending",
+    } }};
+    try std.testing.expect(try store.recordWithSourceAndPublicationPrefix(
+        10,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "shared/qos2",
+            .packet_id = 7,
+            .properties = &source_properties,
+            .payload = "payload",
+        },
+        "publisher",
+        "user",
+        1883,
+        .zero,
+        true,
+    ));
+    var pending = store.take(10, 7).?;
+    const message_pointer = pending.bytes.ptr;
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(std.testing.allocator);
+    const publish = (try pending.asPublish(7, .zero, &properties)).?;
+
+    const publication = try store.adoptPublication(
+        &pending,
+        publish,
+        2,
+        .zero,
+    );
+    try std.testing.expect(pending.storageTransferred());
+    try std.testing.expectEqual(message_pointer, publication.topic().ptr);
+    try std.testing.expectEqualStrings("shared/qos2", publication.topic());
+    try std.testing.expectEqualStrings("payload", publication.payload());
+    store.recycle(&pending);
+    try std.testing.expectEqual(@as(usize, 1), publication.properties.len);
+    try std.testing.expectEqualStrings(
+        "source",
+        publication.properties[0].utf8_pair.key,
+    );
+    try std.testing.expectEqualStrings(
+        "pending",
+        publication.properties[0].utf8_pair.value,
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), store.storage_cache.cachedBlockCount());
+    publication.release();
+    publication.release();
+    try std.testing.expect(store.storage_cache.cachedBlockCount() != 0);
+
+    try std.testing.expect(try store.recordWithSourceAndPublicationPrefix(
+        10,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "shared/qos2",
+            .packet_id = 8,
+            .properties = &source_properties,
+            .payload = "payload",
+        },
+        "publisher",
+        "user",
+        1883,
+        .zero,
+        true,
+    ));
+    var reused = store.take(10, 8).?;
+    try std.testing.expectEqual(message_pointer, reused.bytes.ptr);
+    store.recycle(&reused);
+}
+
+test "QoS 2 publication transfer keeps pending ownership on failure" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    var store = try Store.init(failing.allocator(), 1);
+    defer store.deinit();
+    var source_properties = [_]mqtt.Property{.{ .utf8_pair = .{
+        .id = .user_property,
+        .key = "key",
+        .value = "value",
+    } }};
+    try std.testing.expect(try store.recordWithSourceAndPublicationPrefix(
+        10,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "shared/failure",
+            .packet_id = 7,
+            .properties = &source_properties,
+            .payload = "payload",
+        },
+        "publisher",
+        null,
+        null,
+        .zero,
+        true,
+    ));
+    var pending = store.take(10, 7).?;
+    var pending_owned = true;
+    defer if (pending_owned) store.recycle(&pending);
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(failing.allocator());
+    const publish = (try pending.asPublish(7, .zero, &properties)).?;
+    failing.fail_index = failing.alloc_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.adoptPublication(&pending, publish, 2, .zero),
+    );
+    try std.testing.expect(pending.canAdoptPublication());
+    try std.testing.expectEqualStrings("shared/failure", publish.topic);
+    try std.testing.expectEqualStrings("payload", publish.payload);
+    store.recycle(&pending);
+    pending_owned = false;
 }
 
 test "QoS 2 store owns bytes and preserves the first duplicate PUBLISH" {

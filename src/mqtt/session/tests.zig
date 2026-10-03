@@ -398,6 +398,7 @@ test "session snapshot preserves QoS0 selected for a live write" {
     var cursor = persistence.Cursor.init(encoded.items);
     try restored.restoreSnapshot(&cursor, .zero, 0);
     try cursor.finish();
+    try std.testing.expectEqual(@as(usize, 1), restored.persistentCount());
 
     const resumed = try restored.open(
         "qos0-snapshot",

@@ -401,6 +401,7 @@ pub const Store = struct {
     client_index: std.StringHashMapUnmanaged(usize) = .empty,
     route_index: std.AutoHashMapUnmanaged(u64, usize) = .empty,
     session_count: usize = 0,
+    persistent_session_count: usize = 0,
     total_bytes: usize = 0,
     publish_wire_cache: StorageCache,
     next_generation: u64 = 1,
@@ -441,6 +442,10 @@ pub const Store = struct {
 
     pub fn count(self: Store) usize {
         return self.session_count;
+    }
+
+    pub fn persistentCount(self: Store) usize {
+        return self.persistent_session_count;
     }
 
     pub fn totalBytes(self: Store) usize {
@@ -814,6 +819,7 @@ pub const Store = struct {
         self.client_index.putAssumeCapacityNoClobber(client_owned, index);
         self.route_index.putAssumeCapacityNoClobber(route_id, index);
         self.session_count += 1;
+        self.persistent_session_count += 1;
         self.total_bytes += client_owned.len;
         self.next_route_id = @max(self.next_route_id, route_id +| 1);
         if (self.next_route_id == 0 or
@@ -1044,6 +1050,9 @@ pub const Store = struct {
                 // capability to mutate the shared Session after takeover.
                 session.generation = generation;
                 session.connected = true;
+                if (expiry_interval == 0) {
+                    self.persistent_session_count -= 1;
+                }
                 session.expiry_interval = expiry_interval;
                 session.expires_at_ns = null;
                 for (session.inflight.items) |*maybe_inflight| {
@@ -1110,6 +1119,7 @@ pub const Store = struct {
         );
         self.route_index.putAssumeCapacityNoClobber(route_id, index);
         self.session_count += 1;
+        self.persistent_session_count += @intFromBool(expiry_interval != 0);
         self.total_bytes += client_owned.len;
         return .{
             .handle = .{ .index = index, .generation = generation },
@@ -1160,6 +1170,11 @@ pub const Store = struct {
         try self.validateDisconnect(handle, expiry_override);
         const session = try self.getSession(handle);
         if (expiry_override) |new_expiry| {
+            if (session.expiry_interval != 0 and new_expiry == 0) {
+                self.persistent_session_count -= 1;
+            } else if (session.expiry_interval == 0 and new_expiry != 0) {
+                self.persistent_session_count += 1;
+            }
             session.expiry_interval = new_expiry;
         }
         if (session.expiry_interval == 0) {
@@ -2636,6 +2651,9 @@ pub const Store = struct {
         _ = self.route_index.fetchRemove(session.route_id).?;
         self.sessions.items[index] = null;
         self.session_count -= 1;
+        self.persistent_session_count -= @intFromBool(
+            session.expiry_interval != 0,
+        );
         self.total_bytes -= session.allocation_bytes;
         session.deinit(
             self.allocator,
@@ -3215,6 +3233,32 @@ fn countNullSlots(comptime T: type, items: []const ?T) usize {
     var count: usize = 0;
     for (items) |item| count += @intFromBool(item == null);
     return count;
+}
+
+test "Session store tracks persistent sessions across lifetime changes" {
+    var store = Store.init(std.testing.allocator, .{ .max_sessions = 4 });
+    defer store.deinit();
+    try std.testing.expectEqual(@as(usize, 0), store.persistentCount());
+
+    const transient = try store.open("transient", true, 0, .zero);
+    try std.testing.expectEqual(@as(usize, 0), store.persistentCount());
+
+    _ = try store.open("durable", false, 60, .zero);
+    try std.testing.expectEqual(@as(usize, 1), store.persistentCount());
+    const resumed = try store.open("durable", false, 0, .zero);
+    try std.testing.expect(resumed.session_present);
+    try std.testing.expectEqual(@as(usize, 0), store.persistentCount());
+    try store.disconnect(resumed.handle, null, .zero);
+
+    _ = try store.open("durable", true, 60, .zero);
+    try std.testing.expectEqual(@as(usize, 1), store.persistentCount());
+    _ = try store.open("durable", true, 60, .zero);
+    try std.testing.expectEqual(@as(usize, 1), store.persistentCount());
+    try std.testing.expect(store.discard("durable"));
+    try std.testing.expectEqual(@as(usize, 0), store.persistentCount());
+
+    try store.disconnect(transient.handle, null, .zero);
+    try std.testing.expectEqual(@as(usize, 0), store.count());
 }
 
 test "Session publish expiry deadline skips and repairs scans" {

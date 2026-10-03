@@ -14,6 +14,8 @@ pub const Cache = struct {
 
     allocator: std.mem.Allocator,
     max_blocks: usize,
+    alignment: std.mem.Alignment = .@"1",
+    mutex: std.atomic.Mutex = .unlocked,
     heads: [class_count]?[*]u8 = .{null} ** class_count,
     block_count: usize = 0,
     byte_count: usize = 0,
@@ -23,6 +25,41 @@ pub const Cache = struct {
         max_blocks: usize,
     ) Cache {
         return .{ .allocator = allocator, .max_blocks = max_blocks };
+    }
+
+    pub fn initAligned(
+        allocator: std.mem.Allocator,
+        max_blocks: usize,
+        alignment: std.mem.Alignment,
+    ) Cache {
+        return .{
+            .allocator = allocator,
+            .max_blocks = max_blocks,
+            .alignment = alignment,
+        };
+    }
+
+    /// Expose the cache as a thread-safe allocator whose returned slice keeps
+    /// the caller-requested length while the cache retains its rounded
+    /// capacity. Direct `acquire`/`release` remain lock-free for owners that
+    /// already serialize access.
+    pub fn asAllocator(self: *Cache) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &allocator_vtable };
+    }
+
+    pub fn acquireThreadSafe(
+        self: *Cache,
+        required_len: usize,
+    ) std.mem.Allocator.Error![]u8 {
+        self.lock();
+        defer self.mutex.unlock();
+        return self.acquire(required_len);
+    }
+
+    pub fn releaseThreadSafe(self: *Cache, storage: []u8) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.release(storage);
     }
 
     pub fn deinit(self: *Cache) void {
@@ -40,7 +77,11 @@ pub const Cache = struct {
                     null
                 else
                     @ptrFromInt(next_address);
-                self.allocator.free(storage);
+                self.allocator.rawFree(
+                    storage,
+                    self.alignment,
+                    @returnAddress(),
+                );
             }
         }
         self.* = undefined;
@@ -51,10 +92,7 @@ pub const Cache = struct {
         required_len: usize,
     ) std.mem.Allocator.Error![]u8 {
         if (required_len == 0) return self.allocator.alloc(u8, 0);
-        const storage_len = if (required_len <= max_cacheable_storage)
-            std.math.ceilPowerOfTwo(usize, required_len) catch unreachable
-        else
-            required_len;
+        const storage_len = storageLength(required_len);
         if (storage_len <= max_cacheable_storage) {
             const size_class: usize = @ctz(storage_len);
             if (self.heads[size_class]) |pointer| {
@@ -73,7 +111,12 @@ pub const Cache = struct {
                 return storage;
             }
         }
-        return self.allocator.alloc(u8, storage_len);
+        const pointer = self.allocator.rawAlloc(
+            storage_len,
+            self.alignment,
+            @returnAddress(),
+        ) orelse return error.OutOfMemory;
+        return pointer[0..storage_len];
     }
 
     pub fn release(self: *Cache, storage: []u8) void {
@@ -100,7 +143,11 @@ pub const Cache = struct {
             self.byte_count += storage.len;
             return;
         }
-        self.allocator.free(storage);
+        self.allocator.rawFree(
+            storage,
+            self.alignment,
+            @returnAddress(),
+        );
     }
 
     pub fn cachedBlockCount(self: Cache) usize {
@@ -109,6 +156,78 @@ pub const Cache = struct {
 
     pub fn cachedByteCount(self: Cache) usize {
         return self.byte_count;
+    }
+
+    const allocator_vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocatorAlloc,
+        .resize = allocatorResize,
+        .remap = allocatorRemap,
+        .free = allocatorFree,
+    };
+
+    fn allocatorAlloc(
+        context: *anyopaque,
+        len: usize,
+        alignment: std.mem.Alignment,
+        _: usize,
+    ) ?[*]u8 {
+        const self: *Cache = @ptrCast(@alignCast(context));
+        if (alignment.compare(.gt, self.alignment)) return null;
+        const storage = self.acquireThreadSafe(len) catch return null;
+        return storage.ptr;
+    }
+
+    fn allocatorResize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        _: usize,
+    ) bool {
+        const self: *Cache = @ptrCast(@alignCast(context));
+        if (alignment.compare(.gt, self.alignment)) return false;
+        return storageLength(memory.len) == storageLength(new_len);
+    }
+
+    fn allocatorRemap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        return_address: usize,
+    ) ?[*]u8 {
+        if (!allocatorResize(
+            context,
+            memory,
+            alignment,
+            new_len,
+            return_address,
+        )) return null;
+        return memory.ptr;
+    }
+
+    fn allocatorFree(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        _: usize,
+    ) void {
+        const self: *Cache = @ptrCast(@alignCast(context));
+        std.debug.assert(!alignment.compare(.gt, self.alignment));
+        const storage = memory.ptr[0..storageLength(memory.len)];
+        self.releaseThreadSafe(storage);
+    }
+
+    fn storageLength(required_len: usize) usize {
+        if (required_len == 0) return 0;
+        return if (required_len <= max_cacheable_storage)
+            std.math.ceilPowerOfTwo(usize, required_len) catch unreachable
+        else
+            required_len;
+    }
+
+    fn lock(self: *Cache) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 };
 
@@ -171,4 +290,64 @@ test "bounded storage cache releases oversized blocks" {
     cache.release(oversized);
     try std.testing.expectEqual(@as(usize, 0), cache.cachedBlockCount());
     try std.testing.expectEqual(@as(usize, 0), cache.cachedByteCount());
+}
+
+test "bounded storage cache allocator preserves aligned rounded backing" {
+    var cache = Cache.initAligned(
+        std.testing.allocator,
+        1,
+        .@"16",
+    );
+    defer cache.deinit();
+    const allocator = cache.asAllocator();
+
+    const first = try allocator.alignedAlloc(u8, .@"16", 80);
+    try std.testing.expectEqual(@as(usize, 80), first.len);
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(first.ptr) % 16);
+    allocator.free(first);
+    try std.testing.expectEqual(@as(usize, 1), cache.cachedBlockCount());
+    try std.testing.expectEqual(@as(usize, 128), cache.cachedByteCount());
+
+    const second = try allocator.alloc(u8, 100);
+    try std.testing.expectEqual(first.ptr, second.ptr);
+    allocator.free(second);
+    try std.testing.expectEqual(@as(usize, 1), cache.cachedBlockCount());
+    try std.testing.expectEqual(@as(usize, 128), cache.cachedByteCount());
+}
+
+test "bounded storage cache allocator serializes concurrent owners" {
+    var cache = Cache.initAligned(
+        std.testing.allocator,
+        8,
+        .@"16",
+    );
+    defer cache.deinit();
+    const allocator = cache.asAllocator();
+    const Worker = struct {
+        fn run(shared: std.mem.Allocator, byte: u8) void {
+            for (0..1000) |_| {
+                const memory = shared.alignedAlloc(
+                    u8,
+                    .@"16",
+                    80,
+                ) catch @panic("allocation failed");
+                @memset(memory, byte);
+                shared.free(memory);
+            }
+        }
+    };
+    var threads: [4]std.Thread = undefined;
+    for (&threads, 0..) |*thread, index| {
+        thread.* = try std.Thread.spawn(
+            .{},
+            Worker.run,
+            .{ allocator, @as(u8, @intCast(index)) },
+        );
+    }
+    for (threads) |thread| thread.join();
+    try std.testing.expect(cache.cachedBlockCount() <= 4);
+    try std.testing.expectEqual(
+        cache.cachedBlockCount() * 128,
+        cache.cachedByteCount(),
+    );
 }

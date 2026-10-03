@@ -5654,6 +5654,50 @@ SHA-256 is
 `9aac0c3d68f5f43e8e056decabe7c1115d41461459b3b17f8821241e46abfce4`;
 this is targeted large-packet evidence rather than a general broker claim.
 
+Inbound QoS 2 now applies the same ownership model at its later protocol
+boundary. When persistent Sessions and more than one subscription make durable
+fanout possible, the pending transaction's aligned cache block reserves a
+`Publication` header. PUBREL converts that block in place and shares its Topic
+Name/payload across all durable destinations; the final concurrent Session or
+live-delivery release returns the block through a synchronized adapter to the
+original bounded pending cache. Properties remain alive until routing finishes
+and are still cloned per destination where MQTT state differs. Route matching
+remains deferred until PUBREL, so shared-subscription selection and
+subscription changes keep their existing semantics. Single-subscription and
+pure transient brokers reserve no prefix and retain their old paths; the latter
+restriction was kept because an all-target prototype produced a repeatable
+large-payload throughput regression.
+
+Seven fixed-binary durable QoS 2 allocator samples per shape completed all 70
+baseline/candidate broker runs with exact deliveries/checksums and zero live
+bytes after teardown. Serial was byte-for-byte unchanged. Fanout-32 allocation
+calls fell from 833 to 745 (10.6%), and balanced-32x32 from 1,242 to 1,181
+(4.9%). In the 4-KiB shape, calls fell from 2,431 to 2,400, cumulative requested
+bytes from 15,928,837 to 15,698,861 (1.4%), and peak live bytes from 6,755,201
+to 6,525,561 (3.4%). The small balanced shape traded 8,576 bytes of peak live
+storage (0.14%) for its lower allocation count. Baseline/candidate broker
+SHA-256 values are
+`8c1ace2c11f92246679729cf78e5d6ae4f56832fb37f84542998b3316ac57566`
+and `d4a47755ca070d20f05d06c71660c12444b54bd15f54e4e4c0707848d622379f`;
+their summary hashes are
+`7bd59771d5de02de3f2dac13428f316bc6eaaff177549042258fad91a3162aa6`
+and `1e7c8d24d8372f1184cabeb9a326692b22921a9b0e8b45d55a3a36de35d1727f`.
+A separate three-sample transient QoS 2 control kept allocation counts and
+cumulative bytes identical in all five shapes; its baseline/candidate summary
+hashes are
+`7e5a0682d48662903ab82b824878f1b140c6d1f72ffc26ca9f45a5a63c87d2c7`
+and `e30e43845ac7a6e47599343bf70b1b7be51189f6628e1c2c9276bf5ee1ee4ea0`.
+
+The final CPU-0/client, CPU-1/server seven-pair alternating-order A/B used four
+publishers, four subscribers, MQTT 5 QoS 2, 3,600-second Sessions, a
+16-message window, 1,000 warmups, and 10,000 measured 4-KiB publishes per arm.
+Every arm completed 40,000 deliveries with checksum 10,780,000. Candidate
+throughput improved from a 11,133 to 11,241 publishes/s median (1.0%), its
+median paired ratio was 1.012, and it won all seven pairs. Median p50/p99 moved
+from 2.887/5.310 ms to 2.860/5.264 ms. The captured log SHA-256 is
+`e08a87129648a770b9664de04fde56b2607b7dca100a1a75e16df0b7ac29820b`;
+this remains targeted durable large-payload evidence, not a broad QoS 2 claim.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was

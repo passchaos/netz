@@ -2262,6 +2262,7 @@ pub const Broker = struct {
             &persistent_changed,
             null,
             null,
+            null,
         ) catch |err| {
             return err;
         };
@@ -2391,6 +2392,7 @@ pub const Broker = struct {
             release_now,
             &persistent_changed,
             &publication_effect_committed,
+            null,
             null,
         ) catch |err| {
             if (publication_effect_committed) {
@@ -2621,6 +2623,7 @@ pub const Broker = struct {
                 null,
                 null,
                 std.Io.Clock.awake.now(self.io),
+                null,
                 null,
                 null,
                 null,
@@ -5270,13 +5273,21 @@ pub const Broker = struct {
             durable_publisher_id,
         );
         const publisher_slot = try self.slotForSubscriber(publisher_id);
-        const record_changed = self.pending_qos2.recordWithSource(
+        // Route selection belongs to PUBREL: matching here could advance a
+        // shared-subscription cursor early, and subscriptions may change in
+        // between. The global count is a conservative O(1) signal that avoids
+        // enlarging the common single-subscription pending record.
+        const reserve_publication_prefix =
+            self.sessions.persistentCount() != 0 and
+            self.router.subscriptionCount() > 1;
+        const record_changed = self.pending_qos2.recordWithSourceAndPublicationPrefix(
             durable_publisher_id,
             publish,
             connect.client_id,
             connect.username,
             publisher_slot.retainedSourceId(),
             std.Io.Clock.awake.now(self.io),
+            reserve_publication_prefix,
         ) catch |err| {
             self.state_mutex.unlock(self.io);
             if (err != error.ReceiveMaximumExceeded) return err;
@@ -5397,6 +5408,7 @@ pub const Broker = struct {
                 false,
                 &persistent_changed,
                 null,
+                &pending,
             ) catch |err| {
                 self.state_mutex.lockUncancelable(self.io);
                 self.recordPersistentChangeLocked(persistent_changed);
@@ -5457,6 +5469,7 @@ pub const Broker = struct {
                 true,
                 null,
                 prefixed_packet,
+                null,
             ),
         };
         std.debug.assert(deferred_plan == null);
@@ -5475,6 +5488,7 @@ pub const Broker = struct {
         count_persistent_change: bool,
         outer_changed: ?*bool,
         prefixed_packet: ?*runtime.OwnedPacket,
+        pending_qos2: ?*qos2_mod.Pending,
     ) Error!?RoutePlan {
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
@@ -5499,6 +5513,7 @@ pub const Broker = struct {
             &persistent_changed,
             null,
             prefixed_packet,
+            pending_qos2,
         ) catch |err| {
             if (outer_changed) |changed| {
                 changed.* = changed.* or persistent_changed;
@@ -5585,6 +5600,7 @@ pub const Broker = struct {
         persistent_changed: ?*bool,
         publication_effect_committed: ?*bool,
         prefixed_packet: ?*runtime.OwnedPacket,
+        pending_qos2: ?*qos2_mod.Pending,
     ) Error!RoutePlan {
         if (self.pruneExpiredSessionRoutesLocked(now) != 0) {
             if (persistent_changed) |changed| changed.* = true;
@@ -5645,13 +5661,18 @@ pub const Broker = struct {
             publication.release();
         };
         // `prefixed_packet` is also present when a small PUBLISH borrows the
-        // connection's stack storage. Share online Session bytes only when
-        // the packet carries an allocation that Publication can adopt; an
-        // ordinary borrowed packet must not introduce a new route allocation.
-        const can_adopt_packet = if (prefixed_packet) |packet|
-            packet.prefixedAllocation() != null
+        // connection's stack storage. Share online Session bytes only when an
+        // ingress packet or released QoS 2 transaction already owns backing
+        // that Publication can adopt; a borrowed packet must not introduce a
+        // new route allocation.
+        const can_adopt_source = (if (pending_qos2) |pending|
+            pending.canAdoptPublication()
         else
-            false;
+            false) or
+            (if (prefixed_packet) |packet|
+                packet.prefixedAllocation() != null
+            else
+                false);
         var ignored_persistent_change = false;
         for (session_plan.routes) |*route| {
             const handle = self.sessions.handleForRouteId(
@@ -5730,15 +5751,15 @@ pub const Broker = struct {
             var route_persistent_changed = false;
             var route_enqueued = false;
             const shared_publication = if (session_plan.routes.len > 1 and
-                (can_adopt_packet or !online))
+                (can_adopt_source or !online))
             blk: {
                 if (shared_route_publication == null) {
-                    shared_route_publication = try createRoutePublication(
-                        self.allocator,
+                    shared_route_publication = try self.createRoutePublicationLocked(
                         publish,
                         1,
                         now,
                         prefixed_packet,
+                        pending_qos2,
                     );
                 }
                 break :blk shared_route_publication;
@@ -5852,12 +5873,12 @@ pub const Broker = struct {
         const publication = if (plan.len == 0) null else if (shared_route_publication) |shared| blk: {
             for (0..plan.len) |_| shared.retain();
             break :blk shared;
-        } else createRoutePublication(
-            self.allocator,
+        } else self.createRoutePublicationLocked(
             publish,
             plan.len,
             now,
             prefixed_packet,
+            null,
         ) catch |err| {
             self.releaseRouteReservations(plan);
             return err;
@@ -7128,12 +7149,40 @@ pub const Broker = struct {
             &progress.persistent_changed,
             &progress.publication_effect_committed,
             null,
+            null,
         );
         defer plan.deinit(self.allocator);
 
         // The state lock cannot be held across socket writes. Queue ownership
         // is committed at this point; the timer loop releases the lock before
         // flushing all active slots below.
+    }
+
+    fn createRoutePublicationLocked(
+        self: *Broker,
+        publish: mqtt.Publish,
+        reference_count: usize,
+        now: std.Io.Timestamp,
+        prefixed_packet: ?*runtime.OwnedPacket,
+        pending_qos2: ?*qos2_mod.Pending,
+    ) Error!*Publication {
+        if (pending_qos2) |pending| {
+            if (pending.canAdoptPublication()) {
+                return self.pending_qos2.adoptPublication(
+                    pending,
+                    publish,
+                    reference_count,
+                    now,
+                );
+            }
+        }
+        return createRoutePublication(
+            self.allocator,
+            publish,
+            reference_count,
+            now,
+            prefixed_packet,
+        );
     }
 };
 
@@ -7550,6 +7599,7 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
         &persistent_changed,
         &publication_committed,
         &packet,
+        null,
     );
     defer plan.deinit(allocator);
     try std.testing.expect(!packet.owns_bytes);
@@ -7588,6 +7638,111 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
     try std.testing.expectEqualStrings(
         "shared-payload",
         first[0].publish.payload,
+    );
+}
+
+test "MQTT released QoS 2 fanout adopts pending publication bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_connections = 1 },
+        .session = .{
+            .max_sessions = 2,
+            .max_queued_per_session = 2,
+        },
+    });
+    defer broker.deinit();
+
+    var handles: [2]session_mod.Handle = undefined;
+    for (&handles, 0..) |*handle, index| {
+        var client_id: [32]u8 = undefined;
+        const opened = try broker.sessions.open(
+            try std.fmt.bufPrint(&client_id, "qos2-offline-{d}", .{index}),
+            false,
+            60,
+            .zero,
+        );
+        handle.* = opened.handle;
+        _ = try broker.sessions.setSubscription(
+            opened.handle,
+            .{ .topic_filter = "qos2/shared/#", .qos = .exactly_once },
+            null,
+        );
+        _ = try broker.router.subscribeWithIdentifierStatus(
+            sessionSubscriberId(opened.route_id),
+            .{ .topic_filter = "qos2/shared/#", .qos = .exactly_once },
+            null,
+        );
+        try broker.sessions.disconnect(opened.handle, null, .zero);
+    }
+
+    try std.testing.expect(try broker.pending_qos2.recordWithSourceAndPublicationPrefix(
+        77,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "qos2/shared/topic",
+            .packet_id = 9,
+            .payload = "pending-payload",
+        },
+        "publisher",
+        null,
+        null,
+        .zero,
+        true,
+    ));
+    var pending = broker.pending_qos2.take(77, 9).?;
+    var pending_live = true;
+    defer if (pending_live) broker.pending_qos2.recycle(&pending);
+    const message_pointer = pending.bytes.ptr;
+    var properties: std.ArrayList(mqtt.Property) = .empty;
+    defer properties.deinit(allocator);
+    const publish = (try pending.asPublish(9, .zero, &properties)).?;
+    var plan = try broker.enqueuePublishLocked(
+        false,
+        null,
+        publish,
+        null,
+        null,
+        null,
+        .zero,
+        null,
+        null,
+        null,
+        &pending,
+    );
+    defer plan.deinit(allocator);
+    try std.testing.expect(!pending.canAdoptPublication());
+    broker.pending_qos2.recycle(&pending);
+    pending_live = false;
+
+    var first_output: [1]session_mod.Transmission = undefined;
+    var second_output: [1]session_mod.Transmission = undefined;
+    const first = try broker.sessions.drainInto(
+        handles[0],
+        .zero,
+        1,
+        &first_output,
+    );
+    const second = try broker.sessions.drainInto(
+        handles[1],
+        .zero,
+        1,
+        &second_output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqual(message_pointer, first[0].publish.topic.ptr);
+    try std.testing.expectEqual(
+        first[0].publish.topic.ptr,
+        second[0].publish.topic.ptr,
+    );
+    try std.testing.expectEqual(
+        first[0].publish.payload.ptr,
+        second[0].publish.payload.ptr,
     );
 }
 
