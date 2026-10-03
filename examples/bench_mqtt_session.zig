@@ -1,9 +1,14 @@
 const std = @import("std");
 const netz = @import("netz");
+const CountingAllocator = @import("support/counting_allocator.zig")
+    .CountingAllocator;
 
 const session_count: usize = 4096;
 const resume_iterations: usize = 100_000;
 const queued_per_session: usize = 4;
+const fanout_sessions: usize = 64;
+const fanout_messages: usize = 256;
+const fanout_samples: usize = 7;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -86,6 +91,47 @@ pub fn main(init: std.process.Init) !void {
     }
     const drain_elapsed = nowNs(io) -| drain_started;
 
+    var independent_fanout_ns: [fanout_samples]u64 = undefined;
+    var shared_fanout_ns: [fanout_samples]u64 = undefined;
+    var independent_fanout: ?FanoutResult = null;
+    var shared_fanout: ?FanoutResult = null;
+    for (0..fanout_samples) |sample| {
+        const independent_first = sample % 4 == 0 or sample % 4 == 3;
+        if (independent_first) {
+            const independent = try benchmarkOfflineFanout(io, false);
+            const shared = try benchmarkOfflineFanout(io, true);
+            try recordFanoutResult(
+                &independent_fanout,
+                &independent_fanout_ns,
+                sample,
+                independent,
+            );
+            try recordFanoutResult(
+                &shared_fanout,
+                &shared_fanout_ns,
+                sample,
+                shared,
+            );
+        } else {
+            const shared = try benchmarkOfflineFanout(io, true);
+            const independent = try benchmarkOfflineFanout(io, false);
+            try recordFanoutResult(
+                &shared_fanout,
+                &shared_fanout_ns,
+                sample,
+                shared,
+            );
+            try recordFanoutResult(
+                &independent_fanout,
+                &independent_fanout_ns,
+                sample,
+                independent,
+            );
+        }
+    }
+    std.mem.sort(u64, &independent_fanout_ns, {}, lessThanU64);
+    std.mem.sort(u64, &shared_fanout_ns, {}, lessThanU64);
+
     std.debug.print(
         \\MQTT persistent session benchmark
         \\  io backend: zio-std-io
@@ -94,6 +140,15 @@ pub fn main(init: std.process.Init) !void {
         \\  offline queue ns/message: {d}
         \\  reconnect drain ns/session: {d}
         \\  queued messages/session: {d}
+        \\  offline fanout sessions: {d}
+        \\  offline fanout messages: {d}
+        \\  offline fanout samples: {d}
+        \\  independent fanout ns/target: {d}
+        \\  shared fanout ns/target: {d}
+        \\  independent fanout allocations: {d}
+        \\  shared fanout allocations: {d}
+        \\  independent fanout live bytes: {d}
+        \\  shared fanout live bytes: {d}
         \\  checksum: {d}
         \\
     , .{
@@ -102,12 +157,133 @@ pub fn main(init: std.process.Init) !void {
         queue_elapsed / (session_count * queued_per_session),
         drain_elapsed / session_count,
         queued_per_session,
+        fanout_sessions,
+        fanout_messages,
+        fanout_samples,
+        independent_fanout_ns[fanout_samples / 2],
+        shared_fanout_ns[fanout_samples / 2],
+        independent_fanout.?.allocations,
+        shared_fanout.?.allocations,
+        independent_fanout.?.live_bytes,
+        shared_fanout.?.live_bytes,
         checksum,
     });
+}
+
+const FanoutResult = struct {
+    elapsed_ns: u64,
+    deliveries: usize,
+    allocations: usize,
+    live_bytes: usize,
+};
+
+fn recordFanoutResult(
+    expected: *?FanoutResult,
+    samples: []u64,
+    index: usize,
+    result: FanoutResult,
+) !void {
+    if (expected.*) |first| {
+        if (result.deliveries != first.deliveries or
+            result.allocations != first.allocations or
+            result.live_bytes != first.live_bytes)
+        {
+            return error.InvalidBenchmarkState;
+        }
+    } else {
+        expected.* = result;
+    }
+    samples[index] = result.elapsed_ns / result.deliveries;
+}
+
+fn benchmarkOfflineFanout(io: std.Io, shared_wire: bool) !FanoutResult {
+    var counting = CountingAllocator.init(std.heap.smp_allocator);
+    const allocator = counting.allocator();
+    const result = result: {
+        var store = netz.mqtt.session.Store.init(allocator, .{
+            .max_sessions = fanout_sessions,
+            .max_queued_per_session = fanout_messages,
+        });
+        defer store.deinit();
+        var handles: [fanout_sessions]netz.mqtt.session.Handle = undefined;
+        for (&handles, 0..) |*handle, index| {
+            var client_id: [32]u8 = undefined;
+            handle.* = (try store.open(
+                try std.fmt.bufPrint(&client_id, "fanout-{d}", .{index}),
+                false,
+                3_600,
+                .zero,
+            )).handle;
+            try store.disconnect(handle.*, null, .zero);
+        }
+        const before = counting.snapshot();
+        var payload: [256]u8 = undefined;
+        for (&payload, 0..) |*byte, index| {
+            byte.* = @truncate(index *% 17 +% 3);
+        }
+        const publish: netz.mqtt.Publish = .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = "bench/offline/fanout",
+            .packet_id = 1,
+            .properties = &.{},
+            .payload = &payload,
+        };
+        const started = nowNs(io);
+        for (0..fanout_messages) |_| {
+            if (shared_wire) {
+                const publication = try netz.mqtt.session.SharedPublication
+                    .createFromPublish(allocator, publish, 1, .zero);
+                defer publication.release();
+                for (handles) |handle| {
+                    var changed = false;
+                    _ = try store
+                        .enqueueSharedPublicationTrackingSnapshotChange(
+                        handle,
+                        publication,
+                        .{ .qos = publish.qos, .now = .zero },
+                        &changed,
+                    );
+                    if (!changed) return error.InvalidBenchmarkState;
+                }
+            } else {
+                for (handles) |handle| {
+                    _ = try store.enqueuePublish(
+                        handle,
+                        publish.topic,
+                        publish.payload,
+                        .{ .qos = publish.qos, .now = .zero },
+                    );
+                }
+            }
+        }
+        const elapsed_ns = nowNs(io) -| started;
+        const after = counting.snapshot();
+        const deliveries = fanout_sessions * fanout_messages;
+        const stats = store.aggregateStats();
+        if (stats.queued_count != deliveries) {
+            return error.InvalidBenchmarkState;
+        }
+        break :result FanoutResult{
+            .elapsed_ns = elapsed_ns,
+            .deliveries = deliveries,
+            .allocations = after.alloc_count - before.alloc_count,
+            .live_bytes = after.current_bytes - before.current_bytes,
+        };
+    };
+    if (counting.snapshot().current_bytes != 0) {
+        return error.BenchmarkMemoryLeak;
+    }
+    return result;
 }
 
 fn nowNs(io: std.Io) u64 {
     const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
     if (timestamp <= 0) return 0;
     return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+}
+
+fn lessThanU64(_: void, a: u64, b: u64) bool {
+    return a < b;
 }

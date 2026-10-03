@@ -1,4 +1,5 @@
-//! Shared owned Application Message used by broker delivery queues.
+//! Shared owned Application Message used by live and offline broker delivery
+//! queues.
 //!
 //! Topic, payload, and variable-length MQTT 5 properties are cloned once and
 //! reference-counted across every matching subscriber. Message Expiry is
@@ -201,6 +202,23 @@ pub const Publication = struct {
 
     pub fn payload(self: Publication) []const u8 {
         return self.bytes[self.topic_len..];
+    }
+
+    pub fn retain(self: *Publication) void {
+        const previous = self.references.fetchAdd(1, .monotonic);
+        std.debug.assert(previous != 0);
+        std.debug.assert(previous != std.math.maxInt(usize));
+    }
+
+    /// Recover the coallocated owner from its complete message-byte slice.
+    /// Callers must pass exactly `publication.bytes`, not a topic/payload
+    /// subslice. This keeps shared Session storage pointer-sized.
+    pub fn ownerForBytes(bytes: []u8) *Publication {
+        const address = @intFromPtr(bytes.ptr) - @sizeOf(Publication);
+        const publication: *Publication = @ptrFromInt(address);
+        std.debug.assert(publication.bytes.ptr == bytes.ptr);
+        std.debug.assert(publication.bytes.len == bytes.len);
+        return publication;
     }
 
     /// Build delivery properties and return false when Message Expiry elapsed.
@@ -422,6 +440,12 @@ test "publication coallocates header and message bytes" {
         @intFromPtr(publication) + @sizeOf(Publication),
         @intFromPtr(publication.bytes.ptr),
     );
+    try std.testing.expectEqual(
+        publication,
+        Publication.ownerForBytes(publication.bytes),
+    );
+    publication.retain();
+    publication.release();
     try std.testing.expectEqualStrings("coallocated/topic", publication.topic());
     try std.testing.expectEqualStrings("payload", publication.payload());
 }

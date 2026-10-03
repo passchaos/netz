@@ -5640,6 +5640,10 @@ pub const Broker = struct {
             &session_plan_scratch,
         );
         defer session_plan.deinit();
+        var shared_offline_publication: ?*Publication = null;
+        defer if (shared_offline_publication) |publication| {
+            publication.release();
+        };
         var ignored_persistent_change = false;
         for (session_plan.routes) |*route| {
             const handle = self.sessions.handleForRouteId(
@@ -5717,6 +5721,19 @@ pub const Broker = struct {
                 &ignored_persistent_change;
             var route_persistent_changed = false;
             var route_enqueued = false;
+            const shared_publication = if (!online and
+                session_plan.routes.len > 1)
+            blk: {
+                if (shared_offline_publication == null) {
+                    shared_offline_publication = try Publication.createFromPublish(
+                        self.allocator,
+                        publish,
+                        1,
+                        now,
+                    );
+                }
+                break :blk shared_offline_publication;
+            } else null;
             self.enqueueSessionDeliveryManyLocked(
                 handle,
                 session_plan.identifiersFor(route),
@@ -5726,6 +5743,7 @@ pub const Broker = struct {
                 now,
                 &route_persistent_changed,
                 &route_enqueued,
+                shared_publication,
             ) catch |err| {
                 changed.* = changed.* or route_persistent_changed;
                 if (publication_effect_committed) |committed| {
@@ -6095,6 +6113,7 @@ pub const Broker = struct {
             now,
             persistent_changed,
             null,
+            null,
         );
     }
 
@@ -6108,6 +6127,7 @@ pub const Broker = struct {
         now: std.Io.Timestamp,
         persistent_changed: *bool,
         publication_enqueued: ?*bool,
+        shared_publication: ?*Publication,
     ) Error!void {
         if (publication_enqueued) |enqueued| enqueued.* = false;
         var properties: std.ArrayList(mqtt.Property) = .empty;
@@ -6134,18 +6154,27 @@ pub const Broker = struct {
             } });
         }
         var snapshot_changed = false;
-        const result = self.sessions.enqueuePublishTrackingSnapshotChange(
-            handle,
-            publish.topic,
-            publish.payload,
-            .{
-                .qos = qos,
-                .retain = retain,
-                .properties = properties.items,
-                .now = now,
-            },
-            &snapshot_changed,
-        ) catch |err| switch (err) {
+        const enqueue_options: session_mod.EnqueueOptions = .{
+            .qos = qos,
+            .retain = retain,
+            .properties = properties.items,
+            .now = now,
+        };
+        const result = (if (shared_publication) |shared|
+            self.sessions.enqueueSharedPublicationTrackingSnapshotChange(
+                handle,
+                shared,
+                enqueue_options,
+                &snapshot_changed,
+            )
+        else
+            self.sessions.enqueuePublishTrackingSnapshotChange(
+                handle,
+                publish.topic,
+                publish.payload,
+                enqueue_options,
+                &snapshot_changed,
+            )) catch |err| switch (err) {
             error.QueueFull => {
                 self.publish_counters.recordDropped();
                 persistent_changed.* = persistent_changed.* or
@@ -7436,6 +7465,97 @@ test "MQTT delivery queue reservations reclaim a consumed prefix" {
     try std.testing.expectEqual(@as(usize, 4), buffers.queue.capacity);
     try std.testing.expectEqual(publication, buffers.queue.items[0].publication);
     try std.testing.expectEqual(publication, buffers.queue.items[1].publication);
+}
+
+test "MQTT offline durable fanout shares publication bytes" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_connections = 1 },
+        .session = .{
+            .max_sessions = 2,
+            .max_queued_per_session = 2,
+        },
+    });
+    defer broker.deinit();
+
+    var handles: [2]session_mod.Handle = undefined;
+    for (&handles, 0..) |*handle, index| {
+        var client_id: [32]u8 = undefined;
+        const opened = try broker.sessions.open(
+            try std.fmt.bufPrint(&client_id, "offline-{d}", .{index}),
+            false,
+            60,
+            .zero,
+        );
+        handle.* = opened.handle;
+        _ = try broker.sessions.setSubscription(
+            opened.handle,
+            .{ .topic_filter = "shared/#", .qos = .at_least_once },
+            null,
+        );
+        _ = try broker.router.subscribeWithIdentifierStatus(
+            sessionSubscriberId(opened.route_id),
+            .{ .topic_filter = "shared/#", .qos = .at_least_once },
+            null,
+        );
+        try broker.sessions.disconnect(opened.handle, null, .zero);
+    }
+
+    var persistent_changed = false;
+    var publication_committed = false;
+    var plan = try broker.enqueuePublishLocked(
+        false,
+        null,
+        .{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = false,
+            .topic = "shared/topic",
+            .packet_id = 1,
+            .properties = &.{},
+            .payload = "shared-payload",
+        },
+        null,
+        null,
+        null,
+        .zero,
+        &persistent_changed,
+        &publication_committed,
+        null,
+    );
+    defer plan.deinit(allocator);
+    try std.testing.expect(persistent_changed);
+    try std.testing.expect(publication_committed);
+    try std.testing.expectEqual(@as(usize, 0), plan.deliveries.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.session_targets.len);
+
+    var first_output: [1]session_mod.Transmission = undefined;
+    var second_output: [1]session_mod.Transmission = undefined;
+    const first = try broker.sessions.drainInto(
+        handles[0],
+        .zero,
+        1,
+        &first_output,
+    );
+    const second = try broker.sessions.drainInto(
+        handles[1],
+        .zero,
+        1,
+        &second_output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expectEqual(
+        first[0].publish.topic.ptr,
+        second[0].publish.topic.ptr,
+    );
+    try std.testing.expectEqual(
+        first[0].publish.payload.ptr,
+        second[0].publish.payload.ptr,
+    );
 }
 
 test "MQTT publisher route plans reuse bounded slot storage" {

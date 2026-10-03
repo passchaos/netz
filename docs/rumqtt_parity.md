@@ -3614,6 +3614,21 @@ proxy evidence for the entire suite.
    candidate/baseline ratios were 1.014 for throughput and 0.976 for p99.
    Allocation counts and bytes were identical. This is a modest targeted
    no-expiry fast-path result, not closure of the broader durable QoS 2 gap.
+   Multi-destination offline fanout now mirrors Mosquitto's shared base-message
+   ownership more closely. One reference-counted broker Publication owns the
+   immutable Topic Name and payload while every Session continues to own its
+   QoS, Retain flag, Subscription Identifiers, expiry accounting, Packet
+   Identifier state, logical byte budget, and snapshot representation. Online
+   Session delivery keeps the established storage-cache path, avoiding the
+   per-source allocation cost measured by a rejected all-destination sharing
+   prototype. A new `bench-mqtt-session` AB/BA sub-benchmark holds 256 messages
+   for 64 offline Sessions. Its seven-pair median measured 336 versus 812 ns per
+   destination, while backing allocations fell from 16,896 to 768 (95.5%) and
+   incremental live bytes from 11,345,920 to 3,052,544 (73.1%). All logical
+   16,384 deliveries remain independently accounted and teardown returns the
+   counting allocator to zero. The benchmark binary and captured output hashes
+   are `a2bfe1e2a2e8a14afe3724641180f7f60cf1e906c40193a29e52ad4881b56020`
+   and `07630da78b56333ae2c31f4dae44fc61b924edd81005fcbc764d951fd48eb6f9`.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

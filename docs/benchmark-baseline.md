@@ -5599,6 +5599,31 @@ and checksums; its summary SHA-256 is
 The remaining cross-broker durable-session gap is still dominated by broader
 per-destination ownership and scheduling work.
 
+Offline durable fanout now shares one reference-counted immutable Topic
+Name/payload owner across its destination Sessions, matching Mosquitto's split
+between a shared base message and per-client delivery state. Each Session still
+owns its delivery properties and QoS/Retain/Packet Identifier state, applies
+its logical byte limits independently, and serializes the unchanged snapshot
+format. The optimization is restricted to offline targets in a multi-route fanout;
+online persistent delivery keeps the existing cached independent backing after
+an all-destination sharing experiment increased allocation traffic.
+
+`bench-mqtt-session` now includes a same-binary, seven-pair AB/BA comparison
+that retains 256 messages across 64 offline Sessions (16,384 logical
+deliveries). The final CPU-0 run measured 812 ns per destination for independent
+copies and 336 ns for shared bytes, a 58.6% reduction. Across repeated runs the
+shared path remained 58.3-75.0% lower. More importantly, every run reduced
+backing allocations from 16,896 to 768 (95.5%) and incremental live bytes from
+11,345,920 to 3,052,544 (73.1%), with identical logical queue counts and zero
+bytes after teardown. The benchmark binary SHA-256 is
+`a2bfe1e2a2e8a14afe3724641180f7f60cf1e906c40193a29e52ad4881b56020`;
+the captured output hash is
+`07630da78b56333ae2c31f4dae44fc61b924edd81005fcbc764d951fd48eb6f9`.
+A complete online durable QoS 2 five-shape matrix, where sharing is deliberately
+inactive, preserved all delivery counts and checksums and showed mixed timing
+within the existing host variance. Its summary SHA-256 is
+`97446c6d1693486491dff07926b35c77982787e0d5fb3a35b35673f1ed0bafdc`.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was

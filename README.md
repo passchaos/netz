@@ -1507,6 +1507,10 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # so ordinary no-expiry enqueue/drain operations skip a full queued+inflight
 # prune scan. A seven-pair fixed-binary durable QoS 2 run improved median
 # throughput 1.4% and reduced median p99 2.4%.
+# Fanout to multiple offline persistent Sessions shares one immutable Topic
+# Name/payload owner while retaining independent per-Session QoS, properties,
+# expiry and Packet Identifiers. The 64-session offline benchmark cuts backing
+# allocations 95.5% and live bytes 73.1% versus per-destination cloning.
 # The broker's single-reader TCP loop also supplies 128 bytes of caller storage
 # for ACKs and common small PUBLISH packets. Eligible fragmented packets remain
 # in connection-owned read-ahead across timeouts, while oversized packets, TLS,

@@ -1,8 +1,10 @@
 //! Bounded MQTT server Session State for reconnect and offline delivery.
 //!
 //! Sessions are addressed by generation-checked handles, so callers never hold
-//! pointers invalidated by table growth. All variable-length protocol data is
-//! deeply owned. Queue/inflight scans write borrowed views into caller storage
+//! pointers invalidated by table growth. Variable-length protocol data is
+//! owned for the Session lifetime; multi-destination offline fanout may share
+//! immutable Topic Name and payload bytes through a reference-counted broker
+//! Publication. Queue/inflight scans write borrowed views into caller storage
 //! and allocate only when a previously unsent message moves into inflight.
 
 const std = @import("std");
@@ -10,6 +12,8 @@ const mqtt = @import("../mod.zig");
 const owned_properties = @import("../owned_properties.zig");
 const persistence = @import("../persistence/codec.zig");
 const StorageCache = @import("../storage_cache.zig").Cache;
+pub const SharedPublication = @import("../broker/publication.zig").Publication;
+const shared_publication_wire = std.math.maxInt(usize);
 
 pub const Error = mqtt.Error || error{
     SessionNotFound,
@@ -272,8 +276,12 @@ const OwnedPublish = struct {
         cache: *StorageCache,
     ) void {
         owned_properties.deinit(allocator, self.properties);
-        const allocation = self.wire.ptr[0..self.wire_allocation_len];
-        cache.release(allocation);
+        if (self.wire_allocation_len == shared_publication_wire) {
+            SharedPublication.ownerForBytes(self.wire).release();
+        } else {
+            const allocation = self.wire.ptr[0..self.wire_allocation_len];
+            cache.release(allocation);
+        }
         self.* = undefined;
     }
 };
@@ -1593,6 +1601,78 @@ pub const Store = struct {
         options: EnqueueOptions,
         snapshot_changed: *bool,
     ) Error!EnqueueResult {
+        const session = (try self.preparePublishEnqueue(
+            handle,
+            topic,
+            payload,
+            options,
+            snapshot_changed,
+        )) orelse return .expired;
+        var publish = try clonePublish(
+            self.allocator,
+            &self.publish_wire_cache,
+            topic,
+            payload,
+            options.qos,
+            options.retain,
+            options.properties,
+            options.now.nanoseconds,
+        );
+        errdefer publish.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
+        return self.enqueueOwnedPublish(
+            session,
+            &publish,
+            snapshot_changed,
+        );
+    }
+
+    /// Queue one Session-specific delivery while sharing the immutable Topic
+    /// Name and payload owned by a broker Publication. QoS, Retain, properties,
+    /// expiry accounting, and byte limits remain independent per Session.
+    pub fn enqueueSharedPublicationTrackingSnapshotChange(
+        self: *Store,
+        handle: Handle,
+        publication: *SharedPublication,
+        options: EnqueueOptions,
+        snapshot_changed: *bool,
+    ) Error!EnqueueResult {
+        const session = (try self.preparePublishEnqueue(
+            handle,
+            publication.topic(),
+            publication.payload(),
+            options,
+            snapshot_changed,
+        )) orelse return .expired;
+        var publish = try clonePublishFromSharedPublication(
+            self.allocator,
+            publication,
+            options.qos,
+            options.retain,
+            options.properties,
+            options.now.nanoseconds,
+        );
+        errdefer publish.deinit(
+            self.allocator,
+            &self.publish_wire_cache,
+        );
+        return self.enqueueOwnedPublish(
+            session,
+            &publish,
+            snapshot_changed,
+        );
+    }
+
+    fn preparePublishEnqueue(
+        self: *Store,
+        handle: Handle,
+        topic: []const u8,
+        payload: []const u8,
+        options: EnqueueOptions,
+        snapshot_changed: *bool,
+    ) Error!?*Session {
         snapshot_changed.* = false;
         try validatePublishForSession(topic, payload, options.properties);
         const session = try self.getSession(handle);
@@ -1627,22 +1707,17 @@ pub const Store = struct {
             return error.QueueFull;
         }
         if (mqtt.messageExpiryInterval(options.properties) == 0) {
-            return .expired;
+            return null;
         }
-        var publish = try clonePublish(
-            self.allocator,
-            &self.publish_wire_cache,
-            topic,
-            payload,
-            options.qos,
-            options.retain,
-            options.properties,
-            options.now.nanoseconds,
-        );
-        errdefer publish.deinit(
-            self.allocator,
-            &self.publish_wire_cache,
-        );
+        return session;
+    }
+
+    fn enqueueOwnedPublish(
+        self: *Store,
+        session: *Session,
+        publish: *OwnedPublish,
+        snapshot_changed: *bool,
+    ) Error!EnqueueResult {
         try self.ensureBytes(session, publish.allocation_bytes);
         const queued_payload_bytes = std.math.add(
             usize,
@@ -1658,13 +1733,13 @@ pub const Store = struct {
         {
             compactQueue(session);
         }
-        try session.queued.append(self.allocator, publish);
+        try session.queued.append(self.allocator, publish.*);
         session.queued_count += 1;
         session.queued_payload_bytes = queued_payload_bytes;
         session.allocation_bytes += publish.allocation_bytes;
         self.total_bytes += publish.allocation_bytes;
-        notePublishExpiry(session, publish);
-        publish = undefined;
+        notePublishExpiry(session, publish.*);
+        publish.* = undefined;
         snapshot_changed.* = true;
         return .queued;
     }
@@ -2716,6 +2791,53 @@ fn clonePublish(
     };
 }
 
+fn clonePublishFromSharedPublication(
+    allocator: std.mem.Allocator,
+    publication: *SharedPublication,
+    qos: mqtt.QoS,
+    retain: bool,
+    properties: []const mqtt.Property,
+    now_ns: i96,
+) Error!OwnedPublish {
+    const property_result = owned_properties.clone(
+        allocator,
+        properties,
+        keepQueuedProperty,
+    ) catch |err| switch (err) {
+        error.OwnedPropertyLimitExceeded => return error.SessionByteLimitExceeded,
+        else => return @errorCast(err),
+    };
+    errdefer owned_properties.deinit(
+        allocator,
+        property_result.properties,
+    );
+    const wire_len = std.math.add(
+        usize,
+        publication.topic().len,
+        publication.payload().len,
+    ) catch return error.SessionByteLimitExceeded;
+    const bytes = std.math.add(
+        usize,
+        wire_len,
+        property_result.allocation_bytes,
+    ) catch return error.SessionByteLimitExceeded;
+    publication.retain();
+    return .{
+        // A reserved allocation length tags this as a shared Publication. The
+        // complete bytes slice recovers its coallocated owner at release.
+        .wire = publication.bytes,
+        .wire_allocation_len = shared_publication_wire,
+        .topic = publication.bytes[0..publication.topic().len],
+        .payload = publication.bytes[publication.topic().len..],
+        .qos = qos,
+        .retain = retain,
+        .properties = property_result.properties,
+        .stored_at_ns = now_ns,
+        .expiry_interval = mqtt.messageExpiryInterval(properties),
+        .allocation_bytes = bytes,
+    };
+}
+
 const RestoredSubscription = struct {
     subscription: mqtt.Subscription,
     identifier: ?usize,
@@ -3164,6 +3286,182 @@ test "Session publish expiry deadline skips and repairs scans" {
     try std.testing.expectEqual(
         no_publish_expiry,
         session.next_publish_expiry_ns,
+    );
+}
+
+test "Session fanout can share immutable publication bytes" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{ .max_sessions = 2 });
+    defer store.deinit();
+    const first = try store.open("shared-first", false, 60, .zero);
+    const second = try store.open("shared-second", false, 60, .zero);
+
+    const publication = try SharedPublication.createFromPublish(
+        allocator,
+        .{
+            .dup = false,
+            .qos = .exactly_once,
+            .retain = false,
+            .topic = "shared/topic",
+            .packet_id = 7,
+            .properties = &.{},
+            .payload = "shared-payload",
+        },
+        1,
+        .zero,
+    );
+    var publication_owned = true;
+    defer if (publication_owned) publication.release();
+    var first_changed = false;
+    var second_changed = false;
+    _ = try store.enqueueSharedPublicationTrackingSnapshotChange(
+        first.handle,
+        publication,
+        .{ .qos = .exactly_once, .now = .zero },
+        &first_changed,
+    );
+    _ = try store.enqueueSharedPublicationTrackingSnapshotChange(
+        second.handle,
+        publication,
+        .{ .qos = .at_least_once, .now = .zero },
+        &second_changed,
+    );
+    publication.release();
+    publication_owned = false;
+
+    var first_output: [1]Transmission = undefined;
+    var second_output: [1]Transmission = undefined;
+    const first_delivery = try store.drainInto(
+        first.handle,
+        .zero,
+        1,
+        &first_output,
+    );
+    const second_delivery = try store.drainInto(
+        second.handle,
+        .zero,
+        1,
+        &second_output,
+    );
+    try std.testing.expect(first_changed);
+    try std.testing.expect(second_changed);
+    try std.testing.expectEqual(@as(usize, 1), first_delivery.len);
+    try std.testing.expectEqual(@as(usize, 1), second_delivery.len);
+    try std.testing.expectEqualStrings(
+        "shared/topic",
+        first_delivery[0].publish.topic,
+    );
+    try std.testing.expectEqualStrings(
+        "shared-payload",
+        second_delivery[0].publish.payload,
+    );
+    try std.testing.expectEqual(
+        first_delivery[0].publish.topic.ptr,
+        second_delivery[0].publish.topic.ptr,
+    );
+    try std.testing.expectEqual(
+        first_delivery[0].publish.payload.ptr,
+        second_delivery[0].publish.payload.ptr,
+    );
+    try std.testing.expectEqual(
+        mqtt.QoS.exactly_once,
+        first_delivery[0].publish.qos,
+    );
+    try std.testing.expectEqual(
+        mqtt.QoS.at_least_once,
+        second_delivery[0].publish.qos,
+    );
+}
+
+test "Session shared fanout removes per-destination wire allocations" {
+    const session_count = 8;
+    const options: Options = .{
+        .max_sessions = session_count,
+        .max_queued_per_session = 1,
+    };
+    const publish = mqtt.Publish{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "shared/allocation/topic",
+        .packet_id = 1,
+        .properties = &.{},
+        .payload = "shared-allocation-payload",
+    };
+
+    var independent_allocator = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    var independent = Store.init(
+        independent_allocator.allocator(),
+        options,
+    );
+    defer independent.deinit();
+    var independent_handles: [session_count]Handle = undefined;
+    for (&independent_handles, 0..) |*handle, index| {
+        var client_id: [32]u8 = undefined;
+        handle.* = (try independent.open(
+            try std.fmt.bufPrint(&client_id, "independent-{d}", .{index}),
+            false,
+            60,
+            .zero,
+        )).handle;
+    }
+    const independent_before = independent_allocator.allocations;
+    for (independent_handles) |handle| {
+        _ = try independent.enqueuePublish(
+            handle,
+            publish.topic,
+            publish.payload,
+            .{ .qos = publish.qos, .now = .zero },
+        );
+    }
+    const independent_allocations =
+        independent_allocator.allocations - independent_before;
+
+    var shared_allocator = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    var shared = Store.init(
+        shared_allocator.allocator(),
+        options,
+    );
+    defer shared.deinit();
+    var shared_handles: [session_count]Handle = undefined;
+    for (&shared_handles, 0..) |*handle, index| {
+        var client_id: [32]u8 = undefined;
+        handle.* = (try shared.open(
+            try std.fmt.bufPrint(&client_id, "shared-{d}", .{index}),
+            false,
+            60,
+            .zero,
+        )).handle;
+    }
+    const shared_before = shared_allocator.allocations;
+    const publication = try SharedPublication.createFromPublish(
+        shared_allocator.allocator(),
+        publish,
+        1,
+        .zero,
+    );
+    for (shared_handles) |handle| {
+        var changed = false;
+        _ = try shared.enqueueSharedPublicationTrackingSnapshotChange(
+            handle,
+            publication,
+            .{ .qos = publish.qos, .now = .zero },
+            &changed,
+        );
+        try std.testing.expect(changed);
+    }
+    publication.release();
+    const shared_allocations = shared_allocator.allocations - shared_before;
+
+    try std.testing.expectEqual(
+        independent_allocations - (session_count - 1),
+        shared_allocations,
     );
 }
 
