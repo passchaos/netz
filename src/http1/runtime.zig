@@ -29,9 +29,9 @@ const RequestReadStage = enum { head, continue_write, body };
 
 test "HTTP/1 connections keep optional write scratch compact" {
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 560), @sizeOf(Client));
-        try std.testing.expectEqual(@as(usize, 480), @sizeOf(Connection));
-        try std.testing.expectEqual(@as(usize, 152), @sizeOf(WriteScratch));
+        try std.testing.expectEqual(@as(usize, 528), @sizeOf(Client));
+        try std.testing.expectEqual(@as(usize, 448), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 120), @sizeOf(WriteScratch));
     }
 }
 
@@ -1255,10 +1255,11 @@ fn flattenWriteParts(
         total = std.math.add(usize, total, part.len) catch
             return error.ContentLengthOverflow;
     }
-    scratch.flattened.clearRetainingCapacity();
-    try scratch.flattened.ensureTotalCapacity(allocator, total);
-    for (parts) |part| scratch.flattened.appendSliceAssumeCapacity(part);
-    return scratch.flattened.items;
+    const flattened = try scratch.flattenedBuffer(allocator);
+    flattened.clearRetainingCapacity();
+    try flattened.ensureTotalCapacity(allocator, total);
+    for (parts) |part| flattened.appendSliceAssumeCapacity(part);
+    return flattened.items;
 }
 
 fn writeSlicesWithStrategy(

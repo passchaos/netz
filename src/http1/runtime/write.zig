@@ -108,6 +108,10 @@ const BatchPart = union(enum) {
 };
 
 const BatchScratch = struct {
+    /// Independent contiguous transport staging. This cannot share `encoded`:
+    /// prepared message heads may still borrow that storage while a
+    /// connection-level flatten policy copies all parts.
+    flattened: std.ArrayList(u8) = .empty,
     encoded: std.ArrayList(u8) = .empty,
     parts: std.ArrayList([]const u8) = .empty,
     part_descriptors: std.ArrayList(BatchPart) = .empty,
@@ -119,6 +123,7 @@ const BatchScratch = struct {
     }
 
     fn deinit(self: *BatchScratch, allocator: std.mem.Allocator) void {
+        self.flattened.deinit(allocator);
         self.encoded.deinit(allocator);
         self.parts.deinit(allocator);
         self.part_descriptors.deinit(allocator);
@@ -164,18 +169,19 @@ pub const StreamingChunkScratch = struct {
     }
 };
 
+const content_length_buffer_len = std.fmt.count(
+    "{d}",
+    .{std.math.maxInt(usize)},
+);
+
 pub const Scratch = struct {
     encoded: std.ArrayList(u8) = .empty,
-    /// Independent contiguous transport staging. This cannot share `encoded`:
-    /// prepared message heads and streaming terminators may still borrow that
-    /// storage while a connection-level flatten policy copies all parts.
-    flattened: std.ArrayList(u8) = .empty,
     batch: ?*BatchScratch = null,
     headers: std.ArrayList(http1.Header) = .empty,
     request_headers: std.ArrayList(http1.Header) = .empty,
     trailers: ?*TrailerScratch = null,
     streaming_chunks: ?*StreamingChunkScratch = null,
-    content_length: [32]u8 = undefined,
+    content_length: [content_length_buffer_len]u8 = undefined,
 
     fn reset(self: *Scratch) void {
         self.encoded.clearRetainingCapacity();
@@ -187,7 +193,6 @@ pub const Scratch = struct {
 
     pub fn deinit(self: *Scratch, allocator: std.mem.Allocator) void {
         self.encoded.deinit(allocator);
-        self.flattened.deinit(allocator);
         if (self.batch) |batch| {
             batch.deinit(allocator);
             allocator.destroy(batch);
@@ -214,6 +219,13 @@ pub const Scratch = struct {
         batch.* = .{};
         self.batch = batch;
         return batch;
+    }
+
+    pub fn flattenedBuffer(
+        self: *Scratch,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!*std.ArrayList(u8) {
+        return &(try self.batchScratch(allocator)).flattened;
     }
 
     fn trailerScratch(
@@ -1672,8 +1684,12 @@ fn prepareResponsePartsWithDefaultDate(
 test "HTTP/1 write scratch allocates batch state lazily" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 72), @sizeOf(BatchScratch));
-        try std.testing.expectEqual(@as(usize, 152), @sizeOf(Scratch));
+        try std.testing.expectEqual(@as(usize, 96), @sizeOf(BatchScratch));
+        try std.testing.expectEqual(@as(usize, 120), @sizeOf(Scratch));
+        try std.testing.expectEqual(
+            @as(usize, 20),
+            @sizeOf(@FieldType(Scratch, "content_length")),
+        );
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Scratch, "batch")),
@@ -2091,7 +2107,7 @@ fn appendDefaultedHeaders(
     trailers: []const http1.Header,
     use_chunked: bool,
     add_default_content_length: bool,
-    len_buf: *[32]u8,
+    len_buf: *[content_length_buffer_len]u8,
     scratch: *Scratch,
     default_date: ?[]const u8,
 ) Error!void {

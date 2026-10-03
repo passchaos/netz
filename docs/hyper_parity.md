@@ -207,7 +207,9 @@ benchmark response:
   `Trailer` values are likewise allocated only for messages that declare or
   supply trailers. The two descriptor/iovec lists used by multi-chunk streaming
   writes are also allocated together on first use and retain their warmed
-  capacity;
+  capacity. Contiguous flattening reuses the response-batch allocation because
+  those buffers must coexist, removing its standalone empty list from ordinary
+  connections;
 - complete requests, single responses, and both coalesced and borrowed response
   batches finish all validation and allocation before transport I/O. Once a
   write begins, any transport error permanently retires the HTTP/1 connection:
