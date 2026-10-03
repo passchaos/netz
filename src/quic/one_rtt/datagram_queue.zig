@@ -106,6 +106,19 @@ pub const Queue = struct {
         if (self.len < capacity and self.slots.capacity < capacity) {
             try self.slots.ensureTotalCapacityPrecise(allocator, capacity);
         }
+        if (self.len == capacity) {
+            const oldest = &self.slots.items[self.head].?;
+            // A full fixed-size queue can replace its oldest payload in the
+            // slot that is becoming the new tail. Besides avoiding allocator
+            // traffic on the first overflow, this keeps retained payload
+            // storage at the configured queue bound instead of bound + 1.
+            if (oldest.payload.len == payload.len) {
+                @memcpy(oldest.payload, payload);
+                oldest.packet_number = packet_number;
+                self.head = (self.head + 1) % self.slots.items.len;
+                return true;
+            }
+        }
         const owned = blk: {
             for (self.recycled_payloads.items, 0..) |recycled, index| {
                 if (recycled.len == payload.len) {

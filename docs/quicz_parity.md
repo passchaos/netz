@@ -126,6 +126,12 @@ five-sample 1024-byte/window-16 Quinn matrix measured netz p50 at
 at 156.389/183.814 us. The latter remains directional same-application-shape
 evidence, and the large-payload cross-stack gap remains open.
 
+Saturated equal-size receive queues now overwrite the oldest allocation in
+place rather than temporarily retaining a `capacity + 1` payload block through
+the recycle pool. A fail-first allocator test verifies the no-allocation
+overwrite and FIFO order. Nine CPU-0 fixed-binary service-path pairs reduced
+the 1,149-byte DATAGRAM median from 2,811 to 2,774 ns/packet (1.32%, 9/9 wins).
+
 The real-handshake STREAM benchmark now uses zio-backed `std.Io` for every
 mode. Aggregate connection workers share that backend through `std.Io.Group`;
 the public benchmark no longer creates OS-thread or Threaded-I/O fallbacks.

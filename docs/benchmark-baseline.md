@@ -1130,6 +1130,18 @@ reverse fixed-Quinn-client/netz-server comparison moved p50 44.334 to 44.231
 us (0.2%, 3/5 wins), with one noisy candidate p99 tail. These timing results
 are performance-neutral; the supported improvement is the deterministic
 steady-state payload-allocation removal, not a latency claim.
+When an already-full queue receives another payload of the same size, it now
+copies directly into the oldest slot and rotates that slot to the logical tail.
+This removes the former extra recycle allocation, keeping equal-size saturated
+storage at exactly the configured queue capacity. A fail-first allocator test
+locks down the allocation-free overwrite and FIFO order. Nine CPU-0 fixed-
+binary pairs compared
+`94f30fabbea57d0aa5b1a5f9a91e4eedf677be353b2a9cf6b7aab61fdeceb4c6`
+with
+`1a0a233084afcfcd1b7c2a84d559bf1af7edc196edb523996cb14666e1efec70`;
+each arm used 500 warmups and 10,000 measured 54-packet batches with an
+approximately 1,149-byte DATAGRAM payload. Service-path median cost fell from
+2,811 to 2,774 ns/packet (1.32%), with the candidate faster in all nine pairs.
 The connection additionally exposes blocking, relative-timeout, and
 absolute-deadline caller-buffer DATAGRAM receive APIs, including up-to-64-item
 batch forms with exact partial-progress counts. Existing queued data keeps FIFO

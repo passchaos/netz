@@ -276,6 +276,53 @@ test "QUIC DATAGRAM receive queue keeps drop-oldest accounting with recycle" {
     );
 }
 
+test "QUIC DATAGRAM receive queue overwrites full equal-size slot without allocation" {
+    const allocator = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(allocator);
+
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "one",
+        1,
+        2,
+    ));
+    try std.testing.expect(!try queue.pushCopyDroppingOldest(
+        allocator,
+        "two",
+        2,
+        2,
+    ));
+    const oldest_storage = queue.slots.items[queue.head].?.payload.ptr;
+
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expect(try queue.pushCopyDroppingOldest(
+        fail.allocator(),
+        "new",
+        3,
+        2,
+    ));
+    try std.testing.expect(!fail.has_induced_failure);
+    try std.testing.expectEqual(
+        oldest_storage,
+        queue.slots.items[0].?.payload.ptr,
+    );
+    try std.testing.expectEqual(@as(usize, 0), queue.recycled_payloads.items.len);
+
+    var out: [8]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "two",
+        (try queue.popInto(allocator, &out)).?,
+    );
+    try std.testing.expectEqualStrings(
+        "new",
+        (try queue.popInto(allocator, &out)).?,
+    );
+}
+
 test "QUIC DATAGRAM receive queue bounds recycled and owned storage together" {
     const allocator = std.testing.allocator;
     var queue: Queue = .{};
