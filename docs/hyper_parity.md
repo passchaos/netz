@@ -203,9 +203,12 @@ benchmark response:
   of copying the entire batch. The batch-only encoded bytes, descriptor list,
   and iovec list are allocated together on first pipeline use, removing three
   empty containers from ordinary client and server connections while retaining
-  their warmed capacity. Trailer-name descriptors, backing names, and generated
-  `Trailer` values are likewise allocated only for messages that declare or
-  supply trailers. Multi-chunk streaming descriptors and iovecs share one
+  their warmed capacity. Streaming trailer-name descriptors and backing names
+  are likewise allocated only when a writer must retain them through
+  `finishTrailers`; generated `Trailer:` values use 256 stack bytes with an
+  exact temporary fallback. Complete-message trailers therefore create no
+  persistent trailer state, while streaming state falls from 72 to 48 bytes.
+  Multi-chunk streaming descriptors and iovecs share one
   pointer-aligned backing allocation in a 24-byte lazy state, reducing first
   use from three allocations to two while retaining warmed capacity. Each
   hexadecimal chunk header reserves the exact platform maximum (18 bytes on

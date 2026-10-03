@@ -180,10 +180,13 @@ implementation audit and remaining HTTP/1/HTTP/2 evidence are in
 The response-batch encoded bytes, slice list, and offset descriptors now share
 one state allocated on first batch use instead of three empty `ArrayList`s in
 every connection. On 64-bit targets this reduces `runtime_write.Scratch` from
-320 to 256 bytes. Trailer-name descriptors, their backing names, and generated
-`Trailer` field values are independently allocated only when a message declares
-or supplies trailers, reducing the scratch again to 192 bytes. The descriptor
-and iovec views used only by multi-chunk streaming writes now share one
+320 to 256 bytes. Streaming `Trailer` names and their backing bytes are
+independently allocated only when a writer must retain an announcement through
+`finishTrailers`, reducing the scratch again to 192 bytes. The generated
+`Trailer:` value uses a 256-byte stack-first buffer with an exact temporary
+fallback; complete messages therefore create no persistent trailer state, and
+the retained streaming state is 48 rather than 72 bytes. The descriptor and
+iovec views used only by multi-chunk streaming writes now share one
 pointer-aligned backing allocation in a 24-byte state, rather than two backing
 allocations in a 48-byte state. Their per-chunk hexadecimal staging is the
 platform's exact maximum width (18 bytes on 64-bit targets) rather than 32

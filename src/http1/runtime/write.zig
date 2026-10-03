@@ -134,19 +134,87 @@ const BatchScratch = struct {
 const TrailerScratch = struct {
     headers: std.ArrayList(http1.Header) = .empty,
     name_storage: std.ArrayList(u8) = .empty,
-    value: std.ArrayList(u8) = .empty,
 
     fn reset(self: *TrailerScratch) void {
         self.headers.clearRetainingCapacity();
         self.name_storage.clearRetainingCapacity();
-        self.value.clearRetainingCapacity();
     }
 
     fn deinit(self: *TrailerScratch, allocator: std.mem.Allocator) void {
         self.headers.deinit(allocator);
         self.name_storage.deinit(allocator);
-        self.value.deinit(allocator);
         self.* = undefined;
+    }
+};
+
+const trailer_value_staging_capacity = 256;
+
+const TrailerValueScratch = struct {
+    stack: [trailer_value_staging_capacity]u8 = undefined,
+    heap: ?[]u8 = null,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.heap) |bytes| allocator.free(bytes);
+        self.* = undefined;
+    }
+
+    fn render(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        trailers: []const http1.Header,
+    ) Error![]const u8 {
+        std.debug.assert(self.heap == null);
+        var rendered_len: usize = 0;
+        var unique_count: usize = 0;
+        for (trailers, 0..) |trailer, index| {
+            var duplicate = false;
+            for (trailers[0..index]) |prior| {
+                if (trailer.eqlName(prior.name)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            if (unique_count != 0) {
+                rendered_len = std.math.add(
+                    usize,
+                    rendered_len,
+                    2,
+                ) catch return error.InvalidTrailer;
+            }
+            rendered_len = std.math.add(
+                usize,
+                rendered_len,
+                trailer.name.len,
+            ) catch return error.InvalidTrailer;
+            unique_count += 1;
+        }
+
+        const output = if (rendered_len <= self.stack.len)
+            self.stack[0..rendered_len]
+        else blk: {
+            const heap = try allocator.alloc(u8, rendered_len);
+            self.heap = heap;
+            break :blk heap;
+        };
+        var offset: usize = 0;
+        for (trailers, 0..) |trailer, index| {
+            var duplicate = false;
+            for (trailers[0..index]) |prior| {
+                if (trailer.eqlName(prior.name)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+            if (offset != 0) {
+                @memcpy(output[offset..][0..2], ", ");
+                offset += 2;
+            }
+            @memcpy(output[offset..][0..trailer.name.len], trailer.name);
+            offset += trailer.name.len;
+        }
+        return output[0..offset];
     }
 };
 
@@ -463,6 +531,8 @@ fn prepareStreamingRequest(
     );
 
     var content_length: [content_length_buffer_len]u8 = undefined;
+    var trailer_value: TrailerValueScratch = .{};
+    defer trailer_value.deinit(allocator);
     try appendDefaultedHeadersInPlace(
         &headers,
         allocator,
@@ -475,7 +545,7 @@ fn prepareStreamingRequest(
             trailer_headers,
         ),
         &content_length,
-        scratch,
+        &trailer_value,
         null,
     );
     try encodeRequestHead(allocator, options, headers.items, scratch);
@@ -644,6 +714,8 @@ fn prepareStreamingResponseWithDefaultDate(
     else
         options.body_length orelse declared_length orelse 0;
     var content_length: [content_length_buffer_len]u8 = undefined;
+    var trailer_value: TrailerValueScratch = .{};
+    defer trailer_value.deinit(allocator);
     try appendDefaultedHeaders(
         &headers,
         allocator,
@@ -659,7 +731,7 @@ fn prepareStreamingResponseWithDefaultDate(
             options.request_method,
         ),
         &content_length,
-        scratch,
+        &trailer_value,
         if (responseStatusIsFinal(options.status)) default_date else null,
     );
     try encodeStreamingResponseHead(
@@ -1582,6 +1654,8 @@ pub fn prepareRequest(
     );
 
     var content_length: [content_length_buffer_len]u8 = undefined;
+    var trailer_value: TrailerValueScratch = .{};
+    defer trailer_value.deinit(allocator);
     try appendDefaultedHeadersInPlace(
         &headers,
         allocator,
@@ -1594,7 +1668,7 @@ pub fn prepareRequest(
             options.trailers,
         ),
         &content_length,
-        scratch,
+        &trailer_value,
         null,
     );
 
@@ -1726,9 +1800,6 @@ fn prepareResponsePartsWithDefaultDate(
     );
     for (responses) |response| {
         scratch.encoded.clearRetainingCapacity();
-        if (scratch.trailers) |trailers| {
-            trailers.value.clearRetainingCapacity();
-        }
 
         const framing = try prepareResponseFramingAndHead(
             allocator,
@@ -2044,7 +2115,7 @@ test "HTTP/1 write scratch allocates multi-chunk state lazily" {
 test "HTTP/1 write scratch allocates trailer state only when requested" {
     const allocator = std.testing.allocator;
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 72), @sizeOf(TrailerScratch));
+        try std.testing.expectEqual(@as(usize, 48), @sizeOf(TrailerScratch));
         try std.testing.expectEqual(
             @as(usize, 8),
             @sizeOf(@FieldType(Scratch, "trailers")),
@@ -2056,6 +2127,19 @@ test "HTTP/1 write scratch allocates trailer state only when requested" {
     _ = try prepareRequest(allocator, .{
         .host = "localhost",
     }, &scratch);
+    try std.testing.expect(scratch.trailers == null);
+
+    const complete = try prepareRequest(allocator, .{
+        .method = .POST,
+        .host = "localhost",
+        .body = "body",
+        .trailers = &.{.{ .name = "Digest", .value = "sha-256=value" }},
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        complete.header,
+        "Trailer: Digest\r\n",
+    ) != null);
     try std.testing.expect(scratch.trailers == null);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{
@@ -2090,6 +2174,76 @@ test "HTTP/1 write scratch allocates trailer state only when requested" {
     );
     try std.testing.expectEqual(StreamingFraming.chunked, warmed.framing);
     try std.testing.expect(!no_alloc.has_induced_failure);
+}
+
+test "HTTP/1 Trailer value staging uses stack and exact fallback" {
+    const allocator = std.testing.allocator;
+    var value: TrailerValueScratch = .{};
+    defer value.deinit(allocator);
+
+    var no_alloc = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    const common = try value.render(no_alloc.allocator(), &.{
+        .{ .name = "Digest", .value = "one" },
+        .{ .name = "digest", .value = "two" },
+        .{ .name = "X-Complete", .value = "yes" },
+    });
+    try std.testing.expectEqualStrings("Digest, X-Complete", common);
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    var long_name: [trailer_value_staging_capacity + 1]u8 = undefined;
+    @memset(&long_name, 'x');
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = 0,
+    });
+    var failed_value: TrailerValueScratch = .{};
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failed_value.render(failing.allocator(), &.{.{
+            .name = &long_name,
+            .value = "value",
+        }}),
+    );
+    try std.testing.expect(failed_value.heap == null);
+
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    var overflow_value: TrailerValueScratch = .{};
+    const overflow = try overflow_value.render(
+        tracking.allocator(),
+        &.{.{ .name = &long_name, .value = "value" }},
+    );
+    try std.testing.expectEqualStrings(&long_name, overflow);
+    try std.testing.expectEqual(@as(usize, 1), tracking.allocations);
+    overflow_value.deinit(tracking.allocator());
+    try std.testing.expectEqual(@as(usize, 1), tracking.deallocations);
+}
+
+test "HTTP/1 complete trailers need no persistent trailer scratch" {
+    var tracking = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    const allocator = tracking.allocator();
+    var scratch = Scratch{};
+    defer scratch.deinit(allocator);
+
+    const request = try prepareRequest(allocator, .{
+        .method = .POST,
+        .host = "example.test",
+        .body = "body",
+        .trailers = &.{.{ .name = "Digest", .value = "sha-256=value" }},
+    }, &scratch);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        request.header,
+        "Trailer: Digest\r\n",
+    ) != null);
+    try std.testing.expect(scratch.trailers == null);
+    try std.testing.expectEqual(
+        tracking.deallocations + 1,
+        tracking.allocations,
+    );
 }
 
 test "HTTP/1 warmed response batch reuses lazy scratch" {
@@ -2185,6 +2339,8 @@ fn prepareResponseFramingAndHead(
     );
     var headers = std.ArrayList(http1.Header).initBuffer(headers_buffer);
     var content_length: [content_length_buffer_len]u8 = undefined;
+    var trailer_value: TrailerValueScratch = .{};
+    defer trailer_value.deinit(allocator);
     try appendDefaultedHeaders(
         &headers,
         allocator,
@@ -2197,7 +2353,7 @@ fn prepareResponseFramingAndHead(
             options.request_method,
         ),
         &content_length,
-        scratch,
+        &trailer_value,
         default_date,
     );
     try encodeResponseHead(allocator, options, headers.items, scratch);
@@ -2422,7 +2578,7 @@ fn appendMissingDefaultedHeadersAssumeCapacity(
     use_chunked: bool,
     add_default_content_length: bool,
     len_buf: *[content_length_buffer_len]u8,
-    scratch: *Scratch,
+    trailer_value: *TrailerValueScratch,
     default_date: ?[]const u8,
     presence: DefaultedHeaderPresence,
 ) Error!void {
@@ -2434,15 +2590,9 @@ fn appendMissingDefaultedHeadersAssumeCapacity(
             });
         }
         if (trailers.len != 0 and !presence.trailer) {
-            const trailer_scratch = try scratch.trailerScratch(allocator);
-            try renderTrailerHeaderValue(
-                &trailer_scratch.value,
-                allocator,
-                trailers,
-            );
             list.appendAssumeCapacity(.{
                 .name = "Trailer",
-                .value = trailer_scratch.value.items,
+                .value = try trailer_value.render(allocator, trailers),
             });
         }
     } else if (add_default_content_length and !presence.content_length) {
@@ -2472,7 +2622,7 @@ fn appendDefaultedHeaders(
     use_chunked: bool,
     add_default_content_length: bool,
     len_buf: *[content_length_buffer_len]u8,
-    scratch: *Scratch,
+    trailer_value: *TrailerValueScratch,
     default_date: ?[]const u8,
 ) Error!void {
     if (!use_chunked and trailers.len != 0) return error.InvalidTrailer;
@@ -2490,7 +2640,7 @@ fn appendDefaultedHeaders(
         use_chunked,
         add_default_content_length,
         len_buf,
-        scratch,
+        trailer_value,
         default_date,
         presence,
     );
@@ -2504,7 +2654,7 @@ fn appendDefaultedHeadersInPlace(
     use_chunked: bool,
     add_default_content_length: bool,
     len_buf: *[content_length_buffer_len]u8,
-    scratch: *Scratch,
+    trailer_value: *TrailerValueScratch,
     default_date: ?[]const u8,
 ) Error!void {
     // Request validation has finished, so the normalized descriptor list can
@@ -2527,7 +2677,7 @@ fn appendDefaultedHeadersInPlace(
         use_chunked,
         add_default_content_length,
         len_buf,
-        scratch,
+        trailer_value,
         default_date,
         presence,
     );
@@ -2661,53 +2811,6 @@ fn chunkedWriteFraming(
     if (trailers.len == 0 and !hasHeader(headers, "trailer")) return false;
     if (version == .http_1_0) return error.InvalidVersion;
     return true;
-}
-
-fn renderTrailerHeaderValue(
-    value: *std.ArrayList(u8),
-    allocator: std.mem.Allocator,
-    trailers: []const http1.Header,
-) Error!void {
-    value.clearRetainingCapacity();
-    var rendered_len: usize = 0;
-    var unique_count: usize = 0;
-    for (trailers, 0..) |trailer, index| {
-        var duplicate = false;
-        for (trailers[0..index]) |prior| {
-            if (trailer.eqlName(prior.name)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        if (unique_count != 0) {
-            rendered_len = std.math.add(
-                usize,
-                rendered_len,
-                2,
-            ) catch return error.InvalidTrailer;
-        }
-        rendered_len = std.math.add(
-            usize,
-            rendered_len,
-            trailer.name.len,
-        ) catch return error.InvalidTrailer;
-        unique_count += 1;
-    }
-    try value.ensureUnusedCapacity(allocator, rendered_len);
-
-    for (trailers, 0..) |trailer, index| {
-        var duplicate = false;
-        for (trailers[0..index]) |prior| {
-            if (trailer.eqlName(prior.name)) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) continue;
-        if (value.items.len != 0) value.appendSliceAssumeCapacity(", ");
-        value.appendSliceAssumeCapacity(trailer.name);
-    }
 }
 
 fn appendDecimal(
