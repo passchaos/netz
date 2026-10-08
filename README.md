@@ -1784,8 +1784,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
 - QUIC AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305, and SM4-GCM short-packet
   sealing with caller-provided storage versus the allocating convenience
   wrapper, plus connection-lifetime pure-Zig AES-GCM and header-key contexts
-  that avoid per-packet key/GHASH setup, use four-way scheduled products in
-  16-block PMULL reduction on capable ARM64 targets, and refresh on key updates,
+  that avoid per-packet key/GHASH setup, keep byte-reversed blocks, cached
+  powers, and four-way scheduled products in NEON registers during 16-block
+  PMULL reduction on capable ARM64 targets, and refresh on key updates,
 - bounded QUIC DATAGRAM receive queuing in an O(1) ring under
   `quic/one_rtt/datagram_queue.zig`, with exact one-time capacity reservation,
   direct full-queue reuse for equal-size payloads, a capacity-bounded

@@ -136,6 +136,21 @@ fixed Quinn/netz servers and Quinn-client p50 at 139.089/166.441 us. Those
 same-application-shape ratios are 0.851x/0.878x, so the remaining large-payload
 packet-protection/event-loop gap is still open.
 
+Vail `bd821ba` subsequently kept the byte-reversed blocks, cached powers, and
+four-way products in NEON registers throughout PMULL accumulation. Nine clean
+CPU-0 fixed-binary pairs reduced the 1,149-byte state-service path from 2,641
+to 2,565 ns/packet (2.88%, 9/9 wins), and seven caller-buffer delivery pairs
+moved from 2,681 to 2,618 ns/packet (2.35%, 7/7 wins). The benchmark ELF
+`.text` grew by 252 bytes. Vail's 1,200-byte AES-128-GCM microbenchmark
+independently reduced seal/open-plus-seal by 10.34%/10.12%, with all seven
+pairs faster.
+
+The following five-sample Quinn matrix with published Vail `cfe6e33` measured
+netz-client p50 at 162.155/186.674 us against fixed Quinn/netz servers and
+Quinn-client p50 at 136.932/164.674 us. Its 0.844x/0.882x ratios moved in
+opposite directions from the preceding capture, so no cross-process latency
+gain is claimed from this separately packetized comparison.
+
 Saturated equal-size receive queues now overwrite the oldest allocation in
 place rather than temporarily retaining a `capacity + 1` payload block through
 the recycle pool. A fail-first allocator test verifies the no-allocation

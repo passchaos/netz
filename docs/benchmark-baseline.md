@@ -1391,6 +1391,29 @@ the corresponding Quinn-client medians were 139.089 and 166.441 us. The ratios
 remain 0.851x and 0.878x, so this separately packetized cross-stack gap remains
 open and is not used as causal evidence for the GHASH change.
 
+Vail `bd821ba` then kept byte-reversed message blocks, cached powers, and
+unreduced GHASH products in two-lane NEON values throughout the PMULL loop,
+removing repeated scalar loads/reversals and general/SIMD-register transfers.
+Seven clean CPU-0 fixed-binary pairs reduced the 1,200-byte AES-128-GCM seal
+median from 851 to 763 ns/op (10.34%) and combined open plus seal from 1,699 to
+1,527 ns/op (10.12%), with every pair faster. Nine corresponding netz
+state-service pairs reduced 1,149-byte DATAGRAM receive from 2,641 to 2,565
+ns/packet (2.88%, 9/9 wins), while seven caller-buffer delivery pairs moved
+from 2,681 to 2,618 ns/packet (2.35%, 7/7 wins). The receive benchmark's ELF
+`.text` increased by 252 bytes. Baseline/candidate netz hashes were
+`270ea2e206430f27a53babf8ee6d590d720f5b1c2e5aacecb30ff000e0cdf687`
+and `cce686dfd90cbb5a31d05b97650398f356814f536319abf6c600f49999348f45`;
+Vail binary hashes were
+`d4790dc20fb2824ec1ca0ef8bab4afda054f5d420db0593f78be5ba9b7e65428`
+and `cc60e806dc7132be2630a834eef4cd9c68dcd490a23f10c3fa32bea857b201cc`.
+
+The subsequent five-sample Quinn matrix with published Vail `cfe6e33` measured
+netz-client p50 at 162.155/186.674 us against fixed Quinn/netz servers and
+Quinn-client p50 at 136.932/164.674 us. The corresponding 0.844x/0.882x ratios
+move in opposite directions from the preceding 0.851x/0.878x capture, so no
+cross-process latency gain is attributed to the change; the fixed-binary
+in-process reductions above remain the causal evidence.
+
 The new connection-level suite test passes a FIN-terminated single STREAM and a
 second STREAM after a key-phase update through `Connection.receivePacket` for
 AES-128-GCM/SHA-256, AES-256-GCM/SHA-384, ChaCha20-Poly1305/SHA-256, and
