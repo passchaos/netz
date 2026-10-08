@@ -94,8 +94,8 @@ HTTP content-coding benchmark
   io backend: zio-std-io
   coding: gzip, iterations: 50000
   payload: 4096 bytes, encoded: 80 bytes
-  caller-buffer decode: 2815-2828 ns/representation, median 2820 ns
-  incremental decode: 4648-4691 ns/representation, median 4664 ns
+  caller-buffer decode: 2087-2103 ns/representation, median 2092 ns
+  incremental decode: 3955-3963 ns/representation, median 3959 ns
   incremental decoder state: 72 bytes
   checksum: 9953158
 ```
@@ -117,12 +117,12 @@ only the selected codec implementation, so gzip/deflate users do not carry the
 largest Zstandard decoder inline. Vort's raw incremental decoder now returns an
 exact compressed prefix at EOB, allowing gzip/zlib wrappers to batch input while
 retaining footer ownership; bounded Huffman prefix tables and span-based match
-replay reduce the prior 85,330 ns incremental median to 4,664 ns (`18.30x`, or
-94.53% lower). The whole-body median remained effectively flat at 2,850 ns
-before and 2,820 ns after. Five CPU-0 samples against Vort `85f5b614` establish
-this in-repository A/B. Vort's separate same-frame comparison against system
-zlib 1.3 measured a `1.342x` full-buffer geometric-mean latency ratio and a
-`0.996x` fragmented-input/output ratio across HTTP-like, JSON, and binary
+replay reduce the prior 85,330 ns incremental median to 3,959 ns (`21.55x`, or
+95.36% lower). ARM CRC32 dispatch also moves the whole-body median from 2,850 ns
+to 2,092 ns. Five CPU-0 samples against Vort `571bae21` establish this
+in-repository A/B. Vort's separate same-frame comparison against system
+zlib 1.3 measured a `0.719x` full-buffer geometric-mean latency ratio and a
+`0.581x` fragmented-input/output ratio across HTTP-like, JSON, and binary
 workloads; these are scoped internal comparisons, not a broad industry claim.
 
 ### HTTP/1 persistent 16-request pipeline
