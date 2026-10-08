@@ -1319,12 +1319,12 @@ applying TCP-only socket options.
    labeled rather than being combined into one ratio.
    HTTP/1, RFC 8441, and RFC 9220 connection state now store their mutually
    exclusive resumable application message, Ping, and Close transactions in
-   one shared tagged-union design. On 64-bit targets this reduces
-   `runtime.Connection` from 1,968 to 1,568 bytes and `runtime.H2Connection`
-   from 2,000 to 1,600 bytes: 400 bytes less fixed state for every live H1
-   connection or H2 WebSocket tunnel (20.3% and 20.0%, respectively). The H3
+   one shared tagged-union design. With the obsolete Zig-flate receive window
+   removed, `runtime.Connection` falls from 1,968 to 1,536 bytes and
+   `runtime.H2Connection` from 2,000 to 1,568 bytes: 432 bytes less fixed state
+   for every live H1 connection or RFC 8441 tunnel (22.0% and 21.6%). The H3
    client/server connection types likewise fall from 18,944/18,352 to
-   18,544/17,952 bytes, saving 400 bytes per RFC 9220 tunnel (2.1%/2.2%).
+   18,512/17,920 bytes, saving 432 bytes per RFC 9220 tunnel (2.3%/2.4%).
    Automatic Pong/Close state remains separate because a receive owner may
    queue it behind an older application write. Layout assertions and the
    existing exact-suffix, queued-auto-Pong, control-frame, and fatal-cleanup

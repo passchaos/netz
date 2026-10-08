@@ -6569,7 +6569,7 @@ pub const Connection = struct {
 test "WebSocket HTTP/1 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
-        try std.testing.expectEqual(@as(usize, 1568), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 1536), @sizeOf(Connection));
     }
 }
 
@@ -9604,7 +9604,7 @@ pub const H2Connection = struct {
 test "WebSocket RFC 8441 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingH2Write));
-        try std.testing.expectEqual(@as(usize, 1600), @sizeOf(H2Connection));
+        try std.testing.expectEqual(@as(usize, 1568), @sizeOf(H2Connection));
     }
 }
 

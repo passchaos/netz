@@ -6566,13 +6566,14 @@ separately.
 The HTTP/1, RFC 8441, and RFC 9220 WebSocket connection layouts now overlay
 their mutually exclusive resumable application message, Ping, and Close state
 in one shared tagged-union design while keeping automatic Pong/Close state
-independent for receive/write races. On 64-bit targets `runtime.Connection` is
-1,568 bytes, down from 1,968 bytes, and `runtime.H2Connection` is 1,600 bytes,
-down from 2,000 bytes. Each saves 400 bytes of fixed state per live H1
-connection or H2 WebSocket tunnel (20.3% and 20.0%, respectively); the H1
-reduction is 51,200 bytes across the 128-connection shape above. H3 client and
-server connections fall from 18,944/18,352 to 18,544/17,952 bytes, saving the
-same 400 bytes per RFC 9220 tunnel (2.1%/2.2%). Compile-time-sensitive unit
+independent for receive/write races. After the Vort decoder removed the
+obsolete Zig-flate window, 64-bit `runtime.Connection` is 1,536 bytes, down
+from 1,968 bytes, and `runtime.H2Connection` is 1,568 bytes, down from 2,000
+bytes. Each saves 432 bytes of fixed state per live H1 connection or H2
+WebSocket tunnel (22.0% and 21.6%, respectively); the H1 reduction is 55,296
+bytes across the 128-connection shape above. H3 client and server connections
+fall from 18,944/18,352 to 18,512/17,920 bytes, saving the same 432 bytes per
+RFC 9220 tunnel (2.3%/2.4%). Compile-time-sensitive unit
 assertions fix all four layouts, and the bounded
 message/control/queued-auto-Pong regressions cover every variant. This
 stack/inline-state reduction is separate from the benchmark's explicit

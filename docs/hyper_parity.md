@@ -1897,9 +1897,10 @@ sibling reuse, and connection-error precedence.
    RFC 8441's mutually exclusive resumable application message, Ping, and Close
    transactions now share one 296-byte tagged union. Automatic Pong/Close stays
    independent because the receive owner can queue it behind an older
-   application write. On 64-bit targets this reduces each `H2Connection` from
-   2,000 to 1,600 bytes (20.0%) without narrowing payload, cursor, or control
-   state. A layout assertion plus the existing partial-DATA, queued-auto-Pong,
+   application write. Removing the obsolete Zig-flate receive window after
+   the Vort migration reduces each 64-bit `H2Connection` from 2,000 to 1,568
+   bytes (21.6%) without narrowing payload, cursor, or control state. A layout
+   assertion plus the existing partial-DATA, queued-auto-Pong,
    close-FIN, and fatal-reset regressions guard the new representation. The
    bidirectional Hyper h2c/TLS RFC 8441 gate was reconfirmed after this change
    on 2026-10-02, including fragmented text, Ping/Pong, bounded Close, TLS

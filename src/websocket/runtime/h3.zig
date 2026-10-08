@@ -5882,8 +5882,8 @@ fn compressedFragmentRange(
 test "WebSocket RFC 9220 connections keep resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
-        try std.testing.expectEqual(@as(usize, 18_544), @sizeOf(ClientConnection));
-        try std.testing.expectEqual(@as(usize, 17_952), @sizeOf(ServerConnection));
+        try std.testing.expectEqual(@as(usize, 18_512), @sizeOf(ClientConnection));
+        try std.testing.expectEqual(@as(usize, 17_920), @sizeOf(ServerConnection));
     }
 }
 
