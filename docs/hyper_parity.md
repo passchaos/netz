@@ -1012,6 +1012,10 @@ Zstandard through Vort. Allocating and two-workspace caller-buffer variants
 apply the decoded-size ceiling to every intermediate layer. The helper leaves
 wire headers and encoded response ownership unchanged, avoiding the hidden
 automatic-transform semantics that often complicate pooling and cache logic.
+Single-layer streaming decoders report exact consumed/produced prefixes under
+arbitrary input fragmentation and output backpressure, enforce independent
+encoded/decoded byte ceilings, and require explicit EOF finalization so
+truncation cannot be mistaken for a temporarily incomplete body.
 
 ## Current feature comparison
 

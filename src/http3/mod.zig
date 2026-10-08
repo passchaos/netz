@@ -3707,6 +3707,17 @@ pub const DecodedResponseHead = struct {
     consumed: usize,
     qpack_section_acknowledgments: usize,
 
+    pub fn streamContentDecoder(
+        self: DecodedResponseHead,
+        allocator: std.mem.Allocator,
+        options: content_coding.StreamOptions,
+    ) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+            allocator,
+            options,
+        );
+    }
+
     pub fn deinit(
         self: *DecodedResponseHead,
         allocator: std.mem.Allocator,

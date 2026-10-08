@@ -257,6 +257,8 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz, "http"));
     try std.testing.expect(@hasDecl(netz.http, "ContentCoding"));
     try std.testing.expect(@hasDecl(netz.http, "ContentCodingChain"));
+    try std.testing.expect(@hasDecl(netz.http, "ContentStreamDecoder"));
+    try std.testing.expect(@hasDecl(netz.http, "ContentStreamOptions"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));
     try std.testing.expect(@hasDecl(netz.tls, "client_ca_file"));
@@ -9432,4 +9434,39 @@ test "HTTP response types expose shared content decoding" {
         netz.http.ContentCoding.identity,
         (try h3.contentEncoding()).items()[0],
     );
+
+    var h1_stream = try (netz.http1.runtime.StreamingResponseHead{
+        .version = .http_1_1,
+        .status = 200,
+        .reason = "OK",
+        .headers = &h1_headers,
+        .body_framing = .content_length,
+        .content_length = body.len,
+    }).streamContentDecoder(allocator, .{
+        .max_encoded_bytes = body.len,
+        .max_decoded_bytes = body.len,
+    });
+    defer h1_stream.deinit();
+
+    var h2_stream = try (netz.http2.runtime.StreamingResponseHead{
+        .headers = &h2_headers,
+        .status = 200,
+    }).streamContentDecoder(allocator, .{
+        .max_encoded_bytes = body.len,
+        .max_decoded_bytes = body.len,
+    });
+    defer h2_stream.deinit();
+
+    var h3_stream = try (netz.http3.DecodedResponseHead{
+        .status = 200,
+        .headers = &h3_headers,
+        .content_length = body.len,
+        .body_allowed = true,
+        .consumed = 0,
+        .qpack_section_acknowledgments = 0,
+    }).streamContentDecoder(allocator, .{
+        .max_encoded_bytes = body.len,
+        .max_decoded_bytes = body.len,
+    });
+    defer h3_stream.deinit();
 }

@@ -176,6 +176,15 @@ pub fn Reader(comptime RuntimeError: type) type {
             headers: []const http1.Header,
             body_framing: http1.BodyFraming,
             content_length: ?usize,
+
+            pub fn streamContentDecoder(
+                self: ResponseHead,
+                allocator: std.mem.Allocator,
+                options: http1.content_coding.StreamOptions,
+            ) http1.content_coding.Error!http1.content_coding.StreamDecoder {
+                return (try http1.content_coding.parseHeaders(self.headers))
+                    .streamDecoder(allocator, options);
+            }
         };
 
         const Trailers = struct {

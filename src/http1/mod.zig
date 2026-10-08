@@ -1,7 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
-const content_coding = @import("../http/content_coding.zig");
+pub const content_coding = @import("../http/content_coding.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const client_pool = @import("client_pool.zig");
@@ -333,6 +333,17 @@ pub const ResponseHead = struct {
 
     pub fn header(self: ResponseHead, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
+    }
+
+    pub fn streamContentDecoder(
+        self: ResponseHead,
+        allocator: std.mem.Allocator,
+        options: content_coding.StreamOptions,
+    ) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+            allocator,
+            options,
+        );
     }
 
     pub fn messageLength(self: ResponseHead) Error!?usize {

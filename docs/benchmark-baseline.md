@@ -92,10 +92,12 @@ guard for the shared vail record stream, not a cross-library performance claim.
 ```text
 HTTP content-coding benchmark
   io backend: zio-std-io
-  coding: gzip, iterations: 200000
+  coding: gzip, iterations: 50000
   payload: 4096 bytes, encoded: 80 bytes
-  caller-buffer decode: 2842-2872 ns/representation, median 2854 ns
-  checksum: 19906154
+  caller-buffer decode: 2833-2854 ns/representation, median 2850 ns
+  incremental decode: 85230-85407 ns/representation, median 85330 ns
+  incremental decoder state: 72 bytes
+  checksum: 9953158
 ```
 
 The shared `netz.http.content_coding` layer parses repeated and comma-combined
@@ -106,8 +108,17 @@ Every intermediate representation is independently bounded, so stacking does
 not bypass the caller's decompression limit. The implementation uses Vort for
 gzip, RFC 1950 `deflate`, Brotli, and Zstandard; gzip and Zstandard accept
 concatenated frames while single-stream formats reject trailing bytes. The
-five CPU-0 samples above retain both host-load outliers and establish the first
-in-repository baseline rather than a cross-library comparison.
+single-layer incremental API adds an independent encoded-input ceiling, exact
+successful-step progress, explicit EOF validation, reusable state, and
+response-head constructors for every HTTP version. Stacked encodings remain on
+the bounded whole-body APIs because composing their backpressure requires an
+intermediate representation. The tagged outer state is 72 bytes and allocates
+only the selected codec implementation, so gzip/deflate users do not carry the
+largest Zstandard decoder inline. Five CPU-0 samples above establish the first
+in-repository baseline rather than a cross-library comparison. Vort's current
+gzip incremental wrapper intentionally advances raw input byte by byte to keep
+the footer outside DEFLATE lookahead, so its substantial gap to the one-shot
+path remains visible as the next decoder optimization target.
 
 ### HTTP/1 persistent 16-request pipeline
 

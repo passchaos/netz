@@ -78,5 +78,55 @@ fn exercise(bytes: []const u8) !void {
         if (chain.decodeInto(bytes, &output, &scratch)) |decoded| {
             try std.testing.expect(decoded.len <= output.len);
         } else |_| {}
+        try exerciseStream(coding, bytes);
     }
+}
+
+fn exerciseStream(
+    coding: netz.http.ContentCoding,
+    bytes: []const u8,
+) !void {
+    var decoder = try netz.http.content_coding.StreamDecoder.init(
+        std.testing.allocator,
+        coding,
+        .{
+            .max_encoded_bytes = bytes.len,
+            .max_decoded_bytes = max_output_bytes,
+        },
+    );
+    defer decoder.deinit();
+    var output: [31]u8 = undefined;
+    var input_offset: usize = 0;
+    var turns: usize = 0;
+    while (input_offset < bytes.len) {
+        const result = decoder.step(
+            bytes[input_offset..],
+            &output,
+        ) catch return;
+        try std.testing.expect(result.input_read <= bytes.len - input_offset);
+        try std.testing.expect(result.output_written <= output.len);
+        input_offset += result.input_read;
+        turns += 1;
+        try std.testing.expect(turns <= bytes.len + max_output_bytes + 1);
+        if (result.status == .done) continue;
+        try std.testing.expect(
+            result.input_read != 0 or result.output_written != 0,
+        );
+    }
+    while (!decoder.finished()) {
+        const result = decoder.finish(&output) catch return;
+        try std.testing.expectEqual(@as(usize, 0), result.input_read);
+        try std.testing.expect(result.output_written <= output.len);
+        turns += 1;
+        try std.testing.expect(turns <= bytes.len + max_output_bytes + 2);
+        if (result.status == .done) break;
+        try std.testing.expectEqual(
+            netz.http.content_coding.StreamStatus.need_output,
+            result.status,
+        );
+        try std.testing.expect(result.output_written != 0);
+    }
+    try std.testing.expect(
+        decoder.totalOutputWritten() <= max_output_bytes,
+    );
 }

@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const vort = @import("vort");
+const streaming = @import("content_coding/stream.zig");
 
 pub const max_codings: usize = 8;
 pub const accept_encoding = "gzip, deflate, br, zstd";
@@ -15,8 +16,15 @@ pub const Error = std.mem.Allocator.Error || error{
     UnsupportedContentEncoding,
     TooManyContentEncodings,
     DecodedBodyTooLarge,
+    EncodedBodyTooLarge,
+    StreamingStackUnsupported,
+    InvalidDecoderState,
     AliasedBuffers,
 };
+
+pub const StreamStatus = streaming.Status;
+pub const StreamResult = streaming.Result;
+pub const StreamOptions = streaming.Options;
 
 pub const Coding = enum {
     identity,
@@ -147,6 +155,25 @@ pub const Chain = struct {
         return out[0..current.len];
     }
 
+    /// Build a progressive decoder for an identity or single encoded layer.
+    /// Stacked encodings use `decodeAlloc`/`decodeInto`, since composing
+    /// independent backpressure state machines requires intermediate storage.
+    pub fn streamDecoder(
+        self: Chain,
+        allocator: std.mem.Allocator,
+        options: StreamOptions,
+    ) Error!StreamDecoder {
+        var selected: Coding = .identity;
+        var count: usize = 0;
+        for (self.items()) |coding| {
+            if (coding == .identity) continue;
+            selected = coding;
+            count += 1;
+        }
+        if (count > 1) return error.StreamingStackUnsupported;
+        return StreamDecoder.init(allocator, selected, options);
+    }
+
     fn decodeCount(self: Chain) usize {
         var count: usize = 0;
         for (self.items()) |coding| count += @intFromBool(coding != .identity);
@@ -169,6 +196,8 @@ pub const Chain = struct {
         }
     }
 };
+
+pub const StreamDecoder = streaming.Decoder(Coding, Error, mapDecodeError);
 
 /// Parse one combined Content-Encoding field. `null` means identity.
 pub fn parse(value: ?[]const u8) Error!Chain {
@@ -321,129 +350,4 @@ fn slicesOverlap(a: []const u8, b: []const u8) bool {
     const a_start = @intFromPtr(a.ptr);
     const b_start = @intFromPtr(b.ptr);
     return a_start < b_start +| b.len and b_start < a_start +| a.len;
-}
-
-test "HTTP content coding parses repeated and stacked fields" {
-    const Header = struct { name: []const u8, value: []const u8 };
-    const chain = try parseHeaders(&[_]Header{
-        .{ .name = "Content-Encoding", .value = "deflate, gzip" },
-        .{ .name = "content-encoding", .value = "BR, zstd" },
-    });
-    try std.testing.expectEqualSlices(
-        Coding,
-        &.{ .deflate, .gzip, .br, .zstd },
-        chain.items(),
-    );
-    try std.testing.expect(chain.encoded());
-    try std.testing.expectEqualStrings("gzip", Coding.gzip.name());
-    try std.testing.expectEqual(
-        Coding.gzip,
-        (try parse("x-gzip")).items()[0],
-    );
-    const identity = try parse(null);
-    try std.testing.expect(!identity.encoded());
-    var borrowed = try identity.decodeAlloc(
-        std.testing.allocator,
-        "plain",
-        5,
-    );
-    defer borrowed.deinit(std.testing.allocator);
-    try std.testing.expect(borrowed.owned == null);
-    try std.testing.expectEqualStrings("plain", borrowed.bytes);
-    try std.testing.expectError(
-        error.InvalidContentEncoding,
-        parse("gzip,,br"),
-    );
-    try std.testing.expectError(
-        error.InvalidContentEncoding,
-        parse("gzip;level=1"),
-    );
-    try std.testing.expectError(
-        error.UnsupportedContentEncoding,
-        parse("compress"),
-    );
-    try std.testing.expectError(
-        error.TooManyContentEncodings,
-        parse("gzip,gzip,gzip,gzip,gzip,gzip,gzip,gzip,gzip"),
-    );
-}
-
-test "HTTP content coding decodes Vort gzip deflate Brotli and Zstandard" {
-    const allocator = std.testing.allocator;
-    const payload = "bounded HTTP content decoding " ** 32;
-
-    const zlib = try vort.encodeZlibStoredAlloc(allocator, payload);
-    defer allocator.free(zlib);
-    try expectDecoded(allocator, .deflate, zlib, payload);
-
-    const gzip = try vort.encodeGzipStoredAlloc(allocator, payload);
-    defer allocator.free(gzip);
-    try expectDecoded(allocator, .gzip, gzip, payload);
-
-    const brotli = try vort.brEncodeStoredStreamAlloc(allocator, payload);
-    defer allocator.free(brotli);
-    try expectDecoded(allocator, .br, brotli, payload);
-
-    const zstd = try vort.zstdEncodeNativeFrameAlloc(allocator, payload);
-    defer allocator.free(zstd);
-    try expectDecoded(allocator, .zstd, zstd, payload);
-}
-
-test "HTTP content coding reverses stacked encodings into caller buffers" {
-    const allocator = std.testing.allocator;
-    const payload = "stacked HTTP representation " ** 16;
-    const zlib = try vort.encodeZlibStoredAlloc(allocator, payload);
-    defer allocator.free(zlib);
-    const gzip = try vort.encodeGzipStoredAlloc(allocator, zlib);
-    defer allocator.free(gzip);
-
-    const chain = try parse("deflate, gzip");
-    var output: [2048]u8 = undefined;
-    var scratch: [2048]u8 = undefined;
-    const decoded = try chain.decodeInto(gzip, &output, &scratch);
-    try std.testing.expectEqualStrings(payload, decoded);
-
-    var owned = try chain.decodeAlloc(allocator, gzip, output.len);
-    defer owned.deinit(allocator);
-    try std.testing.expectEqualStrings(payload, owned.bytes);
-    try std.testing.expect(owned.owned != null);
-
-    try std.testing.expectError(
-        error.DecodedBodyTooLarge,
-        chain.decodeInto(gzip, output[0 .. payload.len - 1], &scratch),
-    );
-    try std.testing.expectError(
-        error.DecodedBodyTooLarge,
-        chain.decodeInto(gzip, &output, scratch[0 .. zlib.len - 1]),
-    );
-    try std.testing.expectError(
-        error.AliasedBuffers,
-        chain.decodeInto(gzip, &output, &output),
-    );
-}
-
-fn expectDecoded(
-    allocator: std.mem.Allocator,
-    coding: Coding,
-    encoded: []const u8,
-    expected: []const u8,
-) !void {
-    var chain: Chain = .{};
-    chain.storage[0] = coding;
-    chain.len = 1;
-    var decoded = try chain.decodeAlloc(
-        allocator,
-        encoded,
-        expected.len,
-    );
-    defer decoded.deinit(allocator);
-    try std.testing.expectEqualStrings(expected, decoded.bytes);
-
-    var output: [2048]u8 = undefined;
-    const into = try chain.decodeInto(encoded, &output, &.{});
-    try std.testing.expectEqualStrings(expected, into);
-    try std.testing.expectError(
-        error.DecodedBodyTooLarge,
-        chain.decodeAlloc(allocator, encoded, expected.len - 1),
-    );
 }

@@ -15389,6 +15389,17 @@ pub const StreamingResponse = struct {
 pub const StreamingResponseHead = struct {
     headers: []const http2.Hpack.HeaderField,
     status: u16,
+
+    pub fn streamContentDecoder(
+        self: StreamingResponseHead,
+        allocator: std.mem.Allocator,
+        options: content_coding.StreamOptions,
+    ) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+            allocator,
+            options,
+        );
+    }
 };
 
 pub const InformationalObserver = struct {
