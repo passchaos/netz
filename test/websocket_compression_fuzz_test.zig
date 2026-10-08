@@ -103,12 +103,10 @@ fn exerciseCompressedInput(bytes: []const u8) !void {
     const allocator = std.testing.allocator;
     var output: [max_decompressed_bytes]u8 = undefined;
     var scratch: [max_input_bytes + restored_tail_bytes]u8 = undefined;
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    if (netz.websocket.decompressMessageInto(
+    if (netz.websocket.decompressMessageVortInto(
         &output,
         bytes,
         &scratch,
-        &window,
     )) |decoded| {
         try std.testing.expect(decoded.len <= output.len);
     } else |_| {}

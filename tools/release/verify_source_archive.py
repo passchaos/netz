@@ -92,7 +92,7 @@ def verify_layout(root: Path) -> None:
             f"archive root {root.name!r} does not match manifest {expected_root!r}"
         )
     dependencies = manifest.get("vendored_dependencies", {})
-    for name in ("vail", "pbz", "zio"):
+    for name in ("vail", "vort", "pbz", "zio"):
         dependency = dependencies.get(name, {})
         expected = f"deps/{name}"
         if dependency.get("path") != expected:
@@ -118,6 +118,7 @@ def verify_layout(root: Path) -> None:
     package_manifest = (root / "build.zig.zon").read_text(encoding="utf-8")
     for fragment in (
         '.vail = .{ .path = "deps/vail" },',
+        '.vort = .{ .path = "deps/vort" },',
         '.pbz = .{ .path = "deps/pbz" },',
         '.zio = .{ .path = "deps/zio" },',
         '"RELEASE-MANIFEST.json"',
@@ -127,6 +128,7 @@ def verify_layout(root: Path) -> None:
             raise RuntimeError(f"release package manifest lacks {fragment}")
     if (
         '../vail' in package_manifest
+        or '../vort' in package_manifest
         or '../pbz' in package_manifest
         or 'git+https://github.com/lalinsky/zio' in package_manifest
     ):

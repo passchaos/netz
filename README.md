@@ -499,7 +499,7 @@ Current protocol coverage includes:
   before reading DATA, and then boundedly drain a rejected upload;
   `authorization` remains automatically HPACK never-indexed,
   strict per-message gzip and RFC 1950 zlib-wrapped `deflate` codecs backed by
-  a package-local focused DEFLATE backend, bounded decompression, typed
+  a package-local focused encoder and Vort's bounded decompression, typed
   `grpc-accept-encoding` negotiation, asymmetric request/response algorithms,
   and gRPC Core-compatible fallback when compression does not shrink a message,
   stream-level encoding with per-message compression opt-out on sequential and
@@ -1742,10 +1742,12 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   prehashed exact-match index keys, a newest-name exact-match fast path, and
   byte-verified collision fallback,
 - HTTP/3 QPACK owned decoding with direct-to-final-block string materialization
-  and one-shot stack-plan reservation,
+  and one-shot compact stack-plan reservation,
 - WebSocket masked frame encoding with allocating, caller-buffer, and
   header-only streaming paths, plus retained no-context-takeover
-  permessage-deflate throughput and wire-size reporting; stream transports
+  permessage-deflate throughput and wire-size reporting, Vort-backed bounded
+  caller-buffer inflation without a per-connection 64-KiB decoder window;
+  stream transports
   share nested `runtime/message/` helpers for bounded-slab receive growth,
   compressed-fragment partitioning, Close-state send admission, and owned
   message finalization,

@@ -5,6 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .vail = .{ .path = "../vail" },
+        .vort = .{ .path = "../vort" },
         .zio = .{
             .url = "git+https://github.com/lalinsky/zio#54cb18f05d3feaec431353de85d5d10dac93d37b",
             .hash = "zio-0.17.0-xHbVVELgKQBIzMAdDWTrIamBlTyFlijzxFU7G4f2NUcw",

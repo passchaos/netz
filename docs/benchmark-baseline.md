@@ -5306,7 +5306,22 @@ with a focused in-tree fixed-Huffman encoder using a reusable 4K-entry hash
 chain. A pinned 1,000-round 4-KiB run measured 22.296 us/roundtrip and 350.40
 logical MiB/s with checksum 255,000; a 200-round direct-slices run measured
 21.237 us/roundtrip. These samples preserve the 69-byte wire payload while
-removing the private sibling-repository dependency.
+keeping outbound compression on the focused package-local encoder.
+
+The receive side now uses the sibling Vort revision
+`e5c9f078f028c7f852f288104f49b0e1118409f6` for bounded raw-DEFLATE
+decoding in both no-context and context-takeover modes. Runtime caller-buffer
+decoding no longer allocates or retains Zig flate's separate 64-KiB window per
+connection; context takeover supplies its bounded committed history directly
+as Vort's preset dictionary. Seven CPU-0, order-alternated, fixed-binary pairs
+used 20,000 decodes of the same 69-byte wire message into a 4-KiB caller
+buffer. Parent `9779aef2` measured 1070-1081 ns/message (1072 median); Vort
+measured 467-471 ns/message (468 median), won every pair, and reduced median
+decode time by 56.3% (2.29x throughput). Every arm reported benchmark checksum
+`8353707268`. The baseline and candidate binary SHA-256 values were
+`e21c50823356607edbbead50d6555bdde1a70a0bff117e9b0da90f6dd0ac587a`
+and `e384df772bd672d5237069dfb156804b6f59e48c9e7fdad754b354ab2bdf4b83`.
+This is an internal decoder A/B, not a cross-library WebSocket claim.
 
 `--compression --fragmented` sends the same 4 KiB client message as sixteen
 compressed WebSocket frames. Three CPU-14 runs measured 35.80-36.60

@@ -3,10 +3,11 @@
 //! The raw encoder writes one non-final fixed-Huffman block followed by the
 //! RFC 7692 sync-flush marker. Its hash-chain workspace is reused across
 //! independent messages, and its opt-in context API retains a bounded plaintext
-//! history across messages. This keeps the WebSocket hot path allocation-free
-//! after warmup without pulling another compression repository into the package.
+//! history across messages. Decode paths delegate to the sibling Vort package's
+//! bounded caller-buffer codecs.
 
 const std = @import("std");
+const vort_backend = @import("vort");
 
 pub const ParserMode = enum { hash };
 
@@ -701,7 +702,11 @@ pub fn decodeZlibAllocLimited(
     input: []const u8,
     max_output_len: usize,
 ) ![]u8 {
-    return decodeWrappedAllocLimited(allocator, input, .zlib, max_output_len);
+    return vort_backend.decodeZlibAllocLimited(
+        allocator,
+        input,
+        max_output_len,
+    );
 }
 
 pub fn decodeGzipAppendLimited(
@@ -710,17 +715,57 @@ pub fn decodeGzipAppendLimited(
     input: []const u8,
     max_output_len: usize,
 ) !usize {
-    const start = out.items.len;
-    const decoded = try decodeWrappedAllocLimited(
+    return vort_backend.decodeGzipAppendLimited(
         allocator,
+        out,
         input,
-        .gzip,
         max_output_len,
     );
-    defer allocator.free(decoded);
-    errdefer out.items.len = start;
-    try out.appendSlice(allocator, decoded);
-    return decoded.len;
+}
+
+fn decodeGzipAllocLimited(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    max_output_len: usize,
+) ![]u8 {
+    return vort_backend.decodeGzipAllocLimited(
+        allocator,
+        input,
+        max_output_len,
+    );
+}
+
+pub const DeflateDecodeResult = vort_backend.DeflateDecodeResult;
+
+pub fn decodeRawDeflate(
+    input: []const u8,
+    output: []u8,
+) !DeflateDecodeResult {
+    return vort_backend.decodeRawDeflate(input, output);
+}
+
+pub fn decodeRawDeflateWithDictionary(
+    input: []const u8,
+    dictionary: []const u8,
+    output: []u8,
+) !DeflateDecodeResult {
+    return vort_backend.decodeRawDeflateWithDictionary(
+        input,
+        dictionary,
+        output,
+    );
+}
+
+pub fn decodeRawDeflateAllocLimited(
+    allocator: std.mem.Allocator,
+    input: []const u8,
+    max_output_len: usize,
+) ![]u8 {
+    return vort_backend.decodeRawDeflateAllocLimited(
+        allocator,
+        input,
+        max_output_len,
+    );
 }
 
 fn encodeWrappedAlloc(
@@ -801,62 +846,6 @@ fn encodeStoredWrappedAlloc(
     }
     std.debug.assert(offset == out.len);
     return out;
-}
-
-fn decodeWrappedAllocLimited(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    container: std.compress.flate.Container,
-    max_output_len: usize,
-) ![]u8 {
-    var input_reader: std.Io.Reader = .fixed(input);
-    const window = try allocator.alloc(
-        u8,
-        std.compress.flate.max_window_len,
-    );
-    defer allocator.free(window);
-    var decompressor = std.compress.flate.Decompress.init(
-        &input_reader,
-        container,
-        window,
-    );
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    errdefer output.deinit();
-    while (decompressor.reader.peekGreedy(1)) |bytes| {
-        if (bytes.len > max_output_len -| output.writer.end) {
-            return error.OutputLimitExceeded;
-        }
-        try output.writer.writeAll(bytes);
-        decompressor.reader.toss(bytes.len);
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        error.ReadFailed => return error.InvalidCompressedData,
-    }
-    if (decompressor.err != null) return error.InvalidCompressedData;
-    if (input_reader.seek != input_reader.end) return error.TrailingBytes;
-    const decoded = output.written();
-    switch (container) {
-        .raw => {},
-        .zlib => {
-            if (input.len < 4 or
-                std.mem.readInt(u32, input[input.len - 4 ..][0..4], .big) !=
-                    std.hash.Adler32.hash(decoded))
-            {
-                return error.InvalidCompressedData;
-            }
-        },
-        .gzip => {
-            if (input.len < 8 or
-                std.mem.readInt(u32, input[input.len - 8 ..][0..4], .little) !=
-                    std.hash.crc.Crc32.hash(decoded) or
-                std.mem.readInt(u32, input[input.len - 4 ..][0..4], .little) !=
-                    @as(u32, @truncate(decoded.len)))
-            {
-                return error.InvalidCompressedData;
-            }
-        },
-    }
-    return output.toOwnedSlice();
 }
 
 fn compressionOptions(level: u4) ?std.compress.flate.Compress.Options {
@@ -1052,45 +1041,79 @@ test "focused wrapped decoder rejects corruption and trailing bytes" {
             6,
         );
         defer allocator.free(encoded);
-        const decoded = try decodeWrappedAllocLimited(
-            allocator,
-            encoded,
-            container,
-            payload.len,
-        );
+        const decoded = try switch (container) {
+            .raw => unreachable,
+            .zlib => decodeZlibAllocLimited(
+                allocator,
+                encoded,
+                payload.len,
+            ),
+            .gzip => decodeGzipAllocLimited(
+                allocator,
+                encoded,
+                payload.len,
+            ),
+        };
         defer allocator.free(decoded);
         try std.testing.expectEqualStrings(payload, decoded);
         try std.testing.expectError(
             error.OutputLimitExceeded,
-            decodeWrappedAllocLimited(
-                allocator,
-                encoded,
-                container,
-                payload.len - 1,
-            ),
+            switch (container) {
+                .raw => unreachable,
+                .zlib => decodeZlibAllocLimited(
+                    allocator,
+                    encoded,
+                    payload.len - 1,
+                ),
+                .gzip => decodeGzipAllocLimited(
+                    allocator,
+                    encoded,
+                    payload.len - 1,
+                ),
+            },
         );
         const trailed = try std.mem.concat(allocator, u8, &.{ encoded, "x" });
         defer allocator.free(trailed);
         try std.testing.expectError(
-            error.TrailingBytes,
-            decodeWrappedAllocLimited(
-                allocator,
-                trailed,
-                container,
-                payload.len,
-            ),
+            if (container == .zlib)
+                error.TrailingData
+            else
+                error.OutputLimitExceeded,
+            switch (container) {
+                .raw => unreachable,
+                .zlib => decodeZlibAllocLimited(
+                    allocator,
+                    trailed,
+                    payload.len,
+                ),
+                .gzip => decodeGzipAllocLimited(
+                    allocator,
+                    trailed,
+                    payload.len,
+                ),
+            },
         );
         const corrupted = try allocator.dupe(u8, encoded);
         defer allocator.free(corrupted);
         corrupted[corrupted.len - 1] ^= 1;
         try std.testing.expectError(
-            error.InvalidCompressedData,
-            decodeWrappedAllocLimited(
-                allocator,
-                corrupted,
-                container,
-                payload.len,
-            ),
+            if (container == .zlib)
+                error.ChecksumMismatch
+            else
+                error.OutputLimitExceeded,
+            switch (container) {
+                .raw => unreachable,
+                .zlib => decodeZlibAllocLimited(
+                    allocator,
+                    corrupted,
+                    payload.len,
+                ),
+                .gzip => decodeGzipAllocLimited(
+                    allocator,
+                    corrupted,
+                    payload.len,
+                ),
+            },
         );
     }
 }

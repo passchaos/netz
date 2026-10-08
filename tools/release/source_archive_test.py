@@ -60,13 +60,15 @@ class SourceArchiveTest(unittest.TestCase):
         base = Path(self.temporary.name)
         self.root = base / "netz"
         self.vail = base / "vail"
+        self.vort = base / "vort"
         self.pbz = base / "pbz"
         self.zio = base / "zio"
-        for path in (self.root, self.vail, self.pbz, self.zio):
+        for path in (self.root, self.vail, self.vort, self.pbz, self.zio):
             path.mkdir()
         manifest = b""".{
     .dependencies = .{
         .vail = .{ .path = \"../vail\" },
+        .vort = .{ .path = \"../vort\" },
         .zio = .{
             .url = \"git+https://github.com/lalinsky/zio#54cb18f05d3feaec431353de85d5d10dac93d37b\",
             .hash = \"zio-0.17.0-xHbVVELgKQBIzMAdDWTrIamBlTyFlijzxFU7G4f2NUcw\",
@@ -95,6 +97,14 @@ class SourceArchiveTest(unittest.TestCase):
                 "build.zig": b"pub fn build() void {}\n",
                 "build.zig.zon": b".{}\n",
                 "src/root.zig": b"pub const value = 2;\n",
+            },
+        )
+        self.vort_revision = initialize_repository(
+            self.vort,
+            {
+                "build.zig": b"pub fn build() void {}\n",
+                "build.zig.zon": b".{}\n",
+                "src/root.zig": b"pub const value = 5;\n",
             },
         )
         self.pbz_revision = initialize_repository(
@@ -132,10 +142,12 @@ class SourceArchiveTest(unittest.TestCase):
         SOURCE_ARCHIVE.create_archive(
             self.root,
             self.vail,
+            self.vort,
             self.pbz,
             self.zio,
             output,
             expected_vail_revision=self.vail_revision,
+            expected_vort_revision=self.vort_revision,
             expected_pbz_revision=self.pbz_revision,
             expected_zio_package_hash=self.zio_hash,
         )
@@ -151,6 +163,7 @@ class SourceArchiveTest(unittest.TestCase):
             names = archive.getnames()
             self.assertNotIn("netz-0.1.0/.github/workflows/ci.yml", names)
             self.assertIn("netz-0.1.0/deps/vail/src/root.zig", names)
+            self.assertIn("netz-0.1.0/deps/vort/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/pbz/src/root.zig", names)
             self.assertIn("netz-0.1.0/deps/zio/src/root.zig", names)
             package = archive.extractfile(
@@ -166,16 +179,22 @@ class SourceArchiveTest(unittest.TestCase):
             )
 
         self.assertIn('.path = "deps/vail"', package)
+        self.assertIn('.path = "deps/vort"', package)
         self.assertIn('.path = "deps/pbz"', package)
         self.assertIn('.path = "deps/zio"', package)
         self.assertIn('"deps"', package)
         self.assertNotIn("../vail", package)
+        self.assertNotIn("../vort", package)
         self.assertNotIn("../pbz", package)
         self.assertNotIn("git+https://github.com/lalinsky/zio", package)
         self.assertEqual(self.netz_revision, metadata["source_revision"])
         self.assertEqual(
             self.vail_revision,
             metadata["vendored_dependencies"]["vail"]["revision"],
+        )
+        self.assertEqual(
+            self.vort_revision,
+            metadata["vendored_dependencies"]["vort"]["revision"],
         )
         self.assertEqual(
             self.pbz_revision,
@@ -199,10 +218,12 @@ class SourceArchiveTest(unittest.TestCase):
             SOURCE_ARCHIVE.create_archive(
                 self.root,
                 self.vail,
+                self.vort,
                 self.pbz,
                 self.zio,
                 Path(self.temporary.name) / "mismatch.tar.gz",
                 expected_vail_revision="0" * 40,
+                expected_vort_revision=self.vort_revision,
                 expected_pbz_revision=self.pbz_revision,
                 expected_zio_package_hash=self.zio_hash,
             )

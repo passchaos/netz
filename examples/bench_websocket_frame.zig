@@ -126,6 +126,28 @@ pub fn main() !void {
     }
     const fragmented_ns = nowNs(io) -| fragmented_started;
 
+    var decompression_output: [payload_len]u8 = undefined;
+    var decompression_scratch: [payload_len + 64]u8 = undefined;
+    var decompression_window: [std.compress.flate.max_window_len]u8 = undefined;
+    _ = try netz.websocket.decompressMessageInto(
+        &decompression_output,
+        compression_output.items,
+        &decompression_scratch,
+        &decompression_window,
+    );
+    const decompression_started = nowNs(io);
+    var decompression_checksum: u64 = 0;
+    for (0..compression_iterations) |iteration| {
+        const decompressed = try netz.websocket.decompressMessageInto(
+            &decompression_output,
+            compression_output.items,
+            &decompression_scratch,
+            &decompression_window,
+        );
+        decompression_checksum +%= decompressed[iteration % decompressed.len];
+    }
+    const decompression_ns = nowNs(io) -| decompression_started;
+
     var ascii_text: [payload_len]u8 = undefined;
     for (&ascii_text, 0..) |*byte, index| {
         byte.* = "sensor=42;status=nominal;"[
@@ -390,6 +412,7 @@ pub fn main() !void {
             header_checksum +%
             compression_checksum +%
             fragmented_checksum +%
+            decompression_checksum +%
             utf8_scalar_checksum +%
             utf8_checksum +%
             sparse_scalar_checksum +%
@@ -403,6 +426,10 @@ pub fn main() !void {
             owned_parse_checksum +%
             in_place_parse_checksum,
     });
+    std.debug.print(
+        "  caller-buffer inflate: {d} ns/message\n",
+        .{decompression_ns / compression_iterations},
+    );
     std.debug.print(
         \\  owned aggregate-frame parse: {d:.2} ns/frame
         \\  in-place aggregate-frame parse: {d:.2} ns/frame

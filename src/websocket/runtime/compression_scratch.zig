@@ -1,9 +1,9 @@
 //! Reusable WebSocket compression storage and context-takeover transactions.
 //!
-//! Zig 0.16's decompressor requires a 64 KiB history window, retained by
-//! `Scratch`. The sender retains both encoded output and hash-chain workspace
-//! per connection, avoiding steady-state allocation churn. Optional stateful
-//! codecs keep direction-specific RFC 7692 history; send serialization
+//! The sender retains both encoded output and hash-chain workspace per
+//! connection, avoiding steady-state allocation churn. Vort decodes into the
+//! caller's output without a separate 64-KiB inflater allocation. Optional
+//! stateful codecs keep direction-specific RFC 7692 history; send serialization
 //! guarantees that a preview has one owner until commit or discard.
 
 const std = @import("std");
@@ -12,7 +12,6 @@ const compression_context = @import("../compression_context.zig");
 pub const Scratch = struct {
     payload: std.ArrayList(u8) = .empty,
     decoded: std.ArrayList(u8) = .empty,
-    flate_window: ?[]u8 = null,
     context: ?compression_context.DecompressionContext = null,
     frame_message_compressed: bool = false,
     frame_message_text: bool = false,
@@ -23,7 +22,6 @@ pub const Scratch = struct {
     ) void {
         self.payload.deinit(allocator);
         self.decoded.deinit(allocator);
-        if (self.flate_window) |window| allocator.free(window);
         if (self.context) |*context| context.deinit();
         self.* = undefined;
     }
@@ -45,12 +43,6 @@ pub const Scratch = struct {
         );
         self.payload.clearRetainingCapacity();
         self.payload.items.len = max_message_bytes;
-        if (self.flate_window == null) {
-            self.flate_window = try allocator.alloc(
-                u8,
-                std.compress.flate.max_window_len,
-            );
-        }
     }
 
     pub fn prepareContext(
@@ -187,7 +179,7 @@ pub const Scratch = struct {
 
 pub const SendScratch = struct {
     payload: std.ArrayList(u8) = .empty,
-    encoder: ?@import("../../internal/vort.zig").RawFixedSyncFlushEncoder =
+    encoder: ?@import("../../internal/deflate.zig").RawFixedSyncFlushEncoder =
         null,
     context: ?compression_context.CompressionContext = null,
 
@@ -279,6 +271,18 @@ pub const SendScratch = struct {
         self.payload.clearRetainingCapacity();
     }
 };
+
+test "runtime receive scratch needs one allocation without inflater window" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 1 },
+    );
+    var scratch: Scratch = .{};
+    defer scratch.deinit(failing.allocator());
+    try scratch.prepare(failing.allocator(), 256);
+    try std.testing.expect(!failing.has_induced_failure);
+}
 
 test "runtime send scratch commits and discards takeover previews" {
     const allocator = std.testing.allocator;

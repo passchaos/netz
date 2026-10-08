@@ -5,8 +5,7 @@
 //! negotiated. Failed decoding never commits partial history.
 
 const std = @import("std");
-const vort = @import("../internal/vort.zig");
-const flate_guarded_reader = @import("../internal/flate_guarded_reader.zig");
+const deflate = @import("../internal/deflate.zig");
 
 pub const Error = error{
     InvalidExtension,
@@ -16,7 +15,7 @@ pub const Error = error{
     WriteFailed,
 } || std.mem.Allocator.Error;
 
-const base_options: vort.CompressionOptions = .{
+const base_options: deflate.CompressionOptions = .{
     .parser = .hash,
     .lz77_options = .{
         .window_len = 32 * 1024,
@@ -25,7 +24,7 @@ const base_options: vort.CompressionOptions = .{
     },
 };
 
-fn compressionOptions(max_window_bits: u8) Error!vort.CompressionOptions {
+fn compressionOptions(max_window_bits: u8) Error!deflate.CompressionOptions {
     if (max_window_bits < 8 or max_window_bits > 15) {
         return error.InvalidExtension;
     }
@@ -61,7 +60,7 @@ fn removeTail(output: *std.ArrayList(u8)) Error![]const u8 {
 /// implementations that may fall back to uncompressed wire data must make that
 /// decision before calling or retain a separate preview/rollback policy.
 pub const CompressionContext = struct {
-    encoder: vort.RawFixedSyncFlushEncoder,
+    encoder: deflate.RawFixedSyncFlushEncoder,
     max_window_bits: u8,
     pending: std.ArrayList(u8) = .empty,
     pending_active: bool = false,
@@ -187,7 +186,6 @@ pub const DecompressionContext = struct {
     max_window_bits: u8,
     history: std.ArrayList(u8) = .empty,
     input: std.ArrayList(u8) = .empty,
-    window: ?[]u8 = null,
     pending: std.ArrayList(u8) = .empty,
     pending_active: bool = false,
 
@@ -205,7 +203,6 @@ pub const DecompressionContext = struct {
     pub fn deinit(self: *DecompressionContext) void {
         self.history.deinit(self.allocator);
         self.input.deinit(self.allocator);
-        if (self.window) |window| self.allocator.free(window);
         self.pending.deinit(self.allocator);
         self.* = undefined;
     }
@@ -303,42 +300,15 @@ pub const DecompressionContext = struct {
         );
         self.input.appendSliceAssumeCapacity(compressed_payload);
         self.input.appendSliceAssumeCapacity(&tail);
-        if (self.window == null) {
-            self.window = try self.allocator.alloc(
-                u8,
-                std.compress.flate.max_window_len,
-            );
-        }
-        const window = self.window.?;
-        const history_len = self.history.items.len;
-        @memcpy(window[0..history_len], self.history.items);
-
-        var guarded_input = flate_guarded_reader.GuardedReader.init(
+        const decoded_result = deflate.decodeRawDeflateWithDictionary(
             self.input.items,
-        );
-        const input_reader = guarded_input.reader();
-        var decompressor = std.compress.flate.Decompress.init(
-            input_reader,
-            .raw,
-            window,
-        );
-        decompressor.reader.seek = history_len;
-        decompressor.reader.end = history_len;
-
-        var writer: std.Io.Writer = .fixed(output);
-        _ = decompressor.reader.streamRemaining(&writer) catch |err| {
-            return switch (err) {
-                error.WriteFailed => error.PayloadTooLarge,
-                error.ReadFailed => error.InvalidFrame,
-            };
-        };
-        if (decompressor.err != null or
-            guarded_input.used_guard or
-            guarded_input.sourceConsumed() != self.input.items.len)
-        {
+            self.history.items,
+            output,
+        ) catch |err| return mapDecompressionError(err);
+        if (decoded_result.input_read != self.input.items.len) {
             return error.InvalidFrame;
         }
-        const decoded = output[0..writer.end];
+        const decoded = output[0..decoded_result.output_written];
         const window_len = @as(usize, 1) << @intCast(self.max_window_bits);
         const keep = @min(decoded.len, window_len);
         try self.pending.ensureTotalCapacity(self.allocator, keep);
@@ -348,6 +318,14 @@ pub const DecompressionContext = struct {
         return decoded;
     }
 };
+
+fn mapDecompressionError(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.OutputTooSmall, error.OutputLimitExceeded => error.PayloadTooLarge,
+        else => error.InvalidFrame,
+    };
+}
 
 test "context takeover round trips and resets transactionally" {
     const allocator = std.testing.allocator;

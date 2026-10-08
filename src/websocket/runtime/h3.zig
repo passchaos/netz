@@ -2503,12 +2503,11 @@ pub fn Connection(comptime role: common.Role) type {
                             else => |other| return @errorCast(other),
                         }
                     else
-                        try websocket.decompressMessageInto(
+                        try websocket.decompressMessageVortInto(
                             out[0..self.limits.max_message_bytes],
                             self.compression_receive
                                 .payload.items[0..self.message_into.written],
                             self.compression_receive.payload.allocatedSlice(),
-                            self.compression_receive.flate_window.?,
                         )
                 else
                     out[0..self.message_into.written];
@@ -5976,7 +5975,6 @@ pub const testing = if (builtin.is_test) struct {
             connection.message_frame_receive.header == null and
             connection.compression_receive.payload.capacity == 0 and
             connection.compression_receive.decoded.capacity == 0 and
-            connection.compression_receive.flate_window == null and
             connection.compression_receive.context == null;
     }
 

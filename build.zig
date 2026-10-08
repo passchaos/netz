@@ -22,6 +22,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const vort_dep = b.dependency("vort", .{
+        .target = target,
+        .optimize = optimize,
+    });
     const zio_dep = b.dependency("zio", .{
         .target = target,
         .optimize = optimize,
@@ -33,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "vail", .module = vail_dep.module("vail") },
+            .{ .name = "vort", .module = vort_dep.module("vort") },
             .{ .name = "zio", .module = zio_dep.module("zio") },
         },
     });
@@ -1623,6 +1628,8 @@ pub fn build(b: *std.Build) void {
         source_archive.addDirectoryArg(b.path("."));
         source_archive.addArg("--vail");
         source_archive.addDirectoryArg(vail_dep.path("."));
+        source_archive.addArg("--vort");
+        source_archive.addDirectoryArg(vort_dep.path("."));
         source_archive.addArg("--pbz");
         source_archive.addDirectoryArg(pbz_dep.path("."));
         source_archive.addArg("--zio");

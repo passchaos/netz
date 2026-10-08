@@ -10394,7 +10394,6 @@ pub const testing = if (builtin.is_test) struct {
             connection.message_frame_receive.header == null and
             connection.compression_receive.payload.capacity == 0 and
             connection.compression_receive.decoded.capacity == 0 and
-            connection.compression_receive.flate_window == null and
             connection.compression_receive.context == null and
             tunnel_storage_released;
     }
@@ -10884,11 +10883,10 @@ fn receiveMessageIntoDirectConnection(
                     else => |other| return @errorCast(other),
                 }
             else
-                try websocket.decompressMessageInto(
+                try websocket.decompressMessageVortInto(
                     out[0..connection.limits.max_message_bytes],
                     connection.compression_receive.payload.items[0..connection.message_into.written],
                     connection.compression_receive.payload.allocatedSlice(),
-                    connection.compression_receive.flate_window.?,
                 )
         else
             out[0..connection.message_into.written];
@@ -16242,6 +16240,7 @@ test {
     _ = @import("runtime/close_timeout_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
     _ = @import("runtime/message_io_tests.zig");
+    _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

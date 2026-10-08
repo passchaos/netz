@@ -2,8 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const wire = @import("../internal/wire.zig");
 const http1 = @import("../http1/mod.zig");
-const vort = @import("../internal/vort.zig");
-const flate_guarded_reader = @import("../internal/flate_guarded_reader.zig");
+const deflate = @import("../internal/deflate.zig");
 const compression_context = @import("compression_context.zig");
 
 pub const runtime = @import("runtime.zig");
@@ -1699,7 +1698,7 @@ pub fn compressMessageVortIntoWindow(
     max_window_bits: u8,
 ) Error![]const u8 {
     output.clearRetainingCapacity();
-    _ = vort.encodeRawFixedSyncFlushAppend(
+    _ = deflate.encodeRawFixedSyncFlushAppend(
         allocator,
         output,
         payload,
@@ -1709,7 +1708,7 @@ pub fn compressMessageVortIntoWindow(
 }
 
 pub fn compressMessageVortIntoWindowWithEncoder(
-    encoder: *vort.RawFixedSyncFlushEncoder,
+    encoder: *deflate.RawFixedSyncFlushEncoder,
     output: *std.ArrayList(u8),
     payload: []const u8,
     max_window_bits: u8,
@@ -1748,7 +1747,7 @@ pub fn compressMessageFragmentsVortIntoWindow(
     max_window_bits: u8,
 ) Error![]const u8 {
     output.clearRetainingCapacity();
-    _ = vort.encodeRawFixedSyncFlushChunksAppend(
+    _ = deflate.encodeRawFixedSyncFlushChunksAppend(
         allocator,
         output,
         fragments,
@@ -1758,7 +1757,7 @@ pub fn compressMessageFragmentsVortIntoWindow(
 }
 
 pub fn compressMessageFragmentsVortIntoWindowWithEncoder(
-    encoder: *vort.RawFixedSyncFlushEncoder,
+    encoder: *deflate.RawFixedSyncFlushEncoder,
     output: *std.ArrayList(u8),
     fragments: []const []const u8,
     max_window_bits: u8,
@@ -1772,7 +1771,7 @@ pub fn compressMessageFragmentsVortIntoWindowWithEncoder(
     return removeVortCompressionTail(output);
 }
 
-const vort_websocket_compression_options: vort.CompressionOptions = .{
+const vort_websocket_compression_options: deflate.CompressionOptions = .{
     .parser = .hash,
     .lz77_options = .{
         .window_len = 16 * 1024,
@@ -1783,7 +1782,7 @@ const vort_websocket_compression_options: vort.CompressionOptions = .{
 
 fn vortWebSocketCompressionOptions(
     max_window_bits: u8,
-) Error!vort.CompressionOptions {
+) Error!deflate.CompressionOptions {
     if (max_window_bits < 8 or max_window_bits > 15) {
         return error.InvalidExtension;
     }
@@ -1874,7 +1873,7 @@ fn removeCompressionTail(
 pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []const u8, max_message_bytes: usize) Error![]u8 {
     const tail = [_]u8{
         0x00, 0x00, 0xff, 0xff, // RFC 7692 tail restored for the message.
-        0x01, 0x00, 0x00, 0xff, 0xff, // Final empty block for std's raw inflater.
+        0x01, 0x00, 0x00, 0xff, 0xff, // Final empty block for the raw inflater.
     };
     const logical_input_len = std.math.add(
         usize,
@@ -1885,40 +1884,41 @@ pub fn decompressMessage(allocator: std.mem.Allocator, compressed_payload: []con
     defer with_tail.deinit(allocator);
     try with_tail.appendSlice(allocator, compressed_payload);
     try with_tail.appendSlice(allocator, &tail);
-    var guarded_input = flate_guarded_reader.GuardedReader.init(with_tail.items);
-    const input_reader = guarded_input.reader();
-    const buffer = try allocator.alloc(u8, std.compress.flate.max_window_len);
-    defer allocator.free(buffer);
-    var decompressor = std.compress.flate.Decompress.init(input_reader, .raw, buffer);
-    var output = std.Io.Writer.Allocating.init(allocator);
-    errdefer output.deinit();
-    while (decompressor.reader.peekGreedy(1)) |bytes| {
-        if (output.writer.end + bytes.len > max_message_bytes) return error.PayloadTooLarge;
-        try output.writer.writeAll(bytes);
-        decompressor.reader.toss(bytes.len);
-    } else |err| switch (err) {
-        error.EndOfStream => {},
-        error.ReadFailed => return error.InvalidFrame,
-    }
-    if (decompressor.err != null or
-        guarded_input.used_guard or
-        guarded_input.sourceConsumed() != logical_input_len)
-    {
-        return error.InvalidFrame;
-    }
-    return output.toOwnedSlice();
+    return deflate.decodeRawDeflateAllocLimited(
+        allocator,
+        with_tail.items,
+        max_message_bytes,
+    ) catch |err| return mapVortDecompressionError(err);
 }
 
 /// Inflate one RFC 7692 no-context-takeover message into caller storage.
 ///
-/// `compressed_scratch` must hold the wire payload plus the nine-byte
-/// sync-flush/final-block suffix. `flate_window` is reusable connection state;
-/// keeping it outside this function avoids a 64 KiB allocation per message.
+/// Compatibility wrapper for callers that already provide the former Zig
+/// inflater window. New code should call `decompressMessageVortInto`, which
+/// needs only the compressed scratch slice.
 pub fn decompressMessageInto(
     out: []u8,
     compressed_payload: []const u8,
     compressed_scratch: []u8,
     flate_window: []u8,
+) Error![]u8 {
+    if (flate_window.len < std.compress.flate.max_window_len) {
+        return error.BufferTooShort;
+    }
+    return decompressMessageVortInto(
+        out,
+        compressed_payload,
+        compressed_scratch,
+    );
+}
+
+/// Inflate one RFC 7692 no-context-takeover message with Vort directly into
+/// caller-owned storage. The scratch slice holds only compressed input plus
+/// the restored nine-byte suffix; no separate 64-KiB inflater window is used.
+pub fn decompressMessageVortInto(
+    out: []u8,
+    compressed_payload: []const u8,
+    compressed_scratch: []u8,
 ) Error![]u8 {
     const tail: []const u8 = &.{
         0x00, 0x00, 0xff, 0xff, // RFC 7692 sync-flush tail.
@@ -1929,9 +1929,7 @@ pub fn decompressMessageInto(
         compressed_payload.len,
         tail.len,
     ) catch return error.PayloadTooLarge;
-    if (compressed_scratch.len < input_len or
-        flate_window.len < std.compress.flate.max_window_len)
-    {
+    if (compressed_scratch.len < input_len) {
         return error.BufferTooShort;
     }
     if (compressed_payload.ptr != compressed_scratch.ptr) {
@@ -1944,29 +1942,22 @@ pub fn decompressMessageInto(
         compressed_scratch[compressed_payload.len..input_len],
         tail,
     );
-    var guarded_input = flate_guarded_reader.GuardedReader.init(
+    const decoded = deflate.decodeRawDeflate(
         compressed_scratch[0..input_len],
-    );
-    const input_reader = guarded_input.reader();
-    var decompressor = std.compress.flate.Decompress.init(
-        input_reader,
-        .raw,
-        flate_window[0..std.compress.flate.max_window_len],
-    );
-    var output_writer: std.Io.Writer = .fixed(out);
-    _ = decompressor.reader.streamRemaining(&output_writer) catch |err| {
-        return switch (err) {
-            error.WriteFailed => error.PayloadTooLarge,
-            error.ReadFailed => error.InvalidFrame,
-        };
-    };
-    if (decompressor.err != null or
-        guarded_input.used_guard or
-        guarded_input.sourceConsumed() != input_len)
-    {
+        out,
+    ) catch |err| return mapVortDecompressionError(err);
+    if (decoded.input_read != input_len) {
         return error.InvalidFrame;
     }
-    return output_writer.buffered();
+    return out[0..decoded.output_written];
+}
+
+fn mapVortDecompressionError(err: anyerror) Error {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.OutputTooSmall, error.OutputLimitExceeded => error.PayloadTooLarge,
+        else => error.InvalidFrame,
+    };
 }
 
 const ExtensionHeaderRole = enum { offer, response };

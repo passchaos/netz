@@ -5,7 +5,7 @@
 //! the protocol and important for per-message compression opt-out.
 
 const std = @import("std");
-const vort = @import("../internal/vort.zig");
+const deflate = @import("../internal/deflate.zig");
 
 pub const Error = error{
     CompressionFailed,
@@ -132,12 +132,12 @@ pub fn compressAlloc(
     // stream. The strict wrapper encoders make that distinction explicit.
     const encoded = switch (algorithm) {
         .identity => unreachable,
-        .deflate => vort.encodeZlibLevelAlloc(
+        .deflate => deflate.encodeZlibLevelAlloc(
             allocator,
             input,
             level,
         ),
-        .gzip => vort.encodeGzipLevelAlloc(
+        .gzip => deflate.encodeGzipLevelAlloc(
             allocator,
             input,
             level,
@@ -187,7 +187,7 @@ pub fn decompressAlloc(
     }
     const decoded = switch (algorithm) {
         .identity => unreachable,
-        .deflate => vort.decodeZlibAllocLimited(
+        .deflate => deflate.decodeZlibAllocLimited(
             allocator,
             input,
             max_output_len,
@@ -217,7 +217,7 @@ fn decodeGzipAllocLimitedStrict(
     // verifies CRC/ISIZE, and rejects any bytes after that member.
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(allocator);
-    _ = try vort.decodeGzipAppendLimited(
+    _ = try deflate.decodeGzipAppendLimited(
         allocator,
         &decoded,
         input,

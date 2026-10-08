@@ -387,11 +387,10 @@ The same command also measures one 4 KiB repeated telemetry-like message
 through no-context-takeover compression. Complete and discontiguous messages
 now use a package-local focused fixed-DEFLATE sync-flush encoder. Its reusable
 4K-entry hash chain avoids clearing Zig flate's roughly 224 KiB compressor
-state per message and removes the former external Vort package dependency. The
-chunked encoder keeps plaintext discontiguous while a bounded 16 KiB rolling
-dictionary preserves matches across caller slices. A 2026-09-10 CPU-0 run of
-the persistent 4-KiB compressed echo measured 22.296 us/roundtrip, versus the
-previous 29.44-31.14 us range.
+state per message. The chunked encoder keeps plaintext discontiguous while a
+bounded 16 KiB rolling dictionary preserves matches across caller slices. A
+2026-09-10 CPU-0 run of the persistent 4-KiB compressed echo measured 22.296
+us/roundtrip, versus the previous 29.44-31.14 us range.
 
 ```text
 permessage-deflate: 3.860 us/message, 4096 -> 69 wire bytes
@@ -449,6 +448,17 @@ The fixed binaries and final paired log live under
 and `8a7f7bc3bc9a55a335f37c5471d9432aca8e9e1b0b7abf873f08dd48b458d97e`;
 the log hash is
 `70d549525df781433c18cfdf6abda7c3d67d932db4c419df20165f80549fd47b`.
+
+Inbound no-context and context-takeover messages now use Vort's bounded raw
+DEFLATE decoder. The caller-buffer path no longer retains the former 64-KiB
+Zig-flate window per connection, while context takeover passes its committed
+history as a bounded preset dictionary and preserves explicit preview/commit/
+discard semantics. Seven order-alternated CPU-0 fixed-binary pairs decoded the
+same 69-byte wire message to 4 KiB: the prior path measured 1070-1081
+ns/message (1072 median), and Vort measured 467-471 ns/message (468 median), a
+56.3% median reduction with 7/7 candidate wins. Both arms reported checksum
+`8353707268`; this is an internal decoder A/B, not a comparison with
+websocket.zig.
 
 ## Persistent echo evidence
 

@@ -18,7 +18,8 @@ import tempfile
 FORMAT_VERSION = 1
 PACKAGE_NAME = "netz"
 DEFAULT_PACKAGE_VERSION = "0.1.0"
-VAIL_REVISION = "fc856b91d944bd390dfedc600b8c88ba4b994e6a"
+VAIL_REVISION = "1fa51847b0a08017ff410c31628d68fa9be34544"
+VORT_REVISION = "e5c9f078f028c7f852f288104f49b0e1118409f6"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
 ZIO_SOURCE = (
     "git+https://github.com/lalinsky/zio"
@@ -113,6 +114,7 @@ def release_manifest(
     package_version: str,
     netz_revision: str,
     vail_revision: str,
+    vort_revision: str,
     pbz_revision: str,
     file_hashes: dict[str, str],
 ) -> bytes:
@@ -133,6 +135,10 @@ def release_manifest(
                         "path": "deps/vail",
                         "revision": vail_revision,
                     },
+                    "vort": {
+                        "path": "deps/vort",
+                        "revision": vort_revision,
+                    },
                     "zio": {
                         "path": "deps/zio",
                         "package_hash": ZIO_PACKAGE_HASH,
@@ -152,6 +158,8 @@ def rewrite_package_manifest(data: bytes) -> bytes:
     replacements = {
         '.vail = .{ .path = "../vail" },':
             '.vail = .{ .path = "deps/vail" },',
+        '.vort = .{ .path = "../vort" },':
+            '.vort = .{ .path = "deps/vort" },',
         '.pbz = .{ .path = "../pbz" },':
             '.pbz = .{ .path = "deps/pbz" },',
         '        .zio = .{\n'
@@ -205,11 +213,13 @@ def add_bytes(
 def create_archive(
     root: Path,
     vail: Path,
+    vort: Path,
     pbz: Path,
     zio: Path,
     output: Path,
     package_version: str = DEFAULT_PACKAGE_VERSION,
     expected_vail_revision: str = VAIL_REVISION,
+    expected_vort_revision: str = VORT_REVISION,
     expected_pbz_revision: str = PBZ_REVISION,
     expected_zio_package_hash: str = ZIO_PACKAGE_HASH,
     zig: str = "zig",
@@ -217,6 +227,7 @@ def create_archive(
     repositories = {
         "": root.resolve(),
         "deps/vail": vail.resolve(),
+        "deps/vort": vort.resolve(),
         "deps/pbz": pbz.resolve(),
     }
     for repo in repositories.values():
@@ -227,6 +238,11 @@ def create_archive(
         raise RuntimeError(
             "vail revision mismatch: expected "
             f"{expected_vail_revision}, found {revisions['deps/vail']}"
+        )
+    if revisions["deps/vort"] != expected_vort_revision:
+        raise RuntimeError(
+            "vort revision mismatch: expected "
+            f"{expected_vort_revision}, found {revisions['deps/vort']}"
         )
     if revisions["deps/pbz"] != expected_pbz_revision:
         raise RuntimeError(
@@ -266,6 +282,7 @@ def create_archive(
             package_version,
             revisions[""],
             revisions["deps/vail"],
+            revisions["deps/vort"],
             revisions["deps/pbz"],
             file_hashes,
         ),
@@ -303,6 +320,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--vail", type=Path, required=True)
+    parser.add_argument("--vort", type=Path, required=True)
     parser.add_argument("--pbz", type=Path, required=True)
     parser.add_argument("--zio", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -312,6 +330,7 @@ def main() -> None:
     create_archive(
         args.root,
         args.vail,
+        args.vort,
         args.pbz,
         args.zio,
         args.output,

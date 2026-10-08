@@ -797,6 +797,12 @@ test "WebSocket permessage-deflate decodes into caller storage" {
         window,
     );
     try std.testing.expectEqualStrings(payload, decoded);
+    const vort_decoded = try websocket.decompressMessageVortInto(
+        &output,
+        compressed,
+        scratch,
+    );
+    try std.testing.expectEqualStrings(payload, vort_decoded);
 
     try std.testing.expectError(
         error.PayloadTooLarge,
@@ -843,6 +849,15 @@ test "WebSocket permessage-deflate decodes into caller storage" {
     try std.testing.expectEqualStrings(
         external_plain,
         external_decoded,
+    );
+    const external_vort_decoded = try websocket.decompressMessageVortInto(
+        &external_output,
+        &external_compressed,
+        &external_scratch,
+    );
+    try std.testing.expectEqualStrings(
+        external_plain,
+        external_vort_decoded,
     );
 }
 
