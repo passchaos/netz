@@ -331,10 +331,59 @@ pub const DynamicBlockDecode = struct {
 const owned_plan_stack_fields: usize = 32;
 
 const OwnedFieldPlan = struct {
-    name: EncodedString,
-    value: EncodedString,
-    never_indexed: bool,
+    name_raw: []const u8,
+    value_raw: []const u8,
+    name_decoded_len: usize,
+    value_decoded_len: usize,
+    flags: packed struct(u8) {
+        name_huffman: bool,
+        value_huffman: bool,
+        never_indexed: bool,
+        reserved: u5 = 0,
+    },
+
+    fn init(
+        name: EncodedString,
+        value: EncodedString,
+        never_indexed: bool,
+    ) OwnedFieldPlan {
+        return .{
+            .name_raw = name.raw,
+            .value_raw = value.raw,
+            .name_decoded_len = name.decoded_len,
+            .value_decoded_len = value.decoded_len,
+            .flags = .{
+                .name_huffman = name.huffman,
+                .value_huffman = value.huffman,
+                .never_indexed = never_indexed,
+            },
+        };
+    }
+
+    fn decodeNameInto(self: OwnedFieldPlan, output: []u8) !void {
+        return decodePlannedStringInto(
+            self.name_raw,
+            self.name_decoded_len,
+            self.flags.name_huffman,
+            output,
+        );
+    }
+
+    fn decodeValueInto(self: OwnedFieldPlan, output: []u8) !void {
+        return decodePlannedStringInto(
+            self.value_raw,
+            self.value_decoded_len,
+            self.flags.value_huffman,
+            output,
+        );
+    }
 };
+
+comptime {
+    if (@sizeOf(usize) == 8) {
+        std.debug.assert(@sizeOf(OwnedFieldPlan) == 56);
+    }
+}
 
 pub const FieldSectionPrefix = struct {
     required_insert_count: u64,
@@ -1574,11 +1623,11 @@ const OwnedFieldBuilder = struct {
             self.string_bytes,
             additional,
         ) catch return error.ExcessiveLoad;
-        self.plans.appendAssumeCapacity(.{
-            .name = name,
-            .value = value,
-            .never_indexed = never_indexed,
-        });
+        self.plans.appendAssumeCapacity(OwnedFieldPlan.init(
+            name,
+            value,
+            never_indexed,
+        ));
         self.string_bytes = next_string_bytes;
     }
 
@@ -1609,16 +1658,16 @@ const OwnedFieldBuilder = struct {
         const strings = allocation[field_bytes..];
         var string_offset: usize = 0;
         for (self.plans.items, fields, 0..) |plan, *field, index| {
-            const name = strings[string_offset..][0..plan.name.decoded_len];
-            try plan.name.decodeInto(name);
+            const name = strings[string_offset..][0..plan.name_decoded_len];
+            try plan.decodeNameInto(name);
             string_offset += name.len;
-            const value = strings[string_offset..][0..plan.value.decoded_len];
-            try plan.value.decodeInto(value);
+            const value = strings[string_offset..][0..plan.value_decoded_len];
+            try plan.decodeValueInto(value);
             string_offset += value.len;
             field.* = .{
                 .name = name,
                 .value = value,
-                .never_indexed = plan.never_indexed,
+                .never_indexed = plan.flags.never_indexed,
                 .block_storage = if (index == 0) allocation else null,
             };
         }
@@ -1736,11 +1785,12 @@ const EncodedString = struct {
     decoded_len: usize,
 
     fn decodeInto(self: EncodedString, output: []u8) !void {
-        if (output.len != self.decoded_len) return error.InvalidEncoding;
-        if (self.huffman) {
-            return huffman_codec.decodeHuffmanInto(output, self.raw);
-        }
-        @memcpy(output, self.raw);
+        return decodePlannedStringInto(
+            self.raw,
+            self.decoded_len,
+            self.huffman,
+            output,
+        );
     }
 
     fn decode(
@@ -1755,6 +1805,17 @@ const EncodedString = struct {
         return .{ .value = decoded, .storage = decoded };
     }
 };
+
+fn decodePlannedStringInto(
+    raw: []const u8,
+    decoded_len: usize,
+    huffman: bool,
+    output: []u8,
+) !void {
+    if (output.len != decoded_len) return error.InvalidEncoding;
+    if (huffman) return huffman_codec.decodeHuffmanInto(output, raw);
+    @memcpy(output, raw);
+}
 
 fn decodeString(allocator: std.mem.Allocator, cursor: *wire.Cursor) !DecodedString {
     const first = try cursor.readByte();

@@ -180,6 +180,8 @@ fn measureOwnedDecode(
             table,
             64 * 1024,
         );
+        std.mem.doNotOptimizeAway(decoded.fields.ptr);
+        std.mem.doNotOptimizeAway(decoded.fields.len);
         netz.http3.Qpack.freeDynamicBlock(allocator, &decoded);
     }
     return nowNs(io) -| started;

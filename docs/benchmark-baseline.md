@@ -732,6 +732,16 @@ the geometric grow/remap sequence from ordinary owned sections while retaining
 the same heap migration above that bound. Four stable interleaved CPU-0 runs
 measured 590-599 ns/block versus 634-647 ns/block at the direct-to-final commit
 (1.06-1.10x faster); one cold 921-ns baseline outlier was excluded.
+The owned-field plan now stores its two Huffman flags and never-indexed state
+in one packed byte next to the raw slices and decoded lengths. On 64-bit
+targets this reduces each plan from 72 to 56 bytes and the 32-field stack
+budget from 2,304 to 1,792 bytes without changing final field ownership or
+wire output. Nine CPU-0, order-alternated, fixed-binary comparisons against
+parent `e128fb55` used the same explicit anti-elision barrier and three million
+decodes per arm. The parent measured 682-710 ns/block (693 median); the compact
+plan measured 571-582 ns/block (574 median), won all nine pairs, and reduced
+median time by 17.2%. These are internal owned-decode results, not a
+cross-library QPACK claim.
 
 The same executable now includes a 512-field/512-unique-reference section to
 expose reference-set bookkeeping that the ordinary 32-field block cannot.
