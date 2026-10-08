@@ -127,6 +127,15 @@ servers, versus Quinn-client p50 at 157.621/173.751 us. The latter
 remains directional same-application-shape evidence, and the large-payload
 cross-stack gap remains open.
 
+Vail `6f22077` later grouped four independent PMULL products inside the compact
+runtime-width GHASH loop. Nine clean CPU-0 fixed-binary pairs reduced the same
+1,149-byte netz receive path from 2,689 to 2,646 ns/packet (1.60%, 9/9 wins)
+while adding 776 bytes of ELF `.text`. A fresh five-sample Quinn matrix with
+published Vail `1219d45` measured netz-client p50 at 163.460/189.514 us against
+fixed Quinn/netz servers and Quinn-client p50 at 139.089/166.441 us. Those
+same-application-shape ratios are 0.851x/0.878x, so the remaining large-payload
+packet-protection/event-loop gap is still open.
+
 Saturated equal-size receive queues now overwrite the oldest allocation in
 place rather than temporarily retaining a `capacity + 1` payload block through
 the recycle pool. A fail-first allocator test verifies the no-allocation

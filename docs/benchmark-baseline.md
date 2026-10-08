@@ -1370,6 +1370,27 @@ directional compatibility evidence; the fixed-binary receive result is the
 causal performance evidence, and the large-payload cross-stack gap remains
 open.
 
+Vail `6f22077` subsequently groups four independent ARM64 PMULL products before
+folding them into each GHASH accumulator. It retains the compact runtime-width
+loop instead of instantiating every tail and adds only 776 bytes to this
+benchmark's ELF `.text` (1,419,034 to 1,419,810 bytes). Nine clean,
+order-alternated fixed-binary CPU-0 pairs, each with 500 warmups and 10,000
+measured batches of 54 1,149-byte DATAGRAM packets, reduced the service-path
+median from 2,689 to 2,646 ns/packet (1.60%, 9/9 wins). Vail's separate
+1,200-byte prepared AES-128-GCM benchmark used seven CPU-0 pairs: seal fell
+from 888 to 851 ns/op (4.17%, 6/7 wins), while combined open plus seal fell
+from 1,780 to 1,700 ns/op (4.49%, 7/7 wins). Baseline/candidate netz binary
+hashes were
+`61ac4cd751b7bd8287ef21596919df76b3dc278097023e96914ffdb7c91cdb13`
+and `270ea2e206430f27a53babf8ee6d590d720f5b1c2e5aacecb30ff000e0cdf687`.
+
+A fresh five-sample, 50-warmup, 500-window Quinn matrix with the published
+Vail `1219d45` measured 1,024-byte/window-16 p50 at 163.460 us for a netz
+client against a fixed Quinn server and 189.514 us against a fixed netz server;
+the corresponding Quinn-client medians were 139.089 and 166.441 us. The ratios
+remain 0.851x and 0.878x, so this separately packetized cross-stack gap remains
+open and is not used as causal evidence for the GHASH change.
+
 The new connection-level suite test passes a FIN-terminated single STREAM and a
 second STREAM after a key-phase update through `Connection.receivePacket` for
 AES-128-GCM/SHA-256, AES-256-GCM/SHA-384, ChaCha20-Poly1305/SHA-256, and
