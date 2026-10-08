@@ -12,8 +12,9 @@ const RawDatagramBatch = struct {
     allocator: std.mem.Allocator,
     storage: []u8,
     datagrams: []quic.runtime.ReceivedBytesView,
-    count: usize = 0,
-    next_index: usize = 0,
+    received_at_ns: u64 = 0,
+    count: u8 = 0,
+    next_index: u8 = 0,
 
     fn init(
         connection: *quic.one_rtt.Connection,
@@ -79,6 +80,7 @@ pub const Connection = struct {
         self: *Connection,
         connection: *quic.one_rtt.Connection,
         datagram: quic.runtime.ReceivedBytesView,
+        received_at_ns: u64,
         context: anytype,
         comptime visitor: *const fn (
             @TypeOf(context),
@@ -113,8 +115,9 @@ pub const Connection = struct {
             .connection = connection,
             .context = context,
         };
-        return connection.visitReceivedDatagram(
+        return connection.visitReceivedDatagramAt(
             datagram,
+            received_at_ns,
             &adapter,
             Adapter.visit,
         );
@@ -182,6 +185,7 @@ pub const Connection = struct {
             if (try self.visitRawDatagram(
                 connection,
                 datagram,
+                raw_batch.received_at_ns,
                 context,
                 visitor,
             )) return true;
@@ -209,13 +213,14 @@ pub const Connection = struct {
     ) ReceiveTimeoutError!void {
         const raw_batch = (try self.ensureRawBatch(connection)) orelse
             return error.BufferTooShort;
-        raw_batch.count = try connection
+        raw_batch.count = @intCast(try connection
             .receiveDatagramsIntoServicingTimersDeadline(
             raw_batch.storage,
             raw_batch.datagrams,
             deadline,
-        );
+        ));
         raw_batch.next_index = 0;
+        raw_batch.received_at_ns = monotonicNowNs(connection.endpoint.io);
     }
 
     pub fn visit(
@@ -258,12 +263,15 @@ pub const Connection = struct {
                     context,
                     visitor,
                 )) return;
-                raw_batch.count = try connection
+                raw_batch.count = @intCast(try connection
                     .receiveDatagramsIntoServicingTimers(
                     raw_batch.storage,
                     raw_batch.datagrams,
-                );
+                ));
                 raw_batch.next_index = 0;
+                raw_batch.received_at_ns = monotonicNowNs(
+                    connection.endpoint.io,
+                );
             }
         }
         var batch = try connection.receivePacketBatchServicingTimers();
@@ -360,6 +368,12 @@ pub const Connection = struct {
         return visitor(context, packetView(packet));
     }
 };
+
+fn monotonicNowNs(io: std.Io) u64 {
+    const timestamp = std.Io.Clock.awake.now(io).nanoseconds;
+    if (timestamp <= 0) return 0;
+    return std.math.cast(u64, timestamp) orelse std.math.maxInt(u64);
+}
 
 pub fn packetView(
     packet: quic.one_rtt.ReceivedPacket,
@@ -612,6 +626,8 @@ test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time"
         @as(usize, receive_policy.raw_datagram_storage_limit),
         cursor.raw_batch.?.storage.len,
     );
+    const batch_received_at_ns = cursor.raw_batch.?.received_at_ns;
+    try std.testing.expect(batch_received_at_ns != 0);
     try std.testing.expectEqual(@as(usize, 1), cursor.raw_batch.?.count - cursor.raw_batch.?.next_index);
     const retained_index = cursor.raw_batch.?.next_index;
     try std.testing.expectError(
@@ -637,6 +653,10 @@ test "HTTP/3 connection cursor batches zio UDP but applies one packet at a time"
     try std.testing.expectEqual(@as(u64, 1), packet_numbers[1]);
     try std.testing.expectEqual(@as(u64, 2), connection.stats().packets_received);
     try std.testing.expectEqual(@as(?u64, null), connection.ackDelayDeadline());
+    try std.testing.expectEqual(
+        batch_received_at_ns,
+        cursor.raw_batch.?.received_at_ns,
+    );
     try std.testing.expectEqual(@as(usize, 0), cursor.raw_batch.?.count - cursor.raw_batch.?.next_index);
 }
 

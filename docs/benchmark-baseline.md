@@ -1916,7 +1916,9 @@ handshake caps generated `max_udp_payload_size` advertisements to the endpoint
 capacity and rejects oversized raw transport-parameter overrides. At the HTTP/3
 default, the cursor drains up to sixteen independent UDP datagrams through one
 zio `std.Io` receive operation, retains at most 64 KiB of encrypted datagrams,
-and authenticates/applies exactly one packet per upper-layer turn. Endpoints
+samples the monotonic processing time once for the whole batch, and
+authenticates/applies exactly one packet per upper-layer turn. Compact batch
+indexes keep that timestamp within the prior connection layout. Endpoints
 whose capacity only permits one slot retain the single-packet path.
 Preferred-address migration likewise remains on the dual-socket single-packet
 path. A real zio regression proves that callback

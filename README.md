@@ -790,8 +790,8 @@ Current protocol coverage includes:
   protected-packet storage, handshake-scoped reusable datagram receives whose
   allocation transfers into established 1-RTT receive scratch, in-place
   current-key 1-RTT decryption, and bounded non-GRO multi-datagram receive
-  cursors that amortize
-  zio socket waits while exposing only one packet at a time to HTTP/3,
+  cursors that amortize zio socket waits and one monotonic clock sample across
+  each kernel receive batch while exposing only one packet at a time to HTTP/3,
   preserving any datagrams already dequeued when a later batch-drain receive
   reports an error,
   strict wire-order low-peak batch servicing, and bounded power-of-two

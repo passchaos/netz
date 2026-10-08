@@ -11239,6 +11239,10 @@ pub const Connection = struct {
                 .reordering_threshold = self.ack_reordering_threshold,
             };
             var completed: usize = 0;
+            // Every datagram below came from one recvmmsg call. Use one
+            // processing timestamp for the batch, matching the GRO path and
+            // avoiding a clock read for every independently returned packet.
+            const received_at_ns = self.monotonicNowNs();
             for (received[0..count]) |datagram| {
                 var batch: quic.runtime.ReceivedBytesBatchView = .{
                     .from = datagram.from,
@@ -11250,7 +11254,7 @@ pub const Connection = struct {
                 };
                 completed += try self.processReceivedDatagramBatchVisitingAt(
                     &batch,
-                    self.monotonicNowNs(),
+                    received_at_ns,
                     &ack,
                     BatchAckObservation.observe,
                 );
