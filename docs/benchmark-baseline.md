@@ -119,7 +119,7 @@ exact compressed prefix at EOB, allowing gzip/zlib wrappers to batch input while
 retaining footer ownership; bounded Huffman prefix tables and span-based match
 replay reduce the prior 85,330 ns incremental median to 3,959 ns (`21.55x`, or
 95.36% lower). ARM CRC32 dispatch also moves the whole-body median from 2,850 ns
-to 2,092 ns. Five CPU-0 samples against Vort `571bae21` establish this
+to 2,092 ns. Five CPU-0 samples against Vort `eed23ef7` establish this
 in-repository A/B. Vort's separate same-frame comparison against system
 zlib 1.3 measured a `0.719x` full-buffer geometric-mean latency ratio and a
 `0.581x` fragmented-input/output ratio across HTTP-like, JSON, and binary
