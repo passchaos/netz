@@ -94,8 +94,8 @@ HTTP content-coding benchmark
   io backend: zio-std-io
   coding: gzip, iterations: 50000
   payload: 4096 bytes, encoded: 80 bytes
-  caller-buffer decode: 2824-2860 ns/representation, median 2832 ns
-  incremental decode: 5092-5109 ns/representation, median 5094 ns
+  caller-buffer decode: 2835-2847 ns/representation, median 2837 ns
+  incremental decode: 4612-4658 ns/representation, median 4647 ns
   incremental decoder state: 72 bytes
   checksum: 9953158
 ```
@@ -117,10 +117,13 @@ only the selected codec implementation, so gzip/deflate users do not carry the
 largest Zstandard decoder inline. Vort's raw incremental decoder now returns an
 exact compressed prefix at EOB, allowing gzip/zlib wrappers to batch input while
 retaining footer ownership; bounded Huffman prefix tables and span-based match
-replay reduce the prior 85,330 ns incremental median to 5,094 ns (`16.75x`, or
-94.03% lower). The whole-body median remained effectively flat at 2,850 ns
-before and 2,832 ns after. Five CPU-0 samples against Vort `34c7ff53` establish
-this in-repository A/B; it is not a cross-library performance claim.
+replay reduce the prior 85,330 ns incremental median to 4,647 ns (`18.36x`, or
+94.55% lower). The whole-body median remained effectively flat at 2,850 ns
+before and 2,837 ns after. Five CPU-0 samples against Vort `97393b31` establish
+this in-repository A/B. Vort's separate same-frame comparison against system
+zlib 1.3 measured a `1.340x` full-buffer geometric-mean latency ratio and a
+`0.983x` fragmented-input/output ratio across HTTP-like, JSON, and binary
+workloads; these are scoped internal comparisons, not a broad industry claim.
 
 ### HTTP/1 persistent 16-request pipeline
 
