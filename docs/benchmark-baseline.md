@@ -94,8 +94,8 @@ HTTP content-coding benchmark
   io backend: zio-std-io
   coding: gzip, iterations: 50000
   payload: 4096 bytes, encoded: 80 bytes
-  caller-buffer decode: 2833-2854 ns/representation, median 2850 ns
-  incremental decode: 85230-85407 ns/representation, median 85330 ns
+  caller-buffer decode: 2824-2860 ns/representation, median 2832 ns
+  incremental decode: 5092-5109 ns/representation, median 5094 ns
   incremental decoder state: 72 bytes
   checksum: 9953158
 ```
@@ -114,11 +114,13 @@ response-head constructors for every HTTP version. Stacked encodings remain on
 the bounded whole-body APIs because composing their backpressure requires an
 intermediate representation. The tagged outer state is 72 bytes and allocates
 only the selected codec implementation, so gzip/deflate users do not carry the
-largest Zstandard decoder inline. Five CPU-0 samples above establish the first
-in-repository baseline rather than a cross-library comparison. Vort's current
-gzip incremental wrapper intentionally advances raw input byte by byte to keep
-the footer outside DEFLATE lookahead, so its substantial gap to the one-shot
-path remains visible as the next decoder optimization target.
+largest Zstandard decoder inline. Vort's raw incremental decoder now returns an
+exact compressed prefix at EOB, allowing gzip/zlib wrappers to batch input while
+retaining footer ownership; bounded Huffman prefix tables and span-based match
+replay reduce the prior 85,330 ns incremental median to 5,094 ns (`16.75x`, or
+94.03% lower). The whole-body median remained effectively flat at 2,850 ns
+before and 2,832 ns after. Five CPU-0 samples against Vort `34c7ff53` establish
+this in-repository A/B; it is not a cross-library performance claim.
 
 ### HTTP/1 persistent 16-request pipeline
 
