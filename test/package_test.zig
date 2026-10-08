@@ -254,6 +254,9 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(netz.grpc.StreamingResponse, "reset"));
     try std.testing.expect(@hasDecl(netz, "tls"));
+    try std.testing.expect(@hasDecl(netz, "http"));
+    try std.testing.expect(@hasDecl(netz.http, "ContentCoding"));
+    try std.testing.expect(@hasDecl(netz.http, "ContentCodingChain"));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));
     try std.testing.expect(@hasDecl(netz.tls, "client_ca_file"));
@@ -9369,4 +9372,64 @@ test "public modules are reachable" {
         netz.quic.one_rtt.Connection,
         "resetPartialDeliveryEnabled",
     ));
+}
+
+test "HTTP response types expose shared content decoding" {
+    const allocator = std.testing.allocator;
+    const body = "decoded body";
+    const gzip_hello = [_]u8{
+        0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0x03, 0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07,
+        0x00, 0x86, 0xa6, 0x10, 0x36, 0x05, 0x00, 0x00,
+        0x00,
+    };
+
+    var h1_headers = [_]netz.http1.Header{.{
+        .name = "Content-Encoding",
+        .value = "gzip",
+    }};
+    const h1 = netz.http1.Response{
+        .version = .http_1_1,
+        .status = 200,
+        .reason = "OK",
+        .headers = &h1_headers,
+        .body = &gzip_hello,
+        .consumed = 0,
+    };
+    var h1_decoded = try h1.decodeContentAlloc(allocator, "hello".len);
+    defer h1_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("hello", h1_decoded.bytes);
+
+    var h2_headers = [_]netz.http2.Hpack.HeaderField{.{
+        .name = "content-encoding",
+        .value = "identity",
+    }};
+    var h2_body = [_]u8{
+        'd', 'e', 'c', 'o', 'd', 'e', 'd', ' ', 'b', 'o', 'd', 'y',
+    };
+    const h2 = netz.http2.runtime.OwnedResponse{
+        .headers = &h2_headers,
+        .status = 200,
+        .body = &h2_body,
+    };
+    var output: [body.len]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        body,
+        try h2.decodeContentInto(&output, &.{}),
+    );
+
+    var h3_headers = [_]netz.http3.Qpack.HeaderField{.{
+        .name = "content-encoding",
+        .value = "identity",
+    }};
+    const h3 = netz.http3.DecodedResponse{
+        .status = 200,
+        .headers = &h3_headers,
+        .body = body,
+        .consumed = 0,
+    };
+    try std.testing.expectEqual(
+        netz.http.ContentCoding.identity,
+        (try h3.contentEncoding()).items()[0],
+    );
 }

@@ -8,6 +8,7 @@
 pub const runtime = @import("runtime.zig");
 pub const stream = @import("stream.zig");
 pub const tls = @import("tls/mod.zig");
+pub const http = @import("http/mod.zig");
 pub const http1 = @import("http1/mod.zig");
 pub const http2 = @import("http2/mod.zig");
 pub const http3 = @import("http3/mod.zig");
@@ -21,6 +22,7 @@ comptime {
     _ = runtime;
     _ = stream;
     _ = tls;
+    _ = http;
     _ = http1;
     _ = http2;
     _ = http3;

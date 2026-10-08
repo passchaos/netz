@@ -30,6 +30,7 @@ taskset -c 0 zig build bench-http1-pipeline -Doptimize=ReleaseFast -- \
   --large-body --write-strategy=vectored
 taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
   --mode=fixed --warmup=20 --iterations=200
+taskset -c 0 zig build bench-http-content-coding -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-quic-one-rtt-receive -Doptimize=ReleaseFast -- \
   --mode=visitor --frame=stream --warmup=200 --iterations=5000

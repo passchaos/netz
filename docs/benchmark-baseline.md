@@ -87,6 +87,28 @@ guard for the shared vail record stream, not a cross-library performance claim.
 
 ## Current netz results
 
+### Shared HTTP Content-Encoding decode
+
+```text
+HTTP content-coding benchmark
+  io backend: zio-std-io
+  coding: gzip, iterations: 200000
+  payload: 4096 bytes, encoded: 80 bytes
+  caller-buffer decode: 2842-2872 ns/representation, median 2854 ns
+  checksum: 19906154
+```
+
+The shared `netz.http.content_coding` layer parses repeated and comma-combined
+Content-Encoding fields once, caps nesting at eight codings, and decodes the
+stack in reverse application order. HTTP/1, HTTP/2, and HTTP/3 aggregate
+responses expose the same allocating and two-workspace caller-buffer helpers.
+Every intermediate representation is independently bounded, so stacking does
+not bypass the caller's decompression limit. The implementation uses Vort for
+gzip, RFC 1950 `deflate`, Brotli, and Zstandard; gzip and Zstandard accept
+concatenated frames while single-stream formats reject trailing bytes. The
+five CPU-0 samples above retain both host-load outliers and establish the first
+in-repository baseline rather than a cross-library comparison.
+
 ### HTTP/1 persistent 16-request pipeline
 
 The current HTTP/1 parse, pipeline, and streaming-body executables obtain

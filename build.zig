@@ -530,6 +530,27 @@ pub fn build(b: *std.Build) void {
     fuzz_websocket_compression_step.dependOn(
         &run_websocket_compression_fuzz_tests.step,
     );
+    const http_content_coding_fuzz_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "test/http_content_coding_fuzz_test.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .error_tracing = false,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const run_http_content_coding_fuzz_tests = b.addRunArtifact(
+        http_content_coding_fuzz_tests,
+    );
+    const fuzz_http_content_coding_step = b.step(
+        "fuzz-http-content-coding",
+        "Fuzz bounded HTTP Content-Encoding parsing and decode",
+    );
+    fuzz_http_content_coding_step.dependOn(
+        &run_http_content_coding_fuzz_tests.step,
+    );
     const websocket_context_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -1120,6 +1141,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_http3_connection_fuzz_tests.step);
     test_step.dependOn(&run_webtransport_endpoint_fuzz_tests.step);
     test_step.dependOn(&run_websocket_compression_fuzz_tests.step);
+    test_step.dependOn(&run_http_content_coding_fuzz_tests.step);
     test_step.dependOn(&run_websocket_context_fuzz_tests.step);
     test_step.dependOn(&run_websocket_h1_context_fuzz_tests.step);
     test_step.dependOn(&run_websocket_h1_tls_context_fuzz_tests.step);
@@ -2514,6 +2536,12 @@ pub fn build(b: *std.Build) void {
             .path = "examples/bench_http1_parse.zig",
             .run_step = "bench-http1-parse",
             .description = "Benchmark HTTP/1 borrowed head parsing against owned parsing",
+        },
+        .{
+            .exe_name = "netz-bench-http-content-coding",
+            .path = "examples/bench_http_content_coding.zig",
+            .run_step = "bench-http-content-coding",
+            .description = "Benchmark bounded HTTP Content-Encoding decode",
         },
         .{
             .exe_name = "netz-bench-http1-pipeline",

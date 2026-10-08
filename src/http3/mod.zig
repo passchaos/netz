@@ -3,6 +3,7 @@ const wire = @import("../internal/wire.zig");
 const priority_field = @import("../internal/priority.zig");
 const exact_range_set = @import("../internal/exact_range_set.zig");
 const http_method = @import("../internal/http_method.zig");
+const content_coding = @import("../http/content_coding.zig");
 const quic = @import("../quic/mod.zig");
 const header_fields = @import("codec/header_storage.zig");
 
@@ -3613,6 +3614,39 @@ pub const DecodedResponse = struct {
         Qpack.freeDecodedFields(allocator, self.trailers);
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
+    }
+
+    pub fn contentEncoding(
+        self: DecodedResponse,
+    ) content_coding.Error!content_coding.Chain {
+        return content_coding.parseHeaders(self.headers);
+    }
+
+    /// Decode Content-Encoding layers without mutating QPACK-owned metadata
+    /// or the encoded response body.
+    pub fn decodeContentAlloc(
+        self: DecodedResponse,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return content_coding.decodeHeadersAlloc(
+            allocator,
+            self.headers,
+            self.body,
+            max_output_len,
+        );
+    }
+
+    pub fn decodeContentInto(
+        self: DecodedResponse,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return (try self.contentEncoding()).decodeInto(
+            self.body,
+            out,
+            scratch,
+        );
     }
 };
 

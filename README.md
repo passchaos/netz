@@ -87,6 +87,9 @@ and connection-scoped property isolation.
 oracle with every publisher, subscriber, source, and target connection over
 certificate-pinned native TLS, checking `mqtt` ALPN and AES-128-GCM/SHA-256
 after each bridge reconnect or recreation.
+`zig build fuzz-http-content-coding` feeds arbitrary field values and bounded
+payloads through the shared gzip, deflate, Brotli, and Zstandard response-body
+decoders, including caller-buffer limit and malformed-input paths.
 `zig build fuzz-websocket-compression` separately checks hostile bounded
 DEFLATE input and exact standard/Vort single-buffer and fragmented-input
 round trips across RFC 7692 window sizes; it also accepts `--fuzz=N`.
@@ -138,9 +141,9 @@ After all four protocol combinations warm retained capacity, every generation
 must return connection, pending-handshake, CID-route, and allocator live-byte
 state to the same baseline; final endpoint teardown must return live bytes to
 zero. Multi-hour, high-concurrency stability remains outside these bounded
-models. The pinned GitHub Actions workflow replays all thirty-four
+models. The pinned GitHub Actions workflow replays all thirty-five
 corpora and the complete test gate on pushes and pull requests, then runs the
-thirty-four coverage-guided targets
+thirty-five coverage-guided targets
 daily and on demand. The live HTTP/1 and HTTP/2 targets default to 256 daily
 connections, the TLS HTTP/1, TLS HTTP/2, and HTTP/3 connection targets to 64
 authenticated sessions, the WebSocket H1/H2 TLS targets to 64 authenticated
@@ -156,12 +159,17 @@ two-session runs, the QUIC path target to 256 runs, the QUIC handshake target
 and QUIC endpoint target to 32 runs, and the in-memory targets to 10,000
 iterations. A manual `fuzz_runs` value overrides all targets. Because
 the source
-checkout currently uses sibling `../vail` and `../pbz` paths, repository
+checkout currently uses sibling `../vail`, `../vort`, and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
-for the private `passchaos/vail` checkout.
+for the private dependency checkouts.
 
 Current protocol coverage includes:
 
+- Shared HTTP Content-Encoding parsing and bounded whole-representation decode
+  for HTTP/1, HTTP/2, and HTTP/3 responses, including repeated/stacked coding
+  fields, reverse-order decoding, allocating and caller-buffer APIs, gzip,
+  RFC 1950 `deflate`, Brotli, and Zstandard through Vort, with an eight-layer
+  nesting cap and a decoded-size limit applied independently to every layer,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the
@@ -1432,6 +1440,7 @@ comparison gaps are recorded in `docs/benchmark-baseline.md`:
 ```sh
 zig build bench -Doptimize=ReleaseFast
 zig build bench-http1-parse -Doptimize=ReleaseFast
+taskset -c 0 zig build bench-http-content-coding -Doptimize=ReleaseFast
 # The common owned parser retains up to 16 validated header descriptors during
 # its counting pass, avoiding a second parse while preserving exact allocation
 # for larger header sets.

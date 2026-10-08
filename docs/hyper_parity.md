@@ -1005,6 +1005,14 @@ End-to-end tests prove non-incremental stream-ID order, incremental sharing,
 Priority-header ordering, PRIORITY_UPDATE precedence, and use of lower-urgency
 connection credit while a more urgent stream has no stream credit.
 
+All three HTTP versions share an explicit, bounded Content-Encoding layer for
+aggregate responses. It parses repeated and comma-combined coding fields,
+reverses stacked encodings, and supports gzip, RFC 1950 `deflate`, Brotli, and
+Zstandard through Vort. Allocating and two-workspace caller-buffer variants
+apply the decoded-size ceiling to every intermediate layer. The helper leaves
+wire headers and encoded response ownership unchanged, avoiding the hidden
+automatic-transform semantics that often complicate pooling and cache logic.
+
 ## Current feature comparison
 
 | Area | netz | hyper |

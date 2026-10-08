@@ -20,6 +20,7 @@ const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
+const content_coding = @import("../http/content_coding.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
@@ -15333,6 +15334,38 @@ pub const OwnedResponse = struct {
         freeHeaders(allocator, self.trailers);
         allocator.free(self.body);
         self.* = undefined;
+    }
+
+    pub fn contentEncoding(
+        self: OwnedResponse,
+    ) content_coding.Error!content_coding.Chain {
+        return content_coding.parseHeaders(self.headers);
+    }
+
+    /// Decode Content-Encoding layers without mutating wire headers or body.
+    pub fn decodeContentAlloc(
+        self: OwnedResponse,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return content_coding.decodeHeadersAlloc(
+            allocator,
+            self.headers,
+            self.body,
+            max_output_len,
+        );
+    }
+
+    pub fn decodeContentInto(
+        self: OwnedResponse,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return (try self.contentEncoding()).decodeInto(
+            self.body,
+            out,
+            scratch,
+        );
     }
 };
 
