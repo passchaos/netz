@@ -5343,7 +5343,7 @@ logical MiB/s with checksum 255,000; a 200-round direct-slices run measured
 21.237 us/roundtrip. These samples preserve the 69-byte wire payload while
 keeping outbound compression on the focused package-local encoder.
 
-The receive side now uses the sibling Vort revision
+The receive-side transition was measured against sibling Vort revision
 `e5c9f078f028c7f852f288104f49b0e1118409f6` for bounded raw-DEFLATE
 decoding in both no-context and context-takeover modes. Runtime caller-buffer
 decoding no longer allocates or retains Zig flate's separate 64-KiB window per
