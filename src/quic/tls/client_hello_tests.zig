@@ -137,6 +137,17 @@ test "QUIC TLS ClientHello encodes and parses QUIC extensions" {
         ),
     );
 
+    var invalid_suite_hello: std.ArrayList(u8) = .empty;
+    defer invalid_suite_hello.deinit(allocator);
+    try std.testing.expectError(
+        error.InvalidCipherSuite,
+        target.writeClientHello(&invalid_suite_hello, allocator, .{
+            .random = random,
+            .x25519_public_key = key,
+            .cipher_suites = &.{.aes_128_ccm_8_sha256},
+        }),
+    );
+
     var non_null_compression = try hello.clone(allocator);
     defer non_null_compression.deinit(allocator);
     non_null_compression.items[offsets.compression_start] = 1;

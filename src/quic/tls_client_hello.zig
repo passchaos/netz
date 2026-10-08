@@ -29,8 +29,14 @@ const tls_1_3: u16 = 0x0304;
 pub const CipherSuite = quic.tls.cipher_suite.Suite;
 pub const CipherSuiteSelectionPolicy =
     quic.tls.cipher_suite.SelectionPolicy;
-pub const default_cipher_suites =
-    quic.tls.cipher_suite.default_preference;
+/// QUIC's broadly deployed TLS 1.3 suites. Less common QUIC-compatible suites
+/// remain available through explicit configuration; CCM_8 is never valid for
+/// QUIC packet protection.
+pub const default_cipher_suites = [_]CipherSuite{
+    .aes_128_gcm_sha256,
+    .aes_256_gcm_sha384,
+    .chacha20_poly1305_sha256,
+};
 
 pub const NamedGroup = enum(u16) {
     secp256r1 = 0x0017,
@@ -894,7 +900,10 @@ pub fn deriveHandshakeSecretsWithPskForVersion(
         shared_secret,
         transcript_hash,
         psk,
-    );
+    ) catch |err| switch (err) {
+        error.UnsupportedVersion => return error.UnsupportedVersion,
+        error.HashMismatch, error.InvalidCipherSuite => unreachable,
+    };
 }
 
 pub fn deriveHandshakeSecretsWithPskAndSuiteForVersion(
@@ -903,7 +912,8 @@ pub fn deriveHandshakeSecretsWithPskAndSuiteForVersion(
     shared_secret: [32]u8,
     transcript_hash: [32]u8,
     psk: ?[32]u8,
-) quic.protection.VersionError!HandshakeSecrets {
+) (quic.protection.VersionError ||
+    quic.protection.KeyDerivationError)!HandshakeSecrets {
     const secrets = quic.tls.key_schedule.deriveHandshake(
         shared_secret,
         transcript_hash,
@@ -934,7 +944,7 @@ pub fn deriveRuntimeHandshakeSecretsForVersion(
     psk: ?quic.tls.secret.Secret,
 ) (quic.protection.VersionError ||
     quic.tls.key_schedule.Error ||
-    error{HashMismatch})!RuntimeHandshakeSecrets {
+    quic.protection.KeyDerivationError)!RuntimeHandshakeSecrets {
     return deriveRuntimeHandshakeSecretsFromSliceForVersion(
         version,
         cipher_suite,
@@ -955,7 +965,7 @@ pub fn deriveRuntimeHandshakeSecretsFromSliceForVersion(
     psk: ?quic.tls.secret.Secret,
 ) (quic.protection.VersionError ||
     quic.tls.key_schedule.Error ||
-    error{HashMismatch})!RuntimeHandshakeSecrets {
+    quic.protection.KeyDerivationError)!RuntimeHandshakeSecrets {
     const hash = cipher_suite.hash();
     if (transcript_hash.hash != hash) return error.HashMismatch;
     const secrets = try quic.tls.key_schedule.deriveHandshakeFor(
@@ -991,7 +1001,10 @@ pub fn deriveApplicationSecretsForVersion(version: u32, handshake_secret: [32]u8
         .aes_128_gcm_sha256,
         handshake_secret,
         transcript_hash,
-    );
+    ) catch |err| switch (err) {
+        error.UnsupportedVersion => return error.UnsupportedVersion,
+        error.HashMismatch, error.InvalidCipherSuite => unreachable,
+    };
 }
 
 pub fn deriveApplicationSecretsWithSuiteForVersion(
@@ -999,7 +1012,8 @@ pub fn deriveApplicationSecretsWithSuiteForVersion(
     cipher_suite: CipherSuite,
     handshake_secret: [32]u8,
     transcript_hash: [32]u8,
-) quic.protection.VersionError!ApplicationSecrets {
+) (quic.protection.VersionError ||
+    quic.protection.KeyDerivationError)!ApplicationSecrets {
     const secrets = quic.tls.key_schedule.deriveApplication(
         handshake_secret,
         transcript_hash,
@@ -1028,7 +1042,7 @@ pub fn deriveRuntimeApplicationSecretsForVersion(
     transcript_hash: quic.tls.transcript.Digest,
 ) (quic.protection.VersionError ||
     quic.tls.key_schedule.Error ||
-    error{HashMismatch})!RuntimeApplicationSecrets {
+    quic.protection.KeyDerivationError)!RuntimeApplicationSecrets {
     if (handshake_secret.hash != cipher_suite.hash() or
         transcript_hash.hash != cipher_suite.hash())
     {
@@ -1110,6 +1124,7 @@ fn cipherSuitesWireLen(suites: []const CipherSuite) Error!usize {
         return error.InvalidCipherSuite;
     }
     for (suites, 0..) |suite, index| {
+        if (!suite.quicCompatible()) return error.InvalidCipherSuite;
         for (suites[0..index]) |previous| {
             if (suite == previous) return error.InvalidCipherSuite;
         }

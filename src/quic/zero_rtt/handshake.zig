@@ -13,6 +13,7 @@ const Sha256 = vail.crypto.sha256;
 pub const Error = quic.resumption.tls_psk.Error ||
     quic.resumption.parameters.ValidationError ||
     quic.protection.VersionError ||
+    quic.protection.KeyDerivationError ||
     quic.tls.secret.Error ||
     error{
         InvalidEarlyDataLease,

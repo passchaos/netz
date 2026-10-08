@@ -635,9 +635,18 @@ fn freshSigner(
             try std.Io.randomSecure(io, &noise);
             value.noise = noise;
         },
+        .ecdsa_p521_sha512 => |*value| value.io = io,
+        .ecdsa_p521_sha512_prepared => {},
         .sm2sig_sm3 => |*value| {
             try std.Io.randomSecure(io, &value.nonce);
         },
+        inline .ml_dsa_44, .ml_dsa_65, .ml_dsa_87 => |*value| {
+            var noise = value.noise orelse undefined;
+            try std.Io.randomSecure(io, &noise);
+            value.noise = noise;
+        },
+        .rsa_pss => |*value| value.io = io,
+        .rsa_pkcs1, .custom => {},
     }
     return signer;
 }

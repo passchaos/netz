@@ -268,6 +268,17 @@ test "QUIC AES-256-GCM SHA-384 short packet and key update roundtrip" {
     try std.testing.expectEqualSlices(u8, &keys.suite_hp, &next.suite_hp);
 }
 
+test "QUIC key derivation rejects TLS suites without QUIC protection" {
+    try std.testing.expectError(
+        error.InvalidCipherSuite,
+        protection.deriveKeysForSecretForVersion(
+            version_1_wire_for_test,
+            .aes_128_ccm_8_sha256,
+            .fromSha256([_]u8{0x57} ** protection.secret_len),
+        ),
+    );
+}
+
 test "QUIC AES key update derives next traffic keys and retains header protection" {
     const keys = protection.deriveAes128Keys([_]u8{0x44} ** protection.secret_len);
     const next_secret = protection.nextAes128TrafficSecret(keys.secret);

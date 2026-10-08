@@ -43,6 +43,11 @@ pub const VersionError = error{
     UnsupportedVersion,
 };
 
+pub const KeyDerivationError = error{
+    HashMismatch,
+    InvalidCipherSuite,
+};
+
 pub const Error = varint.Error || VersionError || error{
     InvalidInitialPacket,
     InvalidCipherSuite,
@@ -626,19 +631,19 @@ pub fn deriveKeysForVersion(
     version: u32,
     suite: CipherSuite,
     secret: [secret_len]u8,
-) VersionError!PacketProtectionKeys {
+) (VersionError || KeyDerivationError)!PacketProtectionKeys {
     return deriveKeysWithLabels(
         suite,
         .fromSha256(secret),
         (try protectionProfile(version)).labels,
-    ) catch unreachable;
+    );
 }
 
 pub fn deriveKeysForSecretForVersion(
     version: u32,
     suite: CipherSuite,
     traffic_secret: TlsSecret,
-) (VersionError || error{HashMismatch})!PacketProtectionKeys {
+) (VersionError || KeyDerivationError)!PacketProtectionKeys {
     return deriveKeysWithLabels(
         suite,
         traffic_secret,
@@ -650,8 +655,8 @@ fn deriveKeysWithLabels(
     suite: CipherSuite,
     traffic_secret: TlsSecret,
     labels: HkdfLabels,
-) error{HashMismatch}!PacketProtectionKeys {
-    const derived = try traffic_crypto.Keys.deriveChecked(
+) KeyDerivationError!PacketProtectionKeys {
+    const derived = traffic_crypto.Keys.deriveChecked(
         suite,
         traffic_secret,
         .{
@@ -659,7 +664,10 @@ fn deriveKeysWithLabels(
             .iv = labels.iv,
             .hp = labels.hp,
         },
-    );
+    ) catch |err| switch (err) {
+        error.HashMismatch => return error.HashMismatch,
+        error.UnsupportedCipherSuite => return error.InvalidCipherSuite,
+    };
     const compatibility_secret = if (traffic_secret.hash == .sha256)
         traffic_secret.sha256() catch unreachable
     else
