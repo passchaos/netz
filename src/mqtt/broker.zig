@@ -45,6 +45,7 @@ pub const BridgeQoS2Release = struct {
 const publication_mod = @import("broker/publication.zig");
 const session_delivery = @import("broker/session_delivery.zig");
 const session_route = @import("broker/session_route.zig");
+const session_writer = @import("broker/session_writer.zig");
 const deadline_driver_mod = @import("broker/deadline_driver.zig");
 const retained_mod = @import("retained/mod.zig");
 const session_mod = @import("session/mod.zig");
@@ -494,7 +495,12 @@ const RoutePlan = struct {
     /// Persistent live QoS 0, same-connection, and backpressured transient
     /// targets remain on the ordered caller-owned flush path.
     synchronous_deliveries: []const router_mod.Match,
-    session_targets: []const router_mod.Match,
+    /// Online durable Session targets assigned to the bounded shared writer
+    /// pool with a queue below the asynchronous high watermark.
+    session_deliveries: []const router_mod.Match,
+    /// Same-connection, backpressured, or not-yet-writer-backed durable
+    /// Session targets retain the caller-owned ordered path.
+    synchronous_session_targets: []const router_mod.Match,
     has_matching_subscriber: bool,
     scratch_owner: ?*std.ArrayList(router_mod.Match) = null,
 
@@ -553,6 +559,7 @@ const subscriberIndex = session_route.connectionIndex;
 const route_match_scratch_capacity: usize = 32;
 const session_write_scratch_retain_limit: usize = 64 * 1024;
 const transient_delivery_async_high_watermark: usize = 16;
+const shared_session_delivery_writer_count: usize = 2;
 const session_property_scratch_retain_capacity =
     session_write_scratch_retain_limit / @sizeOf(mqtt.Property);
 
@@ -1375,6 +1382,18 @@ fn shouldScheduleTransientDelivery(
         queued_count < high_watermark;
 }
 
+fn shouldScheduleSessionDelivery(
+    delivery_count: usize,
+    queued_count: usize,
+    high_watermark: usize,
+    same_connection: bool,
+    writer_pool_active: bool,
+) bool {
+    std.debug.assert(high_watermark != 0);
+    return !same_connection and writer_pool_active and delivery_count > 1 and
+        queued_count < high_watermark;
+}
+
 fn networkDeliveryMode(
     upgrade_outgoing_qos: bool,
     source_qos: mqtt.QoS,
@@ -1460,6 +1479,41 @@ test "MQTT transient delivery scheduling respects persistence and watermark" {
         1,
         0,
         limit,
+        false,
+    ));
+    try std.testing.expect(shouldScheduleSessionDelivery(
+        2,
+        1,
+        limit,
+        false,
+        true,
+    ));
+    try std.testing.expect(!shouldScheduleSessionDelivery(
+        2,
+        limit,
+        limit,
+        false,
+        true,
+    ));
+    try std.testing.expect(!shouldScheduleSessionDelivery(
+        1,
+        0,
+        limit,
+        false,
+        true,
+    ));
+    try std.testing.expect(!shouldScheduleSessionDelivery(
+        2,
+        0,
+        limit,
+        true,
+        true,
+    ));
+    try std.testing.expect(!shouldScheduleSessionDelivery(
+        2,
+        0,
+        limit,
+        false,
         false,
     ));
 
@@ -1902,6 +1956,7 @@ pub const Broker = struct {
     ) = .empty,
     will_publishers: will_mod.PublisherMap = .empty,
     slots: []ClientSlot,
+    session_delivery_writers: session_writer.Pool,
     commit_log: ?commit_log_mod.Log = null,
     persistence_mutex: std.Io.Mutex = .init,
     state_mutex: std.Io.Mutex = .init,
@@ -2036,6 +2091,11 @@ pub const Broker = struct {
         );
         @memset(slots, .{});
         errdefer allocator.free(slots);
+        var session_delivery_writers = try session_writer.Pool.init(
+            allocator,
+            slots.len,
+        );
+        errdefer session_delivery_writers.deinit(allocator);
         var router = try router_mod.Router.initWithOptions(
             allocator,
             options.router,
@@ -2095,6 +2155,7 @@ pub const Broker = struct {
             .session_owners = session_owners,
             .will_publishers = will_publishers,
             .slots = slots,
+            .session_delivery_writers = session_delivery_writers,
             .started_at_ns = started_at_ns,
             // Establish a zero-counter baseline at process start so the first
             // periodic `$SYS` update covers the complete initial interval.
@@ -2108,6 +2169,7 @@ pub const Broker = struct {
     }
 
     pub fn deinit(self: *Broker) void {
+        self.session_delivery_writers.deinit(self.allocator);
         for (self.slots) |*slot| {
             slot.clearBuffers(self.allocator);
             slot.clearAssignedClientId(self.allocator);
@@ -3286,6 +3348,21 @@ pub const Broker = struct {
             ) catch return error.BrokerFull;
         }
         var group: std.Io.Group = .init;
+        var session_writer_group: std.Io.Group = .init;
+        try self.session_delivery_writers.start(
+            self.io,
+            &session_writer_group,
+            @min(shared_session_delivery_writer_count, self.slots.len),
+            self,
+            Broker.flushScheduledSessionSlotErased,
+        );
+        var session_writers_started = true;
+        defer if (session_writers_started) {
+            self.session_delivery_writers.stop(
+                self.io,
+                &session_writer_group,
+            );
+        };
         self.deadline_driver.start();
         // Unlike `Io.async`, `concurrent` guarantees the deadline driver is
         // assigned execution before we block in the client group. A merely
@@ -3350,6 +3427,8 @@ pub const Broker = struct {
         }
         group.await(self.io) catch {};
         clients_joined = true;
+        self.session_delivery_writers.stop(self.io, &session_writer_group);
+        session_writers_started = false;
         self.deadline_driver.stop(self.io);
         const deadline_result = deadline_future.await(self.io);
         stop_driver = false;
@@ -3416,6 +3495,21 @@ pub const Broker = struct {
         var supervisor = ListenerSupervisorState{
             .broker = self,
             .options = options,
+        };
+        var session_writer_group: std.Io.Group = .init;
+        try self.session_delivery_writers.start(
+            self.io,
+            &session_writer_group,
+            @min(shared_session_delivery_writer_count, self.slots.len),
+            self,
+            Broker.flushScheduledSessionSlotErased,
+        );
+        var session_writers_started = true;
+        defer if (session_writers_started) {
+            self.session_delivery_writers.stop(
+                self.io,
+                &session_writer_group,
+            );
         };
         self.deadline_driver.start();
         var stop_driver = true;
@@ -3488,6 +3582,8 @@ pub const Broker = struct {
         supervisor.stopping.store(true, .release);
         group.cancel(self.io);
         group_finished = true;
+        self.session_delivery_writers.stop(self.io, &session_writer_group);
+        session_writers_started = false;
         self.deadline_driver.stop(self.io);
         stop_driver = false;
         select.cancelDiscard();
@@ -6016,11 +6112,46 @@ pub const Broker = struct {
                 }
             }
         }
+        const session_target_count = matches.len - session_target_start;
+        var synchronous_session_target_start = matches.len;
+        var session_index = matches.len;
+        while (session_index != session_target_start) {
+            session_index -= 1;
+            const destination_index = subscriberIndex(
+                matches[session_index].subscriber_id,
+                self.slots.len,
+            ).?;
+            const destination = &self.slots[destination_index];
+            const schedule = blk: {
+                const handle = destination.sessionHandle() orelse
+                    break :blk false;
+                const session_stats = self.sessions.stats(handle) catch
+                    break :blk false;
+                break :blk shouldScheduleSessionDelivery(
+                    session_target_count,
+                    session_stats.queued_count,
+                    async_high_watermark,
+                    publisher_id != null and
+                        matches[session_index].subscriber_id == publisher_id.?,
+                    self.session_delivery_writers.isActive(),
+                );
+            };
+            if (schedule) continue;
+            synchronous_session_target_start -= 1;
+            if (session_index != synchronous_session_target_start) {
+                std.mem.swap(
+                    router_mod.Match,
+                    &matches[session_index],
+                    &matches[synchronous_session_target_start],
+                );
+            }
+        }
         return .{
             .storage = matches,
             .deliveries = matches[0..synchronous_delivery_start],
             .synchronous_deliveries = matches[synchronous_delivery_start..plan_count],
-            .session_targets = matches[session_target_start..],
+            .session_deliveries = matches[session_target_start..synchronous_session_target_start],
+            .synchronous_session_targets = matches[synchronous_session_target_start..],
             .has_matching_subscriber = has_matching_subscriber,
             .scratch_owner = match_storage.scratch_owner,
         };
@@ -6456,17 +6587,19 @@ pub const Broker = struct {
         // interleave outside the broker state mutex.
         try self.flushMatches(plan.deliveries);
         try self.flushMatches(plan.synchronous_deliveries);
-        try self.flushMatches(plan.session_targets);
+        try self.flushMatches(plan.session_deliveries);
+        try self.flushMatches(plan.synchronous_session_targets);
     }
 
-    /// Live/transient destinations have independent connection-lifetime
-    /// writers. Durable Session sends still mutate shared Session/persistence
-    /// state while being detached, so keep those targets on the ordered
-    /// caller-owned flush path instead of manufacturing global lock contention.
+    /// Online destinations have independent connection-lifetime writers.
+    /// Durable Session detachment still serializes its own state/persistence
+    /// mutation before each socket write, while batching those socket writes
+    /// across connection tasks in the shared I/O executor turn.
     fn dispatchNetworkPlan(self: *Broker, plan: RoutePlan) Error!void {
         self.scheduleMatches(plan.deliveries);
+        try self.scheduleSessionMatches(plan.session_deliveries);
         try self.flushMatches(plan.synchronous_deliveries);
-        try self.flushMatches(plan.session_targets);
+        try self.flushMatches(plan.synchronous_session_targets);
     }
 
     fn scheduleMatches(
@@ -6479,6 +6612,24 @@ pub const Broker = struct {
                 self.slots.len,
             ) orelse continue;
             self.slots[slot_index].delivery_ready.set(self.io);
+        }
+    }
+
+    fn scheduleSessionMatches(
+        self: *Broker,
+        matches: []const router_mod.Match,
+    ) Error!void {
+        for (matches) |match| {
+            const slot_index = subscriberIndex(
+                match.subscriber_id,
+                self.slots.len,
+            ) orelse continue;
+            if (!self.session_delivery_writers.schedule(
+                self.io,
+                slot_index,
+            )) {
+                try self.flushSlot(slot_index, &self.slots[slot_index]);
+            }
         }
     }
 
@@ -6503,7 +6654,13 @@ pub const Broker = struct {
                 return;
             }
         }
-        for (plan.session_targets) |match| {
+        for (plan.session_deliveries) |match| {
+            if (match.subscriber_id == publisher_id) {
+                try self.flushSlot(slot_index, &self.slots[slot_index]);
+                return;
+            }
+        }
+        for (plan.synchronous_session_targets) |match| {
             if (match.subscriber_id == publisher_id) {
                 try self.flushSlot(slot_index, &self.slots[slot_index]);
                 return;
@@ -6534,6 +6691,50 @@ pub const Broker = struct {
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
         return self.flushSlotLocked(slot);
+    }
+
+    /// Run one shared-pool durable Session job. Holding the slot writer lock
+    /// across validation, flush, and error publication prevents disconnect
+    /// from freeing or reusing the connection while a worker still owns it.
+    fn flushScheduledSessionSlotErased(
+        context: *anyopaque,
+        slot_index: usize,
+    ) void {
+        const self: *Broker = @ptrCast(@alignCast(context));
+        self.flushScheduledSessionSlot(slot_index);
+    }
+
+    fn flushScheduledSessionSlot(
+        self: *Broker,
+        slot_index: usize,
+    ) void {
+        const slot = &self.slots[slot_index];
+        slot.writer_mutex.lockUncancelable(self.io);
+        defer slot.writer_mutex.unlock(self.io);
+
+        self.state_mutex.lockUncancelable(self.io);
+        const can_flush = slot.state.active and
+            slot.state.session_persistent and
+            slot.connection != null;
+        self.state_mutex.unlock(self.io);
+        if (!can_flush) return;
+
+        self.flushSlotLocked(slot) catch |err| {
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            if (!slot.state.active or
+                !slot.state.session_persistent or
+                slot.connection == null)
+            {
+                return;
+            }
+            self.session_delivery_writers.recordError(
+                self.io,
+                slot_index,
+                err,
+            );
+            slot.connection.?.interrupt() catch {};
+        };
     }
 
     fn flushSlotLocked(
@@ -7624,7 +7825,11 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
     try std.testing.expect(persistent_changed);
     try std.testing.expect(publication_committed);
     try std.testing.expectEqual(@as(usize, 0), plan.deliveries.len);
-    try std.testing.expectEqual(@as(usize, 0), plan.session_targets.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.session_deliveries.len);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        plan.synchronous_session_targets.len,
+    );
 
     var first_output: [1]session_mod.Transmission = undefined;
     var second_output: [1]session_mod.Transmission = undefined;
@@ -7988,8 +8193,14 @@ const ClientTask = struct {
             if (!ungracefulTransportClose(err)) read_error = err;
         };
         const writer_error = task.stopDeliveryWriter(slot);
+        const session_writer_error = task.takeSessionDeliveryWriterError(slot);
         if (read_error) |err| task.result.* = err;
         if (writer_error) |err| {
+            if (!ungracefulTransportClose(err) and task.result.* == null) {
+                task.result.* = err;
+            }
+        }
+        if (session_writer_error) |err| {
             if (!ungracefulTransportClose(err) and task.result.* == null) {
                 task.result.* = err;
             }
@@ -8053,6 +8264,16 @@ const ClientTask = struct {
             else => err,
         };
         return null;
+    }
+
+    fn takeSessionDeliveryWriterError(
+        task: ClientTask,
+        _: *ClientSlot,
+    ) ?anyerror {
+        return task.broker.session_delivery_writers.takeError(
+            task.broker.io,
+            task.slot_index,
+        );
     }
 
     fn runLoop(

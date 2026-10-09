@@ -961,25 +961,68 @@ deliveries. Instrumented timing is not used as a benchmark result; the syscall
 count identifies cross-connection write scheduling as the next architectural
 target.
 
+The durable cross-connection target is now addressed by two broker-lifetime
+Session delivery workers rather than one coroutine per connected Session. A
+fixed ring has one entry and one compact state per broker slot, coalesces a
+queued duplicate, and records at most one rerun while a slot is being drained.
+The existing per-slot writer mutex still serializes every control and delivery
+write; same-connection delivery and destinations at the 16-message high
+watermark stay on the ordered publisher path. Worker errors are returned to
+the owning client task before slot reuse, and serving teardown broadcasts to
+and joins both workers. This bounds long-lived writer stacks independently of
+the connection limit. The rejected per-Session prototype reached similar
+throughput but raised balanced broker RSS from about 7.0 MiB to 14.9 MiB; its
+64-KiB zio initial-stack override was also removed because zio deliberately
+keeps 256 KiB available for panic/error paths while retaining an 8-MiB virtual
+growth ceiling.
+
+The final five-pair fixed-binary, CPU-0/client and CPU-1/server A/B is retained
+at `zig-out/mqtt-durable-shared2-ab-final` (63,667,135 bytes; aggregate
+file-hash digest
+`2146ea99f81fb0bc0377de777671c34c7ed39f2b5c8e7d59dd8afb17511570df`).
+It used 1,000 warmups, 10,000 measured QoS 2 publishes, 3,600-second Sessions,
+and an independently sampled CPU-2 RSS peak. Every balanced arm completed
+320,000 deliveries with checksum 18,656,000; every 4-KiB arm completed 40,000
+with checksum 10,780,000. Paired candidate/baseline medians were:
+
+| durable shape | publish/s baseline / candidate | paired throughput | p50 candidate / baseline | p99 candidate / baseline | RSS KiB baseline / candidate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| balanced-32x32 | 1,813 / 2,713 | 1.489x [1.433-1.632] | 0.640x | 0.639x | 6,976 / 8,148 |
+| large-payload | 12,652 / 15,273 | 1.213x [1.207-1.223] | 0.798x | 0.823x | 5,632 / 5,652 |
+
+All ten throughput pairs won. The fixed baseline/candidate/driver SHA-256
+values are
+`fbd216b8cf4f0240ced742f85d805372c795102c90578bec20c8e2c53bf3ff94`,
+`30b6a86286dbdc8ff82c97701812e0ac029557ac6f62a218e416f36ecfe84b69`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+A same-shape `strace -f -c` diagnostic at
+`zig-out/mqtt-durable-shared2-strace-final` (36,304,303 bytes; aggregate
+file-hash digest
+`247adcc68230d909505dc38d6da4198a38373da61b1550c900cddbb4d5eb994b`)
+reduced `io_uring_enter` from 114,102 to 63,454 for 102,400 measured
+deliveries (-44.4%). Its timing remains diagnostic-only; the paired run above
+is the performance evidence.
+
 Two bounded parallel-flush prototypes were removed rather than committed.
 Lazy group scheduling was neutral for balanced and regressed fanout; forced
 concurrency improved balanced throughput about 4% but regressed fanout
 throughput and p50. Smaller default-path experiments that skipped unused
 delivery-ACL or repeated Session validation work were likewise inconsistent
-across fanout and balanced. The adopted design instead starts one persistent
-writer only after a transient client processes its first QoS 1 or QoS 2
-subscription.
+across fanout and balanced. The then-adopted transient design instead starts
+one persistent writer only after a transient client processes its first QoS 1
+or QoS 2 subscription.
 The publisher retains routing, persistence, and PUBREC/PUBCOMP ordering;
 self-delivery remains synchronous so its PUBLISH precedes PUBACK/PUBCOMP on the
 shared connection. It signals other destination writers rather than waiting on
 unrelated subscriber sockets. Every connection still has one serialized writer;
 PINGRESP first drains older delivery work, writer failure shuts down and wakes
 the owning reader, and teardown joins the writer before the slot can be reused.
-Durable Sessions remain on the original synchronous path because their detach
-operations serialize on shared Session/persistence state. A 16-delivery
-internal high watermark returns a lagging transient destination to synchronous
-backpressure before the configured hard queue/drop limit. QoS 0 and durable
-Session delivery retain the original synchronous route and create no writer.
+At that stage durable Sessions remained on the original synchronous path
+because their detach operations serialize on shared Session/persistence state;
+the fixed shared pool above now supplies bounded cross-connection concurrency.
+A 16-delivery internal high watermark returns a lagging destination to
+synchronous backpressure before the configured hard queue/drop limit. QoS 0
+retains the original synchronous route and creates no per-connection writer.
 
 Seven CPU-0/1 fixed-binary, order-alternated transient QoS 2 balanced-32x32
 pairs used 1,000 warmups and 10,000 measured 64-byte publishes at window 4.

@@ -5973,6 +5973,36 @@ from 2.887/5.310 ms to 2.860/5.264 ms. The captured log SHA-256 is
 `e08a87129648a770b9664de04fde56b2607b7dca100a1a75e16df0b7ac29820b`;
 this remains targeted durable large-payload evidence, not a broad QoS 2 claim.
 
+Online durable cross-connection fanout now uses two fixed broker-lifetime
+Session delivery workers and a bounded per-slot coalescing ring instead of
+retaining one coroutine stack per Session. Same-connection and backpressured
+destinations remain synchronous, each slot keeps its existing writer
+serialization, and shutdown joins both workers before broker teardown. The
+first per-Session prototype was rejected despite its speed because balanced
+RSS rose from about 7.0 MiB to 14.9 MiB; the zio 64-KiB initial-stack
+experiment was removed with it, retaining zio's 256-KiB panic/error-path
+default and 8-MiB virtual growth ceiling.
+
+Five fixed-binary pairs at
+`zig-out/mqtt-durable-shared2-ab-final` (63,667,135 bytes; aggregate
+file-hash digest
+`2146ea99f81fb0bc0377de777671c34c7ed39f2b5c8e7d59dd8afb17511570df`)
+pinned client/server/RSS sampling to CPUs 0/1/2. With 1,000 warmups and 10,000
+measured durable QoS 2 publishes per arm, balanced-32x32 moved from 1,813 to
+2,713 publish/s (paired median 1.489x, range 1.433-1.632), p50/p99 fell to
+0.640x/0.639x, and broker RSS moved from 6,976 to 8,148 KiB. The 4-KiB shape
+moved from 12,652 to 15,273 publish/s (1.213x, range 1.207-1.223), p50/p99
+fell to 0.798x/0.823x, and RSS moved only from 5,632 to 5,652 KiB. All ten
+throughput pairs won and every arm matched its exact delivery count and
+checksum. Baseline/candidate/driver hashes are
+`fbd216b8cf4f0240ced742f85d805372c795102c90578bec20c8e2c53bf3ff94`,
+`30b6a86286dbdc8ff82c97701812e0ac029557ac6f62a218e416f36ecfe84b69`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The matched 102,400-delivery `strace` diagnostic at
+`zig-out/mqtt-durable-shared2-strace-final` reduced `io_uring_enter` from
+114,102 to 63,454 (-44.4%); its instrumented timing is not used as benchmark
+evidence.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was
@@ -5995,8 +6025,9 @@ write serialization, preserves PINGRESP as an
 ordered output barrier, and is joined before slot reuse. Self-delivery stays on
 the synchronous path so its PUBLISH precedes PUBACK/PUBCOMP on the shared
 connection. A queue depth of 16 returns that destination to synchronous
-backpressure before the configured hard queue/drop limit. QoS 0 and durable
-Session delivery retain their original synchronous paths.
+backpressure before the configured hard queue/drop limit. This historical
+transient design left QoS 0 and durable Session delivery synchronous; the
+two-worker pool above now handles eligible durable cross-connection fanout.
 
 A fixed-binary CPU-0/client and CPU-1/server A/B used 32 publishers, 32
 subscribers, MQTT 5 QoS 2, a four-message publisher window, 1,000 warmups and
