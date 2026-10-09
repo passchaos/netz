@@ -11,6 +11,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const deadline_policy = @import("../internal/deadline.zig");
 const quic = @import("mod.zig");
+const owned_receive_race = @import("owned_receive_race.zig");
 
 test {
     _ = @import("endpoint_server/tests.zig");
@@ -1952,43 +1953,13 @@ fn receiveFromEitherEndpoint(
             .ecn = pending.ecn,
         };
     }
-    if (server.pending_multi_endpoint_datagram) |datagram| {
-        server.pending_multi_endpoint_datagram = null;
-        return datagram;
-    }
-    const primary = server.endpoint;
-    const bounded = timeout.toDeadline(primary.io);
-    const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes;
-    const Wake = union(enum) {
-        primary: ReceiveResult,
-        preferred: ReceiveResult,
-    };
-    var wake_storage: [2]Wake = undefined;
-    var select: std.Io.Select(Wake) = .init(primary.io, &wake_storage);
-    defer while (select.cancel()) |wake| switch (wake) {
-        .primary, .preferred => |result| if (result) |datagram| {
-            if (server.pending_multi_endpoint_datagram == null) {
-                server.pending_multi_endpoint_datagram = datagram;
-            } else {
-                var extra = datagram;
-                extra.deinit((extra.received_on orelse primary).allocator);
-            }
-        } else |_| {},
-    };
-    select.async(
-        .primary,
-        receiveEndpointDatagram,
-        .{ primary, bounded },
+    return owned_receive_race.receive(
+        &server.pending_multi_endpoint_datagram,
+        server.endpoint.io,
+        server.endpoint,
+        preferred,
+        timeout,
     );
-    select.async(
-        .preferred,
-        receiveEndpointDatagram,
-        .{ preferred, bounded },
-    );
-    return switch (try select.await()) {
-        .primary => |result| try result,
-        .preferred => |result| try result,
-    };
 }
 
 fn receiveViewFromEitherEndpoint(
@@ -2081,13 +2052,6 @@ fn receiveViewFromEitherEndpoint(
         .primary => |result| try result,
         .preferred => |result| try result,
     };
-}
-
-fn receiveEndpointDatagram(
-    endpoint: *quic.runtime.Endpoint,
-    timeout: std.Io.Timeout,
-) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
-    return endpoint.receiveBytesTimeout(timeout);
 }
 
 fn receiveEndpointDatagramInto(

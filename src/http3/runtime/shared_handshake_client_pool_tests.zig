@@ -1,6 +1,7 @@
 const std = @import("std");
 const runtime = @import("../runtime.zig");
 const quic = @import("../../quic/mod.zig");
+const owned_receive_race = @import("../../quic/owned_receive_race.zig");
 const tls_testing = @import("../../tls/testing.zig");
 const netz_runtime = @import("../../runtime.zig");
 
@@ -475,15 +476,7 @@ fn testSharedPoolCrossFamilyMigration(
         responses_sent: usize = 0,
         request_on_preferred_path: bool = false,
         preferred_cid_routed: bool = false,
-        primary_receive_storage: [4096]u8 = undefined,
-        preferred_receive_storage: [4096]u8 = undefined,
-        pending_receive_storage: [4096]u8 = undefined,
-        pending: ?struct {
-            from: std.Io.net.IpAddress,
-            received_on: *quic.runtime.Endpoint,
-            len: usize,
-            ecn: quic.packet_space.EcnCodepoint,
-        } = null,
+        pending: ?quic.runtime.OwnedBytes = null,
         result: anyerror!void = {},
 
         fn run(self: *@This()) void {
@@ -581,27 +574,22 @@ fn testSharedPoolCrossFamilyMigration(
         ) !quic.endpoint_dispatcher.Event {
             while (true) {
                 if (try dispatcher.poll()) |event| return event;
-                const received = try self.receiveEither(
+                var datagram = try self.receiveEither(
                     .{ .deadline = earlierDeadline(
                         self.io,
                         deadline,
                         dispatcher.nextTimerDeadline(),
                     ) },
                 );
-                const received_on = received.received_on orelse
+                const received_on = datagram.received_on orelse
                     &self.server.quic_server.endpoint;
                 if (received_on == self.preferred_endpoint and
-                    received.bytes.len != 0 and
-                    (received.bytes[0] & 0x80) != 0)
+                    datagram.bytes.len != 0 and
+                    (datagram.bytes[0] & 0x80) != 0)
                 {
+                    datagram.deinit(received_on.allocator);
                     continue;
                 }
-                const datagram: quic.runtime.OwnedBytes = .{
-                    .from = received.from,
-                    .received_on = received_on,
-                    .bytes = try self.allocator.dupe(u8, received.bytes),
-                    .ecn = received.ecn,
-                };
                 return dispatcher.dispatch(datagram);
             }
         }
@@ -609,65 +597,14 @@ fn testSharedPoolCrossFamilyMigration(
         fn receiveEither(
             self: *@This(),
             timeout: std.Io.Timeout,
-        ) !quic.runtime.ReceivedBytesView {
-            if (self.pending) |pending| {
-                self.pending = null;
-                return .{
-                    .from = pending.from,
-                    .received_on = pending.received_on,
-                    .bytes = self.pending_receive_storage[0..pending.len],
-                    .ecn = pending.ecn,
-                };
-            }
-            const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView;
-            const Wake = union(enum) {
-                primary: ReceiveResult,
-                preferred: ReceiveResult,
-            };
-            var wake_storage: [2]Wake = undefined;
-            var select: std.Io.Select(Wake) = .init(self.io, &wake_storage);
-            defer while (select.cancel()) |wake| switch (wake) {
-                .primary, .preferred => |result| if (result) |view| {
-                    if (self.pending == null) {
-                        std.debug.assert(
-                            view.bytes.len <= self.pending_receive_storage.len,
-                        );
-                        @memcpy(
-                            self.pending_receive_storage[0..view.bytes.len],
-                            view.bytes,
-                        );
-                        self.pending = .{
-                            .from = view.from,
-                            .received_on = view.received_on orelse
-                                &self.server.quic_server.endpoint,
-                            .len = view.bytes.len,
-                            .ecn = view.ecn,
-                        };
-                    }
-                } else |_| {},
-            };
-            select.async(
-                .primary,
-                quic.runtime.Endpoint.receiveBytesIntoTimeout,
-                .{
-                    &self.server.quic_server.endpoint,
-                    &self.primary_receive_storage,
-                    timeout,
-                },
+        ) !quic.runtime.OwnedBytes {
+            return owned_receive_race.receive(
+                &self.pending,
+                self.io,
+                &self.server.quic_server.endpoint,
+                self.preferred_endpoint,
+                timeout,
             );
-            select.async(
-                .preferred,
-                quic.runtime.Endpoint.receiveBytesIntoTimeout,
-                .{
-                    self.preferred_endpoint,
-                    &self.preferred_receive_storage,
-                    timeout,
-                },
-            );
-            return switch (try select.await()) {
-                .primary => |result| try result,
-                .preferred => |result| try result,
-            };
         }
 
         fn earlierDeadline(
@@ -699,6 +636,11 @@ fn testSharedPoolCrossFamilyMigration(
     var server_task = io.async(ServerWorker.run, .{&worker});
     var server_joined = false;
     defer if (!server_joined) server_task.cancel(io);
+    defer if (worker.pending) |*datagram| {
+        datagram.deinit(
+            (datagram.received_on orelse &server.quic_server.endpoint).allocator,
+        );
+    };
 
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
         .local_address = switch (target_family) {

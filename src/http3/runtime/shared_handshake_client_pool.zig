@@ -8,6 +8,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
+const owned_receive_race = @import("../../quic/owned_receive_race.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 
 const supported_versions = [_]u32{
@@ -60,7 +61,7 @@ pub fn Pool(comptime Runtime: type) type {
         endpoint: *quic.runtime.Endpoint,
         migration_endpoint: ?*quic.runtime.Endpoint = null,
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
-        primary_receive_storage: []u8 = &.{},
+        pending_multi_endpoint_datagram: ?quic.runtime.OwnedBytes = null,
         migration_receive_storage: []u8 = &.{},
         /// A second socket can complete concurrently with the selected receive
         /// result. Copy that view so no authenticated packet is lost when its
@@ -381,13 +382,6 @@ pub fn Pool(comptime Runtime: type) type {
                 candidate.deinit();
                 allocator.destroy(candidate);
             };
-            const primary_receive_storage: []u8 = if (migration_endpoint != null)
-                try allocator.alloc(u8, endpoint.limits.max_datagram_size)
-            else
-                @constCast(&.{});
-            errdefer if (primary_receive_storage.len != 0) {
-                allocator.free(primary_receive_storage);
-            };
             const migration_receive_storage: []u8 = if (migration_endpoint != null)
                 try allocator.alloc(u8, endpoint.limits.max_datagram_size)
             else
@@ -414,7 +408,6 @@ pub fn Pool(comptime Runtime: type) type {
                 .endpoint = endpoint,
                 .migration_endpoint = migration_endpoint,
                 .dispatcher = dispatcher,
-                .primary_receive_storage = primary_receive_storage,
                 .migration_receive_storage = migration_receive_storage,
                 .pending_multi_endpoint_storage = pending_multi_endpoint_storage,
             };
@@ -427,8 +420,10 @@ pub fn Pool(comptime Runtime: type) type {
             }
             while (self.firstHandle()) |handle| self.dropEntry(handle);
             self.entries.deinit(self.allocator);
-            if (self.primary_receive_storage.len != 0) {
-                self.allocator.free(self.primary_receive_storage);
+            if (self.pending_multi_endpoint_datagram) |*datagram| {
+                datagram.deinit(
+                    (datagram.received_on orelse self.endpoint).allocator,
+                );
             }
             if (self.migration_receive_storage.len != 0) {
                 self.allocator.free(self.migration_receive_storage);
@@ -1622,23 +1617,25 @@ fn receiveFromEitherEndpoint(
     candidate: *quic.runtime.Endpoint,
     timeout: std.Io.Timeout,
 ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
-    // Keep both racing task results borrowed. A backend may complete a receive
-    // while its sibling is being cancelled, so returning OwnedBytes from either
-    // task would make a discarded late result leak its allocation. Acquire
-    // ownership only after the select and its cancellation drain have finished.
-    const view = try receiveViewFromEitherEndpoint(
-        pool,
+    if (pool.pending_multi_endpoint_view) |pending| {
+        pool.pending_multi_endpoint_view = null;
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = try pool.allocator.dupe(
+                u8,
+                pool.pending_multi_endpoint_storage[0..pending.len],
+            ),
+            .ecn = pending.ecn,
+        };
+    }
+    return owned_receive_race.receive(
+        &pool.pending_multi_endpoint_datagram,
+        pool.io,
+        pool.endpoint,
         candidate,
-        pool.primary_receive_storage,
         timeout,
     );
-    const received_on = view.received_on orelse pool.endpoint;
-    return .{
-        .from = view.from,
-        .received_on = received_on,
-        .bytes = try pool.allocator.dupe(u8, view.bytes),
-        .ecn = view.ecn,
-    };
 }
 
 fn receiveViewFromEitherEndpoint(
@@ -1654,6 +1651,25 @@ fn receiveViewFromEitherEndpoint(
             .from = pending.from,
             .received_on = pending.received_on,
             .bytes = pool.pending_multi_endpoint_storage[0..pending.len],
+            .ecn = pending.ecn,
+        };
+    }
+    if (pool.pending_multi_endpoint_datagram) |pending_value| {
+        var pending = pending_value;
+        pool.pending_multi_endpoint_datagram = null;
+        defer pending.deinit(
+            (pending.received_on orelse pool.endpoint).allocator,
+        );
+        const storage = if (pending.received_on == candidate)
+            pool.migration_receive_storage
+        else
+            primary_storage;
+        if (pending.bytes.len > storage.len) return error.BufferTooShort;
+        @memcpy(storage[0..pending.bytes.len], pending.bytes);
+        return .{
+            .from = pending.from,
+            .received_on = pending.received_on,
+            .bytes = storage[0..pending.bytes.len],
             .ecn = pending.ecn,
         };
     }

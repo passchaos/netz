@@ -10,6 +10,7 @@ const handshake_status = @import("one_rtt/handshake_status.zig");
 const pto_jitter = @import("one_rtt/pto_jitter.zig");
 const prepared_keys = @import("one_rtt/prepared_keys.zig");
 const connection_scratch = @import("one_rtt/scratch.zig");
+const owned_receive_race = @import("owned_receive_race.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 
 const net = std.Io.net;
@@ -10385,66 +10386,13 @@ pub const Connection = struct {
         {
             return self.send_endpoint.receiveBytesTimeout(timeout);
         }
-        const old_endpoint = self.last_validated_peer_path.endpoint;
-        const candidate_endpoint = self.send_endpoint;
-        const bounded = timeout.toDeadline(self.endpoint.io);
-        const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes;
-        const Wake = union(enum) {
-            old: ReceiveResult,
-            candidate: ReceiveResult,
-        };
-        var wake_storage: [2]Wake = undefined;
-        var select: std.Io.Select(Wake) = .init(
+        return owned_receive_race.receive(
+            &self.pending_received_datagram,
             self.endpoint.io,
-            &wake_storage,
+            self.last_validated_peer_path.endpoint,
+            self.send_endpoint,
+            timeout,
         );
-        select.async(
-            .old,
-            quic.runtime.Endpoint.receiveBytesTimeout,
-            .{ old_endpoint, bounded },
-        );
-        select.async(
-            .candidate,
-            quic.runtime.Endpoint.receiveBytesTimeout,
-            .{ candidate_endpoint, bounded },
-        );
-        const first = select.await() catch |err| {
-            select.cancelDiscard();
-            return err;
-        };
-        var retained: ?quic.runtime.OwnedBytes = null;
-        defer if (retained) |*datagram| {
-            datagram.deinit(
-                (datagram.received_on orelse self.endpoint).allocator,
-            );
-        };
-        while (select.cancel()) |wake| switch (wake) {
-            .old, .candidate => |result| if (result) |datagram| {
-                if (retained == null) {
-                    retained = datagram;
-                } else {
-                    var extra = datagram;
-                    extra.deinit(
-                        (extra.received_on orelse self.endpoint).allocator,
-                    );
-                }
-            } else |_| {},
-        };
-        const selected = switch (first) {
-            .old, .candidate => |result| result catch |err| {
-                if (retained) |datagram| {
-                    retained = null;
-                    return datagram;
-                }
-                return err;
-            },
-        };
-        if (retained) |datagram| {
-            std.debug.assert(self.pending_received_datagram == null);
-            self.pending_received_datagram = datagram;
-            retained = null;
-        }
-        return selected;
     }
 
     pub fn receivePacketOrDropAfterClose(self: *Connection) Error!?ReceivedPacket {

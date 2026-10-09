@@ -2623,6 +2623,7 @@ test {
     _ = recovery;
     _ = connection_router;
     _ = endpoint_dispatcher;
+    _ = @import("owned_receive_race.zig");
     _ = handshake_inbox;
     _ = endpoint_timers;
     _ = connection_id;
