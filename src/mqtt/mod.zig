@@ -326,9 +326,30 @@ fn validateMqttUtf8String(value: []const u8) Error!void {
 
 fn validateMqttUtf8StringWithPolicy(
     value: []const u8,
-    reject_discouraged_controls: bool,
+    comptime reject_discouraged_controls: bool,
 ) Error!void {
-    var view = std.unicode.Utf8View.init(value) catch return error.InvalidUtf8;
+    // MQTT identifiers and topic names are overwhelmingly ASCII. Validate that
+    // prefix once and return without constructing a UTF-8 iterator when the
+    // whole string is ASCII. Starting the general decoder at the first
+    // non-ASCII byte also avoids rescanning a valid prefix on mixed strings.
+    var first_non_ascii = value.len;
+    for (value, 0..) |byte, index| {
+        if (byte >= 0x80) {
+            first_non_ascii = index;
+            break;
+        }
+        if (byte == 0 or
+            (reject_discouraged_controls and
+                (byte <= 0x1f or byte == 0x7f)))
+        {
+            return error.InvalidUtf8;
+        }
+    }
+    if (first_non_ascii == value.len) return;
+
+    var view = std.unicode.Utf8View.init(
+        value[first_non_ascii..],
+    ) catch return error.InvalidUtf8;
     var it = view.iterator();
     while (it.nextCodepoint()) |codepoint| {
         // MQTT 5 section 1.5.4 requires UTF-8 Encoded Strings to exclude
@@ -3446,7 +3467,13 @@ test "MQTT Assigned Client Identifier lookup" {
 test "MQTT UTF-8 strings reject forbidden code points but allow discouraged controls" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
+    try validateUtf8String("");
+    try validateUtf8String("plain/ascii/topic");
     try std.testing.expectError(error.InvalidUtf8, writeUtf8(&out, std.testing.allocator, "bad\x00topic"));
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateUtf8String("valid\xc2\xa2\x00tail"),
+    );
 
     var encoded: [4]u8 = undefined;
     var codepoint: u21 = 0xfdd0;
@@ -3505,6 +3532,11 @@ test "MQTT strict UTF-8 policy rejects discouraged controls" {
             validateStrictUtf8String(value),
         );
     }
+    try validateStrictUtf8String("plain/ascii/value");
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        validateStrictUtf8String("valid\xc2\xa2\x1ftail"),
+    );
     try validateStrictUtf8String("valid\xf0\xaa\x9b\x94value");
 
     try validateStrictUtf8Properties(&.{
@@ -3545,6 +3577,30 @@ test "MQTT strict UTF-8 policy rejects discouraged controls" {
             .value = "bad\xc2\x9fvalue",
         } }}),
     );
+}
+
+test "MQTT ASCII validation preserves base and strict policies" {
+    var value: [1]u8 = undefined;
+    for (0..128) |raw| {
+        value[0] = @intCast(raw);
+        if (raw == 0) {
+            try std.testing.expectError(
+                error.InvalidUtf8,
+                validateUtf8String(&value),
+            );
+        } else {
+            try validateUtf8String(&value);
+        }
+
+        if (raw <= 0x1f or raw == 0x7f) {
+            try std.testing.expectError(
+                error.InvalidUtf8,
+                validateStrictUtf8String(&value),
+            );
+        } else {
+            try validateStrictUtf8String(&value);
+        }
+    }
 }
 
 test "MQTT ping packets reject trailing bytes" {

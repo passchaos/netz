@@ -6071,6 +6071,26 @@ p99 remained noisy. A five-pair 100,000-message serial control was neutral at
 1.009x/1.003x, so those shapes are recorded as no-regression rather than
 throughput wins.
 
+The next isolated change keeps every MQTT UTF-8 and Mosquitto-compatible
+strict-control rule but gives all-ASCII strings a one-pass return before the
+general Unicode decoder. The final five-pair fixed-binary matrix at
+`zig-out/mqtt-ascii-validation-final2` (63,807,571 bytes; aggregate digest
+`24df711c34b2923e11251e9c0e9afd627dfff95345ac213c2c7d4ab39ffa4bf1`)
+pinned client/server/RSS sampling to CPUs 5/7/13 and used cached-time
+baseline/candidate/driver hashes
+`b5008a3cbddc9200a414e084b44860a19baf5e1cb718d2fc3ad9348e2e4bec28`,
+`9a0ae6df6a55ebc8f671c657860c7f36e9c6dfcc2c0a59dff94e24b70d601f57`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Serial, publishers-32, fanout-32, balanced-32x32, and 4-KiB paired throughput
+medians were 1.012x, 1.003x, 1.005x, 1.011x, and 1.013x. Their p50 ratios were
+0.993x, 0.967x, 1.002x, 0.979x, and 1.013x. The first four shapes each won
+three of five throughput pairs; 4-KiB won all five. These small changes are
+supporting CPU/path-length evidence, not a broad throughput claim, and RSS
+remained neutral. A matched 100,000-message profile at
+`zig-out/mqtt-ascii-validation-profile-final2` removed the former 4.95%
+validator and 3.70% UTF-8 decoder entries from the top sampled symbols with
+zero lost samples.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was

@@ -1108,6 +1108,37 @@ throughput improvement. Seven-pair transport controls at
 `zig-out/mqtt-cached-awake-transports-ab` were also neutral: 1.009x for
 MQTT-over-WebSocket and 1.003x for MQTT-over-TLS.
 
+The remaining UTF-8 profile was not a license to weaken MQTT validation.
+`validateMqttUtf8StringWithPolicy` now validates the common all-ASCII case in
+one pass and returns without constructing a UTF-8 view or decoding each byte
+as a code point. It still rejects NUL, applies the stricter C0/DEL policy when
+requested, and hands the suffix beginning at the first non-ASCII byte to the
+complete UTF-8/noncharacter validator. Tests cover all-ASCII acceptance,
+embedded NUL after a multibyte character, strict ASCII controls, mixed UTF-8,
+surrogates, overlong encodings, and every Unicode noncharacter boundary.
+
+The final five-pair fixed-binary matrix at
+`zig-out/mqtt-ascii-validation-final2` (63,807,571 bytes; aggregate digest
+`24df711c34b2923e11251e9c0e9afd627dfff95345ac213c2c7d4ab39ffa4bf1`)
+pinned client/server/RSS sampling to CPUs 5/7/13 and used the cached-time
+build as its baseline. Baseline/candidate/driver hashes were
+`b5008a3cbddc9200a414e084b44860a19baf5e1cb718d2fc3ad9348e2e4bec28`,
+`9a0ae6df6a55ebc8f671c657860c7f36e9c6dfcc2c0a59dff94e24b70d601f57`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Paired throughput/p50 medians were 1.012x/0.993x for serial,
+1.003x/0.967x for publishers-32, 1.005x/1.002x for fanout-32,
+1.011x/0.979x for balanced-32x32, and 1.013x/1.013x for the 4-KiB shape.
+All throughput medians were positive but small; each of the first four shapes
+won three of five pairs and the 4-KiB shape won all five, so this is supporting
+CPU/path-length evidence rather than a broad throughput claim. RSS was neutral.
+In the matching
+5,000-warmup/100,000-message profile at
+`zig-out/mqtt-ascii-validation-profile-final2` (37,242,840 bytes; aggregate
+digest
+`bb24319466455d41c78edde198cec09f228fc277e794f78036014b6ad4879d1f`),
+the former 4.95% validator and 3.70% UTF-8 decoder entries disappeared from
+the top sampled symbols with zero lost samples.
+
 Two bounded parallel-flush prototypes were removed rather than committed.
 Lazy group scheduling was neutral for balanced and regressed fanout; forced
 concurrency improved balanced throughput about 4% but regressed fanout
