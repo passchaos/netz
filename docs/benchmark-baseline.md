@@ -6020,6 +6020,29 @@ Three same-shape `strace` runs recorded 63,733-81,254 `io_uring_enter` calls
 (73,296 median), 35.8% below the 114,102-call baseline; those instrumented
 timings remain diagnostic-only.
 
+The next serial QoS 2 profile found that one already parsed PUBLISH was still
+revalidating its Topic Name, source identity, and properties in Topic Alias,
+Router, retained, QoS2-store, and Session-store layers. Broker-internal paths
+now carry an explicit validated-input contract while every public store/router
+entry point retains defensive validation. This follows audited Mosquitto
+`5cd25465`, which validates UTF-8 in `packet__read_string` and performs the
+remaining PUBLISH Topic Name check before database routing. A seven-pair
+fixed-binary run at `zig-out/mqtt-validated-ingress-ab-final2` (63,726,852 bytes;
+aggregate digest
+`e968026569990076d0120e697f7df2cf3f11be7d34aa0eacada6acca8455858c`)
+used one publisher/subscriber, 1,000 warmups and 10,000 measured 256-byte
+durable QoS 2 publishes. Candidate/baseline paired medians were 1.033x
+throughput, 0.969x p50, and 0.996x RSS; six of seven throughput pairs won,
+p99 was noisy and inconclusive, and every arm completed 10,000 deliveries with
+checksum 2,695,000.
+The baseline/candidate hashes are
+`333148f1b4437441eb3db0727ca4f98ad7733c67808d17bcc90d2ddfaa6d52b4`
+and `beb97b847532fe3bd004b8c35cdc210d9c1a2b10caaef0414929c31dc5a5a0cc`.
+Matched 100,000-message CPU profiles reduced the combined sampled share of the
+MQTT UTF-8 validator and decoder from 19.3% to 7.4%; the remaining dominant
+userspace hotspot is monotonic-clock sampling around packet/deadline and
+Session-expiry boundaries.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was

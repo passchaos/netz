@@ -5659,8 +5659,18 @@ pub const Connection = struct {
         );
     }
 
-    fn applyIncomingTopicAlias(self: *Connection, publish_packet: *mqtt.Publish) Error!void {
+    fn applyIncomingTopicAlias(
+        self: *Connection,
+        publish_packet: *mqtt.Publish,
+    ) Error!void {
         try self.validateIncomingTopicAlias(publish_packet.*);
+        return self.applyValidatedIncomingTopicAlias(publish_packet);
+    }
+
+    fn applyValidatedIncomingTopicAlias(
+        self: *Connection,
+        publish_packet: *mqtt.Publish,
+    ) Error!void {
         const alias = mqtt.topicAlias(publish_packet.properties) orelse {
             return;
         };
@@ -5719,7 +5729,7 @@ pub const Connection = struct {
             std.debug.assert(self.packet_identifiers.remove(packet_id, stage));
             self.incoming_inflight -= 1;
         };
-        try self.applyIncomingTopicAlias(publish_packet);
+        try self.applyValidatedIncomingTopicAlias(publish_packet);
     }
 
     fn validateIncomingPublishCapabilities(self: Connection, publish_packet: mqtt.Publish) Error!void {

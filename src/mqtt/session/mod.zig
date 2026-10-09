@@ -1616,10 +1616,28 @@ pub const Store = struct {
         options: EnqueueOptions,
         snapshot_changed: *bool,
     ) Error!EnqueueResult {
-        const session = (try self.preparePublishEnqueue(
+        try validatePublishForSession(topic, payload, options.properties);
+        return self.enqueueValidatedPublishTrackingSnapshotChange(
             handle,
             topic,
             payload,
+            options,
+            snapshot_changed,
+        );
+    }
+
+    /// Broker-internal ingress path after the Topic Name, properties, payload
+    /// format, and connection-scoped Topic Alias have already been validated.
+    pub fn enqueueValidatedPublishTrackingSnapshotChange(
+        self: *Store,
+        handle: Handle,
+        topic: []const u8,
+        payload: []const u8,
+        options: EnqueueOptions,
+        snapshot_changed: *bool,
+    ) Error!EnqueueResult {
+        const session = (try self.prepareValidatedPublishEnqueue(
+            handle,
             options,
             snapshot_changed,
         )) orelse return .expired;
@@ -1654,10 +1672,29 @@ pub const Store = struct {
         options: EnqueueOptions,
         snapshot_changed: *bool,
     ) Error!EnqueueResult {
-        const session = (try self.preparePublishEnqueue(
-            handle,
+        try validatePublishForSession(
             publication.topic(),
             publication.payload(),
+            options.properties,
+        );
+        return self.enqueueValidatedSharedPublicationTrackingSnapshotChange(
+            handle,
+            publication,
+            options,
+            snapshot_changed,
+        );
+    }
+
+    /// Shared-publication counterpart to the validated broker ingress path.
+    pub fn enqueueValidatedSharedPublicationTrackingSnapshotChange(
+        self: *Store,
+        handle: Handle,
+        publication: *SharedPublication,
+        options: EnqueueOptions,
+        snapshot_changed: *bool,
+    ) Error!EnqueueResult {
+        const session = (try self.prepareValidatedPublishEnqueue(
+            handle,
             options,
             snapshot_changed,
         )) orelse return .expired;
@@ -1688,8 +1725,21 @@ pub const Store = struct {
         options: EnqueueOptions,
         snapshot_changed: *bool,
     ) Error!?*Session {
-        snapshot_changed.* = false;
         try validatePublishForSession(topic, payload, options.properties);
+        return self.prepareValidatedPublishEnqueue(
+            handle,
+            options,
+            snapshot_changed,
+        );
+    }
+
+    fn prepareValidatedPublishEnqueue(
+        self: *Store,
+        handle: Handle,
+        options: EnqueueOptions,
+        snapshot_changed: *bool,
+    ) Error!?*Session {
+        snapshot_changed.* = false;
         const session = try self.getSession(handle);
         // Admission uses the current queue size, as Mosquitto does: the message
         // that reaches/crosses the threshold is retained, while later messages

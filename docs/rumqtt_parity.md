@@ -1031,6 +1031,38 @@ Three matching 102,400-delivery diagnostics at
 The artifact is 36,352,861 bytes with aggregate digest
 `1def46da118b0fa29aad00efdeff9842a4ace1fabccd46e980cf0463df5616fa`.
 
+The serial QoS 2 profile then exposed validation rather than allocation as the
+largest avoidable CPU cost. Netz now validates a network Topic Name's MQTT
+UTF-8 profile once while reading its length-prefixed wire string, then checks
+only the Topic Name-specific wildcard rule. Topic Alias application no longer
+repeats the validation already completed transactionally before inflight state
+is committed. Broker routing uses explicitly named validated Router and
+Session paths after network parsing, local-publish, Will, or snapshot ingress;
+the public Router, retained-store, Session-store, and QoS2-store APIs retain
+their defensive validation. Non-retained publications also skip the retained
+store entirely, and the broker's QoS 2 pending path reuses the CONNECT-validated
+Client ID and username instead of decoding them for every message. This matches
+the audited Mosquitto `5cd25465` structure: `packet__read_string` validates
+UTF-8 at packet ingress and `handle_publish.c` performs the remaining Topic
+Name check before database/routing work.
+
+A seven-pair fixed-binary serial A/B is retained at
+`zig-out/mqtt-validated-ingress-ab-final2` (63,726,852 bytes; aggregate digest
+`e968026569990076d0120e697f7df2cf3f11be7d34aa0eacada6acca8455858c`).
+With one publisher, one subscriber, 1,000 warmups, 10,000 measured 256-byte
+QoS 2 publishes and 3,600-second Sessions, candidate/baseline paired medians
+were 1.033x throughput and 0.969x p50. The candidate won throughput in six of
+seven pairs; p99 was noisy and inconclusive, while RSS stayed neutral at
+0.996x.
+Every arm completed 10,000 deliveries with checksum 2,695,000. The fixed
+baseline/candidate hashes are
+`333148f1b4437441eb3db0727ca4f98ad7733c67808d17bcc90d2ddfaa6d52b4`
+and `beb97b847532fe3bd004b8c35cdc210d9c1a2b10caaef0414929c31dc5a5a0cc`.
+Matched 100,000-message `perf` captures reduced the combined sampled share of
+the MQTT UTF-8 validator and decoder from 19.3% to 7.4%, with zero lost
+samples. The final p99 and remaining serial gap are therefore attributed to
+clock/I/O scheduling rather than hidden validation work.
+
 Two bounded parallel-flush prototypes were removed rather than committed.
 Lazy group scheduling was neutral for balanced and regressed fanout; forced
 concurrency improved balanced throughput about 4% but regressed fanout

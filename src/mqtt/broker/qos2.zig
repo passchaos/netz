@@ -100,6 +100,7 @@ pub const Pending = struct {
             source_listener_id,
             now,
             reserve_publication_prefix,
+            true,
         );
     }
 
@@ -112,19 +113,22 @@ pub const Pending = struct {
         source_listener_id: ?u64,
         now: std.Io.Timestamp,
         reserve_publication_prefix: bool,
+        validate_source_identity: bool,
     ) Error!Pending {
         if (source_client_id == null and
             (source_username != null or source_listener_id != null))
         {
             return error.InvalidProperty;
         }
-        if (source_client_id) |value| {
-            if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
-            try mqtt.validateUtf8String(value);
-        }
-        if (source_username) |value| {
-            if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
-            try mqtt.validateUtf8String(value);
+        if (validate_source_identity) {
+            if (source_client_id) |value| {
+                if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+                try mqtt.validateUtf8String(value);
+            }
+            if (source_username) |value| {
+                if (value.len > std.math.maxInt(u16)) return error.InvalidUtf8;
+                try mqtt.validateUtf8String(value);
+            }
         }
         const bytes_len = std.math.add(
             usize,
@@ -384,6 +388,7 @@ pub const Store = struct {
             source_listener_id,
             now,
             false,
+            true,
         );
     }
 
@@ -405,6 +410,31 @@ pub const Store = struct {
             source_listener_id,
             now,
             reserve_publication_prefix,
+            true,
+        );
+    }
+
+    /// Broker ingress variant after CONNECT parsing and policy validation have
+    /// already established the source Client ID and optional username.
+    pub fn recordValidatedSourceAndPublicationPrefix(
+        self: *Store,
+        publisher_id: router.SubscriberId,
+        publish: mqtt.Publish,
+        source_client_id: ?[]const u8,
+        source_username: ?[]const u8,
+        source_listener_id: ?u64,
+        now: std.Io.Timestamp,
+        reserve_publication_prefix: bool,
+    ) !bool {
+        return self.recordWithSourceOptions(
+            publisher_id,
+            publish,
+            source_client_id,
+            source_username,
+            source_listener_id,
+            now,
+            reserve_publication_prefix,
+            false,
         );
     }
 
@@ -417,6 +447,7 @@ pub const Store = struct {
         source_listener_id: ?u64,
         now: std.Io.Timestamp,
         reserve_publication_prefix: bool,
+        validate_source_identity: bool,
     ) !bool {
         const packet_id = publish.packet_id orelse
             return error.InvalidPacketIdentifier;
@@ -437,6 +468,7 @@ pub const Store = struct {
             source_listener_id,
             now,
             reserve_publication_prefix,
+            validate_source_identity,
         );
         self.entries.putAssumeCapacityNoClobber(key, pending);
         return true;
@@ -789,6 +821,25 @@ fn remainingAfterDowntimeNs(
 }
 
 test "QoS 2 pending coallocates message and source identity bytes" {
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        Pending.createWithSource(
+            std.testing.allocator,
+            .{
+                .dup = false,
+                .qos = .exactly_once,
+                .retain = false,
+                .topic = "invalid/source",
+                .packet_id = 6,
+                .payload = "payload",
+            },
+            "bad\xff",
+            null,
+            null,
+            .zero,
+        ),
+    );
+
     var failing = std.testing.FailingAllocator.init(
         std.testing.allocator,
         .{ .fail_index = 1 },

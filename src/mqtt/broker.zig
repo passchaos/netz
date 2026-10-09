@@ -5391,7 +5391,7 @@ pub const Broker = struct {
         const reserve_publication_prefix =
             self.sessions.persistentCount() != 0 and
             self.router.subscriptionCount() > 1;
-        const record_changed = self.pending_qos2.recordWithSourceAndPublicationPrefix(
+        const record_changed = self.pending_qos2.recordValidatedSourceAndPublicationPrefix(
             durable_publisher_id,
             publish,
             connect.client_id,
@@ -5720,14 +5720,17 @@ pub const Broker = struct {
             self.canonicalPublisherId(id)
         else
             null;
-        const retained_result = self.retained.applyParsedPublishWithSource(
-            publish,
-            route_publisher_id,
-            source_client_id,
-            source_username,
-            source_listener_id,
-            now,
-        ) catch |err| return err;
+        const retained_result: retained_mod.StoreResult = if (publish.retain)
+            self.retained.applyParsedPublishWithSource(
+                publish,
+                route_publisher_id,
+                source_client_id,
+                source_username,
+                source_listener_id,
+                now,
+            ) catch |err| return err
+        else
+            .ignored;
         if (retained_result != .ignored) {
             if (persistent_changed) |changed| changed.* = true;
             if (publication_effect_committed) |committed| committed.* = true;
@@ -6194,7 +6197,7 @@ pub const Broker = struct {
                         match_capacity,
                     );
                     scratch.items.len = match_capacity;
-                    const matches = try self.router.matchIntoForPublisher(
+                    const matches = try self.router.matchValidatedIntoForPublisher(
                         topic,
                         route_publisher_id,
                         scratch.items,
@@ -6207,7 +6210,7 @@ pub const Broker = struct {
                 }
             }
         }
-        return .{ .items = try self.router.matchAllocForPublisher(
+        return .{ .items = try self.router.matchValidatedAllocForPublisher(
             self.allocator,
             topic,
             route_publisher_id,
@@ -6337,14 +6340,14 @@ pub const Broker = struct {
             .now = now,
         };
         const result = (if (shared_publication) |shared|
-            self.sessions.enqueueSharedPublicationTrackingSnapshotChange(
+            self.sessions.enqueueValidatedSharedPublicationTrackingSnapshotChange(
                 handle,
                 shared,
                 enqueue_options,
                 &snapshot_changed,
             )
         else
-            self.sessions.enqueuePublishTrackingSnapshotChange(
+            self.sessions.enqueueValidatedPublishTrackingSnapshotChange(
                 handle,
                 publish.topic,
                 publish.payload,

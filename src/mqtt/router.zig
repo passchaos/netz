@@ -309,6 +309,21 @@ pub const Router = struct {
         out: []Match,
     ) Error![]Match {
         try mqtt.validateTopicName(topic);
+        return self.matchValidatedIntoForPublisher(
+            topic,
+            publisher_id,
+            out,
+        );
+    }
+
+    /// Broker-internal variant for a Topic Name already accepted by the wire,
+    /// local-publish, Will, or persistence validation boundary.
+    pub fn matchValidatedIntoForPublisher(
+        self: *Router,
+        topic: []const u8,
+        publisher_id: ?SubscriberId,
+        out: []Match,
+    ) Error![]Match {
         const trie_counts = self.matchTrie(topic, publisher_id, null, null);
         const normal_count = if (trie_counts) |counts|
             counts.normal
@@ -364,10 +379,26 @@ pub const Router = struct {
         topic: []const u8,
         publisher_id: ?SubscriberId,
     ) Error![]Match {
+        try mqtt.validateTopicName(topic);
+        return self.matchValidatedAllocForPublisher(
+            allocator,
+            topic,
+            publisher_id,
+        );
+    }
+
+    /// Allocating counterpart to `matchValidatedIntoForPublisher` for broker
+    /// ingress that already crossed a Topic Name validation boundary.
+    pub fn matchValidatedAllocForPublisher(
+        self: *Router,
+        allocator: std.mem.Allocator,
+        topic: []const u8,
+        publisher_id: ?SubscriberId,
+    ) Error![]Match {
         const upper_bound = self.subscriptionCount();
         const matches = try allocator.alloc(Match, upper_bound);
         errdefer allocator.free(matches);
-        const written = try self.matchIntoForPublisher(
+        const written = try self.matchValidatedIntoForPublisher(
             topic,
             publisher_id,
             matches,
@@ -1288,6 +1319,10 @@ test "MQTT router enforces no-local semantics" {
 
     const remote = try router.matchIntoForPublisher("events/one", 99, &storage);
     try std.testing.expectEqual(@as(usize, 2), remote.len);
+    try std.testing.expectError(
+        error.InvalidTopic,
+        router.matchIntoForPublisher("events/+", 99, &storage),
+    );
 }
 
 test "MQTT router matchInto allocates nothing and preserves shared cursor on capacity error" {

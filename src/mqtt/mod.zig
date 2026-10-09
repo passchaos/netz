@@ -1608,7 +1608,12 @@ pub const Publish = struct {
         if (protocol == .v5) try validateParsedPropertiesFor(.publish, props);
         if (topic.len == 0) {
             if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
-        } else try validateTopicName(topic);
+        } else if (hasWildcards(topic)) {
+            // readUtf8 above has already enforced the complete MQTT UTF-8
+            // profile and the u16 wire length bounds this slice. Only the
+            // Topic Name-specific wildcard rule remains here.
+            return error.InvalidTopic;
+        }
         const payload = cursor.buf[cursor.pos..];
         try validatePayloadFormat(props, payload);
         return .{
@@ -3811,6 +3816,26 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
     try std.testing.expectEqualStrings("21.5", publish.payload);
     try std.testing.expectEqual(@as(?u16, 2), topicAlias(publish.properties));
+
+    var wildcard_publish = try publish_bytes.clone(allocator);
+    defer wildcard_publish.deinit(allocator);
+    const wildcard_fixed = try FixedHeader.parse(wildcard_publish.items);
+    wildcard_publish.items[wildcard_fixed.header_len + 2] = '+';
+    try std.testing.expectError(
+        error.InvalidTopic,
+        Publish.parse(allocator, .v5, wildcard_publish.items),
+    );
+
+    var invalid_topic_publish = try publish_bytes.clone(allocator);
+    defer invalid_topic_publish.deinit(allocator);
+    const invalid_topic_fixed = try FixedHeader.parse(
+        invalid_topic_publish.items,
+    );
+    invalid_topic_publish.items[invalid_topic_fixed.header_len + 2] = 0xff;
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        Publish.parse(allocator, .v5, invalid_topic_publish.items),
+    );
     try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .qos = .at_least_once, .packet_id = 0 }));
     try std.testing.expectError(error.InvalidPacketIdentifier, writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "bad", .{ .packet_id = 7 }));
