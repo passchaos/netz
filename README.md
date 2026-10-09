@@ -235,7 +235,8 @@ Current protocol coverage includes:
 - Strict owned Ed25519, P-256 ECDSA/SHA-256, P-384 ECDSA/SHA-384, or
   1024-4096-bit RSA PKCS#1 v1.5 SHA-256 PEM CRL loading, including
   issuer/cRLSign, signature, update-window, extension and leaf-serial
-  validation before bind
+  validation before bind, plus RFC 5280 base/delta composition with newest
+  compatible-delta selection and `removeFromCRL` handling
 - Caller-supplied bounded caching of successful X.509 bundle verification for
   repeated exact hostname/DER chains; per-connection CertificateVerify remains
   mandatory, and replacing the trust bundle or time snapshot requires replacing

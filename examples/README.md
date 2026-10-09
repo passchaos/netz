@@ -306,8 +306,10 @@ rejected for WebSocket listeners. Optional
 `crlfile` PEM lists must be signed by a unique configured CA; Ed25519, P-256
 ECDSA with SHA-256, P-384 ECDSA with SHA-384, or 1024-4096-bit RSA PKCS#1
 v1.5 signatures with SHA-256, cRLSign, thisUpdate/nextUpdate, extensions and leaf
-serials are validated before bind.
-Revoked clients are rejected during TLS. Indirect, delta,
+serials are validated before bind. A complete CRL may be accompanied by
+directly signed RFC 5280 delta CRLs; the newest compatible delta is composed
+with its base, including `removeFromCRL`, before client authentication.
+Revoked clients are rejected during TLS. Indirect, orphan/mismatched delta,
 expired, future, malformed and unmatched CRLs fail closed. When
 `use_identity_as_username true` is also set, the verified leaf's unique Subject
 CN replaces any wire username and the wire password is ignored before password,

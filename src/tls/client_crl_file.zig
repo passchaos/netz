@@ -1,8 +1,10 @@
 //! Strict owned CRL bundles for TLS client-certificate authentication.
 //!
 //! Each PEM CRL must be signed by exactly one CA in the configured client CA
-//! file. The composite verifier first validates the client chain and then
-//! requires a matching CRL for the leaf issuer before checking its serial.
+//! file. Complete lists may be followed by one or more compatible delta CRLs;
+//! the newest delta is combined with its base before the client leaf is
+//! checked. The composite verifier first validates the client chain and then
+//! requires complete revocation coverage for the leaf issuer.
 
 const std = @import("std");
 const vail = @import("vail");
@@ -20,6 +22,8 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidCrl,
     MissingCrlIssuer,
     DuplicateCrlIssuer,
+    DuplicateCrlNumber,
+    MissingBaseCrl,
     CrlNotFound,
     CertificateRevoked,
 };
@@ -28,21 +32,37 @@ pub const File = struct {
     allocator: std.mem.Allocator,
     sources: [][]u8,
     lists: []vail.x509.crl.List,
+    combined_lists: []vail.x509.crl.CombinedList,
 
     pub fn deinit(self: *File) void {
+        self.allocator.free(self.combined_lists);
         self.allocator.free(self.lists);
         for (self.sources) |source| self.allocator.free(source);
         self.allocator.free(self.sources);
         self.* = undefined;
     }
 
-    pub fn verifyLeaf(self: File, certificate_der: []const u8) Error!void {
+    pub fn verifyLeaf(
+        self: *const File,
+        certificate_der: []const u8,
+    ) Error!void {
+        const verified = vail.x509.crl.VerifiedSet{
+            .lists = self.lists,
+            .combined_lists = self.combined_lists,
+        };
         for (self.lists) |list| {
-            const revoked = list.isRevoked(certificate_der) catch |err| switch (err) {
-                error.IssuerMismatch => continue,
+            // Every accepted delta has a matching complete list. Trying one
+            // issuer certificate per complete list lets VerifiedSet enforce
+            // the matching scope and apply the newest compatible delta.
+            if (list.isDelta()) continue;
+            verified.policy(true).verify(
+                certificate_der,
+                list.issuer_certificate_der,
+            ) catch |err| switch (err) {
+                error.CertificateRevocationStatusUnavailable => continue,
+                error.CertificateRevoked => return error.CertificateRevoked,
                 else => return error.InvalidCrl,
             };
-            if (revoked) return error.CertificateRevoked;
             return;
         }
         return error.CrlNotFound;
@@ -159,12 +179,28 @@ pub fn parse(
             matched = candidate;
         }
         const list = matched orelse return error.MissingCrlIssuer;
+        // Delegated and indirect CRLs require an authenticated signer path and
+        // certificate cRLIssuer binding. Do not silently treat one as complete
+        // direct coverage until that configuration surface is available.
+        if (list.isIndirect()) return error.InvalidCrl;
         for (lists.items) |existing| {
-            if (std.mem.eql(
+            if (!std.mem.eql(
                 u8,
-                existing.issuer_name,
-                list.issuer_name,
-            )) return error.DuplicateCrlIssuer;
+                existing.issuer_certificate_der,
+                list.issuer_certificate_der,
+            )) continue;
+            if (!existing.isDelta() and !list.isDelta()) {
+                return error.DuplicateCrlIssuer;
+            }
+            if (existing.isDelta() and list.isDelta() and
+                std.mem.eql(
+                    u8,
+                    existing.crl_number orelse return error.InvalidCrl,
+                    list.crl_number orelse return error.InvalidCrl,
+                ))
+            {
+                return error.DuplicateCrlNumber;
+            }
         }
         try sources.append(allocator, crl_der);
         errdefer _ = sources.pop();
@@ -179,11 +215,79 @@ pub fn parse(
     }
     const owned_lists = try lists.toOwnedSlice(allocator);
     errdefer allocator.free(owned_lists);
+    const combined_lists = try combineDeltaCrls(allocator, owned_lists);
+    errdefer allocator.free(combined_lists);
     return .{
         .allocator = allocator,
         .sources = owned_sources,
         .lists = owned_lists,
+        .combined_lists = combined_lists,
     };
+}
+
+fn combineDeltaCrls(
+    allocator: std.mem.Allocator,
+    lists: []const vail.x509.crl.List,
+) Error![]vail.x509.crl.CombinedList {
+    var combined_lists: std.ArrayList(vail.x509.crl.CombinedList) = .empty;
+    defer combined_lists.deinit(allocator);
+    var matched_deltas = [_]bool{false} ** max_crls;
+
+    for (lists) |base| {
+        if (base.isDelta()) continue;
+        var newest: ?vail.x509.crl.CombinedList = null;
+        for (lists, 0..) |delta, delta_index| {
+            if (!delta.isDelta()) continue;
+            const combined = vail.x509.crl.CombinedList.init(
+                base,
+                delta,
+            ) catch |err| switch (err) {
+                error.InvalidDeltaCrl, error.CrlScopeMismatch => continue,
+                else => return error.InvalidCrl,
+            };
+            matched_deltas[delta_index] = true;
+            if (newest == null or deltaIsNewer(
+                combined.delta,
+                newest.?.delta,
+            )) newest = combined;
+        }
+        if (newest) |combined| {
+            try combined_lists.append(allocator, combined);
+        }
+    }
+    for (lists, 0..) |list, index| {
+        if (list.isDelta() and !matched_deltas[index]) {
+            return error.MissingBaseCrl;
+        }
+    }
+    return combined_lists.toOwnedSlice(allocator);
+}
+
+fn deltaIsNewer(
+    candidate: vail.x509.crl.List,
+    current: vail.x509.crl.List,
+) bool {
+    if (candidate.this_update != current.this_update) {
+        return candidate.this_update > current.this_update;
+    }
+    return compareUnsigned(
+        candidate.crl_number orelse return false,
+        current.crl_number orelse return true,
+    ) == .gt;
+}
+
+fn compareUnsigned(a_encoded: []const u8, b_encoded: []const u8) std.math.Order {
+    const a = if (a_encoded.len > 1 and a_encoded[0] == 0)
+        a_encoded[1..]
+    else
+        a_encoded;
+    const b = if (b_encoded.len > 1 and b_encoded[0] == 0)
+        b_encoded[1..]
+    else
+        b_encoded;
+    if (a.len < b.len) return .lt;
+    if (a.len > b.len) return .gt;
+    return std.mem.order(u8, a, b);
 }
 
 const Line = struct {
@@ -281,6 +385,47 @@ fn decodeFixture(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
     return decoded;
 }
 
+fn decodeHexFixture(comptime encoded: []const u8) [encoded.len / 2]u8 {
+    var decoded: [encoded.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&decoded, encoded) catch unreachable;
+    return decoded;
+}
+
+fn encodePemForTest(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    der: []const u8,
+) ![]u8 {
+    const encoded_len = std.base64.standard.Encoder.calcSize(der.len);
+    const prefix = "-----BEGIN ";
+    const middle = "-----\n";
+    const suffix_prefix = "\n-----END ";
+    const suffix = "-----\n";
+    const pem = try allocator.alloc(
+        u8,
+        prefix.len + label.len + middle.len + encoded_len +
+            suffix_prefix.len + label.len + suffix.len,
+    );
+    var offset: usize = 0;
+    @memcpy(pem[offset..][0..prefix.len], prefix);
+    offset += prefix.len;
+    @memcpy(pem[offset..][0..label.len], label);
+    offset += label.len;
+    @memcpy(pem[offset..][0..middle.len], middle);
+    offset += middle.len;
+    _ = std.base64.standard.Encoder.encode(
+        pem[offset..][0..encoded_len],
+        der,
+    );
+    offset += encoded_len;
+    @memcpy(pem[offset..][0..suffix_prefix.len], suffix_prefix);
+    offset += suffix_prefix.len;
+    @memcpy(pem[offset..][0..label.len], label);
+    offset += label.len;
+    @memcpy(pem[offset..][0..suffix.len], suffix);
+    return pem;
+}
+
 test "client CRL file verifies trusted and revoked leaves" {
     const allocator = std.testing.allocator;
     var cas = try client_ca_file.parse(allocator, ca_pem, 1_800_000_000);
@@ -332,5 +477,208 @@ test "client CRL file rejects duplicate and malformed lists" {
             &cas,
             1_800_000_000,
         ),
+    );
+}
+
+test "client CRL file applies a direct delta over its base" {
+    const allocator = std.testing.allocator;
+    const vectors = vail.x509.testing.path_vectors;
+    const now = 1_790_844_200;
+    const ca_der = decodeHexFixture(vectors.delta_crl_ca_hex);
+    const held = decodeHexFixture(vectors.delta_crl_held_hex);
+    const added = decodeHexFixture(vectors.delta_crl_added_hex);
+    const clean = decodeHexFixture(vectors.delta_crl_clean_hex);
+    const base_der = decodeHexFixture(vectors.delta_crl_base_hex);
+    const delta_der = decodeHexFixture(vectors.delta_crl_delta_hex);
+    const indirect_der = decodeHexFixture(vectors.delta_crl_indirect_hex);
+
+    const ca_source = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &ca_der,
+    );
+    defer allocator.free(ca_source);
+    var cas = try client_ca_file.parse(allocator, ca_source, now);
+    defer cas.deinit();
+
+    const base_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &base_der,
+    );
+    defer allocator.free(base_source);
+    const delta_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &delta_der,
+    );
+    defer allocator.free(delta_source);
+    const indirect_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &indirect_der,
+    );
+    defer allocator.free(indirect_source);
+    const crl_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ base_source, delta_source },
+    );
+    defer allocator.free(crl_source);
+
+    var crls = try parse(allocator, crl_source, &cas, now);
+    defer crls.deinit();
+    try std.testing.expectEqual(@as(usize, 2), crls.lists.len);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        crls.combined_lists.len,
+    );
+    // The base held serial is removed by the delta, while the delta adds the
+    // second serial. A clean leaf remains accepted.
+    try crls.verifyLeaf(&held);
+    try std.testing.expectError(
+        error.CertificateRevoked,
+        crls.verifyLeaf(&added),
+    );
+    try crls.verifyLeaf(&clean);
+
+    var verifier = Verifier{
+        .trust = cas.verifier(now),
+        .crls = &crls,
+    };
+    try verifier.verify(.{ .server_name = null, .chain = &.{&held} });
+    try std.testing.expectError(
+        error.CertificateRevoked,
+        verifier.verify(.{ .server_name = null, .chain = &.{&added} }),
+    );
+
+    try std.testing.expectError(
+        error.MissingBaseCrl,
+        parse(allocator, delta_source, &cas, now),
+    );
+    try std.testing.expectError(
+        error.InvalidCrl,
+        parse(allocator, indirect_source, &cas, now),
+    );
+    const duplicate_delta_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ base_source, delta_source, delta_source },
+    );
+    defer allocator.free(duplicate_delta_source);
+    try std.testing.expectError(
+        error.DuplicateCrlNumber,
+        parse(allocator, duplicate_delta_source, &cas, now),
+    );
+}
+
+test "client CRL file selects the newest compatible delta" {
+    const allocator = std.testing.allocator;
+    const vectors = vail.x509.testing.path_vectors;
+    const now = 1_790_848_980;
+    const ca_der = decodeHexFixture(vectors.freshest_crl_ca_hex);
+    const held = decodeHexFixture(vectors.freshest_crl_held_hex);
+    const clean = decodeHexFixture(vectors.freshest_crl_clean_hex);
+    const base_der = decodeHexFixture(vectors.freshest_crl_base_hex);
+    const old_der = decodeHexFixture(vectors.freshest_crl_delta_old_hex);
+    const newest_der = decodeHexFixture(
+        vectors.freshest_crl_delta_new_hex,
+    );
+
+    const ca_source = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &ca_der,
+    );
+    defer allocator.free(ca_source);
+    var cas = try client_ca_file.parse(allocator, ca_source, now);
+    defer cas.deinit();
+
+    const base_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &base_der,
+    );
+    defer allocator.free(base_source);
+    const old_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &old_der,
+    );
+    defer allocator.free(old_source);
+    const newest_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &newest_der,
+    );
+    defer allocator.free(newest_source);
+    const crl_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ base_source, old_source, newest_source },
+    );
+    defer allocator.free(crl_source);
+
+    var crls = try parse(allocator, crl_source, &cas, now);
+    defer crls.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        crls.combined_lists.len,
+    );
+    try std.testing.expectError(
+        error.CertificateRevoked,
+        crls.verifyLeaf(&held),
+    );
+    try crls.verifyLeaf(&clean);
+}
+
+fn parseDeltaForAllocationTest(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    cas: *const client_ca_file.File,
+    now: i64,
+) !void {
+    var crls = try parse(allocator, source, cas, now);
+    defer crls.deinit();
+}
+
+test "client base and delta CRL allocation failures are transactional" {
+    const allocator = std.testing.allocator;
+    const vectors = vail.x509.testing.path_vectors;
+    const now = 1_790_844_200;
+    const ca_der = decodeHexFixture(vectors.delta_crl_ca_hex);
+    const base_der = decodeHexFixture(vectors.delta_crl_base_hex);
+    const delta_der = decodeHexFixture(vectors.delta_crl_delta_hex);
+    const ca_source = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &ca_der,
+    );
+    defer allocator.free(ca_source);
+    const base_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &base_der,
+    );
+    defer allocator.free(base_source);
+    const delta_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &delta_der,
+    );
+    defer allocator.free(delta_source);
+    const crl_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ base_source, delta_source },
+    );
+    defer allocator.free(crl_source);
+    var cas = try client_ca_file.parse(allocator, ca_source, now);
+    defer cas.deinit();
+
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        parseDeltaForAllocationTest,
+        .{ crl_source, &cas, now },
     );
 }
