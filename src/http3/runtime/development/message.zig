@@ -1,5 +1,6 @@
 const std = @import("std");
 const http3 = @import("../../mod.zig");
+const content_coding = @import("../../../http/content_coding.zig");
 const quic = @import("../../../quic/mod.zig");
 
 const net = std.Io.net;
@@ -19,6 +20,28 @@ pub const OwnedRequest = struct {
         allocator.free(self.extra_datagrams);
         allocator.free(self.bytes);
         self.* = undefined;
+    }
+
+    pub fn contentEncoding(
+        self: OwnedRequest,
+    ) content_coding.Error!content_coding.Chain {
+        return self.request.contentEncoding();
+    }
+
+    pub fn decodeContentAlloc(
+        self: OwnedRequest,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return self.request.decodeContentAlloc(allocator, max_output_len);
+    }
+
+    pub fn decodeContentInto(
+        self: OwnedRequest,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return self.request.decodeContentInto(out, scratch);
     }
 };
 

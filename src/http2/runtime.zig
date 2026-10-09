@@ -15238,6 +15238,39 @@ pub const OwnedRequest = struct {
         allocator.free(self.body);
         self.* = undefined;
     }
+
+    pub fn contentEncoding(
+        self: OwnedRequest,
+    ) content_coding.Error!content_coding.Chain {
+        return content_coding.parseHeaders(self.headers);
+    }
+
+    /// Decode Content-Encoding layers without mutating HPACK-owned metadata or
+    /// the encoded request body.
+    pub fn decodeContentAlloc(
+        self: OwnedRequest,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return content_coding.decodeHeadersAlloc(
+            allocator,
+            self.headers,
+            self.body,
+            max_output_len,
+        );
+    }
+
+    pub fn decodeContentInto(
+        self: OwnedRequest,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return (try self.contentEncoding()).decodeInto(
+            self.body,
+            out,
+            scratch,
+        );
+    }
 };
 
 const PendingRequest = union(enum) {
@@ -15291,6 +15324,17 @@ pub const StreamingRequestHead = struct {
     scheme: []const u8,
     authority: ?[]const u8,
     protocol: ?[]const u8 = null,
+
+    pub fn streamContentDecoder(
+        self: StreamingRequestHead,
+        allocator: std.mem.Allocator,
+        options: content_coding.StreamOptions,
+    ) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+            allocator,
+            options,
+        );
+    }
 
     fn fromOwned(request: OwnedRequest) StreamingRequestHead {
         return .{

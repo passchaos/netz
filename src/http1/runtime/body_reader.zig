@@ -167,6 +167,15 @@ pub fn Reader(comptime RuntimeError: type) type {
                     self.headers,
                 );
             }
+
+            pub fn streamContentDecoder(
+                self: RequestHead,
+                allocator: std.mem.Allocator,
+                options: http1.content_coding.StreamOptions,
+            ) http1.content_coding.Error!http1.content_coding.StreamDecoder {
+                return (try http1.content_coding.parseHeaders(self.headers))
+                    .streamDecoder(allocator, options);
+            }
         };
 
         pub const ResponseHead = struct {

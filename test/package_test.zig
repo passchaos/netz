@@ -9470,3 +9470,7 @@ test "HTTP response types expose shared content decoding" {
     });
     defer h3_stream.deinit();
 }
+
+test {
+    _ = @import("http_request_content_coding_test.zig");
+}

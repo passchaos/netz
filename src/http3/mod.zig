@@ -3591,6 +3591,39 @@ pub const DecodedRequest = struct {
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
     }
+
+    pub fn contentEncoding(
+        self: DecodedRequest,
+    ) content_coding.Error!content_coding.Chain {
+        return content_coding.parseHeaders(self.headers);
+    }
+
+    /// Decode Content-Encoding layers without mutating QPACK-owned metadata
+    /// or the encoded request body.
+    pub fn decodeContentAlloc(
+        self: DecodedRequest,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return content_coding.decodeHeadersAlloc(
+            allocator,
+            self.headers,
+            self.body,
+            max_output_len,
+        );
+    }
+
+    pub fn decodeContentInto(
+        self: DecodedRequest,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return (try self.contentEncoding()).decodeInto(
+            self.body,
+            out,
+            scratch,
+        );
+    }
 };
 
 pub const DecodedResponse = struct {
@@ -3689,6 +3722,17 @@ pub const DecodedRequestHead = struct {
     body_allowed: bool,
     consumed: usize,
     qpack_section_acknowledgments: usize,
+
+    pub fn streamContentDecoder(
+        self: DecodedRequestHead,
+        allocator: std.mem.Allocator,
+        options: content_coding.StreamOptions,
+    ) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+            allocator,
+            options,
+        );
+    }
 
     pub fn deinit(
         self: *DecodedRequestHead,

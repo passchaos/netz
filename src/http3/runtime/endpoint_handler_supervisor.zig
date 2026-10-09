@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const http3 = @import("../mod.zig");
+const content_coding = @import("../../http/content_coding.zig");
 const quic = @import("../../quic/mod.zig");
 
 pub const ErrorStage = enum { connection, handler, response };
@@ -67,6 +68,37 @@ pub const OwnedRequest = struct {
         http3.Qpack.freeDecodedFields(allocator, self.trailers);
         if (self.body_storage) |body| allocator.free(body);
         self.* = undefined;
+    }
+
+    pub fn contentEncoding(
+        self: OwnedRequest,
+    ) content_coding.Error!content_coding.Chain {
+        return content_coding.parseHeaders(self.headers);
+    }
+
+    pub fn decodeContentAlloc(
+        self: OwnedRequest,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return content_coding.decodeHeadersAlloc(
+            allocator,
+            self.headers,
+            self.body,
+            max_output_len,
+        );
+    }
+
+    pub fn decodeContentInto(
+        self: OwnedRequest,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return (try self.contentEncoding()).decodeInto(
+            self.body,
+            out,
+            scratch,
+        );
     }
 };
 

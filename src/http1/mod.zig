@@ -310,6 +310,17 @@ pub const RequestHead = struct {
         return requestAcceptsTrailers(self.version, self.headers);
     }
 
+    pub fn streamContentDecoder(
+        self: RequestHead,
+        allocator: std.mem.Allocator,
+        options: content_coding.StreamOptions,
+    ) content_coding.Error!content_coding.StreamDecoder {
+        return (try content_coding.parseHeaders(self.headers)).streamDecoder(
+            allocator,
+            options,
+        );
+    }
+
     /// Total bytes for a pipelined message when its body boundary is known from
     /// the head. Chunked bodies require parsing chunks and return null.
     pub fn messageLength(self: RequestHead) Error!?usize {
@@ -418,6 +429,38 @@ pub const Request = struct {
 
     pub fn header(self: Request, name: []const u8) ?[]const u8 {
         return wire.findHeader(self.headers, name);
+    }
+
+    pub fn contentEncoding(
+        self: Request,
+    ) content_coding.Error!content_coding.Chain {
+        return content_coding.parseHeaders(self.headers);
+    }
+
+    /// Decode Content-Encoding layers without mutating the request body.
+    pub fn decodeContentAlloc(
+        self: Request,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return content_coding.decodeHeadersAlloc(
+            allocator,
+            self.headers,
+            self.body,
+            max_output_len,
+        );
+    }
+
+    pub fn decodeContentInto(
+        self: Request,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return (try self.contentEncoding()).decodeInto(
+            self.body,
+            out,
+            scratch,
+        );
     }
 
     pub fn keepAlive(self: Request) bool {

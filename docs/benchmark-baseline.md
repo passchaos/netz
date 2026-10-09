@@ -103,14 +103,16 @@ HTTP content-coding benchmark
 The shared `netz.http.content_coding` layer parses repeated and comma-combined
 Content-Encoding fields once, caps nesting at eight codings, and decodes the
 stack in reverse application order. HTTP/1, HTTP/2, and HTTP/3 aggregate
-responses expose the same allocating and two-workspace caller-buffer helpers.
+requests and responses expose the same allocating and two-workspace
+caller-buffer helpers.
 Every intermediate representation is independently bounded, so stacking does
 not bypass the caller's decompression limit. The implementation uses Vort for
 gzip, RFC 1950 `deflate`, Brotli, and Zstandard; gzip and Zstandard accept
 concatenated frames while single-stream formats reject trailing bytes. The
 incremental API adds an independent encoded-input ceiling, exact successful
 step progress, explicit EOF validation, reusable state, and response-head
-constructors for every HTTP version. Stacked streams compose the same Vort
+constructors on request and response heads for every HTTP version. Stacked
+streams compose the same Vort
 decoders in reverse order through caller-tunable fixed-capacity queues; queue
 storage and codec state are retained across reset, every intermediate layer is
 bounded, and fragmented input/output propagates backpressure without buffering

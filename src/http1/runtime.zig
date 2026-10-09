@@ -4958,6 +4958,28 @@ pub const OwnedRequest = struct {
         allocator.free(self.bytes);
         self.* = undefined;
     }
+
+    pub fn contentEncoding(
+        self: OwnedRequest,
+    ) http1.content_coding.Error!http1.content_coding.Chain {
+        return self.request.contentEncoding();
+    }
+
+    pub fn decodeContentAlloc(
+        self: OwnedRequest,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) http1.content_coding.Error!http1.content_coding.DecodedBody {
+        return self.request.decodeContentAlloc(allocator, max_output_len);
+    }
+
+    pub fn decodeContentInto(
+        self: OwnedRequest,
+        out: []u8,
+        scratch: []u8,
+    ) http1.content_coding.Error![]u8 {
+        return self.request.decodeContentInto(out, scratch);
+    }
 };
 
 pub const OwnedResponse = struct {

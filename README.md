@@ -166,8 +166,9 @@ for the private dependency checkouts.
 Current protocol coverage includes:
 
 - Shared HTTP Content-Encoding parsing and bounded whole-representation decode
-  for HTTP/1, HTTP/2, and HTTP/3 responses, including repeated/stacked coding
-  fields, reverse-order decoding, allocating and caller-buffer APIs, gzip,
+  for HTTP/1, HTTP/2, and HTTP/3 requests and responses, including
+  repeated/stacked coding fields, reverse-order decoding, allocating and
+  caller-buffer APIs, gzip,
   RFC 1950 `deflate`, Brotli, and Zstandard through Vort, with an eight-layer
   nesting cap and a decoded-size limit applied independently to every layer;
   streaming decoders for identity, single, and stacked codings that preserve
