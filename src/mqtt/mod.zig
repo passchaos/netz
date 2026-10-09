@@ -321,17 +321,30 @@ pub fn readUtf8(cursor: *wire.Cursor) Error![]const u8 {
 }
 
 fn validateMqttUtf8String(value: []const u8) Error!void {
-    if (!std.unicode.utf8ValidateSlice(value)) return error.InvalidUtf8;
+    return validateMqttUtf8StringWithPolicy(value, false);
+}
+
+fn validateMqttUtf8StringWithPolicy(
+    value: []const u8,
+    reject_discouraged_controls: bool,
+) Error!void {
     var view = std.unicode.Utf8View.init(value) catch return error.InvalidUtf8;
     var it = view.iterator();
     while (it.nextCodepoint()) |codepoint| {
-        // MQTT UTF-8 Encoded Strings MUST NOT contain U+0000.  C0/C1 control
-        // characters are only "SHOULD NOT" in MQTT 5 and are accepted by
-        // mature codecs such as rumqtt once the byte sequence is valid UTF-8.
-        // Keep the wire codec interoperable by enforcing the MUST-level NUL
-        // prohibition while leaving policy-level control-character filtering to
-        // applications that need it.
-        if (codepoint == 0) return error.InvalidUtf8;
+        // MQTT 5 section 1.5.4 requires UTF-8 Encoded Strings to exclude
+        // U+0000 and every Unicode noncharacter. C0/C1 controls are only
+        // "SHOULD NOT" and remain a policy decision handled by
+        // validateStrictUtf8String.
+        if (codepoint == 0 or
+            (codepoint >= 0xfdd0 and codepoint <= 0xfdef) or
+            (codepoint & 0xffff == 0xfffe) or
+            (codepoint & 0xffff == 0xffff) or
+            (reject_discouraged_controls and
+                (codepoint <= 0x001f or
+                    (codepoint >= 0x007f and codepoint <= 0x009f))))
+        {
+            return error.InvalidUtf8;
+        }
     }
 }
 
@@ -344,19 +357,7 @@ pub fn validateUtf8String(value: []const u8) Error!void {
 /// discouraged C0/C1 controls; brokers that need Mosquitto-compatible input
 /// rejection can opt into this additional check at the connection boundary.
 pub fn validateStrictUtf8String(value: []const u8) Error!void {
-    try validateMqttUtf8String(value);
-    var view = std.unicode.Utf8View.init(value) catch return error.InvalidUtf8;
-    var it = view.iterator();
-    while (it.nextCodepoint()) |codepoint| {
-        if (codepoint <= 0x001f or
-            (codepoint >= 0x007f and codepoint <= 0x009f) or
-            (codepoint >= 0xfdd0 and codepoint <= 0xfdef) or
-            (codepoint & 0xffff == 0xfffe) or
-            (codepoint & 0xffff == 0xffff))
-        {
-            return error.InvalidUtf8;
-        }
-    }
+    return validateMqttUtf8StringWithPolicy(value, true);
 }
 
 /// Apply the strict UTF-8 policy to every UTF-8 Encoded String carried by an
@@ -3437,13 +3438,45 @@ test "MQTT Assigned Client Identifier lookup" {
     try std.testing.expect(assignedClientIdentifier(&.{}) == null);
 }
 
-test "MQTT UTF-8 strings reject NUL but allow discouraged controls" {
+test "MQTT UTF-8 strings reject forbidden code points but allow discouraged controls" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(std.testing.allocator);
     try std.testing.expectError(error.InvalidUtf8, writeUtf8(&out, std.testing.allocator, "bad\x00topic"));
 
+    var encoded: [4]u8 = undefined;
+    var codepoint: u21 = 0xfdd0;
+    while (codepoint <= 0xfdef) : (codepoint += 1) {
+        const len = try std.unicode.utf8Encode(codepoint, &encoded);
+        try std.testing.expectError(
+            error.InvalidUtf8,
+            validateUtf8String(encoded[0..len]),
+        );
+    }
+    for (0..17) |plane| {
+        const plane_base: u21 = @intCast(plane * 0x10000);
+        for ([_]u21{ plane_base + 0xfffe, plane_base + 0xffff }) |noncharacter| {
+            const len = try std.unicode.utf8Encode(noncharacter, &encoded);
+            try std.testing.expectError(
+                error.InvalidUtf8,
+                validateUtf8String(encoded[0..len]),
+            );
+        }
+    }
+    for ([_]u21{ 0xfdcf, 0xfdf0, 0xfffd, 0x10000, 0x1fffd, 0x10fffd }) |allowed| {
+        const len = try std.unicode.utf8Encode(allowed, &encoded);
+        try validateUtf8String(encoded[0..len]);
+    }
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        writeUtf8(&out, std.testing.allocator, "bad\xef\xbf\xbetopic"),
+    );
+
     var raw = [_]u8{ 0, 5, 'h', 'e', 0, 'l', 'o' };
     var cursor = wire.Cursor.init(&raw);
+    try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
+
+    var noncharacter = [_]u8{ 0, 3, 0xef, 0xbf, 0xbe };
+    cursor = wire.Cursor.init(&noncharacter);
     try std.testing.expectError(error.InvalidUtf8, readUtf8(&cursor));
 
     try writeUtf8(&out, std.testing.allocator, "ok\x1ftopic");
@@ -3455,17 +3488,12 @@ test "MQTT UTF-8 strings reject NUL but allow discouraged controls" {
     try std.testing.expectEqualStrings("b\x7fd", try readUtf8(&cursor));
 }
 
-test "MQTT strict UTF-8 policy rejects controls and noncharacters" {
+test "MQTT strict UTF-8 policy rejects discouraged controls" {
     for ([_][]const u8{
         "bad\x01value",
         "bad\x1fvalue",
         "bad\x7fvalue",
         "bad\xc2\x9fvalue",
-        "bad\xef\xb7\x90value",
-        "bad\xef\xbf\xbevalue",
-        "bad\xef\xbf\xbfvalue",
-        "bad\xf4\x8f\xbf\xbevalue",
-        "bad\xf4\x8f\xbf\xbfvalue",
     }) |value| {
         try std.testing.expectError(
             error.InvalidUtf8,

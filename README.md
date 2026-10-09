@@ -924,8 +924,9 @@ Current protocol coverage includes:
   challenges, owned method binding, active re-authentication and ordinary
   traffic gating, broker event-loop policy hooks, Protocol Error on method
   mismatch, properties, exact packet bounds, minimal remaining length, MQTT
-  UTF-8 string validation with opt-in Mosquitto-compatible strict
-  control/noncharacter rejection across identifiers, topics, filters, and all
+  UTF-8 string validation with mandatory NUL/noncharacter rejection and opt-in
+  Mosquitto-compatible strict C0/C1 control rejection across identifiers,
+  topics, filters, and all
   MQTT 5 UTF-8 property keys/values, response-topic/topic-name/filter validation
   including the complete 65,535-byte wire limit,
   clean-session empty-client-id checks and bidirectional Clean Start/Session

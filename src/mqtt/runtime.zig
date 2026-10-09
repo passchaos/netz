@@ -956,10 +956,10 @@ pub const AcceptOptions = struct {
     /// Protocol versions admitted after CONNECT auto-detection. The protocol
     /// field above remains only the initial parsing/encoding hint.
     accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
-    /// Reject control characters and Unicode noncharacters in every UTF-8
-    /// Encoded String received from the client. The default keeps the wire
-    /// codec's interoperable MUST-level validation; enable this for
-    /// Mosquitto-style broker admission.
+    /// Reject discouraged C0/C1 control characters in every UTF-8 Encoded
+    /// String received from the client. The base wire codec always rejects
+    /// MQTT-forbidden NUL and Unicode noncharacters; enable this stricter
+    /// policy for Mosquitto-style broker admission.
     strict_utf8: bool = false,
     /// Optional process-wide wire counter sink. Every complete MQTT Control
     /// Packet is charged after a successful transport read or write, including
@@ -2270,9 +2270,9 @@ pub const ConnectResult = struct {
 pub const ConnectOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     client_id: []const u8,
-    /// Reject control characters and Unicode noncharacters in every UTF-8
-    /// Encoded String received from the broker. The default retains MQTT's
-    /// interoperable MUST-level validation.
+    /// Reject discouraged C0/C1 control characters in every UTF-8 Encoded
+    /// String received from the broker. The base wire codec always rejects
+    /// MQTT-forbidden NUL and Unicode noncharacters.
     strict_utf8: bool = false,
     /// Absolute receive budget from the transmitted CONNECT through the final
     /// CONNACK. Interim Enhanced Authentication packets do not renew it.

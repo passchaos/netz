@@ -3311,15 +3311,16 @@ accepted through a wildcard.
 All source bytes, replacement bytes, identities, reasons, and the aggregate
 259-replacement count are locked. The gate launches netz with the
 fixture's Receive Maximum 20, Maximum Packet Size 2,000,000, and Topic Alias
-Maximum 10, plus the explicit Mosquitto-compatible strict UTF-8 policy. That
-policy rejects C0/C1 controls and Unicode noncharacters on CONNECT identity and
-Will fields and on later PUBLISH/SUBSCRIBE/UNSUBSCRIBE topic fields, while the
-default runtime policy continues to accept the specification's discouraged
-control characters. Both formerly configuration-dependent PUBLISH scenarios
+Maximum 10, plus the explicit Mosquitto-compatible strict UTF-8 policy. The base
+wire codec always rejects MQTT-forbidden NUL and Unicode noncharacters; the
+explicit policy additionally rejects discouraged C0/C1 controls on CONNECT
+identity and Will fields and on later PUBLISH/SUBSCRIBE/UNSUBSCRIBE topic fields.
+The default runtime policy continues to accept those discouraged control
+characters. Both formerly configuration-dependent PUBLISH scenarios
 and the DISCONNECT Session Expiry transition therefore execute instead of
 being excluded.
-Strict connection validation now applies the same control/noncharacter policy
-to every MQTT 5 UTF-8 property string and User Property key/value in CONNECT,
+Strict connection validation now applies the same control-character policy to
+every MQTT 5 UTF-8 property string and User Property key/value in CONNECT,
 Will, CONNACK, PUBLISH, acknowledgements, subscription controls, DISCONNECT,
 and AUTH; Binary Data remains opaque. This closes the previous gap where only
 identity, Will Topic, Topic Name, and Topic Filter fields received the
