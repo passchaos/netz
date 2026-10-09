@@ -6706,6 +6706,94 @@ server snapshot was taken, while the reverse role pair differed by one final
 These timing-boundary deltas are printed rather than hidden. `--traffic` and `--stats` must run
 separately, and neither changes the ordinary benchmark path.
 
+### zio timed-I/O waiter fast path
+
+On 2026-10-10, fixed `ReleaseFast` binaries isolated the zio timed-I/O change
+while keeping the netz source at `0bf9d383`. The baseline used zio
+`3c23d1c36024fb9a1bc22d27a388f097b99a3a5f`; the candidate used the pushed
+`passchaos/zio` commit `4f12748e34c86f39560c03414c062b0705d99acd`.
+The candidate lets a runtime task wait directly on its I/O completion's
+`Waiter` timer instead of constructing the generic two-member `Group(.race)`.
+The no-task and non-suspending fallbacks are unchanged, and timeout or external
+cancellation still cancels the I/O completion and waits for that cancellation
+to converge before returning.
+
+The MQTT QoS 2 matrix pinned the driver to CPU 5, the broker to CPU 7, and the
+2-ms RSS sampler to CPU 13. Each shape used five paired samples with AB/BA order,
+1,000 warmup publishes, 10,000 measured publishes, persistent 3,600-second
+Sessions, and exact delivery/checksum verification. A pair was accepted only
+when its complete lifetime had no competing Zig compiler; balanced 32x32 and
+4-KiB results were reacquired pair by pair after unrelated host compilation
+invalidated the original tails. Ratios below are candidate/baseline, so higher
+throughput and lower latency are better:
+
+| Shape | Throughput paired median (range) | p50 ratio | p99 ratio | Result |
+|---|---:|---:|---:|---|
+| serial, 1 publisher / 1 subscriber | 1.0584x (1.0373-1.0957x) | 0.9210x | 0.9677x | positive |
+| publishers-32 | 0.9973x (0.9880-1.0026x) | 1.0040x | 1.0020x | neutral |
+| fanout-32 | 1.0110x (1.0029-1.0348x) | 0.9551x | 0.9358x | positive |
+| balanced-32x32 | 1.0010x (0.9785-1.0062x) | 0.9892x | 0.9929x | neutral |
+| 4-KiB payload, 4x4 | 1.0176x (1.0041-1.0345x) | 0.9476x | 0.9430x | positive; 5/5 pairs |
+
+The broker baseline/candidate and shared driver SHA-256 values are
+`9a0ae6df6a55ebc8f671c657860c7f36e9c6dfcc2c0a59dff94e24b70d601f57`,
+`676f8742a2f2da042e4709faa0b92c446cb9a324ab2ad56f184d0cfe9372d691`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The paired records are retained under `zig-out/mqtt-timed-wait-ab`,
+`zig-out/mqtt-timed-wait-balanced-pairwise`, and
+`zig-out/mqtt-timed-wait-large-pairwise`. Sampled RSS moved in both directions,
+so this experiment supports no memory claim.
+
+Seven additional order-alternated, CPU-0 pairs covered encrypted and framed
+MQTT transports with their existing complete-message checks. MQTT-over-
+WebSocket measured a 1.0053x paired throughput median over a 0.9914-1.0134x
+range and won 6/7 pairs. Native MQTT-over-TLS measured 0.9998x over
+0.9931-1.0082x and won 3/7, which is explicitly neutral. The WebSocket
+baseline/candidate binary hashes are
+`1967543d017dcfc69af50b653a2304f039a770ad130daea03e44267fd5cdd046` and
+`cd1b297483d6932bc56a0aa793ebf8b09b0a576c42e14f0d8d585ffd594dcb0c`;
+the TLS hashes are
+`85f11b504518e86f2b1716c73acf1dd78cbbb9909209d47208cefc16ce6ce639`
+and `11851ec7bcf2733495009403ce0c55c2f63a43713b8d8b13672b1b6300398817`.
+
+Matched broker `perf` captures explain the targeted change. The table reports
+self-sample percentages, not absolute CPU time; percentages can rise when the
+candidate completes sooner, so only the disappearance or movement of the
+specific call path is used as structural evidence:
+
+| Symbol | Baseline self | Candidate self |
+|---|---:|---:|
+| `common.timedWaitForIoClock` | 3.11% | 0.48% |
+| `ev.completion.Group.groupCallback` | 0.33% | absent |
+| `ev.loop.Loop.cancelLocal` | 1.26% | absent |
+| `common.Waiter.timedWaitClock` | absent | 2.64% |
+| `runtime.loopClearTimer` | absent | 2.43% |
+| `ev.loop.Loop.addInternal` | 3.65% | 2.74% |
+| `__kernel_clock_gettime` | 12.62% | 16.35% |
+
+The clean 100,000-publish candidate profile completed 100,000 deliveries with
+checksum 25,725,000 at 20,601 publishes/s, 38,463-ns p50, and 49,565-ns p99.
+The old `Group.groupCallback`/`Loop.cancelLocal` target overhead is gone; the
+remaining timer insertion, waiter, clear, and clock costs identify the next
+runtime-level optimization boundary.
+
+For WebTransport, independently built baseline and candidate binaries each
+completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
+size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
+receives, and checksum 921,600,000. Their hashes are
+`5da9d9135efab810447d31fa31ff88c5119e104ba085f4421884e2ce45da0b11` and
+`36f8a3090d69c6e1731bcddc35547a83668ef23ed13736246742088b1b856eb9`.
+External Zig compilation prevented a clean timed pair, so this is deliberately
+recorded only as cross-protocol correctness evidence, not an A/B performance
+result.
+
+zio's focused runtime-task tests cover natural I/O completion, timeout-driven
+cancellation, and external cancellation under the default, epoll, poll,
+single-executor, and pinned schedules. Its complete suite passed 762 tests with
+8 platform skips. With the remote dependency selected, netz's complete
+`zig build test --summary all` gate also passed, covering HTTP, WebSocket,
+WebTransport, QUIC, MQTT, TLS, fuzz smoke, and Python checkers.
+
 ## Reference context from `~/Work`
 
 The closest available reference document is

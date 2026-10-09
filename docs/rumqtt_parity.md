@@ -2473,6 +2473,38 @@ scheduler benchmark. It measures owned-state installation, deadline scheduling,
 polling and release; it is not an equal-wire broker throughput comparison with
 rumqttd.
 
+## zio timed-I/O runtime fast path
+
+The runtime dependency now pins the pushed `passchaos/zio` commit
+`4f12748e34c86f39560c03414c062b0705d99acd`. For a timed I/O operation inside
+a runtime task, zio now uses the completion's `Waiter` timer directly instead
+of building a general two-member `Group(.race)`. The blocking/no-task fallback
+is retained, and both timeout and external cancellation explicitly cancel and
+join the outstanding I/O completion. Dedicated tests cover natural completion,
+timeout, and cancellation under default, epoll, poll, single-executor, and
+pinned scheduling; the complete zio suite passed 762 tests with 8 platform
+skips, and netz's complete test gate passed against the remote commit.
+
+A five-pair, fixed-binary, AB/BA, CPU-pinned MQTT 5 QoS 2 comparison accepted
+only samples with no concurrent Zig compiler. Candidate/baseline paired medians
+were 1.0584x throughput with 0.9210x p50 for serial traffic, 0.9973x/1.0040x
+for publishers-32, 1.0110x/0.9551x for fanout-32, 1.0010x/0.9892x for balanced
+32x32, and 1.0176x/0.9476x for the 4-KiB shape. The 4-KiB candidate won all
+five throughput pairs and lowered p99 in all five. Seven additional pairs put
+MQTT-over-WebSocket at 1.0053x throughput with 6/7 wins and native
+MQTT-over-TLS at a neutral 0.9998x. A matched `perf` capture removed
+`Group.groupCallback` and `Loop.cancelLocal` from the sampled target path;
+`timedWaitForIoClock` self cost moved from 3.11% to 0.48%, with direct waiter
+and timer-clear work visible instead. These percentages describe different
+total runtimes and are structural evidence, not absolute CPU-time ratios.
+
+Both fixed WebTransport binaries also completed 10,000 real
+QUIC/TLS/HTTP/3 1-KiB DATAGRAM sends and receives, in batches of 16 with 64
+maximum in flight, zero timeouts, and identical checksum. Host compilation
+prevented a clean timed pair, so no WebTransport speed claim is made. The full
+method, ratios, binary hashes, perf interpretation, and evidence boundary are
+recorded in `docs/benchmark-baseline.md`.
+
 ## Remaining work before broad superiority
 
 The shared `fuzz-parsers` target dispatches every bounded input through the
