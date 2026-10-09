@@ -2476,14 +2476,18 @@ rumqttd.
 ## zio timed-I/O runtime fast path
 
 The runtime dependency now pins the pushed `passchaos/zio` commit
-`4f12748e34c86f39560c03414c062b0705d99acd`. For a timed I/O operation inside
-a runtime task, zio now uses the completion's `Waiter` timer directly instead
-of building a general two-member `Group(.race)`. The blocking/no-task fallback
-is retained, and both timeout and external cancellation explicitly cancel and
-join the outstanding I/O completion. Dedicated tests cover natural completion,
-timeout, and cancellation under default, epoll, poll, single-executor, and
-pinned scheduling; the complete zio suite passed 762 tests with 8 platform
-skips, and netz's complete test gate passed against the remote commit.
+`aa1a91f768f4ff9ae92c9937c6b8ef5d0d0e8851`. It includes the direct waiter
+change from `4f12748e`: a timed I/O operation inside a runtime task uses the
+completion's `Waiter` timer instead of building a general two-member
+`Group(.race)`. The blocking/no-task fallback is retained, and both timeout and
+external cancellation explicitly cancel and join the outstanding I/O
+completion. The follow-up also avoids refreshing the event-loop clock when a
+timer already carries an absolute deadline; relative durations still receive a
+fresh origin, and `poll` refreshes every clock before expiry checks. Dedicated
+tests cover natural completion, timeout, cancellation, absolute-deadline
+firing, and cached-clock preservation under default, epoll, poll,
+single-executor, and pinned scheduling; the complete zio suite passed 763 tests
+with 8 platform skips.
 
 A five-pair, fixed-binary, AB/BA, CPU-pinned MQTT 5 QoS 2 comparison accepted
 only samples with no concurrent Zig compiler. Candidate/baseline paired medians
@@ -2497,6 +2501,16 @@ MQTT-over-TLS at a neutral 0.9998x. A matched `perf` capture removed
 `timedWaitForIoClock` self cost moved from 3.11% to 0.48%, with direct waiter
 and timer-clear work visible instead. These percentages describe different
 total runtimes and are structural evidence, not absolute CPU-time ratios.
+
+For the follow-up absolute-deadline change, a seven-pair CPU-thread-time
+microbenchmark reduced absolute timer arm plus clear from 133 to 61 ns/op
+(0.4656x median, 7/7 wins). A five-pair MQTT rerun isolated the broker and
+driver on CPUs 10 and 11 outside concurrent build affinity; throughput paired
+medians were 1.0042x, 1.0122x, 1.0037x, 1.0046x, and 1.0074x across serial,
+publishers-32, fanout-32, balanced-32x32, and 4-KiB shapes. The profile's
+`clock_gettime` self share fell from 16.35% to 11.54%, with the former 6.17%
+waiter child path absent. End-to-end movement is therefore positive to neutral,
+while the removed clock read is the primary supported result.
 
 Both fixed WebTransport binaries also completed 10,000 real
 QUIC/TLS/HTTP/3 1-KiB DATAGRAM sends and receives, in batches of 16 with 64

@@ -6777,6 +6777,32 @@ The old `Group.groupCallback`/`Loop.cancelLocal` target overhead is gone; the
 remaining timer insertion, waiter, clear, and clock costs identify the next
 runtime-level optimization boundary.
 
+A follow-up zio change at
+`aa1a91f768f4ff9ae92c9937c6b8ef5d0d0e8851` removed the remaining redundant
+clock read when `Loop.setTimer` receives an already absolute deadline. Relative
+durations still refresh their origin, while every poll refreshes the snapshot
+before comparing either kind of timer. A 10,000,000-iteration CPU-thread-time
+microbenchmark of absolute `setTimer` plus `clearTimer`, pinned to CPU 0 and
+alternated for seven pairs, moved from a 133-ns/op baseline median to 61 ns/op;
+the paired candidate/baseline median was 0.4656x over a 0.4511-0.4812x range,
+with 7/7 wins. This measures the timer arm/disarm primitive, not end-to-end I/O.
+
+The same fixed MQTT broker/driver binaries were run for five AB/BA pairs with
+the broker and driver isolated on CPUs 10 and 11, outside the concurrent build's
+`0-9,12,13` affinity. Candidate/baseline throughput paired medians were 1.0042x,
+1.0122x, 1.0037x, 1.0046x, and 1.0074x for serial, publishers-32, fanout-32,
+balanced-32x32, and 4-KiB payloads respectively. The result is positive to
+neutral across complete application shapes; it is not presented as a 0.4-1.2%
+general throughput promise. The baseline and candidate broker hashes were
+`676f8742a2f2da042e4709faa0b92c446cb9a324ab2ad56f184d0cfe9372d691`
+and `74cff6622c25318b1d0f6c6fb45a4056af6fcdcb282d049b8fc0a5a2e5959d53`.
+A matched 100,000-publish candidate profile completed at 21,117 publishes/s,
+37,723-ns p50, and 45,668-ns p99. `__kernel_clock_gettime` self samples fell
+from 16.35% to 11.54%, and its former 6.17% child path below
+`Waiter.timedWaitClock` disappeared completely; remaining samples come from
+the event-loop poll snapshot. As above, percentages from different-duration
+profiles are explanatory call-path evidence rather than absolute CPU ratios.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
@@ -6789,8 +6815,8 @@ result.
 
 zio's focused runtime-task tests cover natural I/O completion, timeout-driven
 cancellation, and external cancellation under the default, epoll, poll,
-single-executor, and pinned schedules. Its complete suite passed 762 tests with
-8 platform skips. With the remote dependency selected, netz's complete
+single-executor, and pinned schedules. Its final complete suite passed 763
+tests with 8 platform skips. With the remote dependency selected, netz's complete
 `zig build test --summary all` gate also passed, covering HTTP, WebSocket,
 WebTransport, QUIC, MQTT, TLS, fuzz smoke, and Python checkers.
 
