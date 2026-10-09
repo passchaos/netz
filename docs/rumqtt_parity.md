@@ -2512,6 +2512,23 @@ publishers-32, fanout-32, balanced-32x32, and 4-KiB shapes. The profile's
 waiter child path absent. End-to-end movement is therefore positive to neutral,
 while the removed clock read is the primary supported result.
 
+The TCP/TLS/WebSocket packet framing paths now retain the `FixedHeader` they
+already decoded to establish the complete packet length and pass it into
+`OwnedPacket`, rather than decoding Remaining Length a second time. The common
+TCP caller-buffer and uninterrupted owned paths, TLS stream path, and
+WebSocket aggregation path all reuse that result; only a large TCP body resumed
+by a later call reparses its retained header, avoiding extra steady-state
+connection storage. Five fixed-binary CPU-10/11 QoS 2 pairs produced
+candidate/baseline throughput medians of 1.0046x, 1.0022x, 1.0041x, 0.9989x,
+and 1.0008x across serial, publishers-32, fanout-32, balanced-32x32, and 4-KiB
+shapes. The ranges overlap, so no end-to-end speedup is claimed. In matched
+100,000-publish profiles, the former 1.33% `FixedHeader.parse` child path below
+`readTcpPacketWithPolicy` disappeared. The baseline/candidate broker hashes
+are `74cff6622c25318b1d0f6c6fb45a4056af6fcdcb282d049b8fc0a5a2e5959d53`
+and `7555c1775b84778f985c69e411f7e52a1761151a3be72493a6df395182b41975`;
+the unchanged driver hash is
+`30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+
 Both fixed WebTransport binaries also completed 10,000 real
 QUIC/TLS/HTTP/3 1-KiB DATAGRAM sends and receives, in batches of 16 with 64
 maximum in flight, zero timeouts, and identical checksum. Host compilation

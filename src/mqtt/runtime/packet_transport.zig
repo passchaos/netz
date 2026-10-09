@@ -1125,11 +1125,11 @@ fn readTcpPacketWithPolicy(
         inactivityDeadline(tcp.io, timeout)
     else
         absolute_deadline;
+    var parsed_fixed: ?mqtt.FixedHeader = null;
 
     while (tcp.packet == null) {
         const buffered = tcp.buffered();
-        const maybe_packet_len = try completePacketLength(buffered);
-        const packet_len = maybe_packet_len orelse {
+        const frame = (try parsePacketFraming(buffered)) orelse {
             tcp.compactBuffered();
             std.debug.assert(tcp.input_end < tcp.input.len);
             tcp.input_end += try readTcpSomeWithDeadline(
@@ -1139,6 +1139,7 @@ fn readTcpPacketWithPolicy(
             );
             continue;
         };
+        const packet_len = frame.packet_len;
         if (packet_len > max_packet_size) return error.PacketTooLarge;
         if (caller_storage) |storage| {
             if (packet_len <= storage.len and
@@ -1163,7 +1164,7 @@ fn readTcpPacketWithPolicy(
                 tcp.discardBuffered(packet_len);
                 return .{
                     .bytes = bytes,
-                    .fixed = try mqtt.FixedHeader.parse(bytes),
+                    .fixed = frame.fixed,
                     .owns_bytes = false,
                 };
             }
@@ -1180,9 +1181,9 @@ fn readTcpPacketWithPolicy(
         tcp.packet = packet;
         tcp.packet_prefix_len = allocated.prefix_len;
         tcp.packet_read = copy_len;
+        parsed_fixed = frame.fixed;
         if (inactivity_timeout) |timeout| {
-            const fixed = try mqtt.FixedHeader.parse(packet);
-            if (fixed.remaining_len > keep_alive_reader.progress_threshold and
+            if (frame.fixed.remaining_len > keep_alive_reader.progress_threshold and
                 copy_len < packet_len)
             {
                 // The initial read may already have consumed part of a large
@@ -1218,7 +1219,9 @@ fn readTcpPacketWithPolicy(
     errdefer freePacketBytes(allocator, packet, packet_prefix_len);
     return .{
         .bytes = packet,
-        .fixed = try mqtt.FixedHeader.parse(packet),
+        // A resumed large-packet read reconstructs this from its retained
+        // header; the uninterrupted common path reuses the framing parse.
+        .fixed = parsed_fixed orelse try mqtt.FixedHeader.parse(packet),
         .prefix_len = packet_prefix_len,
     };
 }
@@ -1258,7 +1261,7 @@ fn readPacketFromReader(
 ) Error!OwnedPacket {
     var header: [5]u8 = undefined;
     try reader.readExact(header[0..1], false);
-    _ = try mqtt.packetTypeFromFirstByte(header[0]);
+    const packet_type = try mqtt.packetTypeFromFirstByte(header[0]);
     var remaining_len_len: usize = 0;
     while (remaining_len_len < 4) : (remaining_len_len += 1) {
         try reader.readExact(
@@ -1293,7 +1296,12 @@ fn readPacketFromReader(
     try reader.readExact(bytes[payload_start..], true);
     return .{
         .bytes = bytes,
-        .fixed = try mqtt.FixedHeader.parse(bytes),
+        .fixed = .{
+            .packet_type = packet_type,
+            .flags = @truncate(header[0] & 0x0f),
+            .remaining_len = decoded.value,
+            .header_len = payload_start,
+        },
     };
 }
 
@@ -1360,16 +1368,19 @@ fn readWebSocketPacketWithPolicy(
     else
         undefined;
     var large_progress_bytes: usize = 0;
+    var frame = try parsePacketFraming(ws.input.items);
     while (true) {
-        if (try completePacketLength(ws.input.items)) |packet_len| {
-            if (packet_len > max_packet_size) return error.PacketTooLarge;
+        if (frame) |parsed| {
+            if (parsed.packet_len > max_packet_size) {
+                return error.PacketTooLarge;
+            }
             // Once Remaining Length is decoded, `packet_len` is the expected
             // size rather than evidence that all bytes have arrived. MQTT
             // packets commonly span several WebSocket messages.
-            if (packet_len <= ws.input.items.len) {
+            if (parsed.packet_len <= ws.input.items.len) {
                 const allocated = try allocatePacketBytes(
                     allocator,
-                    packet_len,
+                    parsed.packet_len,
                     owned_prefix_len,
                 );
                 errdefer freePacketBytes(
@@ -1379,13 +1390,12 @@ fn readWebSocketPacketWithPolicy(
                 );
                 @memcpy(
                     allocated.bytes,
-                    ws.input.items[0..packet_len],
+                    ws.input.items[0..parsed.packet_len],
                 );
-                const fixed = try mqtt.FixedHeader.parse(allocated.bytes);
-                discardPacketPrefix(&ws.input, packet_len);
+                discardPacketPrefix(&ws.input, parsed.packet_len);
                 return .{
                     .bytes = allocated.bytes,
-                    .fixed = fixed,
+                    .fixed = parsed.fixed,
                     .prefix_len = allocated.prefix_len,
                 };
             }
@@ -1420,6 +1430,7 @@ fn readWebSocketPacketWithPolicy(
             return error.PacketTooLarge;
         }
         try ws.input.appendSlice(allocator, message.payload);
+        frame = try parsePacketFraming(ws.input.items);
 
         // MQTT packets are a byte stream independent of WebSocket message
         // boundaries. Move the one packet deadline only after MQTT bytes have
@@ -1428,12 +1439,14 @@ fn readWebSocketPacketWithPolicy(
         // are consumed inside receiveMessageWithDeadline and never reach this
         // renewal point.
         if (message.payload.len != 0) {
-            if (try completePacketLength(ws.input.items)) |packet_len| {
-                if (packet_len > max_packet_size) return error.PacketTooLarge;
+            if (frame) |parsed| {
+                if (parsed.packet_len > max_packet_size) {
+                    return error.PacketTooLarge;
+                }
                 if (inactivity_timeout) |timeout| {
                     if (ws.input.items.len > large_progress_bytes and
-                        packet_len > ws.input.items.len and
-                        packet_len - ws.input.items.len >
+                        parsed.packet_len > ws.input.items.len and
+                        parsed.packet_len - ws.input.items.len >
                             keep_alive_reader.progress_threshold)
                     {
                         deadline = inactivityDeadline(ws.connection.io, timeout);
@@ -1445,9 +1458,14 @@ fn readWebSocketPacketWithPolicy(
     }
 }
 
-fn completePacketLength(bytes: []const u8) Error!?usize {
+const PacketFrame = struct {
+    fixed: mqtt.FixedHeader,
+    packet_len: usize,
+};
+
+fn parsePacketFraming(bytes: []const u8) Error!?PacketFrame {
     if (bytes.len == 0) return null;
-    _ = try mqtt.packetTypeFromFirstByte(bytes[0]);
+    const packet_type = try mqtt.packetTypeFromFirstByte(bytes[0]);
     if (bytes.len < 2) return null;
     const max_remaining_length_bytes = @min(bytes.len - 1, 4);
     const decoded = mqtt.decodeRemainingLength(
@@ -1456,11 +1474,21 @@ fn completePacketLength(bytes: []const u8) Error!?usize {
         error.BufferTooShort => return null,
         else => return err,
     };
-    return std.math.add(
+    const header_len = 1 + decoded.len;
+    const packet_len = std.math.add(
         usize,
-        1 + decoded.len,
+        header_len,
         decoded.value,
     ) catch return error.PacketTooLarge;
+    return .{
+        .fixed = .{
+            .packet_type = packet_type,
+            .flags = @truncate(bytes[0] & 0x0f),
+            .remaining_len = decoded.value,
+            .header_len = header_len,
+        },
+        .packet_len = packet_len,
+    };
 }
 
 fn discardPacketPrefix(
@@ -1611,27 +1639,24 @@ test "TLS record-boundary EOF is an MQTT connection close" {
     );
 }
 
-test "packet length waits for a complete MQTT remaining length" {
-    try std.testing.expectEqual(
-        @as(?usize, null),
-        try completePacketLength(&.{}),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, null),
-        try completePacketLength(&.{0x30}),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, null),
-        try completePacketLength(&.{ 0x30, 0x80 }),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, 2),
-        try completePacketLength(&.{ 0xc0, 0x00 }),
-    );
-    try std.testing.expectEqual(
-        @as(?usize, 133),
-        try completePacketLength(&.{ 0x30, 0x82, 0x01 }),
-    );
+test "packet framing waits for a complete MQTT remaining length" {
+    try std.testing.expect((try parsePacketFraming(&.{})) == null);
+    try std.testing.expect((try parsePacketFraming(&.{0x30})) == null);
+    try std.testing.expect((try parsePacketFraming(&.{ 0x30, 0x80 })) == null);
+
+    const ping = (try parsePacketFraming(&.{ 0xc0, 0x00 })).?;
+    try std.testing.expectEqual(@as(usize, 2), ping.packet_len);
+    try std.testing.expectEqual(mqtt.PacketType.pingreq, ping.fixed.packet_type);
+    try std.testing.expectEqual(@as(u4, 0), ping.fixed.flags);
+    try std.testing.expectEqual(@as(usize, 0), ping.fixed.remaining_len);
+    try std.testing.expectEqual(@as(usize, 2), ping.fixed.header_len);
+
+    const publish = (try parsePacketFraming(&.{ 0x3d, 0x82, 0x01 })).?;
+    try std.testing.expectEqual(@as(usize, 133), publish.packet_len);
+    try std.testing.expectEqual(mqtt.PacketType.publish, publish.fixed.packet_type);
+    try std.testing.expectEqual(@as(u4, 0x0d), publish.fixed.flags);
+    try std.testing.expectEqual(@as(usize, 130), publish.fixed.remaining_len);
+    try std.testing.expectEqual(@as(usize, 3), publish.fixed.header_len);
 }
 
 test "packet prefix discard retains following packet bytes" {
@@ -1656,7 +1681,7 @@ test "packet prefix discard retains following packet bytes" {
 test "packet length rejects reserved type before malformed length" {
     try std.testing.expectError(
         error.ReservedPacketType,
-        completePacketLength(&.{ 0x00, 0x80, 0x80, 0x80, 0x80 }),
+        parsePacketFraming(&.{ 0x00, 0x80, 0x80, 0x80, 0x80 }),
     );
 }
 

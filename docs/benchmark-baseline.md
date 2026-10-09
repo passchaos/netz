@@ -6803,6 +6803,37 @@ from 16.35% to 11.54%, and its former 6.17% child path below
 the event-loop poll snapshot. As above, percentages from different-duration
 profiles are explanatory call-path evidence rather than absolute CPU ratios.
 
+An attempted follow-up that bypassed the timer mutex whenever the resuming
+task happened to run on the timer's loop was rejected before commit. Its
+isolated five-million-iteration arm/clear primitive fell from 60.43 to 27.84
+ns/op, but zio's existing `multi-executor: timeout cancel racing a cross-loop
+readiness edge` test reproduced pairing-heap corruption. Other executor threads
+may still mutate a loop's timer heap while servicing cross-loop socket state,
+so pointer equality is not an ownership proof. A future linked-timer design
+must route removal back to the timer owner and acknowledge it before releasing
+stack storage; the mutex remains in production.
+
+MQTT packet framing now carries the already validated `FixedHeader` beside the
+complete packet length. TCP read-ahead, uninterrupted owned TCP reads,
+TLS-backed stream reads, and WebSocket aggregation reuse that result instead of
+decoding Remaining Length again when constructing `OwnedPacket`. A TCP body
+resumed by a later call deliberately reparses its retained header rather than
+growing per-connection state for an uncommon path. Five fixed-binary,
+CPU-10/11, order-alternated QoS 2 pairs measured candidate/baseline throughput
+medians of 1.0046x, 1.0022x, 1.0041x, 0.9989x, and 1.0008x for serial,
+publishers-32, fanout-32, balanced-32x32, and 4-KiB payloads. The ranges
+overlapped, so this is a deterministic duplicate-work removal with no broad
+throughput claim. In matched 100,000-publish profiles, the former 1.33%
+`FixedHeader.parse` child path below `readTcpPacketWithPolicy` disappeared;
+the remaining `FixedHeader.parse` samples come from outgoing validation and
+packet-specific parsing. Baseline broker, candidate broker, and fixed driver
+SHA-256 values are respectively
+`74cff6622c25318b1d0f6c6fb45a4056af6fcdcb282d049b8fc0a5a2e5959d53`,
+`7555c1775b84778f985c69e411f7e52a1761151a3be72493a6df395182b41975`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The complete A/B and profile artifacts are retained under
+`zig-out/mqtt-fixed-header-ab` and `zig-out/mqtt-fixed-header-profile`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
