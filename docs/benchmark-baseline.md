@@ -6043,6 +6043,34 @@ MQTT UTF-8 validator and decoder from 19.3% to 7.4%; the remaining dominant
 userspace hotspot is monotonic-clock sampling around packet/deadline and
 Session-expiry boundaries.
 
+The next investigation first ruled out syscall count: an equal 1,000-warmup
+plus 10,000-message serial trace recorded 78,453 total syscalls for netz
+(78,357 `io_uring_enter`) and 198,989 for Mosquitto. A zio inline-send
+prototype was rejected because seven-pair fixed-binary checks regressed all
+five HTTP/1, WebSocket, MQTT-over-WebSocket, MQTT-over-TLS, and HTTP/2 controls;
+the complete rejected evidence is retained at `zig-out/zio-direct-send-cross`.
+
+The accepted approach reuses zio's event-loop awake-clock snapshot only where
+MQTT work is already bounded to the same scheduler scan, retaining exact
+`std.Io` clock behavior elsewhere. In a matched 5,000-warmup/100,000-message
+profile, the 13.2% sample share below repeated protocol clock reads
+disappeared; the
+remaining 12.7% `clock_gettime` share came entirely from the event loop's one
+refresh per poll. The final five-pair, remote-zio matrix at
+`zig-out/mqtt-cached-awake-final-ab` (63,798,176 bytes; aggregate digest
+`9f6c0000a2a9b70fa8eae9d332251da30a78647f1a987bccbd99ae8cf5f430ee`)
+used baseline/candidate/driver hashes
+`beb97b847532fe3bd004b8c35cdc210d9c1a2b10caaef0414929c31dc5a5a0cc`,
+`b5008a3cbddc9200a414e084b44860a19baf5e1cb718d2fc3ad9348e2e4bec28`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Paired throughput medians for serial, publishers-32, fanout-32,
+balanced-32x32, and 4-KiB were 1.018x, 1.021x, 1.078x, 1.038x, and 1.025x;
+p50 ratios were 0.989x, 0.959x, 0.899x, 0.946x, and 0.986x. Publisher-heavy
+p99 remained noisy. A five-pair 100,000-message serial control was neutral at
+1.003x, and seven-pair MQTT-over-WebSocket/TLS controls were neutral at
+1.009x/1.003x, so those shapes are recorded as no-regression rather than
+throughput wins.
+
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
 large-payload order, netz median throughput was

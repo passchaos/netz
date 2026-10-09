@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const mqtt = @import("mod.zig");
+const netz_runtime = @import("../runtime.zig");
 const owned_properties = @import("owned_properties.zig");
 const router_mod = @import("router.zig");
 const runtime = @import("runtime.zig");
@@ -5397,7 +5398,7 @@ pub const Broker = struct {
             connect.client_id,
             connect.username,
             publisher_slot.retainedSourceId(),
-            std.Io.Clock.awake.now(self.io),
+            netz_runtime.cachedAwakeNow(self.io),
             reserve_publication_prefix,
         ) catch |err| {
             self.state_mutex.unlock(self.io);
@@ -5497,7 +5498,7 @@ pub const Broker = struct {
         defer if (deferred_plan) |plan| plan.deinit(self.allocator);
         const maybe_publish = pending.asPublish(
             ack.packet_id,
-            std.Io.Clock.awake.now(self.io),
+            netz_runtime.cachedAwakeNow(self.io),
             &properties,
         ) catch |err| {
             self.state_mutex.lockUncancelable(self.io);
@@ -5620,7 +5621,7 @@ pub const Broker = struct {
             source_client_id,
             source_username,
             source_listener_id,
-            std.Io.Clock.awake.now(self.io),
+            netz_runtime.cachedAwakeNow(self.io),
             &persistent_changed,
             null,
             prefixed_packet,
@@ -6941,7 +6942,7 @@ pub const Broker = struct {
             // The timestamp is unobserved without Message Expiry; avoid a
             // runtime clock query for every subscriber in ordinary fanout.
             const delivery_now = if (delivery.publication.expiry_interval != null)
-                std.Io.Clock.awake.now(self.io)
+                netz_runtime.cachedAwakeNow(self.io)
             else
                 std.Io.Timestamp.fromNanoseconds(0);
             if (!try delivery.publication.appendDeliveryPropertiesMany(
@@ -7038,7 +7039,7 @@ pub const Broker = struct {
             var selection_changed = false;
             const transmissions = self.sessions.drainIntoTrackingSnapshotChange(
                 handle,
-                std.Io.Clock.awake.now(self.io),
+                netz_runtime.cachedAwakeNow(self.io),
                 connection.max_outgoing_inflight,
                 &storage,
                 &selection_changed,

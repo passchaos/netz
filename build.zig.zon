@@ -7,8 +7,8 @@
         .vail = .{ .path = "../vail" },
         .vort = .{ .path = "../vort" },
         .zio = .{
-            .url = "git+https://github.com/passchaos/zio#4daa0c0a9522a37c4d28e3dcec2515cc955abe71",
-            .hash = "zio-0.19.1-xHbVVJXzKwAKLRAABWeDvQG9Dg1kf9FM3haWG0YqtScn",
+            .url = "git+https://github.com/passchaos/zio#3c23d1c36024fb9a1bc22d27a388f097b99a3a5f",
+            .hash = "zio-0.19.1-xHbVVHr6KwDfrOK-2MPEpD2scHdIwir1oAhAYeMJeRD_",
         },
         .pbz = .{ .path = "../pbz" },
     },

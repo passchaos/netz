@@ -1,5 +1,6 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
+const netz_runtime = @import("../../runtime.zig");
 const stream_io = @import("../../internal/stream_io.zig");
 const websocket_runtime = @import("../../websocket/mod.zig").runtime;
 const http1_runtime = @import("../../http1/mod.zig").runtime;
@@ -7,6 +8,14 @@ const tls_stream = @import("../../tls/mod.zig").stream;
 const keep_alive_reader = @import("keep_alive_reader.zig");
 
 const net = std.Io.net;
+
+fn inactivityDeadline(
+    io: std.Io,
+    timeout: std.Io.Clock.Duration,
+) std.Io.Clock.Timestamp {
+    std.debug.assert(timeout.clock == .awake);
+    return netz_runtime.cachedAwakeTimestamp(io).addDuration(timeout);
+}
 
 /// Broker-facing packet reads may reserve an aligned prefix for transferring
 /// a large packet allocation into a longer-lived object without replacement.
@@ -816,7 +825,7 @@ fn readStreamPacketWithPolicy(
 ) Error!OwnedPacket {
     const connection = transport.connection;
     var deadline = if (inactivity_timeout) |timeout|
-        std.Io.Clock.Timestamp.fromNow(connection.io, timeout)
+        inactivityDeadline(connection.io, timeout)
     else
         absolute_deadline;
     const state = &transport.packet_state;
@@ -866,7 +875,7 @@ fn readStreamPacketWithPolicy(
             if (packet.len - state.packet_read >
                 keep_alive_reader.progress_threshold)
             {
-                deadline = .fromNow(connection.io, timeout);
+                deadline = inactivityDeadline(connection.io, timeout);
             }
         }
         state.packet_read += readStreamExactWithDeadline(
@@ -1113,7 +1122,7 @@ fn readTcpPacketWithPolicy(
     owned_prefix_len: usize,
 ) Error!OwnedPacket {
     var deadline = if (inactivity_timeout) |timeout|
-        std.Io.Clock.Timestamp.fromNow(tcp.io, timeout)
+        inactivityDeadline(tcp.io, timeout)
     else
         absolute_deadline;
 
@@ -1180,7 +1189,7 @@ fn readTcpPacketWithPolicy(
                 // body. Preserve the pre-read-ahead policy: once its header
                 // establishes a large packet, body progress starts a fresh
                 // inactivity window.
-                deadline = .fromNow(tcp.io, timeout);
+                deadline = inactivityDeadline(tcp.io, timeout);
             }
         }
     }
@@ -1191,7 +1200,7 @@ fn readTcpPacketWithPolicy(
             if (packet.len - tcp.packet_read >
                 keep_alive_reader.progress_threshold)
             {
-                deadline = .fromNow(tcp.io, timeout);
+                deadline = inactivityDeadline(tcp.io, timeout);
             }
         }
         const count = try readTcpSomeWithDeadline(
@@ -1345,7 +1354,7 @@ fn readWebSocketPacketWithPolicy(
     owned_prefix_len: usize,
 ) Error!OwnedPacket {
     var deadline: std.Io.Clock.Timestamp = if (inactivity_timeout) |timeout|
-        .fromNow(ws.connection.io, timeout)
+        inactivityDeadline(ws.connection.io, timeout)
     else if (absolute_deadline) |value|
         value
     else
@@ -1427,7 +1436,7 @@ fn readWebSocketPacketWithPolicy(
                         packet_len - ws.input.items.len >
                             keep_alive_reader.progress_threshold)
                     {
-                        deadline = .fromNow(ws.connection.io, timeout);
+                        deadline = inactivityDeadline(ws.connection.io, timeout);
                         large_progress_bytes = ws.input.items.len;
                     }
                 }
@@ -1488,7 +1497,7 @@ fn TlsPacketReader(comptime ConnectionType: type) type {
                 .none => null,
                 .inactivity_timeout => |timeout| blk: {
                     std.debug.assert(timeout.raw.nanoseconds > 0);
-                    break :blk .fromNow(connection.io, timeout);
+                    break :blk inactivityDeadline(connection.io, timeout);
                 },
                 .absolute_deadline => |value| value,
             };
@@ -1536,7 +1545,7 @@ fn TlsPacketReader(comptime ConnectionType: type) type {
                 .inactivity_timeout => |value| value,
                 else => return,
             };
-            self.deadline = .fromNow(self.connection.io, timeout);
+            self.deadline = inactivityDeadline(self.connection.io, timeout);
         }
     };
 }

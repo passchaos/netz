@@ -1063,6 +1063,51 @@ the MQTT UTF-8 validator and decoder from 19.3% to 7.4%, with zero lost
 samples. The final p99 and remaining serial gap are therefore attributed to
 clock/I/O scheduling rather than hidden validation work.
 
+The follow-up fixed-binary syscall capture at
+`zig-out/mqtt-serial-syscalls` confirmed that syscall volume was not the
+serial deficit. Across 1,000 warmups plus 10,000 measured durable QoS 2
+publishes, the netz broker made 78,453 syscalls (78,357
+`io_uring_enter`) while Mosquitto made 198,989: 44,003 `sendto`, 44,013
+`read`, 88,012 `epoll_ctl`, and 22,813 `epoll_pwait`. The traced timings are
+diagnostic only. A zio prototype that completed writable socket sends inline
+was rejected after fixed-binary cross-protocol pairs regressed HTTP/1,
+WebSocket, MQTT-over-WebSocket, MQTT-over-TLS, and HTTP/2 throughput to
+0.866x, 0.954x, 0.928x, 0.893x, and 0.871x. Its evidence remains at
+`zig-out/zio-direct-send-cross` (113,709,948 bytes; aggregate digest
+`eed8e3556d1438b3d9a6e8330da80c01d6f7765fb494ac6243d5ec58d13b4d69`).
+
+The retained change instead exposes zio's already refreshed per-loop awake
+timestamp through `cachedAwakeNow`, with exact-clock fallback outside the
+matching runtime, while leaving `std.Io.Clock.now` untouched. MQTT uses that
+snapshot only for same-event-loop-turn keep-alive, inbound QoS 2, routing,
+Message Expiry, and Session-drain bookkeeping. A matching
+5,000-warmup/100,000-message CPU profile at
+`zig-out/mqtt-cached-awake-profile-final` (37,234,702 bytes; aggregate digest
+`7a8788136caf27fc13314a613ffd01b392e8131dca2fdcc7e87aec67daaf140e`)
+reduced `__kernel_clock_gettime` from 24.5% of samples, including 13.2% below
+protocol `std.Io` calls, to 12.7% entirely below the event-loop refresh; both
+profiles lost zero samples.
+
+The final remote-zio fixed-binary five-pair matrix is retained at
+`zig-out/mqtt-cached-awake-final-ab` (63,798,176 bytes; aggregate digest
+`9f6c0000a2a9b70fa8eae9d332251da30a78647f1a987bccbd99ae8cf5f430ee`).
+It used CPUs 0/1/2, 1,000 warmups, 10,000 measured durable QoS 2 publishes,
+and exact delivery/checksum validation. Baseline/candidate/driver SHA-256
+values are
+`beb97b847532fe3bd004b8c35cdc210d9c1a2b10caaef0414929c31dc5a5a0cc`,
+`b5008a3cbddc9200a414e084b44860a19baf5e1cb718d2fc3ad9348e2e4bec28`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Paired throughput/p50/p99 medians were 1.018x/0.989x/0.946x for serial,
+1.021x/0.959x/1.136x for publishers-32, 1.078x/0.899x/0.843x for fanout-32,
+1.038x/0.946x/0.950x for balanced-32x32, and 1.025x/0.986x/0.947x for the
+4-KiB shape. Publisher-heavy p99 was noisy and inconclusive; throughput won
+four or five pairs in every shape and all five fanout pairs. A separate
+100,000-message serial control at `zig-out/mqtt-cached-awake-ab-long` was
+throughput-neutral at 1.003x, so the result does not claim a durable serial
+throughput improvement. Seven-pair transport controls at
+`zig-out/mqtt-cached-awake-transports-ab` were also neutral: 1.009x for
+MQTT-over-WebSocket and 1.003x for MQTT-over-TLS.
+
 Two bounded parallel-flush prototypes were removed rather than committed.
 Lazy group scheduling was neutral for balanced and regressed fanout; forced
 concurrency improved balanced throughput about 4% but regressed fanout

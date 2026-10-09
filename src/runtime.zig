@@ -9,6 +9,21 @@ const zio = @import("zio");
 /// crosses into HTTP, WebSocket, QUIC, or the other protocol APIs.
 pub const BackendKind = enum { zio };
 
+/// Return the zio event-loop's awake-clock snapshot when `io` belongs to the
+/// task currently running on that loop. Foreign `std.Io` implementations and
+/// calls outside a matching runtime retain their ordinary clock semantics.
+pub fn cachedAwakeNow(io: std.Io) std.Io.Timestamp {
+    return zio.cachedAwakeNow(io);
+}
+
+/// Clock-tagged form for composing an awake-clock deadline.
+pub fn cachedAwakeTimestamp(io: std.Io) std.Io.Clock.Timestamp {
+    return .{
+        .raw = cachedAwakeNow(io),
+        .clock = .awake,
+    };
+}
+
 pub const Backend = struct {
     allocator: std.mem.Allocator,
     kind: BackendKind = .zio,
@@ -50,6 +65,22 @@ test "runtime backend initializes zio behind std.Io" {
     try std.testing.expectEqual(BackendKind.zio, backend.kind);
     const io = backend.io();
     try std.testing.expect(io.userdata != null);
+}
+
+test "runtime cached awake timestamp follows zio event-loop scans" {
+    var backend = try Backend.init(std.testing.allocator);
+    defer backend.deinit();
+    const io = backend.io();
+
+    const before = cachedAwakeNow(io);
+    zio.os.time.sleep(.fromMilliseconds(2));
+    try std.testing.expectEqual(before.nanoseconds, cachedAwakeNow(io).nanoseconds);
+    const tagged = cachedAwakeTimestamp(io);
+    try std.testing.expectEqual(std.Io.Clock.awake, tagged.clock);
+    try std.testing.expectEqual(before.nanoseconds, tagged.raw.nanoseconds);
+
+    try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    try std.testing.expect(cachedAwakeNow(io).nanoseconds > before.nanoseconds);
 }
 
 test "runtime backend zio std.Io TCP round trip" {
