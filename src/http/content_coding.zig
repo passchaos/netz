@@ -17,6 +17,7 @@ pub const Error = std.mem.Allocator.Error || error{
     TooManyContentEncodings,
     DecodedBodyTooLarge,
     EncodedBodyTooLarge,
+    /// Retained for source compatibility; stacked streams are now supported.
     StreamingStackUnsupported,
     InvalidDecoderState,
     AliasedBuffers,
@@ -155,23 +156,15 @@ pub const Chain = struct {
         return out[0..current.len];
     }
 
-    /// Build a progressive decoder for an identity or single encoded layer.
-    /// Stacked encodings use `decodeAlloc`/`decodeInto`, since composing
-    /// independent backpressure state machines requires intermediate storage.
+    /// Build a progressive decoder for the complete encoding chain. Stacked
+    /// codings are decoded in reverse application order through bounded
+    /// intermediate queues allocated once during initialization.
     pub fn streamDecoder(
         self: Chain,
         allocator: std.mem.Allocator,
         options: StreamOptions,
     ) Error!StreamDecoder {
-        var selected: Coding = .identity;
-        var count: usize = 0;
-        for (self.items()) |coding| {
-            if (coding == .identity) continue;
-            selected = coding;
-            count += 1;
-        }
-        if (count > 1) return error.StreamingStackUnsupported;
-        return StreamDecoder.init(allocator, selected, options);
+        return StreamDecoder.initChain(allocator, self.items(), options);
     }
 
     fn decodeCount(self: Chain) usize {
@@ -197,7 +190,12 @@ pub const Chain = struct {
     }
 };
 
-pub const StreamDecoder = streaming.Decoder(Coding, Error, mapDecodeError);
+pub const StreamDecoder = streaming.Decoder(
+    Coding,
+    Error,
+    mapDecodeError,
+    max_codings,
+);
 
 /// Parse one combined Content-Encoding field. `null` means identity.
 pub fn parse(value: ?[]const u8) Error!Chain {

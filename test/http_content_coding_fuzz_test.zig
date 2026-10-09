@@ -80,18 +80,41 @@ fn exercise(bytes: []const u8) !void {
         } else |_| {}
         try exerciseStream(coding, bytes);
     }
+    inline for ([_][2]netz.http.ContentCoding{
+        .{ .deflate, .gzip },
+        .{ .br, .zstd },
+    }) |codings| {
+        var chain: netz.http.ContentCodingChain = .{};
+        chain.storage[0] = codings[0];
+        chain.storage[1] = codings[1];
+        chain.len = codings.len;
+        if (chain.decodeInto(bytes, &output, &scratch)) |decoded| {
+            try std.testing.expect(decoded.len <= output.len);
+        } else |_| {}
+        try exerciseStreamChain(chain, bytes);
+    }
 }
 
 fn exerciseStream(
     coding: netz.http.ContentCoding,
     bytes: []const u8,
 ) !void {
-    var decoder = try netz.http.content_coding.StreamDecoder.init(
+    var chain: netz.http.ContentCodingChain = .{};
+    chain.storage[0] = coding;
+    chain.len = 1;
+    return exerciseStreamChain(chain, bytes);
+}
+
+fn exerciseStreamChain(
+    chain: netz.http.ContentCodingChain,
+    bytes: []const u8,
+) !void {
+    var decoder = try chain.streamDecoder(
         std.testing.allocator,
-        coding,
         .{
             .max_encoded_bytes = bytes.len,
             .max_decoded_bytes = max_output_bytes,
+            .intermediate_buffer_bytes = 17,
         },
     );
     defer decoder.deinit();

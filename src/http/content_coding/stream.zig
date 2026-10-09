@@ -1,7 +1,8 @@
-//! Single-layer streaming HTTP content decoder over Vort codecs.
+//! Bounded streaming HTTP content decoder over Vort codecs.
 
 const std = @import("std");
 const vort = @import("vort");
+const pipeline = @import("pipeline.zig");
 
 pub const Status = enum {
     need_input,
@@ -18,16 +19,25 @@ pub const Result = struct {
 pub const Options = struct {
     max_encoded_bytes: usize,
     max_decoded_bytes: usize,
+    /// Capacity of each queue between stacked decoders. The allocation is
+    /// capped at `max_decoded_bytes`; zero selects the one-byte minimum.
+    intermediate_buffer_bytes: usize = 16 * 1024,
+};
+
+const Limits = struct {
+    max_encoded_bytes: usize,
+    max_decoded_bytes: usize,
 };
 
 pub fn Decoder(
     comptime Coding: type,
     comptime Error: type,
     comptime map_error: fn (anyerror) Error,
+    comptime max_layers: usize,
 ) type {
     return struct {
         allocator: std.mem.Allocator,
-        options: Options,
+        options: Limits,
         state: State,
         input_read: usize = 0,
         output_written: usize = 0,
@@ -36,6 +46,13 @@ pub fn Decoder(
         failed: bool = false,
 
         const Self = @This();
+        const PipelineState = pipeline.Pipeline(
+            Self,
+            Coding,
+            Error,
+            Result,
+            Status,
+        );
 
         const State = union(enum) {
             identity,
@@ -43,6 +60,7 @@ pub fn Decoder(
             gzip: *GzipState,
             br: *vort.BrotliIncrementalStreamDecoder,
             zstd: *vort.ZstdNativeIncrementalFrameDecoder,
+            pipeline: *PipelineState,
         };
 
         const DeflateState = struct {
@@ -110,8 +128,45 @@ pub fn Decoder(
             };
             return .{
                 .allocator = allocator,
-                .options = options,
+                .options = .{
+                    .max_encoded_bytes = options.max_encoded_bytes,
+                    .max_decoded_bytes = options.max_decoded_bytes,
+                },
                 .state = state,
+            };
+        }
+
+        /// Initialize decoders in reverse Content-Encoding application order.
+        /// Identity members are ignored. A single effective coding keeps the
+        /// allocation and dispatch shape of `init`; stacked codings allocate
+        /// fixed-capacity queues once and perform no per-step allocation.
+        pub fn initChain(
+            allocator: std.mem.Allocator,
+            codings: []const Coding,
+            options: Options,
+        ) Error!Self {
+            if (codings.len > max_layers) {
+                return error.TooManyContentEncodings;
+            }
+            var selected: Coding = .identity;
+            var count: usize = 0;
+            for (codings) |coding| {
+                if (coding == .identity) continue;
+                selected = coding;
+                count += 1;
+            }
+            if (count <= 1) return init(allocator, selected, options);
+
+            const state = try allocator.create(PipelineState);
+            errdefer allocator.destroy(state);
+            state.* = try PipelineState.init(allocator, codings, options);
+            return .{
+                .allocator = allocator,
+                .options = .{
+                    .max_encoded_bytes = options.max_encoded_bytes,
+                    .max_decoded_bytes = options.max_decoded_bytes,
+                },
+                .state = .{ .pipeline = state },
             };
         }
 
@@ -128,6 +183,10 @@ pub fn Decoder(
                     decoder.deinit();
                     self.allocator.destroy(decoder);
                 },
+                .pipeline => |state| {
+                    state.deinit();
+                    self.allocator.destroy(state);
+                },
             }
             self.* = undefined;
         }
@@ -139,6 +198,7 @@ pub fn Decoder(
                 .gzip => |decoder| decoder.decoder.reset(),
                 .br => |decoder| decoder.reset(),
                 .zstd => |decoder| decoder.reset(),
+                .pipeline => |state| state.reset(),
             }
             self.input_read = 0;
             self.output_written = 0;
@@ -172,6 +232,15 @@ pub fn Decoder(
                 return self.fail(error.EncodedBodyTooLarge);
             }
 
+            switch (self.state) {
+                .pipeline => |state| {
+                    const result = state.step(input, output) catch |err|
+                        return self.fail(err);
+                    return self.commitResult(input.len, result);
+                },
+                else => {},
+            }
+
             if (self.isIdentity()) {
                 return self.commitResult(
                     input.len,
@@ -196,6 +265,7 @@ pub fn Decoder(
                     decoder.step(input, output) catch |err|
                         return self.fail(map_error(err)),
                 ),
+                .pipeline => unreachable,
             };
             return self.commitResult(input.len, result);
         }
@@ -213,6 +283,15 @@ pub fn Decoder(
                     .output_written = 0,
                     .status = .done,
                 };
+            }
+            switch (self.state) {
+                .pipeline => |state| {
+                    self.finish_started = true;
+                    const result = state.finish(output) catch |err|
+                        return self.fail(err);
+                    return self.commitResult(0, result);
+                },
+                else => {},
             }
             if (self.isIdentity()) {
                 self.finish_started = true;
@@ -263,6 +342,7 @@ pub fn Decoder(
         fn isIdentity(self: Self) bool {
             return switch (self.state) {
                 .identity => true,
+                .pipeline => false,
                 else => false,
             };
         }
@@ -305,6 +385,7 @@ pub fn Decoder(
                 .zstd => |decoder| fromVortStep(
                     try decoder.step(input, output),
                 ),
+                .pipeline => unreachable,
             };
         }
 
@@ -315,6 +396,7 @@ pub fn Decoder(
                 .gzip => |decoder| try decoder.decoder.finish(),
                 .br => |decoder| try decoder.finish(),
                 .zstd => |decoder| try decoder.finish(),
+                .pipeline => unreachable,
             }
         }
 

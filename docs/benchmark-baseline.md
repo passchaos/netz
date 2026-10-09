@@ -108,16 +108,19 @@ Every intermediate representation is independently bounded, so stacking does
 not bypass the caller's decompression limit. The implementation uses Vort for
 gzip, RFC 1950 `deflate`, Brotli, and Zstandard; gzip and Zstandard accept
 concatenated frames while single-stream formats reject trailing bytes. The
-single-layer incremental API adds an independent encoded-input ceiling, exact
-successful-step progress, explicit EOF validation, reusable state, and
-response-head constructors for every HTTP version. Stacked encodings remain on
-the bounded whole-body APIs because composing their backpressure requires an
-intermediate representation. The tagged outer state is 72 bytes and allocates
-only the selected codec implementation, so gzip/deflate users do not carry the
-largest Zstandard decoder inline. Vort's raw incremental decoder now returns an
-exact compressed prefix at EOB, allowing gzip/zlib wrappers to batch input while
-retaining footer ownership; bounded Huffman prefix tables and span-based match
-replay reduce the prior 85,330 ns incremental median to 3,959 ns (`21.55x`, or
+incremental API adds an independent encoded-input ceiling, exact successful
+step progress, explicit EOF validation, reusable state, and response-head
+constructors for every HTTP version. Stacked streams compose the same Vort
+decoders in reverse order through caller-tunable fixed-capacity queues; queue
+storage and codec state are retained across reset, every intermediate layer is
+bounded, and fragmented input/output propagates backpressure without buffering
+the whole representation. The tagged outer state remains 72 bytes and allocates
+only the selected codec implementation for a single coding, so gzip/deflate
+users do not carry the largest Zstandard decoder inline. Vort's raw incremental
+decoder now returns an exact compressed prefix at EOB, allowing gzip/zlib
+wrappers to batch input while retaining footer ownership; bounded Huffman prefix
+tables and span-based match replay reduce the prior 85,330 ns incremental median
+to 3,959 ns (`21.55x`, or
 95.36% lower). ARM CRC32 dispatch also moves the whole-body median from 2,850 ns
 to 2,092 ns. Five CPU-0 samples against Vort `eed23ef7` establish this
 in-repository A/B. Vort's separate same-frame comparison against system

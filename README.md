@@ -170,10 +170,11 @@ Current protocol coverage includes:
   fields, reverse-order decoding, allocating and caller-buffer APIs, gzip,
   RFC 1950 `deflate`, Brotli, and Zstandard through Vort, with an eight-layer
   nesting cap and a decoded-size limit applied independently to every layer;
-  single-layer streaming decoders additionally preserve exact input/output
-  progress across arbitrary fragmentation and output backpressure, require an
-  explicit EOF finish, and expose constructors on each protocol's streaming
-  response-head type,
+  streaming decoders for identity, single, and stacked codings that preserve
+  exact input/output progress across arbitrary fragmentation and output
+  backpressure, bound every intermediate layer through reusable fixed-capacity
+  queues, require an explicit EOF finish, and expose constructors on each
+  protocol's streaming response-head type,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the

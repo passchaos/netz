@@ -216,16 +216,122 @@ test "HTTP content coding streaming preserves EOF and limit errors" {
         }
     }
     try std.testing.expect(saw_decoded_limit);
+}
 
+test "HTTP content coding streams stacked Vort codecs with tiny queues" {
+    const allocator = std.testing.allocator;
+    const payload = "stacked progressive content decoding " ** 24;
+    const zlib = try vort.encodeZlibStoredAlloc(allocator, payload);
+    defer allocator.free(zlib);
+    const gzip = try vort.encodeGzipStoredAlloc(allocator, zlib);
+    defer allocator.free(gzip);
+    const brotli = try vort.brEncodeStoredStreamAlloc(allocator, gzip);
+    defer allocator.free(brotli);
+    const zstd = try vort.zstdEncodeNativeFrameAlloc(allocator, brotli);
+    defer allocator.free(zstd);
+    const max_layer_bytes = @max(
+        payload.len,
+        @max(zlib.len, @max(gzip.len, brotli.len)),
+    );
+    const chain = try content_coding.parse("deflate, gzip, br, zstd");
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var decoder = try chain.streamDecoder(failing.allocator(), .{
+        .max_encoded_bytes = zstd.len,
+        .max_decoded_bytes = max_layer_bytes,
+        .intermediate_buffer_bytes = 3,
+    });
+    defer decoder.deinit();
+
+    const first = try decodeStreamFragmented(allocator, &decoder, zstd);
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings(payload, first);
+    decoder.reset();
+    failing.fail_index = failing.alloc_index;
+    const second = try decodeStreamFragmented(allocator, &decoder, zstd);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(payload, second);
+    try std.testing.expectEqual(zstd.len, decoder.totalInputRead());
+    try std.testing.expectEqual(payload.len, decoder.totalOutputWritten());
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "HTTP stacked streaming initialization rolls back every allocation" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        initStackedStreamDecoder,
+        .{},
+    );
+}
+
+test "HTTP stacked streaming keeps the public nesting cap" {
+    const codings = [_]Coding{.gzip} ** (content_coding.max_codings + 1);
     try std.testing.expectError(
-        error.StreamingStackUnsupported,
-        (try content_coding.parse("deflate, gzip")).streamDecoder(
-            allocator,
-            .{
-                .max_encoded_bytes = gzip.len,
-                .max_decoded_bytes = payload.len,
-            },
-        ),
+        error.TooManyContentEncodings,
+        StreamDecoder.initChain(std.testing.allocator, &codings, .{
+            .max_encoded_bytes = 1024,
+            .max_decoded_bytes = 2048,
+        }),
+    );
+}
+
+test "HTTP stacked streaming bounds intermediates and validates inner EOF" {
+    const allocator = std.testing.allocator;
+    const payload = "inner stream";
+    const zlib = try vort.encodeZlibStoredAlloc(allocator, payload);
+    defer allocator.free(zlib);
+    const gzip = try vort.encodeGzipStoredAlloc(allocator, zlib);
+    defer allocator.free(gzip);
+    const chain = try content_coding.parse("deflate, gzip");
+
+    var limited = try chain.streamDecoder(allocator, .{
+        .max_encoded_bytes = gzip.len,
+        .max_decoded_bytes = payload.len,
+        .intermediate_buffer_bytes = 2,
+    });
+    defer limited.deinit();
+    var output: [payload.len]u8 = undefined;
+    try std.testing.expectError(
+        error.DecodedBodyTooLarge,
+        decodeStreamInto(&limited, gzip, &output),
+    );
+
+    const truncated_gzip = try vort.encodeGzipStoredAlloc(
+        allocator,
+        zlib[0 .. zlib.len - 1],
+    );
+    defer allocator.free(truncated_gzip);
+    var truncated = try chain.streamDecoder(allocator, .{
+        .max_encoded_bytes = truncated_gzip.len,
+        .max_decoded_bytes = zlib.len,
+        .intermediate_buffer_bytes = 2,
+    });
+    defer truncated.deinit();
+    try std.testing.expectError(
+        error.InvalidContentEncoding,
+        decodeStreamInto(&truncated, truncated_gzip, &output),
+    );
+
+    const trailed_zlib = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ zlib, "trailing-inner-bytes" },
+    );
+    defer allocator.free(trailed_zlib);
+    const trailed_gzip = try vort.encodeGzipStoredAlloc(
+        allocator,
+        trailed_zlib,
+    );
+    defer allocator.free(trailed_gzip);
+    var trailed = try chain.streamDecoder(allocator, .{
+        .max_encoded_bytes = trailed_gzip.len,
+        .max_decoded_bytes = trailed_zlib.len,
+        .intermediate_buffer_bytes = 2,
+    });
+    defer trailed.deinit();
+    try std.testing.expectError(
+        error.InvalidContentEncoding,
+        decodeStreamInto(&trailed, trailed_gzip, &output),
     );
 }
 
@@ -417,4 +523,58 @@ fn decodeStreamInto(
         if (result.output_written == 0) return error.TestUnexpectedResult;
     }
     return output[0..output_offset];
+}
+
+fn decodeStreamFragmented(
+    allocator: std.mem.Allocator,
+    decoder: *StreamDecoder,
+    input: []const u8,
+) ![]u8 {
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(allocator);
+    var output: [5]u8 = undefined;
+    var input_offset: usize = 0;
+    var turn: usize = 0;
+    while (input_offset < input.len) {
+        const end = @min(input.len, input_offset + 1 + turn % 7);
+        while (input_offset < end) {
+            const result = try decoder.step(
+                input[input_offset..end],
+                &output,
+            );
+            try decoded.appendSlice(
+                allocator,
+                output[0..result.output_written],
+            );
+            input_offset += result.input_read;
+            if (result.status == .done) {
+                if (input_offset != input.len) return error.TestUnexpectedResult;
+                break;
+            }
+            if (result.input_read == 0 and result.output_written == 0) {
+                return error.TestUnexpectedResult;
+            }
+        }
+        turn += 1;
+    }
+    while (!decoder.finished()) {
+        const result = try decoder.finish(&output);
+        try decoded.appendSlice(
+            allocator,
+            output[0..result.output_written],
+        );
+        if (result.status == .done) break;
+        if (result.output_written == 0) return error.TestUnexpectedResult;
+    }
+    return decoded.toOwnedSlice(allocator);
+}
+
+fn initStackedStreamDecoder(allocator: std.mem.Allocator) !void {
+    const chain = try content_coding.parse("deflate, gzip");
+    var decoder = try chain.streamDecoder(allocator, .{
+        .max_encoded_bytes = 1024,
+        .max_decoded_bytes = 2048,
+        .intermediate_buffer_bytes = 7,
+    });
+    defer decoder.deinit();
 }
