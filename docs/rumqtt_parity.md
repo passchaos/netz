@@ -961,7 +961,7 @@ deliveries. Instrumented timing is not used as a benchmark result; the syscall
 count identifies cross-connection write scheduling as the next architectural
 target.
 
-The durable cross-connection target is now addressed by two broker-lifetime
+The durable cross-connection target is now addressed by two serving-scope
 Session delivery workers rather than one coroutine per connected Session. A
 fixed ring has one entry and one compact state per broker slot, coalesces a
 queued duplicate, and records at most one rerun while a slot is being drained.
@@ -976,7 +976,8 @@ throughput but raised balanced broker RSS from about 7.0 MiB to 14.9 MiB; its
 keeps 256 KiB available for panic/error paths while retaining an 8-MiB virtual
 growth ceiling.
 
-The final five-pair fixed-binary, CPU-0/client and CPU-1/server A/B is retained
+The initial shared-pool five-pair fixed-binary, CPU-0/client and CPU-1/server
+A/B is retained
 at `zig-out/mqtt-durable-shared2-ab-final` (63,667,135 bytes; aggregate
 file-hash digest
 `2146ea99f81fb0bc0377de777671c34c7ed39f2b5c8e7d59dd8afb17511570df`).
@@ -1002,6 +1003,33 @@ file-hash digest
 reduced `io_uring_enter` from 114,102 to 63,454 for 102,400 measured
 deliveries (-44.4%). Its timing remains diagnostic-only; the paired run above
 is the performance evidence.
+
+The final pool is lazy: entering a serving scope only publishes its fixed
+queue and callback context. It allocates no stack and starts no writer until a
+multi-target online durable route first selects asynchronous delivery. A
+single destination, QoS 0 traffic, and brokers serving only transient Sessions
+therefore retain the original task count. The lifecycle regression separately
+proves an unused scope stops without spawning and two started idle waiters are
+broadcast and joined.
+
+The matching three-shape, five-pair final-binary run is retained at
+`zig-out/mqtt-durable-lazy-shared2-ab-final` (63,688,110 bytes; aggregate
+file-hash digest
+`21cd20890dda288025a91dcc98366c6ac7126c4b20acd994115c9b58dc86a248`).
+Its serial shape proves the negative case: median throughput was 19,040 versus
+18,878 publish/s (paired ratio 0.997x), p50 was 43.258 versus 43.481 us, and
+RSS was 4,860 versus 4,824 KiB, so an unused pool has no measurable resident
+stack cost. Balanced-32x32 retained a 1.489x paired throughput median, 0.638x
+p50 and 0.640x p99; RSS was 6,928 versus 8,716 KiB. The 4-KiB shape retained
+a 1.213x throughput median, 0.819x p50 and 0.818x p99, with RSS at 5,636 versus
+5,664 KiB. Every one of the fifteen baseline/candidate pairs completed its
+exact delivery count and checksum. The final candidate SHA-256 is
+`333148f1b4437441eb3db0727ca4f98ad7733c67808d17bcc90d2ddfaa6d52b4`.
+Three matching 102,400-delivery diagnostics at
+`zig-out/mqtt-durable-lazy-shared2-strace-final` recorded 63,733-81,254
+`io_uring_enter` calls (73,296 median), 35.8% below the 114,102-call baseline.
+The artifact is 36,352,861 bytes with aggregate digest
+`1def46da118b0fa29aad00efdeff9842a4ace1fabccd46e980cf0463df5616fa`.
 
 Two bounded parallel-flush prototypes were removed rather than committed.
 Lazy group scheduling was neutral for balanced and regressed fanout; forced

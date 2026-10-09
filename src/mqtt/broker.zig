@@ -3349,7 +3349,7 @@ pub const Broker = struct {
         }
         var group: std.Io.Group = .init;
         var session_writer_group: std.Io.Group = .init;
-        try self.session_delivery_writers.start(
+        self.session_delivery_writers.begin(
             self.io,
             &session_writer_group,
             @min(shared_session_delivery_writer_count, self.slots.len),
@@ -3360,7 +3360,6 @@ pub const Broker = struct {
         defer if (session_writers_started) {
             self.session_delivery_writers.stop(
                 self.io,
-                &session_writer_group,
             );
         };
         self.deadline_driver.start();
@@ -3427,7 +3426,7 @@ pub const Broker = struct {
         }
         group.await(self.io) catch {};
         clients_joined = true;
-        self.session_delivery_writers.stop(self.io, &session_writer_group);
+        self.session_delivery_writers.stop(self.io);
         session_writers_started = false;
         self.deadline_driver.stop(self.io);
         const deadline_result = deadline_future.await(self.io);
@@ -3497,7 +3496,7 @@ pub const Broker = struct {
             .options = options,
         };
         var session_writer_group: std.Io.Group = .init;
-        try self.session_delivery_writers.start(
+        self.session_delivery_writers.begin(
             self.io,
             &session_writer_group,
             @min(shared_session_delivery_writer_count, self.slots.len),
@@ -3508,7 +3507,6 @@ pub const Broker = struct {
         defer if (session_writers_started) {
             self.session_delivery_writers.stop(
                 self.io,
-                &session_writer_group,
             );
         };
         self.deadline_driver.start();
@@ -3582,7 +3580,7 @@ pub const Broker = struct {
         supervisor.stopping.store(true, .release);
         group.cancel(self.io);
         group_finished = true;
-        self.session_delivery_writers.stop(self.io, &session_writer_group);
+        self.session_delivery_writers.stop(self.io);
         session_writers_started = false;
         self.deadline_driver.stop(self.io);
         stop_driver = false;
@@ -6133,7 +6131,7 @@ pub const Broker = struct {
                     async_high_watermark,
                     publisher_id != null and
                         matches[session_index].subscriber_id == publisher_id.?,
-                    self.session_delivery_writers.isActive(),
+                    self.session_delivery_writers.isAvailable(),
                 );
             };
             if (schedule) continue;
@@ -6619,6 +6617,11 @@ pub const Broker = struct {
         self: *Broker,
         matches: []const router_mod.Match,
     ) Error!void {
+        if (matches.len == 0) return;
+        if (!self.session_delivery_writers.ensureStarted(self.io)) {
+            try self.flushMatches(matches);
+            return;
+        }
         for (matches) |match| {
             const slot_index = subscriberIndex(
                 match.subscriber_id,

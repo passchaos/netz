@@ -104,12 +104,18 @@ pub const WorkQueue = struct {
 pub const Pool = struct {
     pub const RunFn = *const fn (context: *anyopaque, slot_index: usize) void;
 
+    serving: std.atomic.Value(bool) = .init(false),
     active: std.atomic.Value(bool) = .init(false),
     stopping: std.atomic.Value(bool) = .init(false),
     mutex: std.Io.Mutex = .init,
     ready: std.Io.Condition = .init,
     work: WorkQueue,
     errors: []?anyerror,
+    group: ?*std.Io.Group = null,
+    context: ?*anyopaque = null,
+    run_fn: ?RunFn = null,
+    worker_count: usize = 0,
+    unavailable: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -126,74 +132,108 @@ pub const Pool = struct {
     }
 
     pub fn deinit(self: *Pool, allocator: std.mem.Allocator) void {
+        std.debug.assert(!self.serving.load(.acquire));
         std.debug.assert(!self.active.load(.acquire));
         allocator.free(self.errors);
         self.work.deinit(allocator);
         self.* = undefined;
     }
 
-    pub fn isActive(self: *const Pool) bool {
-        return self.active.load(.acquire);
+    pub fn isAvailable(self: *const Pool) bool {
+        return self.serving.load(.acquire);
     }
 
-    pub fn start(
+    /// Open one serving scope without allocating a coroutine stack. The first
+    /// eligible multi-destination delivery starts the fixed worker set.
+    pub fn begin(
         self: *Pool,
         io: std.Io,
         group: *std.Io.Group,
         worker_count: usize,
         context: *anyopaque,
         run_fn: RunFn,
-    ) !void {
-        std.debug.assert(!self.isActive());
+    ) void {
+        std.debug.assert(!self.isAvailable());
+        std.debug.assert(!self.active.load(.acquire));
         std.debug.assert(worker_count != 0);
         std.debug.assert(worker_count <= self.work.states.len);
         self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
         self.work.reset();
         @memset(self.errors, null);
+        self.group = group;
+        self.context = context;
+        self.run_fn = run_fn;
+        self.worker_count = worker_count;
+        self.unavailable = false;
         self.stopping.store(false, .release);
-        self.active.store(true, .release);
-        self.mutex.unlock(io);
-        errdefer {
-            self.mutex.lockUncancelable(io);
-            self.active.store(false, .release);
-            self.stopping.store(true, .release);
-            self.ready.broadcast(io);
-            self.mutex.unlock(io);
-            group.cancel(io);
-            self.mutex.lockUncancelable(io);
-            self.work.reset();
-            self.mutex.unlock(io);
-        }
-
-        for (0..worker_count) |_| {
-            try group.concurrent(
-                io,
-                Worker.run,
-                .{ self, io, context, run_fn },
-            );
-        }
+        self.serving.store(true, .release);
     }
 
-    pub fn stop(self: *Pool, io: std.Io, group: *std.Io.Group) void {
+    /// Lazily start every worker as one transaction. A scheduling-resource
+    /// failure disables the pool for this serving scope; the broker can then
+    /// preserve delivery by using its synchronous path.
+    pub fn ensureStarted(self: *Pool, io: std.Io) bool {
+        if (self.active.load(.acquire)) return true;
+        if (!self.isAvailable()) return false;
+
         self.mutex.lockUncancelable(io);
+        if (self.active.load(.acquire)) {
+            self.mutex.unlock(io);
+            return true;
+        }
+        if (!self.isAvailable() or self.unavailable) {
+            self.mutex.unlock(io);
+            return false;
+        }
+        const group = self.group.?;
+        for (0..self.worker_count) |_| {
+            group.concurrent(
+                io,
+                Worker.run,
+                .{ self, io, self.context.?, self.run_fn.? },
+            ) catch {
+                self.unavailable = true;
+                self.stopping.store(true, .release);
+                self.ready.broadcast(io);
+                self.mutex.unlock(io);
+                group.cancel(io);
+                return false;
+            };
+        }
+        self.active.store(true, .release);
+        self.mutex.unlock(io);
+        return true;
+    }
+
+    pub fn stop(self: *Pool, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        const workers_started = self.active.load(.acquire);
+        const group = self.group.?;
+        self.serving.store(false, .release);
         self.active.store(false, .release);
         self.stopping.store(true, .release);
         self.ready.broadcast(io);
         self.mutex.unlock(io);
-        group.await(io) catch {};
+        if (workers_started) group.await(io) catch {};
 
         self.mutex.lockUncancelable(io);
         self.work.reset();
+        self.group = null;
+        self.context = null;
+        self.run_fn = null;
+        self.worker_count = 0;
+        self.unavailable = false;
         self.mutex.unlock(io);
     }
 
     /// Returns false only when the serving scope is stopping, letting the
     /// caller fall back to an ordered synchronous flush without losing work.
     pub fn schedule(self: *Pool, io: std.Io, slot_index: usize) bool {
-        if (!self.isActive()) return false;
+        if (!self.active.load(.acquire)) return false;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        if (!self.isActive()) return false;
+        if (!self.active.load(.acquire)) return false;
         if (self.work.schedule(slot_index)) self.ready.signal(io);
         return true;
     }
@@ -289,13 +329,12 @@ test "durable Session writer queue wraps at its fixed slot bound" {
     try std.testing.expectEqual(@as(?usize, null), queue.take());
 }
 
-test "durable Session writer pool stops multiple idle waiters" {
+test "durable Session writer pool starts lazily and stops idle waiters" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
     var pool = try Pool.init(std.testing.allocator, 4);
     defer pool.deinit(std.testing.allocator);
-    var group: std.Io.Group = .init;
     var calls: usize = 0;
     const run = struct {
         fn run(context: *anyopaque, _: usize) void {
@@ -304,9 +343,19 @@ test "durable Session writer pool stops multiple idle waiters" {
         }
     }.run;
 
-    try pool.start(io, &group, 2, &calls, run);
-    try std.testing.expect(pool.isActive());
-    pool.stop(io, &group);
-    try std.testing.expect(!pool.isActive());
+    var unused_group: std.Io.Group = .init;
+    pool.begin(io, &unused_group, 2, &calls, run);
+    try std.testing.expect(pool.isAvailable());
+    try std.testing.expect(!pool.active.load(.acquire));
+    pool.stop(io);
+    try std.testing.expect(!pool.isAvailable());
+
+    var active_group: std.Io.Group = .init;
+    pool.begin(io, &active_group, 2, &calls, run);
+    try std.testing.expect(pool.ensureStarted(io));
+    try std.testing.expect(pool.active.load(.acquire));
+    pool.stop(io);
+    try std.testing.expect(!pool.isAvailable());
+    try std.testing.expect(!pool.active.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), calls);
 }

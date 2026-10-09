@@ -5973,7 +5973,7 @@ from 2.887/5.310 ms to 2.860/5.264 ms. The captured log SHA-256 is
 `e08a87129648a770b9664de04fde56b2607b7dca100a1a75e16df0b7ac29820b`;
 this remains targeted durable large-payload evidence, not a broad QoS 2 claim.
 
-Online durable cross-connection fanout now uses two fixed broker-lifetime
+Online durable cross-connection fanout now uses two fixed serving-scope
 Session delivery workers and a bounded per-slot coalescing ring instead of
 retaining one coroutine stack per Session. Same-connection and backpressured
 destinations remain synchronous, each slot keeps its existing writer
@@ -6002,6 +6002,23 @@ The matched 102,400-delivery `strace` diagnostic at
 `zig-out/mqtt-durable-shared2-strace-final` reduced `io_uring_enter` from
 114,102 to 63,454 (-44.4%); its instrumented timing is not used as benchmark
 evidence.
+
+The final pool starts lazily on the first eligible multi-target durable route,
+not when a serving scope opens. The three-shape, five-pair fixed-binary run at
+`zig-out/mqtt-durable-lazy-shared2-ab-final` (63,688,110 bytes; aggregate
+digest `21cd20890dda288025a91dcc98366c6ac7126c4b20acd994115c9b58dc86a248`)
+added a 1x1 serial negative control. Its baseline/candidate medians were
+19,040/18,878 publish/s, 43.258/43.481 us p50, and 4,860/4,824 KiB RSS;
+the 0.997x paired throughput ratio and lower candidate RSS show that an unused
+pool does not retain writer stacks. Balanced-32x32 retained a 1.489x throughput
+ratio with p50/p99 at 0.638x/0.640x and RSS at 6,928/8,716 KiB. The 4-KiB
+shape retained a 1.213x throughput ratio with p50/p99 at 0.819x/0.818x and RSS
+at 5,636/5,664 KiB. All fifteen pairs completed exact delivery counts and
+checksums. The final candidate hash is
+`333148f1b4437441eb3db0727ca4f98ad7733c67808d17bcc90d2ddfaa6d52b4`.
+Three same-shape `strace` runs recorded 63,733-81,254 `io_uring_enter` calls
+(73,296 median), 35.8% below the 114,102-call baseline; those instrumented
+timings remain diagnostic-only.
 
 A fixed-binary four-sample matrix compared `a45ddb93` with the final candidate
 on 2026-10-02. In serial, publishers-32, fanout-32, balanced-32x32, and
