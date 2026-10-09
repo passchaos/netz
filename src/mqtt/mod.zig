@@ -1616,9 +1616,47 @@ pub const Publish = struct {
         if (fixed.packet_type != .publish) return error.InvalidPacketType;
         try validatePacketFlags(protocol, fixed);
         try validatePacketBounds(packet, fixed);
-        var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
+        return parsePayloadValidated(
+            allocator,
+            protocol,
+            fixed.flags,
+            packet[fixed.header_len .. fixed.header_len + fixed.remaining_len],
+        );
+    }
+
+    /// Parse a PUBLISH payload after a framing layer has already decoded and
+    /// bounded the Fixed Header. The caller supplies the low four header bits
+    /// and exactly the `remaining_len` bytes; all PUBLISH-specific flag,
+    /// property, topic, identifier, and payload validation still applies.
+    pub fn parsePayload(
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        flags: u4,
+        payload_bytes: []const u8,
+    ) Error!Publish {
+        try validatePacketFlags(protocol, .{
+            .packet_type = .publish,
+            .flags = flags,
+            .remaining_len = payload_bytes.len,
+            .header_len = 0,
+        });
+        return parsePayloadValidated(
+            allocator,
+            protocol,
+            flags,
+            payload_bytes,
+        );
+    }
+
+    fn parsePayloadValidated(
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        flags: u4,
+        payload_bytes: []const u8,
+    ) Error!Publish {
+        var cursor = wire.Cursor.init(payload_bytes);
         const topic = try readUtf8(&cursor);
-        const qos = try QoS.fromFlags(fixed.flags);
+        const qos = try QoS.fromFlags(flags);
         const packet_id = if (qos == .at_most_once) null else blk: {
             const id = try cursor.readInt(u16, .big);
             if (id == 0) return error.InvalidPacketIdentifier;
@@ -1638,9 +1676,9 @@ pub const Publish = struct {
         const payload = cursor.buf[cursor.pos..];
         try validatePayloadFormat(props, payload);
         return .{
-            .dup = (fixed.flags & 0x08) != 0,
+            .dup = (flags & 0x08) != 0,
             .qos = qos,
-            .retain = (fixed.flags & 0x01) != 0,
+            .retain = (flags & 0x01) != 0,
             .topic = topic,
             .packet_id = packet_id,
             .properties = props,
@@ -1672,13 +1710,56 @@ pub const AckPacket = struct {
         }
         try validatePacketFlags(protocol, fixed);
         try validatePacketBounds(packet, fixed);
-        var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
+        return parsePayloadValidated(
+            allocator,
+            protocol,
+            fixed.packet_type,
+            packet[fixed.header_len .. fixed.header_len + fixed.remaining_len],
+        );
+    }
+
+    /// Parse an acknowledgement payload after a framing layer has already
+    /// decoded and bounded the Fixed Header. The caller supplies exactly the
+    /// `remaining_len` bytes; all packet-type, flag, identifier, reason-code,
+    /// property, and trailing-byte validation still applies.
+    pub fn parsePayload(
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        packet_type: PacketType,
+        flags: u4,
+        payload_bytes: []const u8,
+    ) Error!AckPacket {
+        switch (packet_type) {
+            .puback, .pubrec, .pubrel, .pubcomp => {},
+            else => return error.InvalidPacketType,
+        }
+        try validatePacketFlags(protocol, .{
+            .packet_type = packet_type,
+            .flags = flags,
+            .remaining_len = payload_bytes.len,
+            .header_len = 0,
+        });
+        return parsePayloadValidated(
+            allocator,
+            protocol,
+            packet_type,
+            payload_bytes,
+        );
+    }
+
+    fn parsePayloadValidated(
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        packet_type: PacketType,
+        payload_bytes: []const u8,
+    ) Error!AckPacket {
+        var cursor = wire.Cursor.init(payload_bytes);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         if (protocol == .v3_1_1) {
             if (!cursor.eof()) return error.InvalidPacketType;
             return .{
-                .packet_type = fixed.packet_type,
+                .packet_type = packet_type,
                 .packet_id = packet_id,
                 .properties = try allocator.alloc(Property, 0),
             };
@@ -1686,7 +1767,7 @@ pub const AckPacket = struct {
 
         var reason_code: u8 = 0;
         if (!cursor.eof()) reason_code = try cursor.readByte();
-        try validateAckReasonCode(fixed.packet_type, reason_code);
+        try validateAckReasonCode(packet_type, reason_code);
         const props = if (!cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         // The packet-type switch above establishes the ACK context. Apply
@@ -1695,7 +1776,7 @@ pub const AckPacket = struct {
         try validateParsedPropertiesFor(.ack, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{
-            .packet_type = fixed.packet_type,
+            .packet_type = packet_type,
             .packet_id = packet_id,
             .reason_code = reason_code,
             .properties = props,
@@ -3398,6 +3479,19 @@ test "MQTT CONNACK and publish acknowledgments reuse output capacity" {
     defer parsed.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 7), parsed.packet_id);
     try std.testing.expectEqual(@as(u8, 0x10), parsed.reason_code);
+
+    const fixed = try FixedHeader.parse(output.items);
+    var payload_parsed = try AckPacket.parsePayload(
+        allocator,
+        .v5,
+        fixed.packet_type,
+        fixed.flags,
+        output.items[fixed.header_len..],
+    );
+    defer payload_parsed.deinit(allocator);
+    try std.testing.expectEqual(parsed.packet_type, payload_parsed.packet_type);
+    try std.testing.expectEqual(parsed.packet_id, payload_parsed.packet_id);
+    try std.testing.expectEqual(parsed.reason_code, payload_parsed.reason_code);
 }
 
 test "MQTT subscription control writers reuse output capacity" {
@@ -3862,6 +3956,18 @@ test "MQTT connect and publish parse" {
     defer publish_bytes.deinit(allocator);
     try writePublish(&publish_bytes, allocator, .v5, "sensors/temp", "21.5", .{ .qos = .at_least_once, .packet_id = 7, .properties = &.{.{ .two_byte = .{ .id = .topic_alias, .value = 2 } }} });
     var publish = try Publish.parse(allocator, .v5, publish_bytes.items);
+    const publish_fixed = try FixedHeader.parse(publish_bytes.items);
+    var payload_publish = try Publish.parsePayload(
+        allocator,
+        .v5,
+        publish_fixed.flags,
+        publish_bytes.items[publish_fixed.header_len..],
+    );
+    defer payload_publish.deinit(allocator);
+    try std.testing.expectEqual(publish.qos, payload_publish.qos);
+    try std.testing.expectEqual(publish.packet_id, payload_publish.packet_id);
+    try std.testing.expectEqualStrings(publish.topic, payload_publish.topic);
+    try std.testing.expectEqualStrings(publish.payload, payload_publish.payload);
     var trailing_publish = try publish_bytes.clone(allocator);
     defer trailing_publish.deinit(allocator);
     try trailing_publish.append(allocator, 0);
@@ -3872,6 +3978,15 @@ test "MQTT connect and publish parse" {
     try std.testing.expectEqual(@as(u16, 7), publish.packet_id.?);
     try std.testing.expectEqualStrings("21.5", publish.payload);
     try std.testing.expectEqual(@as(?u16, 2), topicAlias(publish.properties));
+    try std.testing.expectError(
+        error.InvalidFlags,
+        Publish.parsePayload(
+            allocator,
+            .v5,
+            0x08,
+            publish_bytes.items[publish_fixed.header_len..],
+        ),
+    );
 
     var wildcard_publish = try publish_bytes.clone(allocator);
     defer wildcard_publish.deinit(allocator);

@@ -6834,6 +6834,26 @@ and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
 The complete A/B and profile artifacts are retained under
 `zig-out/mqtt-fixed-header-ab` and `zig-out/mqtt-fixed-header-profile`.
 
+A follow-up lets the public PUBLISH and publish-acknowledgement decoders accept
+an already bounded payload plus the framing metadata. Their ordinary whole-
+packet `parse` entry points retain complete independent wire validation, while
+the broker uses the preframed form only after `OwnedPacket` construction and
+connection-level flag/direction checks. Against the framing-only baseline,
+five fixed-binary CPU-10/11 pairs produced throughput medians of 1.0088x,
+1.0135x, 1.0025x, 1.0003x, and 1.0002x in the same five-shape order. Ranges
+still overlap, so this is again recorded as deterministic work removal rather
+than a general throughput claim. In the matched 100,000-publish profile,
+`FixedHeader.parse` fell from 1.64% to 0.66% self samples and its remaining
+samples came only from outbound packet validation; receive-side PUBLISH and
+PUBACK/PUBREC/PUBREL/PUBCOMP decoding no longer reparses the header. The
+framing-only baseline broker, final candidate broker, and fixed driver hashes
+are respectively
+`7555c1775b84778f985c69e411f7e52a1761151a3be72493a6df395182b41975`,
+`51866c4694a3fc96d28491d5d5204f103b97ecb88ccf7acff32ed45ecccf3253`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Artifacts are retained under `zig-out/mqtt-payload-parse-ab` and
+`zig-out/mqtt-payload-parse-profile`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

@@ -2529,6 +2529,23 @@ and `7555c1775b84778f985c69e411f7e52a1761151a3be72493a6df395182b41975`;
 the unchanged driver hash is
 `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
 
+PUBLISH and publish-acknowledgement decoding now continue that ownership chain:
+their whole-packet `parse` APIs retain complete standalone validation, while
+the broker passes the already bounded Remaining Length payload and header flags
+to `parsePayload`. This removes another fixed-header decode from incoming
+PUBLISH, PUBACK, PUBREC, PUBREL, and PUBCOMP processing without trusting
+unframed network input or adding connection state. Against the framing-only
+baseline, five fixed-binary CPU-10/11 QoS 2 pairs produced throughput medians
+of 1.0088x, 1.0135x, 1.0025x, 1.0003x, and 1.0002x in serial,
+publishers-32, fanout-32, balanced-32x32, and 4-KiB order. The overlapping
+ranges again limit the conclusion to no observed regression. In matched
+100,000-publish profiles, `FixedHeader.parse` fell from 1.64% to 0.66% self
+samples and remained only under outbound `Connection.writePacket`; its
+receive-side broker paths disappeared. The framing-only baseline and final
+candidate broker hashes are
+`7555c1775b84778f985c69e411f7e52a1761151a3be72493a6df395182b41975`
+and `51866c4694a3fc96d28491d5d5204f103b97ecb88ccf7acff32ed45ecccf3253`.
+
 Both fixed WebTransport binaries also completed 10,000 real
 QUIC/TLS/HTTP/3 1-KiB DATAGRAM sends and receives, in batches of 16 with 64
 maximum in flight, zero timeouts, and identical checksum. Host compilation

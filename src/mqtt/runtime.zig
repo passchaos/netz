@@ -4253,7 +4253,12 @@ pub const Connection = struct {
         var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .publish) return error.UnexpectedPacket;
-        var publish_packet = try mqtt.Publish.parse(self.allocator, self.protocol, packet.bytes);
+        var publish_packet = try mqtt.Publish.parsePayload(
+            self.allocator,
+            self.protocol,
+            packet.fixed.flags,
+            packet.remainingBytes(),
+        );
         errdefer publish_packet.deinit(self.allocator);
         try self.validateIncomingUtf8(publish_packet.topic);
         try self.validateIncomingProperties(publish_packet.properties);
@@ -5358,10 +5363,11 @@ pub const Connection = struct {
                 } };
             },
             .publish => blk: {
-                var value = try mqtt.Publish.parse(
+                var value = try mqtt.Publish.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingUtf8(value.topic);
@@ -5373,10 +5379,12 @@ pub const Connection = struct {
                 } };
             },
             .puback, .pubrec, .pubrel, .pubcomp => |packet_type| blk: {
-                var value = try mqtt.AckPacket.parse(
+                var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.packet_type,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
@@ -5505,10 +5513,11 @@ pub const Connection = struct {
                 } };
             },
             .publish => blk: {
-                var value = try mqtt.Publish.parse(
+                var value = try mqtt.Publish.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingUtf8(value.topic);
@@ -5556,10 +5565,12 @@ pub const Connection = struct {
                 } };
             },
             .puback => blk: {
-                var value = try mqtt.AckPacket.parse(
+                var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.packet_type,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
@@ -5569,10 +5580,12 @@ pub const Connection = struct {
                 } };
             },
             .pubrec => blk: {
-                var value = try mqtt.AckPacket.parse(
+                var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.packet_type,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
@@ -5582,10 +5595,12 @@ pub const Connection = struct {
                 } };
             },
             .pubrel => blk: {
-                var value = try mqtt.AckPacket.parse(
+                var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.packet_type,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
@@ -5599,10 +5614,12 @@ pub const Connection = struct {
                 } };
             },
             .pubcomp => blk: {
-                var value = try mqtt.AckPacket.parse(
+                var value = try mqtt.AckPacket.parsePayload(
                     self.allocator,
                     self.protocol,
-                    packet.bytes,
+                    packet.fixed.packet_type,
+                    packet.fixed.flags,
+                    packet.remainingBytes(),
                 );
                 errdefer value.deinit(self.allocator);
                 try self.validateIncomingProperties(value.properties);
@@ -6271,7 +6288,13 @@ pub const Connection = struct {
         var packet = try self.readPacket();
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != packet_type) return error.UnexpectedPacket;
-        var ack = try mqtt.AckPacket.parse(self.allocator, self.protocol, packet.bytes);
+        var ack = try mqtt.AckPacket.parsePayload(
+            self.allocator,
+            self.protocol,
+            packet.fixed.packet_type,
+            packet.fixed.flags,
+            packet.remainingBytes(),
+        );
         errdefer ack.deinit(self.allocator);
         try self.validateIncomingProperties(ack.properties);
         return .{ .packet = packet, .ack = ack };
@@ -6401,6 +6424,15 @@ pub const OwnedPacket = struct {
     /// Non-zero only for broker-oriented TCP reads that reserve aligned
     /// storage before the wire packet for allocation ownership transfer.
     prefix_len: u16 = 0,
+
+    /// Bytes covered by the already decoded MQTT Remaining Length.
+    pub fn remainingBytes(self: OwnedPacket) []const u8 {
+        std.debug.assert(self.fixed.header_len <= self.bytes.len);
+        std.debug.assert(
+            self.fixed.remaining_len == self.bytes.len - self.fixed.header_len,
+        );
+        return self.bytes[self.fixed.header_len..];
+    }
 
     pub fn contains(self: OwnedPacket, bytes: []const u8) bool {
         const packet_start = @intFromPtr(self.bytes.ptr);
