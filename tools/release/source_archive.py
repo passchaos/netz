@@ -22,10 +22,10 @@ VAIL_REVISION = "5fcab62638ee361df370d01986d8afebfd673b9c"
 VORT_REVISION = "eed23ef7ce522ff908e04d8a8c24ebdb498cb78a"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
 ZIO_SOURCE = (
-    "git+https://github.com/lalinsky/zio"
-    "#54cb18f05d3feaec431353de85d5d10dac93d37b"
+    "git+https://github.com/passchaos/zio"
+    "#4daa0c0a9522a37c4d28e3dcec2515cc955abe71"
 )
-ZIO_PACKAGE_HASH = "zio-0.17.0-xHbVVELgKQBIzMAdDWTrIamBlTyFlijzxFU7G4f2NUcw"
+ZIO_PACKAGE_HASH = "zio-0.19.1-xHbVVJXzKwAKLRAABWeDvQG9Dg1kf9FM3haWG0YqtScn"
 ROOT_FILES = {
     ".gitignore",
     "LICENSE",

@@ -3764,6 +3764,7 @@ pub const Broker = struct {
         errdefer self.unregister(
             index,
             registration.subscriber_id,
+            null,
         ) catch {};
         try self.flushSlot(index, &self.slots[index]);
         const task = ClientTask{
@@ -4550,7 +4551,15 @@ pub const Broker = struct {
         self: *Broker,
         slot_index: usize,
         id: router_mod.SubscriberId,
+        listener_capacity: ?*ListenerCapacity,
     ) Error!void {
+        // Release the listener claim on every terminal path. The successful
+        // path transfers this cleanup to the precise inactive-slot boundary
+        // below, before the old socket close becomes visible to its peer.
+        var capacity_claimed = listener_capacity != null;
+        defer if (capacity_claimed) {
+            listener_capacity.?.release(self.io);
+        };
         const slot = &self.slots[slot_index];
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
@@ -4641,6 +4650,14 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         state_locked = false;
         self.deadline_driver.notify(self.io);
+        // The broker slot is now reusable and no code can observe this
+        // connection as active. Publish the listener capacity before closing
+        // the detached socket so a peer that observes EOF/reset can reconnect
+        // immediately without racing a stale capacity count.
+        if (listener_capacity) |capacity| {
+            capacity.release(self.io);
+            capacity_claimed = false;
+        }
         defer if (assigned_client_id) |client_id| {
             self.allocator.free(client_id);
         };
@@ -7952,15 +7969,13 @@ const ClientTask = struct {
     listener_capacity: ?*ListenerCapacity = null,
 
     fn run(task: ClientTask) std.Io.Cancelable!void {
-        defer if (task.listener_capacity) |capacity| {
-            capacity.release(task.broker.io);
-        };
         var connect = task.connect;
         const slot = &task.broker.slots[task.slot_index];
         const connection = slot.connection.?;
         defer task.broker.unregister(
             task.slot_index,
             task.subscriber_id,
+            task.listener_capacity,
         ) catch |err| {
             task.result.* = err;
         };

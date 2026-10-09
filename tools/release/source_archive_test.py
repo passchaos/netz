@@ -70,8 +70,8 @@ class SourceArchiveTest(unittest.TestCase):
         .vail = .{ .path = \"../vail\" },
         .vort = .{ .path = \"../vort\" },
         .zio = .{
-            .url = \"git+https://github.com/lalinsky/zio#54cb18f05d3feaec431353de85d5d10dac93d37b\",
-            .hash = \"zio-0.17.0-xHbVVELgKQBIzMAdDWTrIamBlTyFlijzxFU7G4f2NUcw\",
+            .url = \"git+https://github.com/passchaos/zio#4daa0c0a9522a37c4d28e3dcec2515cc955abe71\",
+            .hash = \"zio-0.19.1-xHbVVJXzKwAKLRAABWeDvQG9Dg1kf9FM3haWG0YqtScn\",
         },
         .pbz = .{ .path = \"../pbz\" },
     },
@@ -122,7 +122,7 @@ class SourceArchiveTest(unittest.TestCase):
         (self.zio / "build.zig.zon").write_text(
             """.{
     .name = .zio,
-    .version = "0.17.0",
+    .version = "0.19.1",
     .fingerprint = 0xcf1598b354d576c4,
     .minimum_zig_version = "0.16.0",
     .paths = .{ "build.zig", "build.zig.zon", "src" },
@@ -186,7 +186,7 @@ class SourceArchiveTest(unittest.TestCase):
         self.assertNotIn("../vail", package)
         self.assertNotIn("../vort", package)
         self.assertNotIn("../pbz", package)
-        self.assertNotIn("git+https://github.com/lalinsky/zio", package)
+        self.assertNotIn("git+https://github.com/passchaos/zio", package)
         self.assertEqual(self.netz_revision, metadata["source_revision"])
         self.assertEqual(
             self.vail_revision,

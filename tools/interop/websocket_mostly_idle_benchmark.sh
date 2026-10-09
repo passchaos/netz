@@ -53,7 +53,7 @@ if [[ -n $(git -C "$reference_root" status --short) ]]; then
   echo "websocket.zig checkout must be clean" >&2
   exit 1
 fi
-zio_root="$repo_root/zig-pkg/zio-0.17.0-xHbVVELgKQBIzMAdDWTrIamBlTyFlijzxFU7G4f2NUcw"
+zio_root="$repo_root/zig-pkg/zio-0.19.1-xHbVVJXzKwAKLRAABWeDvQG9Dg1kf9FM3haWG0YqtScn"
 if [[ ! -f "$zio_root/src/zio.zig" ]]; then
   echo "missing locked zio source at $zio_root" >&2
   exit 1

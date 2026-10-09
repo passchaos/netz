@@ -58,6 +58,11 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
+    const test_lib_step = b.step(
+        "test-lib",
+        "Compile and run the Netz library unit tests",
+    );
+    test_lib_step.dependOn(&run_lib_tests.step);
 
     const package_tests = b.addTest(.{
         .root_module = b.createModule(.{

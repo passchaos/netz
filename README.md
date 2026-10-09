@@ -163,6 +163,11 @@ checkout currently uses sibling `../vail`, `../vort`, and `../pbz` paths, reposi
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
 for the private dependency checkouts.
 
+Use `zig build test-lib` for the complete in-process library suite without
+external interoperability and release-tool checks; `zig build test` remains
+the complete repository gate. Both accept `-Doptimize` and repeatable
+`-Dtest-filter` options.
+
 Current protocol coverage includes:
 
 - Shared HTTP Content-Encoding parsing and bounded whole-representation decode
@@ -2031,10 +2036,13 @@ still unavailable. All protocol runtimes nevertheless stay on the `std.Io`
 abstraction: `netz.runtime.Backend.init()` uses zio's complete `std.Io`
 implementation (io_uring with automatic epoll fallback on Linux, plus portable
 backends elsewhere) and reports initialization failure rather than silently
-changing execution models. The dependency is pinned to upstream commit
-`54cb18f05d3feaec431353de85d5d10dac93d37b`, whose multi-message UDP receive
-support is required by shared-endpoint batching. Neither zio nor OS-specific
-rings leak into the HTTP, WebSocket, QUIC, or other protocol APIs.
+changing execution models. The dependency is pinned to the project-maintained
+`passchaos/zio` Zig-0.16 branch at v0.19.1 commit
+`4daa0c0a9522a37c4d28e3dcec2515cc955abe71`. It includes the multi-message UDP
+receive support required by shared-endpoint batching and treats unsupported
+`MADV_NOHUGEPAGE` as the optional kernel hint it is, without Debug-build stack
+traces. Neither zio nor OS-specific rings leak into the HTTP, WebSocket, QUIC,
+or other protocol APIs.
 All runnable non-benchmark examples construct this backend and schedule local
 concurrent work through `std.Io.async`; benchmark and low-level white-box code
 may still construct specialized I/O fixtures to measure or fault-inject a

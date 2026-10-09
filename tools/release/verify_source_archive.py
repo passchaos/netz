@@ -130,7 +130,7 @@ def verify_layout(root: Path) -> None:
         '../vail' in package_manifest
         or '../vort' in package_manifest
         or '../pbz' in package_manifest
-        or 'git+https://github.com/lalinsky/zio' in package_manifest
+        or 'git+https://github.com/passchaos/zio' in package_manifest
     ):
         raise RuntimeError("release package retains a sibling dependency path")
 
