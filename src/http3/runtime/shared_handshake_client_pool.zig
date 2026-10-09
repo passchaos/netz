@@ -60,10 +60,11 @@ pub fn Pool(comptime Runtime: type) type {
         endpoint: *quic.runtime.Endpoint,
         migration_endpoint: ?*quic.runtime.Endpoint = null,
         dispatcher: *quic.endpoint_dispatcher.Dispatcher,
-        /// A second socket can complete concurrently with the selected receive
-        /// result. Retain that datagram so no authenticated packet is lost.
-        pending_multi_endpoint_datagram: ?quic.runtime.OwnedBytes = null,
+        primary_receive_storage: []u8 = &.{},
         migration_receive_storage: []u8 = &.{},
+        /// A second socket can complete concurrently with the selected receive
+        /// result. Copy that view so no authenticated packet is lost when its
+        /// endpoint buffer is reused.
         pending_multi_endpoint_storage: []u8 = &.{},
         pending_multi_endpoint_view: ?PendingEndpointDatagramView = null,
         entries: std.AutoHashMapUnmanaged(
@@ -380,6 +381,13 @@ pub fn Pool(comptime Runtime: type) type {
                 candidate.deinit();
                 allocator.destroy(candidate);
             };
+            const primary_receive_storage: []u8 = if (migration_endpoint != null)
+                try allocator.alloc(u8, endpoint.limits.max_datagram_size)
+            else
+                @constCast(&.{});
+            errdefer if (primary_receive_storage.len != 0) {
+                allocator.free(primary_receive_storage);
+            };
             const migration_receive_storage: []u8 = if (migration_endpoint != null)
                 try allocator.alloc(u8, endpoint.limits.max_datagram_size)
             else
@@ -406,6 +414,7 @@ pub fn Pool(comptime Runtime: type) type {
                 .endpoint = endpoint,
                 .migration_endpoint = migration_endpoint,
                 .dispatcher = dispatcher,
+                .primary_receive_storage = primary_receive_storage,
                 .migration_receive_storage = migration_receive_storage,
                 .pending_multi_endpoint_storage = pending_multi_endpoint_storage,
             };
@@ -418,10 +427,8 @@ pub fn Pool(comptime Runtime: type) type {
             }
             while (self.firstHandle()) |handle| self.dropEntry(handle);
             self.entries.deinit(self.allocator);
-            if (self.pending_multi_endpoint_datagram) |*datagram| {
-                datagram.deinit(
-                    (datagram.received_on orelse self.endpoint).allocator,
-                );
+            if (self.primary_receive_storage.len != 0) {
+                self.allocator.free(self.primary_receive_storage);
             }
             if (self.migration_receive_storage.len != 0) {
                 self.allocator.free(self.migration_receive_storage);
@@ -1615,77 +1622,23 @@ fn receiveFromEitherEndpoint(
     candidate: *quic.runtime.Endpoint,
     timeout: std.Io.Timeout,
 ) quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes {
-    if (pool.pending_multi_endpoint_view) |pending| {
-        pool.pending_multi_endpoint_view = null;
-        return .{
-            .from = pending.from,
-            .received_on = pending.received_on,
-            .bytes = try pending.received_on.allocator.dupe(
-                u8,
-                pool.pending_multi_endpoint_storage[0..pending.len],
-            ),
-            .ecn = pending.ecn,
-        };
-    }
-    if (pool.pending_multi_endpoint_datagram) |datagram| {
-        pool.pending_multi_endpoint_datagram = null;
-        return datagram;
-    }
-    const ReceiveResult =
-        quic.runtime.ReceiveTimeoutError!quic.runtime.OwnedBytes;
-    const Wake = union(enum) {
-        primary: ReceiveResult,
-        candidate: ReceiveResult,
-    };
-    var wake_storage: [2]Wake = undefined;
-    var select: std.Io.Select(Wake) = .init(pool.io, &wake_storage);
-    select.async(
-        .primary,
-        quic.runtime.Endpoint.receiveBytesTimeout,
-        .{ pool.endpoint, timeout },
+    // Keep both racing task results borrowed. A backend may complete a receive
+    // while its sibling is being cancelled, so returning OwnedBytes from either
+    // task would make a discarded late result leak its allocation. Acquire
+    // ownership only after the select and its cancellation drain have finished.
+    const view = try receiveViewFromEitherEndpoint(
+        pool,
+        candidate,
+        pool.primary_receive_storage,
+        timeout,
     );
-    select.async(
-        .candidate,
-        quic.runtime.Endpoint.receiveBytesTimeout,
-        .{ candidate, timeout },
-    );
-    const first = select.await() catch |err| {
-        select.cancelDiscard();
-        return err;
+    const received_on = view.received_on orelse pool.endpoint;
+    return .{
+        .from = view.from,
+        .received_on = received_on,
+        .bytes = try pool.allocator.dupe(u8, view.bytes),
+        .ecn = view.ecn,
     };
-    var retained: ?quic.runtime.OwnedBytes = null;
-    defer if (retained) |*datagram| {
-        datagram.deinit(
-            (datagram.received_on orelse pool.endpoint).allocator,
-        );
-    };
-    while (select.cancel()) |wake| switch (wake) {
-        .primary, .candidate => |result| if (result) |datagram| {
-            if (retained == null) {
-                retained = datagram;
-            } else {
-                var extra = datagram;
-                extra.deinit(
-                    (extra.received_on orelse pool.endpoint).allocator,
-                );
-            }
-        } else |_| {},
-    };
-    const selected = switch (first) {
-        .primary, .candidate => |result| result catch |err| {
-            if (retained) |datagram| {
-                retained = null;
-                return datagram;
-            }
-            return err;
-        },
-    };
-    if (retained) |datagram| {
-        std.debug.assert(pool.pending_multi_endpoint_datagram == null);
-        pool.pending_multi_endpoint_datagram = datagram;
-        retained = null;
-    }
-    return selected;
 }
 
 fn receiveViewFromEitherEndpoint(
@@ -1704,26 +1657,6 @@ fn receiveViewFromEitherEndpoint(
             .ecn = pending.ecn,
         };
     }
-    if (pool.pending_multi_endpoint_datagram) |pending_value| {
-        var pending = pending_value;
-        pool.pending_multi_endpoint_datagram = null;
-        defer pending.deinit(
-            (pending.received_on orelse pool.endpoint).allocator,
-        );
-        const storage = if (pending.received_on == candidate)
-            pool.migration_receive_storage
-        else
-            primary_storage;
-        if (pending.bytes.len > storage.len) return error.BufferTooShort;
-        @memcpy(storage[0..pending.bytes.len], pending.bytes);
-        return .{
-            .from = pending.from,
-            .received_on = pending.received_on,
-            .bytes = storage[0..pending.bytes.len],
-            .ecn = pending.ecn,
-        };
-    }
-
     const bounded = timeout.toDeadline(pool.io);
     const ReceiveResult = quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView;
     const Wake = union(enum) {
