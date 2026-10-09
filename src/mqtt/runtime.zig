@@ -3332,12 +3332,13 @@ pub const Connection = struct {
             properties.items,
         );
         if (connect_deadline) |deadline|
-            try self.writePacketWithDeadline(
+            try self.writeGeneratedPacketWithDeadline(
                 self.write_scratch.items,
+                .connect,
                 deadline,
             )
         else
-            try self.writePacket(self.write_scratch.items);
+            try self.writeGeneratedPacket(self.write_scratch.items, .connect);
         const auth_handler = options.authentication;
         var auth_rounds: usize = 0;
         var connack: OwnedConnAck = while (true) {
@@ -3571,9 +3572,13 @@ pub const Connection = struct {
             reason_code,
         );
         if (deadline) |absolute|
-            try self.writePacketWithDeadline(bytes, absolute)
+            try self.writeGeneratedPacketWithDeadline(
+                bytes,
+                .connack,
+                absolute,
+            )
         else
-            try self.writePacket(bytes);
+            try self.writeGeneratedPacket(bytes, .connack);
     }
 
     pub fn writeConnAck(self: *Connection, options: ConnAckOptions) Error!void {
@@ -3710,9 +3715,13 @@ pub const Connection = struct {
             break :blk self.write_scratch.items;
         };
         if (deadline) |absolute|
-            try self.writePacketWithDeadline(bytes, absolute)
+            try self.writeGeneratedPacketWithDeadline(
+                bytes,
+                .connack,
+                absolute,
+            )
         else
-            try self.writePacket(bytes);
+            try self.writeGeneratedPacket(bytes, .connack);
         if (accepted) {
             // This is the Server's own inbound QoS 1/2 limit. MQTT 5 also
             // advertises it as Receive Maximum; MQTT 3.1.1 has no property,
@@ -4487,13 +4496,13 @@ pub const Connection = struct {
         reason_code: u8,
     ) Error!void {
         var encoded: [mqtt.AckPacket.no_properties_max_len]u8 = undefined;
-        try self.writePacket(try mqtt.AckPacket.writeNoPropertiesInto(
+        try self.writeGeneratedPacket(try mqtt.AckPacket.writeNoPropertiesInto(
             &encoded,
             self.protocol,
             packet_type,
             packet_id,
             reason_code,
-        ));
+        ), packet_type);
     }
 
     fn writeAckPacket(self: *Connection, packet_type: mqtt.PacketType, packet_id: u16, reason_code: u8, properties: []const mqtt.Property) Error!void {
@@ -4525,7 +4534,7 @@ pub const Connection = struct {
             reason_code,
             outgoing_properties,
         );
-        try self.writePacket(self.write_scratch.items);
+        try self.writeGeneratedPacket(self.write_scratch.items, packet_type);
     }
 
     pub fn subscribe(self: *Connection, subscriptions: []const mqtt.Subscription, options: SubscribeOptions) Error!OwnedSubAck {
@@ -4534,7 +4543,7 @@ pub const Connection = struct {
         const packet_id = self.nextPacketId();
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Subscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, subscriptions);
-        try self.writePacket(self.write_scratch.items);
+        try self.writeGeneratedPacket(self.write_scratch.items, .subscribe);
 
         var suback = try self.readSubAck();
         errdefer suback.deinit(self.allocator);
@@ -4592,7 +4601,7 @@ pub const Connection = struct {
                 reason_codes,
             );
         }
-        try self.writePacket(self.write_scratch.items);
+        try self.writeGeneratedPacket(self.write_scratch.items, .suback);
     }
 
     pub fn readSubAck(self: *Connection) Error!OwnedSubAck {
@@ -4610,7 +4619,7 @@ pub const Connection = struct {
         const packet_id = self.nextPacketId();
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Unsubscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
-        try self.writePacket(self.write_scratch.items);
+        try self.writeGeneratedPacket(self.write_scratch.items, .unsubscribe);
 
         var unsuback = try self.readUnsubAck();
         errdefer unsuback.deinit(self.allocator);
@@ -4665,7 +4674,7 @@ pub const Connection = struct {
                 reason_codes,
             );
         }
-        try self.writePacket(self.write_scratch.items);
+        try self.writeGeneratedPacket(self.write_scratch.items, .unsuback);
     }
 
     pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
@@ -4717,7 +4726,10 @@ pub const Connection = struct {
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!void {
         var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        try self.writePacket(mqtt.writePingInto(&encoded, false));
+        try self.writeGeneratedPacket(
+            mqtt.writePingInto(&encoded, false),
+            .pingreq,
+        );
         while (true) {
             // Do not consume the pending queue while waiting: those packets
             // predate this PING and re-queueing them would loop forever.
@@ -4755,7 +4767,10 @@ pub const Connection = struct {
     pub fn writePingResp(self: *Connection) Error!void {
         try self.validateOutgoingPacketType(.pingresp);
         var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        try self.writePacket(mqtt.writePingInto(&encoded, true));
+        try self.writeGeneratedPacket(
+            mqtt.writePingInto(&encoded, true),
+            .pingresp,
+        );
     }
 
     /// Emit a PINGREQ without consuming the socket. Event-loop owners use
@@ -4764,7 +4779,10 @@ pub const Connection = struct {
     pub fn writePingReq(self: *Connection) Error!void {
         try self.validateOutgoingPacketType(.pingreq);
         var encoded: [mqtt.ping_packet_len]u8 = undefined;
-        try self.writePacket(mqtt.writePingInto(&encoded, false));
+        try self.writeGeneratedPacket(
+            mqtt.writePingInto(&encoded, false),
+            .pingreq,
+        );
     }
 
     /// Drop connection-local acknowledgement bookkeeping while preserving all
@@ -4790,12 +4808,13 @@ pub const Connection = struct {
         try self.validateOutgoingDisconnect(reason_code, properties);
         if (properties.len == 0) {
             var encoded: [mqtt.Disconnect.no_properties_max_len]u8 = undefined;
-            return self.writePacket(
+            return self.writeGeneratedPacket(
                 try mqtt.Disconnect.writeNoPropertiesInto(
                     &encoded,
                     self.protocol,
                     reason_code,
                 ),
+                .disconnect,
             );
         }
         self.write_scratch.clearRetainingCapacity();
@@ -4806,7 +4825,7 @@ pub const Connection = struct {
             reason_code,
             properties,
         );
-        try self.writePacket(self.write_scratch.items);
+        try self.writeGeneratedPacket(self.write_scratch.items, .disconnect);
     }
 
     fn validateOutgoingDisconnect(
@@ -4934,9 +4953,13 @@ pub const Connection = struct {
                 reason_code,
             );
             return if (deadline) |absolute|
-                self.writePacketWithDeadline(bytes, absolute)
+                self.writeGeneratedPacketWithDeadline(
+                    bytes,
+                    .auth,
+                    absolute,
+                )
             else
-                self.writePacket(bytes);
+                self.writeGeneratedPacket(bytes, .auth);
         }
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Auth.write(
@@ -4947,12 +4970,13 @@ pub const Connection = struct {
             outgoing_properties,
         );
         if (deadline) |absolute|
-            try self.writePacketWithDeadline(
+            try self.writeGeneratedPacketWithDeadline(
                 self.write_scratch.items,
+                .auth,
                 absolute,
             )
         else
-            try self.writePacket(self.write_scratch.items);
+            try self.writeGeneratedPacket(self.write_scratch.items, .auth);
     }
 
     fn validateOutgoingAuthReason(
@@ -5961,18 +5985,30 @@ pub const Connection = struct {
         if (!self.isUsable()) return error.ConnectionClosed;
         const fixed = try mqtt.FixedHeader.parse(bytes);
         try mqtt.validatePacketFlags(self.protocol, fixed);
-        try self.validateOutgoingPacketType(fixed.packet_type);
-        try self.authentication.ensurePacketAllowed(
-            fixed.packet_type,
-        );
-        if (bytes.len > self.peer_max_packet_size) return error.OutgoingPacketTooLarge;
+        try self.validatePacketForWrite(fixed.packet_type, bytes.len);
         try self.writeTransportPacket(bytes);
         self.recordPacketSent(bytes.len);
     }
 
-    fn writePacketWithDeadline(
+    /// Write bytes produced by the matching MQTT encoder without reparsing
+    /// their Fixed Header. Raw or restored packet bytes must use `writePacket`.
+    fn writeGeneratedPacket(
         self: *Connection,
         bytes: []u8,
+        packet_type: mqtt.PacketType,
+    ) Error!void {
+        if (!self.isUsable()) return error.ConnectionClosed;
+        try self.validatePacketForWrite(packet_type, bytes.len);
+        try self.writeTransportPacket(bytes);
+        self.recordPacketSent(bytes.len);
+    }
+
+    /// Deadline-bounded counterpart for bytes produced by a matching MQTT
+    /// encoder. It does not parse the already known Fixed Header again.
+    fn writeGeneratedPacketWithDeadline(
+        self: *Connection,
+        bytes: []u8,
+        packet_type: mqtt.PacketType,
         deadline: std.Io.Clock.Timestamp,
     ) Error!void {
         if (!self.isUsable()) return error.ConnectionClosed;
@@ -5980,18 +6016,24 @@ pub const Connection = struct {
             self.transport.ioHandle(),
             deadline,
         );
-        const fixed = try mqtt.FixedHeader.parse(bytes);
-        try mqtt.validatePacketFlags(self.protocol, fixed);
-        try self.validateOutgoingPacketType(fixed.packet_type);
-        try self.authentication.ensurePacketAllowed(fixed.packet_type);
-        if (bytes.len > self.peer_max_packet_size) {
-            return error.OutgoingPacketTooLarge;
-        }
+        try self.validatePacketForWrite(packet_type, bytes.len);
         self.transport.writePacketWithDeadline(bytes, deadline) catch |err| {
             self.transport_unusable.store(true, .release);
             return err;
         };
         self.recordPacketSent(bytes.len);
+    }
+
+    fn validatePacketForWrite(
+        self: *const Connection,
+        packet_type: mqtt.PacketType,
+        packet_len: usize,
+    ) Error!void {
+        try self.validateOutgoingPacketType(packet_type);
+        try self.authentication.ensurePacketAllowed(packet_type);
+        if (packet_len > self.peer_max_packet_size) {
+            return error.OutgoingPacketTooLarge;
+        }
     }
 
     fn writeTransportPacket(

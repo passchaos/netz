@@ -2546,6 +2546,21 @@ candidate broker hashes are
 `7555c1775b84778f985c69e411f7e52a1761151a3be72493a6df395182b41975`
 and `51866c4694a3fc96d28491d5d5204f103b97ecb88ccf7acff32ed45ecccf3253`.
 
+Internally generated control packets now use a private typed-write path as
+well. CONNECT, CONNACK, publish acknowledgements, subscription controls, PING,
+DISCONNECT, and AUTH retain direction, authentication-state, peer-size,
+deadline, and transport-failure validation, but no longer decode their own
+freshly encoded Fixed Header. Arbitrary Session/restored bytes remain on the
+fully validating raw path. Against the preframed-parser baseline, five fixed-
+binary CPU-10/11 QoS 2 pairs produced throughput medians of 1.0101x, 1.0006x,
+0.9989x, 1.0238x, and 1.0053x in serial, publishers-32, fanout-32,
+balanced-32x32, and 4-KiB order. Ranges overlap, so no universal speedup is
+claimed. The matched 100,000-publish profile no longer contains
+`FixedHeader.parse`; the prior profile's remaining 0.66% came only from
+outbound `Connection.writePacket`. The baseline/candidate broker hashes are
+`51866c4694a3fc96d28491d5d5204f103b97ecb88ccf7acff32ed45ecccf3253`
+and `dccf66204cdb25779951c4ae42a2fd37085710d8e45e69b98b972addceeb2836`.
+
 Both fixed WebTransport binaries also completed 10,000 real
 QUIC/TLS/HTTP/3 1-KiB DATAGRAM sends and receives, in batches of 16 with 64
 maximum in flight, zero timeouts, and identical checksum. Host compilation

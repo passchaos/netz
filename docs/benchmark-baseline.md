@@ -6854,6 +6854,27 @@ and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
 Artifacts are retained under `zig-out/mqtt-payload-parse-ab` and
 `zig-out/mqtt-payload-parse-profile`.
 
+The next stage separates codec-produced output from arbitrary or restored raw
+packet bytes. Internal CONNECT, CONNACK, publish acknowledgement, subscription,
+PING, DISCONNECT, and AUTH writers now pass their compile-time-known packet type
+to a private transport helper, retaining direction, authentication-state,
+peer-size, deadline, and transport-failure checks without reparsing bytes they
+just encoded. Public Session packet injection and restored wire bytes continue
+through the fully validating `writePacket` path. Against the preframed-parser
+baseline, five fixed-binary CPU-10/11 QoS 2 pairs produced throughput medians
+of 1.0101x, 1.0006x, 0.9989x, 1.0238x, and 1.0053x in serial,
+publishers-32, fanout-32, balanced-32x32, and 4-KiB order. The ranges overlap,
+so this is retained as a validated removal of duplicate work rather than a
+general throughput claim. A matched 100,000-publish profile no longer contains
+`FixedHeader.parse`; the preceding profile attributed its remaining 0.66% self
+samples solely to outbound `Connection.writePacket`. Baseline broker, candidate
+broker, and fixed driver SHA-256 values are respectively
+`51866c4694a3fc96d28491d5d5204f103b97ecb88ccf7acff32ed45ecccf3253`,
+`dccf66204cdb25779951c4ae42a2fd37085710d8e45e69b98b972addceeb2836`,
+and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Artifacts are retained under `zig-out/mqtt-generated-write-ab` and
+`zig-out/mqtt-generated-write-profile`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
