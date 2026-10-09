@@ -4428,7 +4428,15 @@ pub const HandshakeSupervisor = struct {
     ) std.Io.Cancelable!void {
         const result: @FieldType(HandshakeCompletion, "result") = blk: {
             const session = context.server.acceptAdmission(admission) catch |err| {
-                break :blk .{ .failure = err };
+                // A worker delayed until after its admission deadline observes
+                // the generic preflight Timeout, while a worker already inside
+                // the QUIC handshake reports HandshakeTimeout. Supervisor
+                // completions expose one stable handshake-lifetime error
+                // independent of scheduler timing.
+                break :blk .{ .failure = if (err == error.Timeout)
+                    error.HandshakeTimeout
+                else
+                    err };
             };
             break :blk .{ .session = session };
         };
