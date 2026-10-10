@@ -1366,9 +1366,48 @@ test "WebTransport handshake session receives peer QUIC close details" {
     );
     defer server.deinit();
 
+    const DropFirstCloseIo = struct {
+        delegate: std.Io,
+        send_calls: usize = 0,
+        dropped: usize = 0,
+
+        fn now(
+            context: ?*anyopaque,
+            clock: std.Io.Clock,
+        ) std.Io.Timestamp {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            return self.delegate.vtable.now(
+                self.delegate.userdata,
+                clock,
+            );
+        }
+
+        fn netSend(
+            context: ?*anyopaque,
+            socket_handle: std.Io.net.Socket.Handle,
+            messages: []std.Io.net.OutgoingMessage,
+            flags: std.Io.net.SendFlags,
+        ) struct { ?std.Io.net.Socket.SendError, usize } {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            self.send_calls += 1;
+            if (self.dropped == 0) {
+                self.dropped = messages.len;
+                return .{ null, messages.len };
+            }
+            return self.delegate.vtable.netSend(
+                self.delegate.userdata,
+                socket_handle,
+                messages,
+                flags,
+            );
+        }
+    };
+
     const Shared = struct {
         server: *runtime.HandshakeServer,
         close_observed: std.Io.Event = .unset,
+        close_send_calls: usize = 0,
+        dropped_close_packets: usize = 0,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -1380,16 +1419,44 @@ test "WebTransport handshake session receives peer QUIC close details" {
         fn runFallible(self: *@This()) !void {
             var session = try self.server.accept();
             defer session.deinit();
+            const endpoint = session.h3.established.connection.send_endpoint;
+            const original_io = endpoint.io;
+            var dropping = DropFirstCloseIo{ .delegate = original_io };
+            var vtable = original_io.vtable.*;
+            vtable.now = DropFirstCloseIo.now;
+            vtable.netSend = DropFirstCloseIo.netSend;
+            endpoint.io = .{ .userdata = &dropping, .vtable = &vtable };
+            defer {
+                endpoint.io = original_io;
+                self.close_send_calls = dropping.send_calls;
+                self.dropped_close_packets = dropping.dropped;
+            }
             try session.h3.established.connection.closeApplication(
                 0,
                 "interop complete",
             );
-            // `closeApplication` submits the final datagram asynchronously.
-            // Keep its connection state alive until the client has consumed
-            // the close, otherwise immediate teardown can race that send.
-            try self.close_observed.wait(
-                self.server.h3.quic_server.endpoint.io,
-            );
+            // A CONNECTION_CLOSE packet is not acknowledged and UDP may drop
+            // the initial datagram. A production closing endpoint continues
+            // receiving and rate-limits close responses to subsequent peer
+            // packets; this deliberately one-way test peer has no such loop,
+            // so retry at a low cadence while keeping the connection state
+            // alive until the client observes one copy.
+            while (true) {
+                self.close_observed.waitTimeout(
+                    original_io,
+                    .{ .duration = .{
+                        .raw = .fromMilliseconds(100),
+                        .clock = .awake,
+                    } },
+                ) catch |err| switch (err) {
+                    error.Timeout => {
+                        try session.h3.established.connection.resendClose();
+                        continue;
+                    },
+                    else => return err,
+                };
+                break;
+            }
         }
     };
 
@@ -1439,6 +1506,8 @@ test "WebTransport handshake session receives peer QUIC close details" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.dropped_close_packets);
+    try std.testing.expect(shared.close_send_calls >= 2);
 }
 
 test "WebTransport session control encodes bounds and rejects malformed close" {
