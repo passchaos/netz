@@ -1734,6 +1734,20 @@ pub const Store = struct {
         };
     }
 
+    /// Whether this Session retains a transmission that has not yet been
+    /// selected by `drainInto`. The currently detached QoS 0 packet is not
+    /// counted: its caller already owns that write, while any queued suffix is
+    /// included and becomes eligible after the write is committed.
+    pub fn hasUnselectedTransmission(
+        self: *Store,
+        handle: Handle,
+    ) Error!bool {
+        const session = try self.getSession(handle);
+        assertInflightSendCursor(session.*);
+        return session.next_inflight_send != no_inflight_send or
+            session.queued_count != 0;
+    }
+
     pub fn routeId(
         self: *Store,
         handle: Handle,
@@ -3860,6 +3874,7 @@ test "Session queue cursor releases a fully consumed prefix" {
         &output,
     );
     const session = try store.getSession(opened.handle);
+    try std.testing.expect(try store.hasUnselectedTransmission(opened.handle));
     try std.testing.expectEqual(@as(usize, 1), session.queued_head);
     try std.testing.expectEqual(@as(usize, 2), session.queued_count);
     _ = try store.handleAck(
@@ -3883,8 +3898,49 @@ test "Session queue cursor releases a fully consumed prefix" {
             0,
         );
     }
+    try std.testing.expect(!try store.hasUnselectedTransmission(opened.handle));
     try std.testing.expectEqual(@as(usize, 0), session.queued_head);
     try std.testing.expectEqual(@as(usize, 0), session.queued.items.len);
+}
+
+test "Session unselected transmission tracks the QoS 2 handshake" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("pending-qos2", false, 60, .zero);
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "pending/qos2",
+        "value",
+        .{ .qos = .exactly_once, .now = .zero },
+    );
+    try std.testing.expect(try store.hasUnselectedTransmission(opened.handle));
+
+    var output: [1]Transmission = undefined;
+    const publish = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), publish.len);
+    try std.testing.expect(!try store.hasUnselectedTransmission(opened.handle));
+
+    const packet_id = publish[0].publish.packet_id;
+    try std.testing.expectEqual(
+        AckAction.send_pubrel,
+        try store.handleAck(opened.handle, .pubrec, packet_id, 0),
+    );
+    try std.testing.expect(try store.hasUnselectedTransmission(opened.handle));
+
+    const pubrel = try store.drainInto(
+        opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), pubrel.len);
+    try std.testing.expect(pubrel[0] == .pubrel);
+    try std.testing.expect(!try store.hasUnselectedTransmission(opened.handle));
 }
 
 test {

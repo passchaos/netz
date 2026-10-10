@@ -7108,6 +7108,35 @@ Artifacts are retained under `zig-out/mqtt-event-out-ab`; the 50-row result
 table hashes to
 `29f79ec8b05ee30ddcb6f9effb2ae1adc193431063a26ad344003ea8a0872ce5`.
 
+Synchronous durable Session flushing now carries one O(1) snapshot of whether
+the locked selection left another unsent transmission. After the selected
+packet is committed to the socket, a false snapshot skips the former second
+state-mutex acquisition and empty `drainInto` probe. Every producer still
+schedules or performs its own flush, so an enqueue racing the socket write
+cannot be stranded. The shared durable and transient writer tasks deliberately
+retain drain-until-empty behavior; an initial prototype that yielded after each
+snapshot regressed fanout throughput and was rejected. The final
+`DetachedSessionPacket` remains 112 bytes (120 bytes as an optional return) and
+`ClientTask.runLoop` retains its `0xa00` ReleaseFast stack frame.
+
+Seven fixed-binary AB/BA pairs then exercised serial, publishers-32,
+fanout-32, balanced-32x32, and 4-KiB durable QoS 2 with the broker/driver on
+CPUs 10/11. Candidate/baseline throughput paired medians were 0.9954x,
+1.0049x, 0.9982x, 0.9972x, and 1.0025x; every range crossed 1.0 and RSS was
+neutral. This is therefore retained as deterministic removal of a redundant
+lock/drain operation, not as an end-to-end speed claim. Matched 100,000-message
+serial profiles had comparable 5.05/5.10-second durations and zero lost
+samples; `Broker.flushSlotLocked` fell from 211 samples (4.35%) to 156 (3.22%).
+The baseline broker, final candidate broker, fixed driver, and 70-row result
+table SHA-256 values are respectively
+`a0c016fd604350fffa6159f54424e54f8e85b40ea1d73fae5e5d75b54747ad01`,
+`1361e5914bc49042c228d4b9eaa89af8ab749c378a5d6d1432b0ccfb88539c49`,
+`cf09a9b947ceadb34fd8ef12ff90c9c768134c4935095fe8f313b4670b50f618`,
+and `3109bfce4a11204a007767aef287a58d40e47c51f39de68a21969250359a1843`.
+Artifacts are retained under `zig-out/mqtt-session-tail-probe-sync-final`,
+`zig-out/mqtt-current-head-serial-profile`, and
+`zig-out/mqtt-session-tail-probe-sync-profile`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

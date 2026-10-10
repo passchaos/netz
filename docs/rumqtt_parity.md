@@ -3994,6 +3994,14 @@ proxy evidence for the entire suite.
    median with p50/p99 ratios of 0.9841x/0.9842x; serial, fanout, balanced, and
    4-KiB shapes remained neutral, so this is a targeted receive-loop result
    rather than a general broker speed claim.
+   Synchronous durable Session flushing now also records whether its locked
+   selection left another unsent transmission. A final successful write can
+   therefore skip the second state-mutex acquisition and empty drain probe.
+   Concurrent producers retain their own flush notification, while shared
+   writer tasks continue draining until empty so fanout batching is unchanged.
+   A seven-pair fixed-binary durable QoS 2 matrix was neutral in all five
+   shapes; a matched 100,000-message serial profile reduced
+   `flushSlotLocked` from 211 samples (4.35%) to 156 (3.22%).
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

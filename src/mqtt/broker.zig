@@ -5035,7 +5035,7 @@ pub const Broker = struct {
         // Retained replay is deliberately queued before SUBACK but flushed
         // only afterwards. This preserves protocol ordering while using the
         // same Receive Maximum/backpressure path as live fanout.
-        try self.flushSlotLocked(slot);
+        try self.flushSlotLocked(slot, true);
     }
 
     /// Queue retained replay while `state_mutex` is held.
@@ -6697,7 +6697,7 @@ pub const Broker = struct {
         _ = slot_index;
         slot.writer_mutex.lockUncancelable(self.io);
         defer slot.writer_mutex.unlock(self.io);
-        return self.flushSlotLocked(slot);
+        return self.flushSlotLocked(slot, true);
     }
 
     /// Run one shared-pool durable Session job. Holding the slot writer lock
@@ -6726,7 +6726,7 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
         if (!can_flush) return;
 
-        self.flushSlotLocked(slot) catch |err| {
+        self.flushSlotLocked(slot, false) catch |err| {
             self.state_mutex.lockUncancelable(self.io);
             defer self.state_mutex.unlock(self.io);
             if (!slot.state.active or
@@ -6747,13 +6747,16 @@ pub const Broker = struct {
     fn flushSlotLocked(
         self: *Broker,
         slot: *ClientSlot,
+        stop_after_snapshot: bool,
     ) Error!void {
         while (true) {
             self.state_mutex.lockUncancelable(self.io);
             var take_changed = false;
+            var more_pending = false;
             const maybe_packet = self.takeSessionPacketAssumeLocked(
                 slot,
                 &take_changed,
+                &more_pending,
             ) catch |err| {
                 self.state_mutex.unlock(self.io);
                 if (take_changed) {
@@ -6854,6 +6857,7 @@ pub const Broker = struct {
                         persistent_changed,
                     );
                 }
+                if (stop_after_snapshot and !more_pending) return;
                 continue;
             }
             if (take_changed) {
@@ -7017,8 +7021,10 @@ pub const Broker = struct {
         self: *Broker,
         slot: *ClientSlot,
         persistent_changed_out: *bool,
+        more_pending_out: *bool,
     ) Error!?DetachedSessionPacket {
         persistent_changed_out.* = false;
+        more_pending_out.* = false;
         const handle = slot.sessionHandle() orelse return null;
         const connection = slot.connection orelse return null;
         const route_id = try self.sessions.routeId(handle);
@@ -7126,6 +7132,9 @@ pub const Broker = struct {
                 }
                 return err;
             };
+            more_pending_out.* =
+                (try self.sessions.hasUnselectedTransmission(handle)) or
+                slot.queuedCount() != 0;
             persistent_changed_out.* = persistent_changed;
             self.recordPersistentChangeLocked(persistent_changed);
             return .{
@@ -8610,7 +8619,7 @@ const ClientTask = struct {
                     // A PINGRESP is an observable ordering barrier for this
                     // connection. Preserve the pre-writer behavior by
                     // draining every earlier routed PUBLISH first.
-                    task.broker.flushSlotLocked(slot) catch |err| {
+                    task.broker.flushSlotLocked(slot, true) catch |err| {
                         slot.writer_mutex.unlock(task.broker.io);
                         return err;
                     };
@@ -8686,7 +8695,9 @@ const DeliveryWriterTask = struct {
             // remains set for the next turn instead of being lost afterward.
             slot.delivery_ready.reset();
             if (stop.load(.acquire)) return null;
-            broker.flushSlot(slot_index, slot) catch |err| {
+            slot.writer_mutex.lockUncancelable(broker.io);
+            defer slot.writer_mutex.unlock(broker.io);
+            broker.flushSlotLocked(slot, false) catch |err| {
                 if (slot.connection) |connection| {
                     connection.interrupt() catch {};
                 }
