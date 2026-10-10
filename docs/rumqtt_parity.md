@@ -3984,6 +3984,16 @@ proxy evidence for the entire suite.
    medians (paired median 0.00921x, 7/7 wins), while resume stayed 1.000x and
    reconnect drain measured 0.9897x. The final ordinary-window durable QoS 2
    control was neutral at 0.9981x, 1.0011x, 0.9941x, 1.0017x and 1.0068x.
+   The broker's connection loop now also supplies one reusable output slot to
+   the `BrokerEvent` reader instead of returning that large tagged union by
+   value. The public return-value API remains available as a wrapper, and the
+   caller-output contract leaves the slot untouched on failure. ReleaseFast
+   assembly shrank the loop's stack frame from `0xa70` to `0xa00` bytes and
+   removed the intermediate vector-sized event copies. Across five fixed
+   AB/BA pairs, the 32-publisher shape won all pairs at a 1.0153x throughput
+   median with p50/p99 ratios of 0.9841x/0.9842x; serial, fanout, balanced, and
+   4-KiB shapes remained neutral, so this is a targeted receive-loop result
+   rather than a general broker speed claim.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

@@ -7045,6 +7045,33 @@ The complete 63,827,365-byte artifact is retained under
 `zig-out/mqtt-session-free-slot-broker-ab`; its result-table SHA-256 is
 `f2dfc98bba49507efb4861a6db6041784532d6cd08a256d80dd169d65a37e98e`.
 
+The broker receive loop now passes a caller-owned `BrokerEvent` output slot to
+the packet reader instead of returning the large tagged union by value. The
+original return-value API remains as a compatibility wrapper. Generated
+ReleaseFast assembly reduces `ClientTask.runLoop`'s stack frame from `0xa70`
+to `0xa00` bytes and removes the intervening groups of 128-bit event copies.
+Ownership tests cover a prefixed heap-backed successful event and verify both
+one-time release and that a malformed packet rolls back its allocation while
+leaving the caller's output value untouched.
+
+Five fixed-binary AB/BA pairs then exercised serial, 32-publisher, 32-subscriber
+fanout, balanced 32x32, and 4-KiB durable QoS 2 workloads with the broker,
+driver, and RSS sampler pinned to CPUs 10, 11, and 13. All 50 arms completed
+their exact delivery and checksum checks. Candidate/baseline throughput paired
+medians were 1.0011x, 1.0153x, 0.9989x, 1.0048x, and 1.0028x respectively.
+The 32-publisher candidate won all five pairs (1.0093-1.0255x), with p50 and
+p99 paired medians of 0.9841x and 0.9842x; the other shapes are treated as
+neutral because their ranges overlap, including two noisy balanced samples.
+RSS was neutral. Baseline broker, candidate broker, and fixed driver SHA-256
+values are
+`167d13799ab1e98be993fe6a6dcae72d0f506b77b77d64760b22de091c81edd8`,
+`69eb0d455d8df0ea00599399773488e0843576771479b798395c327b28466833`,
+and
+`30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+Artifacts are retained under `zig-out/mqtt-event-out-ab`; the 50-row result
+table hashes to
+`29f79ec8b05ee30ddcb6f9effb2ae1adc193431063a26ad344003ea8a0872ce5`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

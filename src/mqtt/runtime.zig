@@ -5474,6 +5474,25 @@ pub const Connection = struct {
         storage: []u8,
         prefix_len: usize,
     ) Error!BrokerEvent {
+        var event: BrokerEvent = undefined;
+        try self.readBrokerEventWithKeepAliveIntoPrefixedOut(
+            storage,
+            prefix_len,
+            &event,
+        );
+        return event;
+    }
+
+    /// Caller-output form for broker loops that retain one event slot across
+    /// iterations and want to avoid returning the large tagged union by value.
+    /// On success, ownership is transferred through `out` and the caller must
+    /// call `BrokerEvent.deinit`. On error, `out` is left untouched.
+    pub fn readBrokerEventWithKeepAliveIntoPrefixedOut(
+        self: *Connection,
+        storage: []u8,
+        prefix_len: usize,
+        out: *BrokerEvent,
+    ) Error!void {
         const timeout = keepAliveTimeout(self.keep_alive_seconds);
         const packet = if (timeout) |value|
             try self.transport
@@ -5494,7 +5513,7 @@ pub const Connection = struct {
         self.recordPacketReceived(packet.bytes.len);
         var validated = try self.finishReadPacket(packet);
         errdefer validated.deinit(self.allocator);
-        return self.finishBrokerEvent(validated);
+        out.* = try self.finishBrokerEvent(validated);
     }
 
     fn readBrokerEventInternal(
@@ -10641,6 +10660,74 @@ test "MQTT broker event borrows caller storage for a complete TCP acknowledgemen
     try std.testing.expectEqual(storage[0..].ptr, event.puback.packet.bytes.ptr);
     try std.testing.expectEqual(@as(u16, 7), event.puback.ack.packet_id);
     try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "MQTT broker caller-output event transfers ownership and preserves output on error" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+    const client_stream = try listener.socket.address.connect(
+        io,
+        .{ .mode = .stream },
+    );
+    var peer = PacketTransport.initTcp(io, try listener.accept(io));
+    defer peer.close(allocator);
+    var connection = Connection{
+        .allocator = allocator,
+        .transport = .initTcp(io, client_stream),
+        .protocol = .v5,
+        .endpoint_role = .server,
+        .keep_alive_seconds = 1,
+    };
+    defer connection.close();
+
+    var storage: [1]u8 = undefined;
+    var event: BrokerEvent = undefined;
+    var puback = [_]u8{ 0x40, 0x02, 0x00, 0x07 };
+    try peer.writePacket(&puback);
+    try connection.readBrokerEventWithKeepAliveIntoPrefixedOut(
+        &storage,
+        32,
+        &event,
+    );
+    try std.testing.expect(event == .puback);
+    try std.testing.expect(event.puback.packet.owns_bytes);
+    try std.testing.expectEqual(@as(u16, 32), event.puback.packet.prefix_len);
+    try std.testing.expect(event.puback.packet.prefixedAllocation() != null);
+    try std.testing.expectEqual(@as(u16, 7), event.puback.ack.packet_id);
+    event.deinit(allocator);
+
+    var sentinel_bytes = [_]u8{ 0xc0, 0x00 };
+    event = .{ .pingreq = .{
+        .bytes = &sentinel_bytes,
+        .fixed = .{
+            .packet_type = .pingreq,
+            .flags = 0,
+            .remaining_len = 0,
+            .header_len = 2,
+        },
+        .owns_bytes = false,
+    } };
+    var malformed_subscribe =
+        [_]u8{ 0x82, 0x07, 0x00, 0x0f, 0x00, 0x00, 0x01, 'p', 0x40 };
+    try peer.writePacket(&malformed_subscribe);
+    try std.testing.expectError(
+        error.MalformedSubscriptionOptions,
+        connection.readBrokerEventWithKeepAliveIntoPrefixedOut(
+            &storage,
+            32,
+            &event,
+        ),
+    );
+    try std.testing.expect(event == .pingreq);
+    try std.testing.expectEqual(sentinel_bytes[0..].ptr, event.pingreq.bytes.ptr);
+    event.deinit(allocator);
 }
 
 test "MQTT serveUntil isolates CONNECT errors and reuses its worker" {

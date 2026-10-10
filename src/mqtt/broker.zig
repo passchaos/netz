@@ -8295,9 +8295,11 @@ const ClientTask = struct {
         // to the transport's complete read-ahead capacity.
         var packet_storage: [packet_storage_capacity]u8 = undefined;
         while (true) {
-            var event = connection.readBrokerEventWithKeepAliveIntoPrefixed(
+            var event: runtime.BrokerEvent = undefined;
+            connection.readBrokerEventWithKeepAliveIntoPrefixedOut(
                 &packet_storage,
                 @sizeOf(Publication),
+                &event,
             ) catch |err| {
                 if (try task.disconnectForProtocolViolation(
                     slot,
