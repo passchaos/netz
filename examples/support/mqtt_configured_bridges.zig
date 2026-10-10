@@ -8,14 +8,95 @@ const CertificateBundle = std.crypto.Certificate.Bundle;
 
 const max_bridge_ca_file_bytes: usize = 4 * 1024 * 1024;
 
-const TlsResources = struct {
+const ConfiguredConnector = struct {
+    source: *const mqtt.broker_config.Bridge,
+    tls_options: ?mqtt.tls_runtime.ConnectOptions = null,
+    next_address: usize = 0,
+
+    fn connector(self: *ConfiguredConnector) mqtt.runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt.runtime.ConnectOptions,
+    ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
+        const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
+        const endpoint = self.takeEndpoint();
+        if (self.tls_options) |options| {
+            var tls_connector = mqtt.tls_runtime.HostReconnectConnector{
+                .host = endpoint.host,
+                .port = endpoint.port,
+                .options = options,
+            };
+            return tls_connector.connector().connectAttempt(
+                allocator,
+                io,
+                mqtt_options,
+            );
+        }
+        return mqtt.runtime.Client.connectHostAttempt(
+            allocator,
+            io,
+            endpoint.host,
+            endpoint.port,
+            mqtt_options,
+        );
+    }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt.runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
+        const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
+        const endpoint = self.takeEndpoint();
+        if (self.tls_options) |options| {
+            var tls_connector = mqtt.tls_runtime.HostReconnectConnector{
+                .host = endpoint.host,
+                .port = endpoint.port,
+                .options = options,
+            };
+            return tls_connector.connector().connectAttemptWithDeadline(
+                allocator,
+                io,
+                mqtt_options,
+                deadline,
+            );
+        }
+        return mqtt.runtime.Client.connectHostAttemptWithDeadline(
+            allocator,
+            io,
+            endpoint.host,
+            endpoint.port,
+            mqtt_options,
+            deadline,
+        );
+    }
+
+    fn takeEndpoint(self: *ConfiguredConnector) mqtt.broker_config.BridgeEndpoint {
+        const index = self.next_address;
+        self.next_address = (index + 1) % self.source.addressCount();
+        return self.source.addressAt(index);
+    }
+};
+
+const ConnectorResources = struct {
     ca_bundle: CertificateBundle = .empty,
     ca_lock: std.Io.RwLock = .init,
     identity: ?netz.tls.server_identity_file.Identity = null,
     alpn_protocols: [1][]const u8 = undefined,
-    connector: mqtt.tls_runtime.HostReconnectConnector = undefined,
+    connector: ConfiguredConnector = undefined,
 
-    fn deinit(self: *TlsResources, allocator: std.mem.Allocator) void {
+    fn deinit(self: *ConnectorResources, allocator: std.mem.Allocator) void {
         if (self.identity) |*identity| identity.deinit();
         self.ca_bundle.deinit(allocator);
         self.* = undefined;
@@ -25,7 +106,7 @@ const TlsResources = struct {
 pub const Set = struct {
     allocator: std.mem.Allocator,
     values: []mqtt.bridge.Bridge,
-    tls_resources: []TlsResources,
+    connector_resources: []ConnectorResources,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -36,13 +117,13 @@ pub const Set = struct {
     ) !Set {
         const values = try allocator.alloc(mqtt.bridge.Bridge, configured.len);
         errdefer allocator.free(values);
-        const tls_resources = try allocator.alloc(
-            TlsResources,
+        const connector_resources = try allocator.alloc(
+            ConnectorResources,
             configured.len,
         );
-        errdefer allocator.free(tls_resources);
-        @memset(tls_resources, .{});
-        errdefer for (tls_resources) |*resources| {
+        errdefer allocator.free(connector_resources);
+        @memset(connector_resources, .{});
+        errdefer for (connector_resources) |*resources| {
             resources.deinit(allocator);
         };
         var initialized: usize = 0;
@@ -52,7 +133,7 @@ pub const Set = struct {
                 values[initialized].deinit();
             }
         }
-        for (configured, values, tls_resources) |source, *bridge, *tls| {
+        for (configured, values, connector_resources) |*source, *bridge, *resources| {
             const rules = try allocator.alloc(mqtt.bridge.Rule, source.rules.len);
             defer allocator.free(rules);
             for (source.rules, rules) |rule, *runtime_rule| {
@@ -102,23 +183,27 @@ pub const Set = struct {
                 },
                 .rules = rules,
                 .bridge_id = if (source.usesQoS2())
-                    stableBridgeId(source)
+                    stableBridgeId(source.*)
                 else
                     null,
             };
-            bridge.* = if (source.usesTls()) blk: {
-                try loadTlsResources(
-                    tls,
-                    allocator,
-                    io,
-                    std.Io.Dir.cwd(),
-                    source,
-                );
+            bridge.* = if (source.usesTls() or source.addressCount() > 1) blk: {
+                if (source.usesTls()) {
+                    try loadTlsResources(
+                        resources,
+                        allocator,
+                        io,
+                        std.Io.Dir.cwd(),
+                        source,
+                    );
+                } else {
+                    resources.connector = .{ .source = source };
+                }
                 break :blk try mqtt.bridge.Bridge.initConnectorMany(
                     allocator,
                     io,
                     local,
-                    tls.connector.connector(),
+                    resources.connector.connector(),
                     options,
                     shutdown,
                 );
@@ -136,7 +221,7 @@ pub const Set = struct {
         return .{
             .allocator = allocator,
             .values = values,
-            .tls_resources = tls_resources,
+            .connector_resources = connector_resources,
         };
     }
 
@@ -146,19 +231,21 @@ pub const Set = struct {
             remaining -= 1;
             self.values[remaining].deinit();
         }
-        for (self.tls_resources) |*resources| resources.deinit(self.allocator);
-        self.allocator.free(self.tls_resources);
+        for (self.connector_resources) |*resources| {
+            resources.deinit(self.allocator);
+        }
+        self.allocator.free(self.connector_resources);
         self.allocator.free(self.values);
         self.* = undefined;
     }
 };
 
 fn loadTlsResources(
-    resources: *TlsResources,
+    resources: *ConnectorResources,
     allocator: std.mem.Allocator,
     io: std.Io,
     dir: std.Io.Dir,
-    source: mqtt.broker_config.Bridge,
+    source: *const mqtt.broker_config.Bridge,
 ) !void {
     if (source.ca_file.len != 0) {
         if (source.use_os_ca_certificates) {
@@ -216,9 +303,8 @@ fn loadTlsResources(
     else
         null;
     resources.connector = .{
-        .host = source.host,
-        .port = source.port,
-        .options = .{
+        .source = source,
+        .tls_options = .{
             .mqtt = .{ .client_id = source.clientId() },
             .tls = .{
                 .ca_bundle = if (source.ca_file.len != 0) .{
@@ -315,10 +401,10 @@ test "configured bridge rejects an empty explicit CA file" {
         .rules = &.{},
         .ca_file = &ca_file,
     };
-    var resources: TlsResources = .{};
+    var resources: ConnectorResources = .{};
     defer resources.deinit(allocator);
     try std.testing.expectError(
         error.EmptyBridgeCaFile,
-        loadTlsResources(&resources, allocator, io, tmp.dir, source),
+        loadTlsResources(&resources, allocator, io, tmp.dir, &source),
     );
 }

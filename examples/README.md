@@ -131,7 +131,8 @@ allow_anonymous true
 max_connections 16
 
 connection upstream
-address broker.example:1883
+address broker.example:1883 backup.example:1883
+round_robin true
 topic sensors/# in 1 local/ remote/
 cleansession false
 remote_clientid netz-upstream
@@ -169,7 +170,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`, and
-`bridge_tls_version`. Unknown directives, duplicates,
+`bridge_tls_version`, plus `round_robin`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. In
 production config mode, each listener's `max_connections` is its simultaneous
 admitted-client limit and the broker keeps accepting after clients disconnect.
@@ -184,13 +185,17 @@ payloads are rejected while representable QoS flows complete. Each listener
 accepts MQTT 3.1.1 and MQTT 5 by default.
 
 Each `connection` creates an independently reconnecting inbound bridge.
-Exactly one `address host[:port]` (or bracketed IPv6 address with a required
-port) and one or more explicit `topic FILTER in QOS [LOCAL_PREFIX]
+One `address` directive containing one or more `host[:port]` targets (or
+bracketed IPv6 targets with required ports) and one or more explicit
+`topic FILTER in QOS [LOCAL_PREFIX]
 [REMOTE_PREFIX]` rules are required. The bridge subscribes remotely to
 `REMOTE_PREFIX + FILTER`, strips `REMOTE_PREFIX` from each delivered Topic
 Name, then prepends `LOCAL_PREFIX` before local broker routing. Empty prefixes
 may be omitted or written as `""`. Rules must be pairwise disjoint after remote
-prefix expansion. `out`, `both`, multiple addresses, MQTT 3.1, and the
+prefix expansion. Multiple targets require `round_robin true`; initial failure
+and later disconnects rotate to the next target and a successful target remains
+active until it fails. Mosquitto's primary-priority periodic failback mode is
+not silently approximated. `out`, `both`, multi-address `round_robin false`, MQTT 3.1, and the
 three-argument `restart_timeout` stable-period form fail explicitly instead of
 being silently downgraded. One timeout value selects a fixed delay; two select
 bounded exponential full-jitter retries. MQTT 3.1.1 is the bridge default;
@@ -201,7 +206,8 @@ used as the stable Client ID. QoS 2 additionally requires `persistence true`, a 
 Session, and for MQTT 5 a non-zero `bridge_session_expiry_interval`; the runner
 derives a stable bridge identity from the connection identity and mappings and opens a
 crash-safe broker journal beside the configured snapshot. A process gate runs
-two real broker instances, verifies prefix mapping and QoS 1/2 delivery, kills
+two real broker instances, begins through an unavailable first address,
+verifies round-robin failover plus prefix mapping and QoS 1/2 delivery, kills
 and restarts the upstream broker, then verifies automatic resubscription and
 delivery without restarting the local broker.
 

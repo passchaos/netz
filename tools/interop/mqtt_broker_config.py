@@ -5238,7 +5238,7 @@ def main() -> None:
         "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound bridge prefix mapping, mTLS, "
-        "QoS 1/2, and reconnect, "
+        "QoS 1/2, multi-address failover, and reconnect, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/P-521/Ed25519/RSA and encrypted PKCS#8 TLS "

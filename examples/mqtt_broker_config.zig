@@ -559,12 +559,13 @@ pub fn run(
     }
     for (config.bridges) |bridge| {
         std.debug.print(
-            "  bridge {s} remote={s}:{d} transport={s} " ++
+            "  bridge {s} remote={s}:{d} addresses={d} transport={s} " ++
                 "rules={d} direction=in\n",
             .{
                 bridge.name,
                 bridge.host,
                 bridge.port,
+                bridge.addressCount(),
                 if (bridge.usesTls()) "tls-vail" else "tcp",
                 bridge.rules.len,
             },

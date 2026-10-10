@@ -27,6 +27,8 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     BridgePersistentSessionRequired,
     BridgeTlsIdentityIncomplete,
     BridgeTlsTrustRequired,
+    MultiAddressRequiresRoundRobin,
+    DuplicateBridgeAddress,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
     UnsupportedBridgeDirection,
@@ -57,10 +59,21 @@ pub const Rule = struct {
     }
 };
 
+pub const Endpoint = struct {
+    host: []const u8,
+    port: u16,
+
+    fn deinit(self: *Endpoint, allocator: std.mem.Allocator) void {
+        allocator.free(@constCast(self.host));
+        self.* = undefined;
+    }
+};
+
 pub const Bridge = struct {
     name: []u8,
     host: []u8,
     port: u16 = default_port,
+    secondary_addresses: []Endpoint = &.{},
     rules: []Rule,
     protocol: mqtt.ProtocolVersion = .v3_1_1,
     clean_session: bool = false,
@@ -75,6 +88,7 @@ pub const Bridge = struct {
     private_key_file: []u8 = &.{},
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
+    round_robin: bool = false,
     restart: RestartPolicy = .{},
 
     pub fn deinit(self: *Bridge, allocator: std.mem.Allocator) void {
@@ -93,6 +107,10 @@ pub const Bridge = struct {
             allocator.free(self.private_key_password_file);
         }
         if (self.alpn.len != 0) allocator.free(self.alpn);
+        for (self.secondary_addresses) |*endpoint| endpoint.deinit(allocator);
+        if (self.secondary_addresses.len != 0) {
+            allocator.free(self.secondary_addresses);
+        }
         allocator.free(self.host);
         allocator.free(self.name);
         self.* = undefined;
@@ -115,6 +133,15 @@ pub const Bridge = struct {
     pub fn usesTls(self: Bridge) bool {
         return self.ca_file.len != 0 or self.use_os_ca_certificates;
     }
+
+    pub fn addressCount(self: Bridge) usize {
+        return 1 + self.secondary_addresses.len;
+    }
+
+    pub fn addressAt(self: Bridge, index: usize) Endpoint {
+        if (index == 0) return .{ .host = self.host, .port = self.port };
+        return self.secondary_addresses[index - 1];
+    }
 };
 
 const Seen = struct {
@@ -135,12 +162,14 @@ const Seen = struct {
     bridge_alpn: bool = false,
     bridge_insecure: bool = false,
     bridge_tls_version: bool = false,
+    round_robin: bool = false,
 };
 
 pub const Builder = struct {
     name: []u8,
     host: []u8 = &.{},
     port: u16 = default_port,
+    secondary_addresses: std.ArrayList(Endpoint) = .empty,
     rules: std.ArrayList(Rule) = .empty,
     protocol: mqtt.ProtocolVersion = .v3_1_1,
     clean_session: bool = false,
@@ -155,6 +184,7 @@ pub const Builder = struct {
     private_key_file: []u8 = &.{},
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
+    round_robin: bool = false,
     restart: RestartPolicy = .{},
     seen: Seen = .{},
     moved: bool = false,
@@ -187,6 +217,10 @@ pub const Builder = struct {
             allocator.free(self.private_key_password_file);
         }
         if (self.alpn.len != 0) allocator.free(self.alpn);
+        for (self.secondary_addresses.items) |*endpoint| {
+            endpoint.deinit(allocator);
+        }
+        self.secondary_addresses.deinit(allocator);
         if (self.host.len != 0) allocator.free(self.host);
         allocator.free(self.name);
         self.* = undefined;
@@ -200,9 +234,7 @@ pub const Builder = struct {
     ) Error!void {
         if (std.mem.eql(u8, directive, "address")) {
             try markOnce(&self.seen.address);
-            const endpoint = try parseEndpoint(try parseOne(words));
-            self.host = try allocator.dupe(u8, endpoint.host);
-            self.port = endpoint.port;
+            try self.parseAddresses(allocator, words);
         } else if (std.mem.eql(u8, directive, "topic")) {
             try self.appendRule(allocator, words);
         } else if (std.mem.eql(u8, directive, "cleansession")) {
@@ -286,6 +318,9 @@ pub const Builder = struct {
             if (!std.mem.eql(u8, try parseOne(words), "tlsv1.3")) {
                 return error.UnsupportedBridgeTlsVersion;
             }
+        } else if (std.mem.eql(u8, directive, "round_robin")) {
+            try markOnce(&self.seen.round_robin);
+            self.round_robin = try parseOneBool(words);
         } else {
             return error.InvalidDirective;
         }
@@ -324,6 +359,9 @@ pub const Builder = struct {
         {
             return error.BridgeTlsTrustRequired;
         }
+        if (self.secondary_addresses.items.len != 0 and !self.round_robin) {
+            return error.MultiAddressRequiresRoundRobin;
+        }
         var uses_qos2 = false;
         for (self.rules.items) |rule| {
             uses_qos2 = uses_qos2 or rule.qos == .exactly_once;
@@ -337,10 +375,17 @@ pub const Builder = struct {
             }
         }
         const owned_rules = try self.rules.toOwnedSlice(allocator);
+        errdefer {
+            for (owned_rules) |*rule| rule.deinit(allocator);
+            allocator.free(owned_rules);
+        }
+        const owned_secondary_addresses = try self.secondary_addresses
+            .toOwnedSlice(allocator);
         const result = Bridge{
             .name = self.name,
             .host = self.host,
             .port = self.port,
+            .secondary_addresses = owned_secondary_addresses,
             .rules = owned_rules,
             .protocol = self.protocol,
             .clean_session = self.clean_session,
@@ -355,10 +400,46 @@ pub const Builder = struct {
             .private_key_file = self.private_key_file,
             .private_key_password_file = self.private_key_password_file,
             .alpn = self.alpn,
+            .round_robin = self.round_robin,
             .restart = self.restart,
         };
         self.moved = true;
         return result;
+    }
+
+    fn parseAddresses(
+        self: *Builder,
+        allocator: std.mem.Allocator,
+        words: anytype,
+    ) Error!void {
+        var count: usize = 0;
+        while (words.next()) |value| {
+            const endpoint = try parseEndpoint(value);
+            if (self.hasEndpoint(endpoint)) return error.DuplicateBridgeAddress;
+            const host = try allocator.dupe(u8, endpoint.host);
+            if (count == 0) {
+                self.host = host;
+                self.port = endpoint.port;
+            } else {
+                errdefer allocator.free(host);
+                try self.secondary_addresses.append(allocator, .{
+                    .host = host,
+                    .port = endpoint.port,
+                });
+            }
+            count += 1;
+        }
+        if (count == 0) return error.InvalidDirective;
+    }
+
+    fn hasEndpoint(self: *const Builder, endpoint: Endpoint) bool {
+        if (self.host.len != 0 and self.port == endpoint.port and
+            std.mem.eql(u8, self.host, endpoint.host)) return true;
+        for (self.secondary_addresses.items) |existing| {
+            if (existing.port == endpoint.port and
+                std.mem.eql(u8, existing.host, endpoint.host)) return true;
+        }
+        return false;
     }
 
     fn appendRule(
@@ -432,13 +513,9 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_keyfile_password_file") or
         std.mem.eql(u8, value, "bridge_alpn") or
         std.mem.eql(u8, value, "bridge_insecure") or
-        std.mem.eql(u8, value, "bridge_tls_version");
+        std.mem.eql(u8, value, "bridge_tls_version") or
+        std.mem.eql(u8, value, "round_robin");
 }
-
-const Endpoint = struct {
-    host: []const u8,
-    port: u16,
-};
 
 fn parseEndpoint(value: []const u8) Error!Endpoint {
     if (value.len == 0) return error.InvalidDirective;

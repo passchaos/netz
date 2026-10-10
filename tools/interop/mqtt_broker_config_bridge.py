@@ -19,6 +19,13 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def _distinct_ports(count: int) -> list[int]:
+    ports: set[int] = set()
+    while len(ports) != count:
+        ports.add(_free_port())
+    return list(ports)
+
+
 def _varint(value: int) -> bytes:
     result = bytearray()
     while True:
@@ -385,8 +392,7 @@ def _create_tls_material(directory: Path) -> tuple[Path, Path, Path, Path, Path]
 
 
 def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
-    upstream_port = _free_port()
-    local_port = _free_port()
+    upstream_port, local_port, unavailable_port = _distinct_ports(3)
     upstream_config = directory / "bridge-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
@@ -402,7 +408,8 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         "allow_anonymous true\n"
         "max_connections 1\n"
         "connection upstream\n"
-        f"address 127.0.0.1:{upstream_port}\n"
+        f"address 127.0.0.1:{unavailable_port} 127.0.0.1:{upstream_port}\n"
+        "round_robin true\n"
         "topic sensors/# in 2 local/ remote/\n"
         "cleansession false\n"
         "bridge_protocol_version mqttv50\n"
@@ -502,8 +509,7 @@ def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
         "-passout",
         "pass:bridge-key-secret",
     )
-    upstream_port = _free_port()
-    local_port = _free_port()
+    upstream_port, local_port = _distinct_ports(2)
     upstream_config = directory / "bridge-tls-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"

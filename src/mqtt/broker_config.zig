@@ -31,6 +31,7 @@ pub const default_autosave_interval: u32 = 1800;
 pub const Protocol = enum { mqtt, websockets };
 pub const Bridge = bridge_config.Bridge;
 pub const BridgeRule = bridge_config.Rule;
+pub const BridgeEndpoint = bridge_config.Endpoint;
 
 pub const Listener = struct {
     address: net.IpAddress,
@@ -1156,7 +1157,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\listener 1883 127.0.0.1
         \\allow_anonymous true
         \\connection upstream
-        \\address broker.example:2883
+        \\address broker.example:2883 backup.example:3883
         \\topic sensors/# in 1 local/ remote/
         \\topic $SYS/# in 0 "" ""
         \\cleansession false
@@ -1175,6 +1176,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_alpn mqtt
         \\bridge_insecure false
         \\bridge_tls_version tlsv1.3
+        \\round_robin true
         \\connection backup
         \\address [::1]:3883
         \\topic backup/# in 2 mirror/ source/
@@ -1189,6 +1191,13 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqualStrings("upstream", upstream.name);
     try std.testing.expectEqualStrings("broker.example", upstream.host);
     try std.testing.expectEqual(@as(u16, 2883), upstream.port);
+    try std.testing.expectEqual(@as(usize, 2), upstream.addressCount());
+    try std.testing.expectEqualStrings(
+        "backup.example",
+        upstream.addressAt(1).host,
+    );
+    try std.testing.expectEqual(@as(u16, 3883), upstream.addressAt(1).port);
+    try std.testing.expect(upstream.round_robin);
     try std.testing.expectEqual(mqtt.ProtocolVersion.v5, upstream.protocol);
     try std.testing.expect(!upstream.clean_session);
     try std.testing.expectEqual(
@@ -1372,10 +1381,17 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "restart_timeout 5 30 30\n"),
     );
     try std.testing.expectError(
-        error.InvalidDirective,
+        error.MultiAddressRequiresRoundRobin,
         parse(allocator, listener ++
             "connection addresses\naddress one.example two.example\n" ++
             "topic # in 0\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateBridgeAddress,
+        parse(allocator, listener ++
+            "connection duplicate-address\n" ++
+            "address one.example:1883 one.example\n" ++
+            "topic # in 0\nround_robin true\n"),
     );
 }
 
@@ -1393,7 +1409,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\listener 1883 127.0.0.1
         \\allow_anonymous true
         \\connection allocation-test
-        \\address broker.example:2883
+        \\address broker.example:2883 backup.example:3883
         \\topic sensors/# in 1 local/ remote/
         \\topic commands/# in 2 command/ upstream/
         \\remote_clientid allocation-bridge
@@ -1405,6 +1421,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\bridge_keyfile_password_file client.password
         \\bridge_alpn mqtt
         \\bridge_tls_version tlsv1.3
+        \\round_robin true
     );
     defer config.deinit(allocator);
 }
