@@ -38,11 +38,15 @@ pub const Error = std.mem.Allocator.Error ||
         UnsupportedSignatureScheme,
     };
 
-/// One server identity generation borrowed for exactly one TLS handshake.
-/// Providers use the release callback to keep retired certificate storage
-/// alive until every handshake that selected it has completed.
+/// One server TLS policy generation borrowed for exactly one handshake.
+/// Providers use the release callback to keep retired server certificates,
+/// client trust, and revocation storage alive until every selecting handshake
+/// has completed.
 pub const ServerIdentityLease = struct {
     identity: vail.tls.auth.ServerIdentity,
+    /// Optional client-authentication policy from the same configuration
+    /// generation. Null preserves the static policy in `Options`.
+    client_auth: ?vail.tls.client_auth.ServerPolicy = null,
     context: ?*anyopaque = null,
     release_fn: ?*const fn (?*anyopaque) void = null,
 
@@ -52,8 +56,8 @@ pub const ServerIdentityLease = struct {
     }
 };
 
-/// Late-bound server identity source. `acquire` must return a lease whose
-/// identity remains valid until the handshake releases it.
+/// Late-bound server TLS policy source. `acquire` must return a lease whose
+/// identity and optional client-auth policy remain valid through release.
 pub const ServerIdentityProvider = struct {
     context: *anyopaque,
     acquire_fn: *const fn (*anyopaque) ServerIdentityLease,
@@ -180,6 +184,7 @@ fn performBefore(
     var identity_lease = try options.acquireIdentity();
     defer identity_lease.deinit();
     const identity = identity_lease.identity;
+    const client_auth = identity_lease.client_auth orelse options.client_auth;
 
     var client_hello_storage: std.ArrayList(u8) = .empty;
     defer client_hello_storage.deinit(allocator);
@@ -241,9 +246,9 @@ fn performBefore(
                 .shared_secret = &shared_secret,
                 .certificate_chain = identity.certificate_chain,
                 .signer = signer,
-                .client_auth = if (options.client_auth) |client_auth|
+                .client_auth = if (client_auth) |policy|
                     .{
-                        .certificate_authorities = client_auth.certificate_authorities,
+                        .certificate_authorities = policy.certificate_authorities,
                     }
                 else
                     null,
@@ -273,7 +278,7 @@ fn performBefore(
         stream,
         &handshake_read_keys,
         &client_flight,
-        if (options.client_auth == null)
+        if (client_auth == null)
             max_client_finished_len
         else
             options.max_client_handshake_size,
@@ -281,13 +286,13 @@ fn performBefore(
     );
     var peer_certificate_chain: ?PeerCertificateChain = null;
     errdefer if (peer_certificate_chain) |*chain| chain.deinit();
-    if (options.client_auth) |client_auth| {
+    if (client_auth) |policy| {
         const split = try splitAuthenticatedClientFlight(
             client_flight.items,
         );
         var verification = try vail.tls.client_auth.verifyClientFlight(
             allocator,
-            client_auth,
+            policy,
             &.{},
             handshake.transcript_state_after_server_finished,
             handshake.client_handshake_traffic_secret,

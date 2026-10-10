@@ -303,6 +303,28 @@ def wait_process_line(
     )
 
 
+def read_listener_lines(
+    process: subprocess.Popen[str],
+    count: int,
+    label: str,
+) -> list[str]:
+    assert process.stdout is not None
+    listeners: list[str] = []
+    observed: list[str] = []
+    while len(listeners) < count:
+        line = process.stdout.readline()
+        if not line:
+            raise AssertionError(
+                f"{label}: broker exited before listener lines; "
+                f"output={observed!r}"
+            )
+        stripped = line.strip()
+        observed.append(stripped)
+        if stripped.startswith(("mqtt ", "mqtts ", "websockets ", "wss ")):
+            listeners.append(stripped)
+    return listeners
+
+
 def websocket_mqtt_ping(sock: socket.socket) -> None:
     send_websocket_binary(sock, b"\xc0\x00")
     response = read_websocket_binary(sock)
@@ -2223,13 +2245,16 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         env=environment,
     )
     assert process.stdout is not None
-    ready = process.stdout.readline().strip()
-    if "configured 2 listeners global_max_connections=32" not in ready:
-        raise RuntimeError(f"identity reload broker failed to start: {ready}")
-    listener_lines = [
-        process.stdout.readline().strip(),
-        process.stdout.readline().strip(),
-    ]
+    wait_process_line(
+        process,
+        "configured 2 listeners global_max_connections=32",
+        "identity reload broker startup",
+    )
+    listener_lines = read_listener_lines(
+        process,
+        2,
+        "identity reload broker startup",
+    )
     if not any(line.startswith("mqtts ") for line in listener_lines):
         raise RuntimeError(f"identity reload MQTT/TLS listener missing: {listener_lines}")
     if not any(line.startswith("wss ") for line in listener_lines):
@@ -2346,6 +2371,280 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         rejected_new.close()
         mqtt_ping(old_mqtt)
         websocket_mqtt_ping(old_wss)
+    finally:
+        for client in clients:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
+def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
+    server_ca, server_ca_key = create_ca(
+        directory, "ca-reload-server-ca", "CA Reload Server Root"
+    )
+    server_certificate, server_key = create_signed_certificate(
+        directory,
+        "ca-reload-server",
+        "localhost",
+        server_ca,
+        server_ca_key,
+        711,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    first_ca, first_ca_key = create_ca(
+        directory, "ca-reload-first-client-ca", "CA Reload First Client Root"
+    )
+    first_client, first_key = create_signed_certificate(
+        directory,
+        "ca-reload-first-client",
+        "ca-reload-first-client",
+        first_ca,
+        first_ca_key,
+        712,
+        "clientAuth",
+    )
+    second_ca, second_ca_key = create_ca(
+        directory, "ca-reload-second-client-ca", "CA Reload Second Client Root"
+    )
+    second_client, second_key = create_signed_certificate(
+        directory,
+        "ca-reload-second-client",
+        "ca-reload-second-client",
+        second_ca,
+        second_ca_key,
+        713,
+        "clientAuth",
+    )
+    active_ca = directory / "ca-reload-active-client.crt"
+    active_ca.write_bytes(first_ca.read_bytes())
+    active_ca_directory = directory / "ca-reload-active-client-dir"
+    active_ca_directory.mkdir()
+    active_ca_directory_file = active_ca_directory / "client.pem"
+    active_ca_directory_file.write_bytes(first_ca.read_bytes())
+
+    mqtt_port = free_port()
+    websocket_port = free_port()
+    while websocket_port == mqtt_port:
+        websocket_port = free_port()
+    capath_port = free_port()
+    while capath_port in (mqtt_port, websocket_port):
+        capath_port = free_port()
+    config = directory / "ca-reload.conf"
+    config.write_text(
+        f"listener {mqtt_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {active_ca}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 16\n"
+        f"listener {capath_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"capath {active_ca_directory}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 16\n"
+        f"listener {websocket_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {active_ca}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 16\n"
+    )
+    environment = os.environ.copy()
+    environment.pop(FINITE_TEST_ENV, None)
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdout is not None
+    wait_process_line(
+        process,
+        "configured 3 listeners global_max_connections=48",
+        "client CA reload broker startup",
+    )
+    listener_lines = read_listener_lines(
+        process,
+        3,
+        "client CA reload broker startup",
+    )
+    if sum(line.startswith("mqtts ") for line in listener_lines) != 2:
+        raise RuntimeError(f"client CA reload MQTT/TLS listener missing: {listener_lines}")
+    if not any(line.startswith("wss ") for line in listener_lines):
+        raise RuntimeError(f"client CA reload WSS listener missing: {listener_lines}")
+
+    def mqtt_connect(
+        port: int,
+        certificate: Path,
+        key: Path,
+        client_id: str,
+    ) -> ssl.SSLSocket:
+        client = mqtt_tls_socket(
+            port,
+            server_ca,
+            certificate,
+            key,
+        )
+        client.sendall(connect_packet(client_id))
+        if connack_reason(read_mqtt_packet(client)) != 0:
+            client.close()
+            raise AssertionError(f"client CA reload CONNECT failed for {client_id}")
+        return client
+
+    def wss_connect(
+        certificate: Path,
+        key: Path,
+        client_id: str,
+    ) -> socket.socket:
+        client = websocket_connect(
+            websocket_port,
+            server_ca,
+            certificate,
+            key,
+        )
+        send_websocket_binary(client, connect_packet(client_id))
+        if connack_reason(read_websocket_binary(client)) != 0:
+            client.close()
+            raise AssertionError(f"client CA reload WSS CONNECT failed for {client_id}")
+        return client
+
+    def expect_mqtt_rejected(certificate: Path, key: Path, label: str) -> None:
+        result = openssl_mqtt_client(
+            mqtt_port,
+            server_ca,
+            certificate,
+            key,
+        )
+        if result.stdout.startswith(b"\x20"):
+            raise AssertionError(f"{label}: untrusted MQTT client received CONNACK")
+
+    def expect_capath_rejected(certificate: Path, key: Path, label: str) -> None:
+        result = openssl_mqtt_client(
+            capath_port,
+            server_ca,
+            certificate,
+            key,
+        )
+        if result.stdout.startswith(b"\x20"):
+            raise AssertionError(f"{label}: untrusted capath client received CONNACK")
+
+    def expect_wss_rejected(certificate: Path, key: Path, label: str) -> None:
+        try:
+            client = wss_connect(certificate, key, f"{label}-wss")
+        except (ssl.SSLError, ConnectionError, AssertionError):
+            return
+        client.close()
+        raise AssertionError(f"{label}: untrusted WSS client received CONNACK")
+
+    clients: list[socket.socket] = []
+    try:
+        old_mqtt = mqtt_connect(
+            mqtt_port,
+            first_client,
+            first_key,
+            "ca-reload-old-mqtt",
+        )
+        clients.append(old_mqtt)
+        old_capath = mqtt_connect(
+            capath_port,
+            first_client,
+            first_key,
+            "ca-reload-old-capath",
+        )
+        clients.append(old_capath)
+        old_wss = wss_connect(first_client, first_key, "ca-reload-old-wss")
+        clients.append(old_wss)
+        expect_mqtt_rejected(second_client, second_key, "initial second CA")
+        expect_capath_rejected(second_client, second_key, "initial second CA")
+        expect_wss_rejected(second_client, second_key, "initial-second-ca")
+
+        active_ca.write_bytes(second_ca.read_bytes())
+        active_ca_directory_file.write_bytes(second_ca.read_bytes())
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "successful client CA reload",
+        )
+        mqtt_ping(old_mqtt)
+        mqtt_ping(old_capath)
+        websocket_mqtt_ping(old_wss)
+        new_mqtt = mqtt_connect(
+            mqtt_port,
+            second_client,
+            second_key,
+            "ca-reload-new-mqtt",
+        )
+        clients.append(new_mqtt)
+        new_capath = mqtt_connect(
+            capath_port,
+            second_client,
+            second_key,
+            "ca-reload-new-capath",
+        )
+        clients.append(new_capath)
+        new_wss = wss_connect(
+            second_client,
+            second_key,
+            "ca-reload-new-wss",
+        )
+        clients.append(new_wss)
+        expect_mqtt_rejected(first_client, first_key, "retired first CA")
+        expect_capath_rejected(first_client, first_key, "retired first CA")
+        expect_wss_rejected(first_client, first_key, "retired-first-ca")
+        diagnostics = openssl_certificate_request_diagnostics(
+            mqtt_port,
+            server_ca,
+            second_client,
+            second_key,
+        )
+        if (
+            "CN=CA Reload Second Client Root" not in diagnostics
+            or "CN=CA Reload First Client Root" in diagnostics
+        ):
+            raise AssertionError(
+                "reloaded CertificateRequest CA names are stale: " + diagnostics
+            )
+
+        active_ca.write_text("not a certificate\n")
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload failed: error=InvalidPem",
+            "failed client CA reload",
+        )
+        rollback_mqtt = mqtt_connect(
+            mqtt_port,
+            second_client,
+            second_key,
+            "ca-reload-rollback-mqtt",
+        )
+        clients.append(rollback_mqtt)
+        rollback_capath = mqtt_connect(
+            capath_port,
+            second_client,
+            second_key,
+            "ca-reload-rollback-capath",
+        )
+        clients.append(rollback_capath)
+        rollback_wss = wss_connect(
+            second_client,
+            second_key,
+            "ca-reload-rollback-wss",
+        )
+        clients.append(rollback_wss)
     finally:
         for client in clients:
             client.close()
@@ -4655,6 +4954,7 @@ def main() -> None:
         run_authentication_case(args.broker, directory)
         run_security_reload_case(args.broker, directory)
         run_server_identity_reload_case(args.broker, directory)
+        run_client_ca_reload_case(args.broker, directory)
         run_crl_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
@@ -4686,7 +4986,7 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "atomic password/ACL/CRL and TLS/WSS identity SIGHUP reload with rollback, "
+        "atomic password/ACL and TLS/WSS identity/CA/CRL SIGHUP reload with rollback, "
         "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )

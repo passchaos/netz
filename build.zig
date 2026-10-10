@@ -973,7 +973,7 @@ pub fn build(b: *std.Build) void {
     );
     const mqtt_reloadable_identity_step = b.step(
         "test-mqtt-reloadable-identity",
-        "Test atomic MQTT TLS server identity reloads",
+        "Test atomic MQTT TLS identity, client CA, and CRL reloads",
     );
     mqtt_reloadable_identity_step.dependOn(
         &run_mqtt_reloadable_identity_tests.step,

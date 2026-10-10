@@ -318,6 +318,10 @@ pub fn run(
         paths.* = .{
             .certificate_file = configured.certfile,
             .private_key_file = configured.keyfile,
+            .client_ca_file = configured.cafile,
+            .client_ca_path = configured.capath,
+            .crl_file = configured.crlfile,
+            .require_client_certificate = configured.require_certificate,
         };
     }
     var identities = try reloadable_identity.Set.init(
@@ -328,72 +332,6 @@ pub fn run(
         &security.lock,
     );
     defer identities.deinit();
-    const client_cas = try allocator.alloc(
-        ?netz.tls.client_ca_file.File,
-        config.listeners.len,
-    );
-    defer allocator.free(client_cas);
-    @memset(client_cas, null);
-    defer for (client_cas) |*maybe_ca| {
-        if (maybe_ca.*) |*ca| ca.deinit();
-    };
-    const client_auth_paths = try allocator.alloc(
-        reloadable_security.ClientAuthPaths,
-        config.listeners.len,
-    );
-    defer allocator.free(client_auth_paths);
-    @memset(client_auth_paths, .{});
-    const client_auth_verifiers = try allocator.alloc(
-        reloadable_security.ClientAuthPolicy,
-        config.listeners.len,
-    );
-    defer allocator.free(client_auth_verifiers);
-    const client_auth_policies = try allocator.alloc(
-        ?mqtt.tls_runtime.ClientAuthPolicy,
-        config.listeners.len,
-    );
-    defer allocator.free(client_auth_policies);
-    @memset(client_auth_policies, null);
-    // Validate every credential before opening any listener. A malformed later
-    // identity must not leave an earlier configured port briefly exposed.
-    for (config.listeners, 0..) |configured, index| {
-        if (!configured.usesTls()) continue;
-        if (configured.cafile.len != 0 or configured.capath.len != 0) {
-            client_cas[index] = if (configured.capath.len != 0)
-                try netz.tls.client_ca_dir.loadCombined(
-                    allocator,
-                    io,
-                    std.Io.Dir.cwd(),
-                    if (configured.cafile.len != 0) configured.cafile else null,
-                    configured.capath,
-                )
-            else
-                try netz.tls.client_ca_file.load(
-                    allocator,
-                    io,
-                    std.Io.Dir.cwd(),
-                    configured.cafile,
-                );
-            client_auth_paths[index] = .{
-                .client_ca = &client_cas[index].?,
-                .crl_file = configured.crlfile,
-            };
-        }
-    }
-    try security.configureClientAuth(client_auth_paths);
-    for (config.listeners, 0..) |configured, index| {
-        if (client_cas[index]) |*ca| {
-            client_auth_verifiers[index] = security.clientAuthPolicy(index);
-            client_auth_policies[index] = .{
-                .verifier = client_auth_verifiers[index].clientVerifier(),
-                .certificate_authorities = ca.authorities(),
-                .requirement = if (configured.require_certificate)
-                    .required
-                else
-                    .optional,
-            };
-        }
-    }
     const has_reloadable_files = security.hasReloadableFiles() or
         identities.hasReloadableFiles();
     var reload_signal = if (has_reloadable_files)
@@ -440,7 +378,7 @@ pub fn run(
                     .{
                         .identity = identities.initialIdentity(index).?,
                         .identity_provider = identity_provider,
-                        .client_auth = client_auth_policies[index],
+                        .client_auth = identities.initialClientAuth(index),
                         .limits = listenerLimits(config, configured),
                         .tcp_nodelay = config.set_tcp_nodelay,
                     },
@@ -453,7 +391,7 @@ pub fn run(
                         .{
                             .identity = identities.initialIdentity(index).?,
                             .identity_provider = identity_provider,
-                            .client_auth = client_auth_policies[index],
+                            .client_auth = identities.initialClientAuth(index),
                             .allowed_origins = configured.websocket_origins.items,
                             .max_head_bytes = config.websocket_headers_size,
                             .limits = listenerLimits(config, configured),
