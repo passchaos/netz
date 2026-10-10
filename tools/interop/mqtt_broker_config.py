@@ -3343,6 +3343,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
 def run_modern_tls_identity_case(broker: Path, directory: Path) -> None:
     cases = (
         ("p384", "EC", "P-384", "ecdsa_secp384r1_sha384"),
+        ("p521", "EC", "P-521", "ecdsa_secp521r1_sha512"),
         ("ed25519", "ED25519", None, "ed25519"),
     )
     for name, algorithm, curve, signature_algorithm in cases:
@@ -3354,8 +3355,8 @@ def run_modern_tls_identity_case(broker: Path, directory: Path) -> None:
         key_command.extend(("-out", str(private_key)))
         run_openssl(*key_command)
         websocket_private_key = private_key
-        if name == "p384":
-            websocket_private_key = directory / "p384-server-sec1-key.pem"
+        if algorithm == "EC":
+            websocket_private_key = directory / f"{name}-server-sec1-key.pem"
             run_openssl(
                 "pkey",
                 "-in",
@@ -5062,7 +5063,7 @@ def main() -> None:
         "policy, ordered include_dir and global/per-listener security files, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
-        "policies, P-256/P-384/Ed25519/RSA TLS and required mTLS with OpenSSL verification, "
+        "policies, P-256/P-384/P-521/Ed25519/RSA TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "

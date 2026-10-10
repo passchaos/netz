@@ -998,7 +998,7 @@ Current protocol coverage includes:
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
-  listener-local P-256/P-384/Ed25519/RSA PEM `certfile`/`keyfile` and
+  listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile` and
   optional/required
   mTLS through strictly validated `cafile` and bounded TCP/TLS `capath` trust
   sources with `require_certificate`, plus owned certificate-CN

@@ -1,7 +1,7 @@
 //! Strict file-backed TLS server identities.
 //!
-//! This loader supports PEM X.509 chains with unencrypted P-256/P-384 SEC1 or
-//! PKCS#8 keys, RFC 8410 Ed25519 PKCS#8 keys, and 2048/3072/4096-bit RSA
+//! This loader supports PEM X.509 chains with unencrypted P-256/P-384/P-521
+//! SEC1 or PKCS#8 keys, RFC 8410 Ed25519 PKCS#8 keys, and 2048/3072/4096-bit RSA
 //! PKCS#1/PKCS#8 keys. Unsupported PEM labels, ambiguous DER, parameters that
 //! cannot be represented by the TLS signer, and certificate/key mismatches fail
 //! closed.
@@ -12,6 +12,7 @@ const vail = @import("vail");
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const Ed25519 = std.crypto.sign.Ed25519;
+const P521 = vail.crypto.p521;
 const Rsa = vail.crypto.rsa;
 const ServerIdentity = vail.tls.auth.ServerIdentity;
 
@@ -41,6 +42,7 @@ pub const Identity = struct {
     pub const KeyPair = union(enum) {
         ecdsa_p256_sha256: EcdsaP256Sha256.KeyPair,
         ecdsa_p384_sha384: EcdsaP384Sha384.KeyPair,
+        ecdsa_p521_sha512: *P521.KeyPair,
         ed25519: Ed25519.KeyPair,
         rsa_pss: *RsaKeyPair,
     };
@@ -71,6 +73,13 @@ pub const Identity = struct {
                 },
                 .ecdsa_p384_sha384 => |key_pair| .{
                     .ecdsa_p384_sha384 = .{ .key_pair = key_pair },
+                },
+                .ecdsa_p521_sha512 => |key_pair| .{
+                    .ecdsa_p521_sha512 = .{
+                        .key_pair = key_pair,
+                        // The stream handshake replaces this before signing.
+                        .io = undefined,
+                    },
                 },
                 .ed25519 => |key_pair| .{
                     .ed25519 = .{ .key_pair = key_pair },
@@ -386,6 +395,7 @@ const DerReader = struct {
 const oid_ec_public_key = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 };
 const oid_prime256v1 = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
 const oid_secp384r1 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
+const oid_secp521r1 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x23 };
 const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
 const oid_rsa_encryption = [_]u8{
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
@@ -409,7 +419,7 @@ fn parsePrivateKeyDer(
         return error.InvalidPrivateKey;
     }
     return switch (label) {
-        .sec1 => parseSec1PrivateKey(der, null, true),
+        .sec1 => parseSec1PrivateKey(allocator, der, null, true),
         .rsa_pkcs1 => .{
             .rsa_pss = try parseRsaPrivateKey(allocator, der),
         },
@@ -441,6 +451,8 @@ fn parsePkcs8PrivateKey(
             .p256
         else if (std.mem.eql(u8, curve_oid, &oid_secp384r1))
             .p384
+        else if (std.mem.eql(u8, curve_oid, &oid_secp521r1))
+            .p521
         else
             return error.InvalidPrivateKey;
     } else if (std.mem.eql(u8, algorithm_oid, &oid_ed25519))
@@ -456,7 +468,12 @@ fn parsePkcs8PrivateKey(
     const inner = try fields.read(0x04);
     if (!fields.done()) return error.InvalidPrivateKey;
     return switch (key_kind) {
-        .p256, .p384 => parseSec1PrivateKey(inner, key_kind, false),
+        .p256, .p384, .p521 => parseSec1PrivateKey(
+            allocator,
+            inner,
+            key_kind,
+            false,
+        ),
         .ed25519 => parseEd25519PrivateKey(inner),
     };
 }
@@ -533,14 +550,20 @@ fn deinitKeyPair(
         allocator.free(rsa.encoded);
         std.crypto.secureZero(Identity.RsaKeyPair, rsa[0..1]);
         allocator.destroy(rsa);
+    } else if (key_pair.* == .ecdsa_p521_sha512) {
+        const p521 = key_pair.ecdsa_p521_sha512;
+        p521.deinit();
+        std.crypto.secureZero(P521.KeyPair, p521[0..1]);
+        allocator.destroy(p521);
     }
     std.crypto.secureZero(u8, std.mem.asBytes(key_pair));
     key_pair.* = undefined;
 }
 
-const KeyKind = enum { p256, p384, ed25519 };
+const KeyKind = enum { p256, p384, p521, ed25519 };
 
 fn parseSec1PrivateKey(
+    allocator: std.mem.Allocator,
     der: []const u8,
     expected_kind: ?KeyKind,
     require_parameters: bool,
@@ -563,6 +586,8 @@ fn parseSec1PrivateKey(
             .p256
         else if (std.mem.eql(u8, curve_oid, &oid_secp384r1))
             .p384
+        else if (std.mem.eql(u8, curve_oid, &oid_secp521r1))
+            .p521
         else
             return error.InvalidPrivateKey;
         if (!parameter_fields.done()) return error.InvalidPrivateKey;
@@ -600,8 +625,22 @@ fn parseSec1PrivateKey(
             private_key,
             encoded_public_key,
         ) },
+        .p521 => .{
+            .ecdsa_p521_sha512 = try parseP521KeyPair(allocator, der),
+        },
         .ed25519 => return error.InvalidPrivateKey,
     };
+}
+
+fn parseP521KeyPair(
+    allocator: std.mem.Allocator,
+    der: []const u8,
+) Error!*P521.KeyPair {
+    const key_pair = try allocator.create(P521.KeyPair);
+    errdefer allocator.destroy(key_pair);
+    key_pair.* = P521.KeyPair.fromDer(der) catch
+        return error.InvalidPrivateKey;
+    return key_pair;
 }
 
 fn parseEcKeyPair(

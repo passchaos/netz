@@ -283,8 +283,8 @@ still rejects invalid credentials when a username is supplied. `certfile` and
 `keyfile` are listener-local and must occur together. Their presence upgrades
 `protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
 port is opened, every identity is loaded from a leaf-first PEM certificate
-chain and an unencrypted P-256/P-384 SEC1 or PKCS#8, RFC 8410 Ed25519 PKCS#8,
-or 2048/3072/4096-bit RSA PKCS#1/PKCS#8 private key. TLS-compatible constrained
+chain and an unencrypted P-256/P-384/P-521 SEC1 or PKCS#8, RFC 8410 Ed25519
+PKCS#8, or 2048/3072/4096-bit RSA PKCS#1/PKCS#8 private key. TLS-compatible constrained
 RSA-PSS PKCS#8 keys are also supported. Inputs are bounded, strictly decoded,
 prepared for allocation-free handshake signing, and checked against the leaf
 public key. `include_dir` is supported by the
