@@ -9,6 +9,18 @@ const zio = @import("zio");
 /// crosses into HTTP, WebSocket, QUIC, or the other protocol APIs.
 pub const BackendKind = enum { zio };
 
+/// Coroutine-stack capacity and high-water data reported by the runtime.
+/// Reserved virtual bytes are address space, not resident memory.
+pub const StackMetrics = struct {
+    configured_maximum_bytes: usize,
+    configured_initial_committed_bytes: usize,
+    active_stacks: usize,
+    retained_stacks: usize,
+    peak_active_stacks: usize,
+    peak_committed_bytes_per_stack: usize,
+    reserved_virtual_bytes: usize,
+};
+
 /// Return the zio event-loop's awake-clock snapshot when `io` belongs to the
 /// task currently running on that loop. Foreign `std.Io` implementations and
 /// calls outside a matching runtime retain their ordinary clock semantics.
@@ -48,6 +60,21 @@ pub const Backend = struct {
         return zioRuntime(self.runtime).io();
     }
 
+    /// Snapshot coroutine stack capacity without exposing a zio-specific type
+    /// through Netz's runtime facade.
+    pub fn stackMetrics(self: *Backend) StackMetrics {
+        const metrics = zioRuntime(self.runtime).stackMetrics();
+        return .{
+            .configured_maximum_bytes = metrics.configured_maximum_bytes,
+            .configured_initial_committed_bytes = metrics.configured_initial_committed_bytes,
+            .active_stacks = metrics.active_stacks,
+            .retained_stacks = metrics.retained_stacks,
+            .peak_active_stacks = metrics.peak_active_stacks,
+            .peak_committed_bytes_per_stack = metrics.peak_committed_bytes_per_stack,
+            .reserved_virtual_bytes = metrics.reserved_virtual_bytes,
+        };
+    }
+
     pub fn deinit(self: *Backend) void {
         zioRuntime(self.runtime).deinit();
         self.* = undefined;
@@ -65,6 +92,13 @@ test "runtime backend initializes zio behind std.Io" {
     try std.testing.expectEqual(BackendKind.zio, backend.kind);
     const io = backend.io();
     try std.testing.expect(io.userdata != null);
+
+    const metrics = backend.stackMetrics();
+    try std.testing.expectEqual(@as(usize, 8 * 1024 * 1024), metrics.configured_maximum_bytes);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), metrics.configured_initial_committed_bytes);
+    try std.testing.expectEqual(@as(usize, 0), metrics.active_stacks);
+    try std.testing.expectEqual(@as(usize, 0), metrics.retained_stacks);
+    try std.testing.expectEqual(@as(usize, 0), metrics.reserved_virtual_bytes);
 }
 
 test "runtime cached awake timestamp follows zio event-loop scans" {

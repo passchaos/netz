@@ -6803,6 +6803,18 @@ from 16.35% to 11.54%, and its former 6.17% child path below
 the event-loop poll snapshot. As above, percentages from different-duration
 profiles are explanatory call-path evidence rather than absolute CPU ratios.
 
+The zio dependency is subsequently pinned to
+`1b258ef7bd2042b1eb04c34c2ebbc522f118635d`. Its new `Runtime.stackMetrics()`
+snapshot separates the configured 8-MiB per-coroutine virtual ceiling from the
+256-KiB initial committed extent, and reports active/retained stacks, peak
+concurrency, the largest observed per-stack commit, and total virtual address
+space reserved by the pool. Netz exposes the same values through
+`runtime.Backend.stackMetrics()` without leaking a zio-specific type into its
+runtime facade. POSIX stack growth updates the high-water counter only when a
+guard fault expands committed pages; ordinary coroutine yields do not acquire
+a lock or update a counter. This provides workload evidence for future stack
+limit tuning instead of treating virtual reservation as RSS.
+
 An attempted follow-up that bypassed the timer mutex whenever the resuming
 task happened to run on the timer's loop was rejected before commit. Its
 isolated five-million-iteration arm/clear primitive fell from 60.43 to 27.84
