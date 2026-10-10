@@ -3974,6 +3974,16 @@ proxy evidence for the entire suite.
    five-shape durable QoS 2 control remained mixed at 0.9994x, 1.0070x,
    0.9938x, 0.9854x and 1.0058x, so no general speed claim is attached to this
    correctness fix.
+   Inflight slot reuse no longer scans the optional array for a tombstone.
+   Packet Identifier zero marks private free slots, whose indices form a list
+   stored entirely in existing `Inflight` tail padding; the active order head
+   carries the free-list head. There is no extra allocation, `Session` stays
+   400 bytes, and removing the optional tag reduces each physical slot from
+   144 to 128 bytes (256 KiB saved at 16,384 slots). A seven-pair, CPU-11
+   16,384-inflight tail-churn benchmark moved from 15,935 to 147 ns/op by
+   medians (paired median 0.00921x, 7/7 wins), while resume stayed 1.000x and
+   reconnect drain measured 0.9897x. The final ordinary-window durable QoS 2
+   control was neutral at 0.9981x, 1.0011x, 0.9941x, 1.0017x and 1.0068x.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

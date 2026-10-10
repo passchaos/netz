@@ -7003,6 +7003,48 @@ The complete 63,824,845-byte artifact is retained under
 `zig-out/mqtt-session-order-final-broker-ab`; its result-table SHA-256 is
 `9492a06a010fff8a9e37641660dd97c11f46f936277fc5abd1b629c59a5807f4`.
 
+Stable logical order made the remaining physical-slot cost independently
+visible: `appendOrReuseAssumeCapacity` still searched the complete inflight
+array for a tombstone. Inflight storage now uses Packet Identifier zero as its
+private free-slot marker and threads free indices through two `u16` fields in
+the record's existing tail padding. The active order head owns the free-list
+head, so there is no second allocation or larger Session object; removing the
+last active record clears the logical array while retaining its capacity. Debug
+statistics traverse both circular active order and the free chain, checking
+that together they cover every slot exactly once. This also removes the tagged
+optional around every entry: fixed-binary DWARF reports each slot falling from
+144 to 128 bytes (11.1%, or 256 KiB at 16,384 slots), while `Inflight` remains
+128 bytes and `Session` remains 400 bytes.
+
+A new benchmark fills 16,384 inflight records, repeatedly acknowledges the
+tail and immediately inserts its replacement, and therefore isolates the old
+worst-case tombstone search. Seven CPU-11 order-alternated fixed-binary pairs,
+each with seven internal 20,000-operation samples, reduced the median from
+15,935 to 147 ns/op. The paired candidate/baseline median was 0.00921x, with
+7/7 wins. Resume remained 1.000x, reconnect drain improved to 0.9897x by
+paired median, and the full-window empty path remained at 11 ns. Baseline,
+candidate, identical benchmark source and result-table SHA-256 values are
+respectively
+`c31b35218d43bdfdd361cbd17fc5fd3e899a870e8fc0a8443252676e5830d8b6`,
+`632cb513fb2ee91603f4b786c96502826ef2c81ece48875e113ccb3faaf44717`,
+`8828de18a82e6fcedd5cb94ab6546eaa8152b90852950d4a81a53748bb34d079`
+and
+`d7db2830160b9503074cc9b4e7c682e8f340d5e8f2a863064d4e3932cca51231`.
+Artifacts are retained under `zig-out/mqtt-session-free-slot-ab`.
+
+The corresponding five-pair durable QoS 2 broker control completed all 50
+arms with exact delivery counts and checksums. Throughput paired medians were
+0.9981x, 1.0011x, 0.9941x, 1.0017x and 1.0068x in the five-shape order, with
+overlapping ranges and no broad throughput claim. Baseline broker, candidate
+broker and fixed driver hashes are
+`6577b422bd02b70e89d3ee1f4d57ff9120f10ba3a122d72c759ef6290b7d5bcb`,
+`167d13799ab1e98be993fe6a6dcae72d0f506b77b77d64760b22de091c81edd8`
+and
+`30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The complete 63,827,365-byte artifact is retained under
+`zig-out/mqtt-session-free-slot-broker-ab`; its result-table SHA-256 is
+`f2dfc98bba49507efb4861a6db6041784532d6cd08a256d80dd169d65a37e98e`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

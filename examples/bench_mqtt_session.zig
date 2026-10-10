@@ -12,6 +12,8 @@ const fanout_samples: usize = 7;
 const full_window_inflight: usize = 16_384;
 const full_window_iterations: usize = 20_000;
 const full_window_samples: usize = 7;
+const inflight_churn_iterations: usize = 20_000;
+const inflight_churn_samples: usize = 7;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -137,6 +139,8 @@ pub fn main(init: std.process.Init) !void {
 
     const full_window = try benchmarkFullWindowDrain(io);
     checksum +%= full_window.checksum;
+    const inflight_churn = try benchmarkInflightSlotChurn(io);
+    checksum +%= inflight_churn.checksum;
 
     std.debug.print(
         \\MQTT persistent session benchmark
@@ -159,6 +163,9 @@ pub fn main(init: std.process.Init) !void {
         \\  full-window empty-drain iterations/sample: {d}
         \\  full-window empty-drain samples: {d}
         \\  full-window empty-drain median ns/op: {d}
+        \\  tail-slot churn iterations/sample: {d}
+        \\  tail-slot churn samples: {d}
+        \\  tail-slot churn median ns/op: {d}
         \\  checksum: {d}
         \\
     , .{
@@ -180,6 +187,9 @@ pub fn main(init: std.process.Init) !void {
         full_window_iterations,
         full_window_samples,
         full_window.median_ns,
+        inflight_churn_iterations,
+        inflight_churn_samples,
+        inflight_churn.median_ns,
         checksum,
     });
 }
@@ -192,6 +202,11 @@ const FanoutResult = struct {
 };
 
 const FullWindowResult = struct {
+    median_ns: u64,
+    checksum: u64,
+};
+
+const InflightChurnResult = struct {
     median_ns: u64,
     checksum: u64,
 };
@@ -261,6 +276,72 @@ fn benchmarkFullWindowDrain(io: std.Io) !FullWindowResult {
     std.mem.sort(u64, &samples, {}, lessThanU64);
     return .{
         .median_ns = samples[full_window_samples / 2],
+        .checksum = checksum,
+    };
+}
+
+fn benchmarkInflightSlotChurn(io: std.Io) !InflightChurnResult {
+    const allocator = std.heap.smp_allocator;
+    var store = netz.mqtt.session.Store.init(allocator, .{
+        .max_sessions = 1,
+        .max_queued_per_session = full_window_inflight,
+        .max_inflight_per_session = full_window_inflight,
+    });
+    defer store.deinit();
+    const opened = try store.open("inflight-churn", false, 3_600, .zero);
+    for (0..full_window_inflight) |_| {
+        _ = try store.enqueuePublish(
+            opened.handle,
+            "bench/inflight-churn",
+            "payload",
+            .{ .qos = .at_least_once, .now = .zero },
+        );
+    }
+
+    const initial = try allocator.alloc(
+        netz.mqtt.session.Transmission,
+        full_window_inflight,
+    );
+    defer allocator.free(initial);
+    const drained = try store.drainInto(
+        opened.handle,
+        .zero,
+        @intCast(full_window_inflight),
+        initial,
+    );
+    if (drained.len != full_window_inflight) {
+        return error.InvalidBenchmarkState;
+    }
+    var packet_id = drained[drained.len - 1].publish.packet_id;
+    var checksum: u64 = packet_id;
+    var samples: [inflight_churn_samples]u64 = undefined;
+    for (&samples) |*sample| {
+        const started = nowNs(io);
+        for (0..inflight_churn_iterations) |_| {
+            std.mem.doNotOptimizeAway(&store);
+            if (try store.handleAck(
+                opened.handle,
+                .puback,
+                packet_id,
+                0,
+            ) != .completed) return error.InvalidBenchmarkState;
+            const replacement = try store.beginImmediatePublish(
+                opened.handle,
+                "bench/inflight-churn",
+                "payload",
+                .{ .qos = .at_least_once, .now = .zero },
+                @intCast(full_window_inflight),
+            );
+            packet_id = replacement.packet_id;
+            checksum +%= packet_id;
+            std.mem.doNotOptimizeAway(packet_id);
+        }
+        sample.* = (nowNs(io) -| started) / inflight_churn_iterations;
+    }
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.sort(u64, &samples, {}, lessThanU64);
+    return .{
+        .median_ns = samples[inflight_churn_samples / 2],
         .checksum = checksum,
     };
 }
