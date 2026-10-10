@@ -41,7 +41,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail and passchaos/vort"
             exit 1
           fi
 
@@ -49,9 +49,18 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
-          ref: fc856b91d944bd390dfedc600b8c88ba4b994e6a
+          ref: 5fcab62638ee361df370d01986d8afebfd673b9c
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vail
+          persist-credentials: false
+
+      - name: Checkout pinned vort
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vort
+          ref: eed23ef7ce522ff908e04d8a8c24ebdb498cb78a
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vort
           persist-credentials: false
 
       - name: Checkout pinned pbz
@@ -71,7 +80,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/.cache/zig
-          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'pbz/build.zig.zon') }}
+          key: ${{ runner.os }}-zig-0.16-${{ hashFiles('netz/build.zig.zon', 'vail/build.zig.zon', 'vort/build.zig.zon', 'pbz/build.zig.zon') }}
           restore-keys: |
             ${{ runner.os }}-zig-0.16-
 
@@ -181,7 +190,7 @@ jobs:
           DEPENDENCIES_TOKEN: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
         run: |
           if [ -z "$DEPENDENCIES_TOKEN" ]; then
-            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail"
+            echo "::error::Configure NETZ_DEPENDENCIES_TOKEN with read access to passchaos/vail and passchaos/vort"
             exit 1
           fi
 
@@ -189,9 +198,18 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
-          ref: fc856b91d944bd390dfedc600b8c88ba4b994e6a
+          ref: 5fcab62638ee361df370d01986d8afebfd673b9c
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vail
+          persist-credentials: false
+
+      - name: Checkout pinned vort
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: passchaos/vort
+          ref: eed23ef7ce522ff908e04d8a8c24ebdb498cb78a
+          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
+          path: vort
           persist-credentials: false
 
       - name: Checkout pinned pbz

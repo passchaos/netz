@@ -23,9 +23,9 @@ VORT_REVISION = "eed23ef7ce522ff908e04d8a8c24ebdb498cb78a"
 PBZ_REVISION = "6513ef1f8b130b308bd86ba0bd02f6acc2be64e8"
 ZIO_SOURCE = (
     "git+https://github.com/passchaos/zio"
-    "#4daa0c0a9522a37c4d28e3dcec2515cc955abe71"
+    "#1b258ef7bd2042b1eb04c34c2ebbc522f118635d"
 )
-ZIO_PACKAGE_HASH = "zio-0.19.1-xHbVVJXzKwAKLRAABWeDvQG9Dg1kf9FM3haWG0YqtScn"
+ZIO_PACKAGE_HASH = "zio-0.19.1-xHbVVAE2LACgCMZ_8iklH7CP4dZb0ECdrdhYPHjeNauz"
 ROOT_FILES = {
     ".gitignore",
     "LICENSE",

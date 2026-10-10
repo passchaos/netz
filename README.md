@@ -1239,7 +1239,7 @@ authenticate those inputs.
 
 ```sh
 zig build test
-# Build a deterministic source archive containing pinned vail, pbz, and zio.
+# Build a deterministic source archive containing pinned vail, vort, pbz, and zio.
 zig build release-source
 # Extract the archive in isolation and compile its public-package test.
 zig build verify-release-source
@@ -1927,17 +1927,17 @@ userspace accounting as kernel/interface capture; `--traffic` and `--stats`
 are deliberately mutually exclusive.
 
 The build script pins the package to Zig `0.16.0`.
-The development package manifest uses sibling `../vail` and `../pbz` checkouts
-and pins `zio` by immutable URL and content hash. CI checks out exact vail and
-pbz commits into that layout. WebSocket/gRPC DEFLATE support is included under
-`src/internal`, and the published path set includes all example, benchmark,
-documentation, test, and interop sources referenced by the build graph. The
+The development package manifest uses sibling `../vail`, `../vort`, and
+`../pbz` checkouts and pins `zio` by immutable URL and content hash. CI checks
+out exact vail, vort, and pbz commits into that layout. The published path set
+includes all example, benchmark, documentation, test, and interop sources
+referenced by the build graph. The
 `release-source` target emits `zig-out/artifacts/netz-<version>-source.tar.gz`
 and its `.sha256` sidecar
-with those exact vail and pbz commits plus the hash-verified zio package under
-`deps/`, rewrites the release manifest to local paths, and records SHA-256 for
-every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty source
-repositories or dependency revision drift. `verify-release-source` checks the
+with those exact vail, vort, and pbz commits plus the hash-verified zio package
+under `deps/`, rewrites the release manifest to local paths, and records
+SHA-256 for every packaged file in `RELEASE-MANIFEST.json`. It rejects dirty
+source repositories or dependency revision drift. `verify-release-source` checks the
 whole-archive checksum, archive shape and internal file hashes, extracts it
 outside the workspace layout, builds its
 public-package test, then imports the `.tar.gz` itself through a `file://` URL
@@ -2038,11 +2038,12 @@ implementation (io_uring with automatic epoll fallback on Linux, plus portable
 backends elsewhere) and reports initialization failure rather than silently
 changing execution models. The dependency is pinned to the project-maintained
 `passchaos/zio` Zig-0.16 branch at v0.19.1 commit
-`4daa0c0a9522a37c4d28e3dcec2515cc955abe71`. It includes the multi-message UDP
+`1b258ef7bd2042b1eb04c34c2ebbc522f118635d`. It includes the multi-message UDP
 receive support required by shared-endpoint batching and treats unsupported
 `MADV_NOHUGEPAGE` as the optional kernel hint it is, without Debug-build stack
-traces. Neither zio nor OS-specific rings leak into the HTTP, WebSocket, QUIC,
-or other protocol APIs.
+traces. It also exposes coroutine-stack capacity and committed high-water
+metrics without adding work to ordinary context switches. Neither zio nor
+OS-specific rings leak into the HTTP, WebSocket, QUIC, or other protocol APIs.
 All runnable non-benchmark examples construct this backend and schedule local
 concurrent work through `std.Io.async`; benchmark and low-level white-box code
 may still construct specialized I/O fixtures to measure or fault-inject a

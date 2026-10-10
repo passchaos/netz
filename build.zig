@@ -1113,6 +1113,13 @@ pub fn build(b: *std.Build) void {
     source_archive_tests.addFileInput(b.path(
         "tools/release/archive_checksum.py",
     ));
+    source_archive_tests.addFileInput(b.path("build.zig.zon"));
+    source_archive_tests.addFileInput(b.path(
+        ".github/workflows/ci.yml",
+    ));
+    source_archive_tests.addFileInput(b.path(
+        ".github/workflows/release.yml",
+    ));
     const release_tag_tests = b.addSystemCommand(&.{
         "python3",
         "tools/release/validate_tag_test.py",

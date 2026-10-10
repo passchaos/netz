@@ -29,6 +29,8 @@ assert CHECKSUM_SPEC is not None and CHECKSUM_SPEC.loader is not None
 CHECKSUM = importlib.util.module_from_spec(CHECKSUM_SPEC)
 CHECKSUM_SPEC.loader.exec_module(CHECKSUM)
 
+REPOSITORY_ROOT = Path(__file__).parents[2]
+
 
 def initialize_repository(root: Path, files: dict[str, bytes]) -> str:
     for relative, data in files.items():
@@ -70,8 +72,8 @@ class SourceArchiveTest(unittest.TestCase):
         .vail = .{ .path = \"../vail\" },
         .vort = .{ .path = \"../vort\" },
         .zio = .{
-            .url = \"git+https://github.com/passchaos/zio#4daa0c0a9522a37c4d28e3dcec2515cc955abe71\",
-            .hash = \"zio-0.19.1-xHbVVJXzKwAKLRAABWeDvQG9Dg1kf9FM3haWG0YqtScn\",
+            .url = \"git+https://github.com/passchaos/zio#1b258ef7bd2042b1eb04c34c2ebbc522f118635d\",
+            .hash = \"zio-0.19.1-xHbVVAE2LACgCMZ_8iklH7CP4dZb0ECdrdhYPHjeNauz\",
         },
         .pbz = .{ .path = \"../pbz\" },
     },
@@ -275,6 +277,43 @@ class SourceArchiveTest(unittest.TestCase):
         checksum.write_text("0" * 64 + "  other.tar.gz\n", encoding="ascii")
         with self.assertRaisesRegex(RuntimeError, "checksum names"):
             CHECKSUM.verify(archive, checksum)
+
+
+class RepositoryDependencyPinTest(unittest.TestCase):
+    def test_workflows_and_release_generator_use_the_same_dependencies(self) -> None:
+        manifest = (REPOSITORY_ROOT / "build.zig.zon").read_text(encoding="utf-8")
+        self.assertIn(f'.url = "{SOURCE_ARCHIVE.ZIO_SOURCE}"', manifest)
+        self.assertIn(
+            f'.hash = "{SOURCE_ARCHIVE.ZIO_PACKAGE_HASH}"',
+            manifest,
+        )
+
+        ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        release = (REPOSITORY_ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        sibling_pins = {
+            "vail": SOURCE_ARCHIVE.VAIL_REVISION,
+            "vort": SOURCE_ARCHIVE.VORT_REVISION,
+            "pbz": SOURCE_ARCHIVE.PBZ_REVISION,
+        }
+        for name, revision in sibling_pins.items():
+            checkout_lines = [
+                f"repository: passchaos/{name}",
+                f"          ref: {revision}",
+            ]
+            if name in ("vail", "vort"):
+                checkout_lines.append(
+                    "          token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}"
+                )
+            checkout_lines.append(f"          path: {name}")
+            checkout = "\n".join(checkout_lines)
+            self.assertEqual(2, ci.count(checkout), name)
+            self.assertEqual(1, release.count(checkout), name)
+
+        self.assertIn("'vort/build.zig.zon'", ci)
 
 
 if __name__ == "__main__":
