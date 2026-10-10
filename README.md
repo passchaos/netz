@@ -162,6 +162,9 @@ the source
 checkout currently uses sibling `../vail`, `../vort`, and `../pbz` paths, repository
 administrators must configure the read-only `NETZ_DEPENDENCIES_TOKEN` secret
 for the private dependency checkouts.
+Pull requests also compile the complete library and public-package test surfaces
+for baseline AArch64/x86_64 Linux, x86_64 Windows, and AArch64/x86_64 macOS
+without attempting to execute foreign binaries.
 
 Use `zig build test-lib` for the complete in-process library suite without
 external interoperability and release-tool checks; `zig build test` remains
@@ -1239,6 +1242,7 @@ authenticate those inputs.
 
 ```sh
 zig build test
+zig build test-compile -Dtarget=x86_64-windows-gnu
 # Build a deterministic source archive containing pinned vail, vort, pbz, and zio.
 zig build release-source
 # Extract the archive in isolation and compile its public-package test.

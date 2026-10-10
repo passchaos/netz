@@ -310,10 +310,22 @@ class RepositoryDependencyPinTest(unittest.TestCase):
                 )
             checkout_lines.append(f"          path: {name}")
             checkout = "\n".join(checkout_lines)
-            self.assertEqual(2, ci.count(checkout), name)
+            self.assertEqual(3, ci.count(checkout), name)
             self.assertEqual(1, release.count(checkout), name)
 
         self.assertIn("'vort/build.zig.zon'", ci)
+        for target in (
+            "aarch64-linux-gnu",
+            "x86_64-linux-gnu",
+            "x86_64-windows-gnu",
+            "aarch64-macos-none",
+            "x86_64-macos-none",
+        ):
+            self.assertEqual(1, ci.count(target), target)
+        self.assertIn(
+            "zig build test-compile -j1 -Dtarget=${{ matrix.target }} --summary all",
+            ci,
+        )
 
 
 if __name__ == "__main__":

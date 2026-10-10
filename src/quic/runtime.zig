@@ -2023,8 +2023,22 @@ fn gsoFallbackError(err: net.Socket.SendError) bool {
 }
 
 fn rawSetSockOpt(fd: std.posix.socket_t, level: i32, optname: u32, opt: []const u8) bool {
+    if (comptime builtin.os.tag == .windows) {
+        // std.Io's Windows socket handle is an AFD handle, not a Winsock
+        // SOCKET. Optional POSIX socket tuning therefore remains disabled on
+        // this backend instead of calling std.posix.setsockopt.
+        return unsupportedRawSetSockOpt(fd, level, optname, opt);
+    }
     std.posix.setsockopt(fd, level, optname, opt) catch return false;
     return true;
+}
+
+fn unsupportedRawSetSockOpt(fd: std.posix.socket_t, level: i32, optname: u32, opt: []const u8) bool {
+    _ = fd;
+    _ = level;
+    _ = optname;
+    _ = opt;
+    return false;
 }
 
 fn ecnCodepointBits(ecn: quic.packet_space.EcnCodepoint) u32 {

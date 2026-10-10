@@ -79,6 +79,12 @@ pub fn build(b: *std.Build) void {
         "Compile and test the public Netz package surface",
     );
     test_package_step.dependOn(&run_package_tests.step);
+    const test_compile_step = b.step(
+        "test-compile",
+        "Compile library and public-package tests without running them",
+    );
+    test_compile_step.dependOn(&lib_tests.step);
+    test_compile_step.dependOn(&package_tests.step);
     const parser_fuzz_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("test/parser_fuzz_test.zig"),

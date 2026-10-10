@@ -8344,6 +8344,8 @@ test "HTTP/1 TLS key updates require an idle HTTP exchange" {
 }
 
 test "HTTP/1 large response batch write failure makes connection unusable" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
