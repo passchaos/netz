@@ -1610,6 +1610,9 @@ MQTT_QOS=2 MQTT_SESSION_EXPIRY_SECONDS=3600 \
 # two-shape fixed-binary timing remains neutral.
 # Exact-delivery runs use at least 1,024 queue slots and cover the longer phase.
 # An explicit override must be at least that derived common bound.
+# Router subscription totals are maintained transactionally, so broker route
+# planning no longer scans the tombstone-preserving subscription table before
+# every PUBLISH. See docs/benchmark-baseline.md for the fixed-binary A/B.
 MQTT_MAX_QUEUED_MESSAGES=5000 MESSAGES=5000 \
   zig build compare-mqtt-mosquitto -Doptimize=ReleaseFast
 zig build bench-quic-short-packet -Doptimize=ReleaseFast

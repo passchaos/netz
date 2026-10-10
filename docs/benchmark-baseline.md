@@ -7057,6 +7057,30 @@ The complete 63,827,365-byte artifact is retained under
 `zig-out/mqtt-session-free-slot-broker-ab`; its result-table SHA-256 is
 `f2dfc98bba49507efb4861a6db6041784532d6cd08a256d80dd169d65a37e98e`.
 
+The MQTT router now maintains exact active and shared-subscription counts as
+part of successful subscribe, replacement, unsubscribe, and bulk subscriber
+removal transactions. `Broker.matchRoutesForPublisherLocked` therefore obtains
+its safe output upper bound in O(1) instead of scanning the complete
+tombstone-preserving subscription array before every PUBLISH. A dedicated
+ReleaseFast benchmark used 4,098 live subscriptions and one million count
+queries in each of seven CPU-4-pinned, order-alternated fixed-binary pairs. The
+baseline median was 2,359,466,335 ns total (2,359 ns/query); the candidate
+median was 769,100 ns total (769 ps/query), a 0.0003260x ratio, or about 3,068x
+lower latency. Every run produced the identical 4,098,000,000 count checksum.
+The baseline, candidate, and result-table SHA-256 values are respectively
+`e697e7d8779bd30380bc0a80594af37c93eef2f5e45cb41d83c7b9ae764ffe60`,
+`828f22b4e6b18d165ecc49c03e53bdd3b5a29ed52df86e359bb83a1c7aa3863d`,
+and `4f51bef06230163d173090cb7aa7215c17fb9373933749ca28c5865624c0eaaa`.
+Artifacts are retained under `zig-out/mqtt-router-count-ab`.
+
+A separate seven-pair, fixed-binary fanout-32 durable QoS 2 control pinned the
+driver and broker to CPUs 4 and 5, used 1,000 warmups plus 10,000 measured
+publishes, and completed 320,000 exact deliveries per arm. Candidate/baseline
+paired medians were 1.0007x for throughput, 0.9997x for p50, and 0.9820x for
+p99, with overlapping samples. The application-scale result is therefore
+neutral; this change is retained for its deterministic removal of an O(n)
+operation whose cost otherwise grows with subscription-table history.
+
 The broker receive loop now passes a caller-owned `BrokerEvent` output slot to
 the packet reader instead of returning the large tagged union by value. The
 original return-value API remains as a compatibility wrapper. Generated

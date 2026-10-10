@@ -92,6 +92,10 @@ pub const Router = struct {
     options: Options,
     nodes: std.ArrayList(Node) = .empty,
     entries: std.ArrayList(?Entry) = .empty,
+    /// Live entry counts are maintained transactionally so broker hot paths do
+    /// not rescan the tombstone-preserving entry table before every PUBLISH.
+    active_entry_count: usize = 0,
+    shared_entry_count: usize = 0,
     // Route representatives store `shared_group_index`, so group positions must
     // remain stable across unsubscribe.  Empty groups become tombstones that a
     // later group can reuse instead of compacting and invalidating indexes.
@@ -129,21 +133,14 @@ pub const Router = struct {
     }
 
     pub fn subscriptionCount(self: Router) usize {
-        var count: usize = 0;
-        for (self.entries.items) |entry| count += @intFromBool(entry != null);
-        return count;
+        return self.active_entry_count;
     }
 
     /// Count shared-subscription members, matching Mosquitto's
     /// `$SYS/broker/shared_subscriptions/count` semantics. This counts each
     /// client/filter membership, not only distinct `{group, filter}` keys.
     pub fn sharedSubscriptionCount(self: Router) usize {
-        var count: usize = 0;
-        for (self.entries.items) |maybe_entry| {
-            const entry = maybe_entry orelse continue;
-            count += @intFromBool(entry.shared_group != null);
-        }
-        return count;
+        return self.shared_entry_count;
     }
 
     pub fn subscribe(self: *Router, subscriber_id: SubscriberId, subscription: mqtt.Subscription) Error!void {
@@ -242,6 +239,8 @@ pub const Router = struct {
             try self.appendRouteEntry(node_index, multi_level, entry_index);
             errdefer self.removeRouteEntry(node_index, multi_level, entry_index);
         }
+        self.active_entry_count += 1;
+        self.shared_entry_count += @intFromBool(parsed.group != null);
         return false;
     }
 
@@ -269,8 +268,11 @@ pub const Router = struct {
         } else {
             self.removeRouteEntry(node_index, multi_level, entry_index);
         }
+        const was_shared = entry.shared_group != null;
         entry.deinit(self.allocator);
         self.entries.items[entry_index] = null;
+        self.active_entry_count -= 1;
+        self.shared_entry_count -= @intFromBool(was_shared);
     }
 
     /// Remove every subscription owned by one live network connection.
@@ -1252,6 +1254,50 @@ test "MQTT router unsubscribe preserves shared cursor safety" {
     const matches = try router.matchInto("a/c", &storage);
     try std.testing.expectEqual(@as(usize, 1), matches.len);
     try std.testing.expectEqual(@as(SubscriberId, 1), matches[0].subscriber_id);
+}
+
+test "MQTT router cached subscription counts track replacement and removal" {
+    const allocator = std.testing.allocator;
+    var router = try Router.init(allocator);
+    defer router.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 0), router.sharedSubscriptionCount());
+
+    try router.subscribe(1, .{ .topic_filter = "devices/+" });
+    try router.subscribe(2, .{ .topic_filter = "$share/work/devices/#" });
+    try router.subscribe(3, .{ .topic_filter = "$share/work/devices/#" });
+    try std.testing.expectEqual(@as(usize, 3), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 2), router.sharedSubscriptionCount());
+
+    try std.testing.expectError(
+        error.InvalidSubscription,
+        router.subscribe(4, .{
+            .topic_filter = "$share/work/devices/#",
+            .no_local = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 3), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 2), router.sharedSubscriptionCount());
+
+    try router.subscribe(2, .{
+        .topic_filter = "$share/work/devices/#",
+        .qos = .exactly_once,
+    });
+    try std.testing.expectEqual(@as(usize, 3), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 2), router.sharedSubscriptionCount());
+
+    try router.unsubscribe(2, "$share/work/devices/#");
+    try std.testing.expectEqual(@as(usize, 2), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 1), router.sharedSubscriptionCount());
+
+    try std.testing.expectEqual(@as(usize, 1), try router.removeSubscriber(1));
+    try std.testing.expectEqual(@as(usize, 1), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 1), router.sharedSubscriptionCount());
+
+    try std.testing.expectEqual(@as(usize, 1), try router.removeSubscriber(3));
+    try std.testing.expectEqual(@as(usize, 0), router.subscriptionCount());
+    try std.testing.expectEqual(@as(usize, 0), router.sharedSubscriptionCount());
 }
 
 test "MQTT router replaces repeated subscription options" {

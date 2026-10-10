@@ -3,6 +3,7 @@ const netz = @import("netz");
 
 const filter_count: usize = 4096;
 const iterations: usize = 20_000;
+const count_iterations: usize = 1_000_000;
 const shared_member_count: usize = 64;
 const shared_iterations: usize = 100_000;
 
@@ -40,6 +41,14 @@ pub fn main() !void {
     var matches: [8]netz.mqtt.router.Match = undefined;
     const topic = "devices/2047/state";
 
+    const count_start = nowNs(io);
+    var count_checksum: usize = 0;
+    for (0..count_iterations) |_| {
+        std.mem.doNotOptimizeAway(&router);
+        count_checksum +%= router.subscriptionCount();
+    }
+    const count_ns = nowNs(io) -| count_start;
+
     const router_start = nowNs(io);
     var router_total: usize = 0;
     for (0..iterations) |_| {
@@ -71,6 +80,7 @@ pub fn main() !void {
         \\  io backend: zio-std-io
         \\  filters: {d}
         \\  iterations: {d}
+        \\  subscription count iterations: {d}, total ns: {d}, ps/op: {d}, checksum: {d}
         \\  router matches: {d}, ns/op: {d}
         \\  linear matches: {d}, ns/op: {d}
         \\  router speedup: {d}.{d:0>2}x
@@ -85,6 +95,10 @@ pub fn main() !void {
     , .{
         filters.items.len,
         iterations,
+        count_iterations,
+        count_ns,
+        (count_ns *| 1000) / count_iterations,
+        count_checksum,
         router_total,
         router_ns / iterations,
         linear_total,
