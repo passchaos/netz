@@ -80,7 +80,7 @@ pub fn filtersOverlap(left: []const u8, right: []const u8) bool {
     }
 }
 
-fn effectiveFilter(filter: []const u8) []const u8 {
+pub fn effectiveFilter(filter: []const u8) []const u8 {
     if (!std.mem.startsWith(u8, filter, "$share/")) return filter;
     const rest = filter["$share/".len..];
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse unreachable;

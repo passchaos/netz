@@ -203,9 +203,10 @@ const TlsBridgePeer = struct {
 
 test "bridge rule validates bounded inbound mappings" {
     try (Rule{
-        .filter = "sensors/+/state",
+        .filter = "remote/sensors/+/state",
         .qos = .at_least_once,
         .local_prefix = "upstream/",
+        .remote_prefix = "remote/",
     }).validate();
     try (Rule{
         .filter = "#",
@@ -227,6 +228,50 @@ test "bridge rule validates bounded inbound mappings" {
             .filter = "#",
             .local_prefix = &[_]u8{ 0xff, '/' },
         }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidTopic,
+        (Rule{ .filter = "remote/#", .remote_prefix = "bad/+" }).validate(),
+    );
+    try std.testing.expectError(
+        error.InvalidBridgePrefix,
+        (Rule{ .filter = "other/#", .remote_prefix = "remote/" }).validate(),
+    );
+    try (Rule{
+        .filter = "$share/workers/remote/#",
+        .remote_prefix = "remote/",
+    }).validate();
+}
+
+test "bridge rule strips remote prefix before adding local prefix" {
+    const allocator = std.testing.allocator;
+    const rule = Rule{
+        .filter = "remote/sensors/#",
+        .qos = .at_least_once,
+        .local_prefix = "local/",
+        .remote_prefix = "remote/",
+    };
+    const mapped = try rule.mapTopicAlloc(
+        allocator,
+        "remote/sensors/room-1/state",
+    );
+    defer allocator.free(mapped);
+    try std.testing.expectEqualStrings("local/sensors/room-1/state", mapped);
+
+    const parent = try (Rule{
+        .filter = "remote/#",
+        .local_prefix = "local/",
+        .remote_prefix = "remote/",
+    }).mapTopicAlloc(allocator, "remote");
+    defer allocator.free(parent);
+    try std.testing.expectEqualStrings("local/", parent);
+
+    try std.testing.expectError(
+        error.EmptyMappedTopic,
+        (Rule{
+            .filter = "remote/#",
+            .remote_prefix = "remote/",
+        }).mapTopicAlloc(allocator, "remote"),
     );
 }
 
@@ -556,6 +601,7 @@ test "bridge multi-rule constructor owns every filter and prefix" {
 
     var first_filter: [8]u8 = "sensor/#".*;
     var first_prefix: [4]u8 = "one/".*;
+    var first_remote_prefix: [7]u8 = "sensor/".*;
     var second_filter: [9]u8 = "command/#".*;
     var second_prefix: [4]u8 = "two/".*;
     var shutdown: std.Io.Event = .unset;
@@ -567,7 +613,11 @@ test "bridge multi-rule constructor owns every filter and prefix" {
         .{
             .connect = .{ .client_id = "owned-many" },
             .rules = &.{
-                .{ .filter = &first_filter, .local_prefix = &first_prefix },
+                .{
+                    .filter = &first_filter,
+                    .local_prefix = &first_prefix,
+                    .remote_prefix = &first_remote_prefix,
+                },
                 .{ .filter = &second_filter, .local_prefix = &second_prefix },
             },
         },
@@ -576,12 +626,14 @@ test "bridge multi-rule constructor owns every filter and prefix" {
     defer bridge.deinit();
     @memset(&first_filter, 'x');
     @memset(&first_prefix, 'x');
+    @memset(&first_remote_prefix, 'x');
     @memset(&second_filter, 'x');
     @memset(&second_prefix, 'x');
 
     try std.testing.expectEqual(@as(usize, 2), bridge.rules.len);
     try std.testing.expectEqualStrings("sensor/#", bridge.rule.filter);
     try std.testing.expectEqualStrings("one/", bridge.rule.local_prefix);
+    try std.testing.expectEqualStrings("sensor/", bridge.rule.remote_prefix);
     try std.testing.expectEqualStrings("command/#", bridge.rules[1].filter);
     try std.testing.expectEqualStrings("two/", bridge.rules[1].local_prefix);
 }

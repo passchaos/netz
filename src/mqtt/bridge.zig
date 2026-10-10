@@ -36,19 +36,23 @@ pub const Error = broker_mod.Error || reconnect.Error || error{
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
     MissingBridgeIdentifier,
+    InvalidBridgePrefix,
     InvalidBridgeQoS,
     QoS2RequiresPersistentSession,
     QoS2RequiresCommitLog,
     TopicOutsideBridgeRule,
+    EmptyMappedTopic,
 };
 
-/// One remote subscription mapped into a literal local Topic Name prefix.
+/// One effective remote subscription mapped between literal topic prefixes.
 ///
 /// `filter` may contain MQTT wildcards and is installed unchanged on the
-/// remote broker. `local_prefix` is not a Topic Filter: it must be empty or a
-/// valid literal Topic Name fragment. Mapping concatenates the prefix and the
-/// complete remote Topic Name, so `local_prefix = "upstream/"` maps
-/// `sensors/room` to `upstream/sensors/room`.
+/// remote broker. `remote_prefix` must be a literal prefix of the effective
+/// filter (inside a shared-subscription wrapper); it is removed from a
+/// delivered Topic Name before `local_prefix` is prepended. Both prefixes are
+/// empty or valid literal Topic Name fragments. For example, filter
+/// `remote/sensors/#`, remote prefix `remote/`, and local prefix `local/` map
+/// `remote/sensors/room` to `local/sensors/room`.
 ///
 /// QoS 2 additionally requires `Options.bridge_id` and a persistent upstream
 /// Session so the bridge can join the remote transaction to the local broker's
@@ -58,19 +62,19 @@ pub const Rule = struct {
     filter: []const u8,
     qos: mqtt.QoS = .at_most_once,
     local_prefix: []const u8 = "",
+    remote_prefix: []const u8 = "",
 
     pub fn validate(self: Rule) Error!void {
         try mqtt.validateTopicFilter(self.filter);
-        if (self.local_prefix.len == 0) return;
-        // A trailing slash intentionally permits a caller to create a new
-        // level boundary. Validate a completed Topic Name with a literal
-        // suffix so `"prefix/"` remains useful while wildcard/NUL/UTF-8
-        // errors are still rejected.
-        if (self.local_prefix.len >= std.math.maxInt(u16)) {
-            return error.InvalidTopic;
+        try validatePrefix(self.local_prefix);
+        try validatePrefix(self.remote_prefix);
+        if (self.remote_prefix.len != 0 and !std.mem.startsWith(
+            u8,
+            rule_helpers.effectiveFilter(self.filter),
+            self.remote_prefix,
+        )) {
+            return error.InvalidBridgePrefix;
         }
-        try mqtt.validateUtf8String(self.local_prefix);
-        if (mqtt.hasWildcards(self.local_prefix)) return error.InvalidTopic;
     }
 
     /// Allocate the canonical local Topic Name for a matching remote topic.
@@ -85,16 +89,33 @@ pub const Rule = struct {
         if (!mqtt.topicMatchesFilter(remote_topic, self.filter)) {
             return error.TopicOutsideBridgeRule;
         }
+        const visible = if (std.mem.startsWith(
+            u8,
+            remote_topic,
+            self.remote_prefix,
+        ))
+            remote_topic[self.remote_prefix.len..]
+        else if (self.remote_prefix.len != 0 and
+            self.remote_prefix[self.remote_prefix.len - 1] == '/' and
+            std.mem.eql(
+                u8,
+                remote_topic,
+                self.remote_prefix[0 .. self.remote_prefix.len - 1],
+            ))
+            ""
+        else
+            return error.TopicOutsideBridgeRule;
         const mapped_len = std.math.add(
             usize,
             self.local_prefix.len,
-            remote_topic.len,
+            visible.len,
         ) catch return error.InvalidTopic;
+        if (mapped_len == 0) return error.EmptyMappedTopic;
         if (mapped_len > std.math.maxInt(u16)) return error.InvalidTopic;
         const mapped = try allocator.alloc(u8, mapped_len);
         errdefer allocator.free(mapped);
         @memcpy(mapped[0..self.local_prefix.len], self.local_prefix);
-        @memcpy(mapped[self.local_prefix.len..], remote_topic);
+        @memcpy(mapped[self.local_prefix.len..], visible);
         try mqtt.validateTopicName(mapped);
         return mapped;
     }
@@ -109,6 +130,15 @@ pub const Rule = struct {
         return rule_helpers.filtersOverlap(self.filter, other.filter);
     }
 };
+
+fn validatePrefix(prefix: []const u8) Error!void {
+    if (prefix.len == 0) return;
+    // A trailing slash intentionally permits a caller to create a new level
+    // boundary. UTF-8 and wildcard errors remain distinguishable to callers.
+    if (prefix.len >= std.math.maxInt(u16)) return error.InvalidTopic;
+    try mqtt.validateUtf8String(prefix);
+    if (mqtt.hasWildcards(prefix)) return error.InvalidTopic;
+}
 
 pub const Options = struct {
     connect: runtime.ConnectOptions,
@@ -142,6 +172,7 @@ const OwnedRules = struct {
         errdefer allocator.free(values);
         var initialized: usize = 0;
         errdefer for (values[0..initialized]) |value| {
+            allocator.free(value.remote_prefix);
             allocator.free(value.local_prefix);
             allocator.free(value.filter);
         };
@@ -149,10 +180,13 @@ const OwnedRules = struct {
             const filter = try allocator.dupe(u8, rule.filter);
             errdefer allocator.free(filter);
             const local_prefix = try allocator.dupe(u8, rule.local_prefix);
+            errdefer allocator.free(local_prefix);
+            const remote_prefix = try allocator.dupe(u8, rule.remote_prefix);
             owned.* = .{
                 .filter = filter,
                 .qos = rule.qos,
                 .local_prefix = local_prefix,
+                .remote_prefix = remote_prefix,
             };
             initialized += 1;
         }
@@ -161,6 +195,7 @@ const OwnedRules = struct {
 
     fn deinit(self: *OwnedRules, allocator: std.mem.Allocator) void {
         for (self.values) |value| {
+            allocator.free(value.remote_prefix);
             allocator.free(value.local_prefix);
             allocator.free(value.filter);
         }
