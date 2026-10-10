@@ -4578,58 +4578,139 @@ def run_signed_crl_listener_case(
             )
 
 
-def run_unsupported_tls_key_case(broker: Path, directory: Path) -> None:
-    certificate = directory / "server-cert.pem"
-    rsa_key = directory / "rsa-key.pem"
-    cleartext_port = free_port()
-    tls_port = free_port()
-    while tls_port == cleartext_port:
-        tls_port = free_port()
-    subprocess.run(
-        [
-            "openssl",
-            "genpkey",
-            "-algorithm",
-            "RSA",
-            "-pkeyopt",
-            "rsa_keygen_bits:2048",
-            "-out",
-            str(rsa_key),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=10,
-        check=True,
+def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
+    rsa_key = directory / "rsa-server-pkcs8.key"
+    rsa_pkcs1_key = directory / "rsa-server-pkcs1.key"
+    rsa_certificate = directory / "rsa-server.crt"
+    run_openssl(
+        "genpkey",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+        "-out",
+        rsa_key,
     )
-    config = directory / "unsupported-tls-key.conf"
+    run_openssl(
+        "pkey",
+        "-in",
+        rsa_key,
+        "-traditional",
+        "-out",
+        rsa_pkcs1_key,
+    )
+    run_openssl(
+        "req",
+        "-new",
+        "-x509",
+        "-key",
+        rsa_key,
+        "-sha256",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost",
+        "-out",
+        rsa_certificate,
+    )
+
+    tls_port = free_port()
+    websocket_port = free_port()
+    while websocket_port == tls_port:
+        websocket_port = free_port()
+    config = directory / "rsa-tls-key.conf"
     config.write_text(
+        f"listener {tls_port} 127.0.0.1\n"
+        f"certfile {rsa_certificate}\n"
+        f"keyfile {rsa_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {websocket_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {rsa_certificate}\n"
+        f"keyfile {rsa_pkcs1_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    wait_process_line(
+        process,
+        "configured 2 listeners for 2 clients",
+        "RSA TLS broker startup",
+    )
+    listener_lines = read_listener_lines(process, 2, "RSA TLS broker startup")
+    if sum(line.startswith("mqtts ") for line in listener_lines) != 1:
+        raise RuntimeError(f"RSA MQTT/TLS listeners missing: {listener_lines}")
+    if not any(line.startswith("wss ") for line in listener_lines):
+        raise RuntimeError(f"RSA WSS listener missing: {listener_lines}")
+
+    rsa_result = openssl_mqtt_client(
+        tls_port,
+        rsa_certificate,
+        signature_algorithms="rsa_pss_rsae_sha256",
+    )
+    assert_openssl_mqtt_success(rsa_result)
+    websocket = websocket_connect(websocket_port, rsa_certificate)
+    try:
+        send_websocket_binary(websocket, connect_packet("rsa-pkcs1-wss"))
+        if connack_reason(read_websocket_binary(websocket)) != 0:
+            raise AssertionError("RSA PKCS1 WSS CONNECT failed")
+        send_websocket_binary(websocket, bytes.fromhex("e000"))
+    finally:
+        websocket.close()
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError("RSA TLS broker failed: " + process.stdout.read())
+
+    mismatched_key = directory / "rsa-mismatched.key"
+    run_openssl(
+        "genpkey",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+        "-out",
+        mismatched_key,
+    )
+    cleartext_port = free_port()
+    mismatch_port = free_port()
+    while mismatch_port == cleartext_port:
+        mismatch_port = free_port()
+    mismatch_config = directory / "rsa-tls-key-mismatch.conf"
+    mismatch_config.write_text(
         f"listener {cleartext_port} 127.0.0.1\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
-        f"listener {tls_port} 127.0.0.1\n"
-        f"certfile {certificate}\n"
-        f"keyfile {rsa_key}\n"
+        f"listener {mismatch_port} 127.0.0.1\n"
+        f"certfile {rsa_certificate}\n"
+        f"keyfile {mismatched_key}\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
-        [str(broker), f"--config={config}"],
+        [str(broker), f"--config={mismatch_config}"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         timeout=5,
         check=False,
     )
-    if result.returncode == 0 or "UnsupportedPrivateKey" not in result.stdout:
+    if result.returncode == 0 or "CertificateKeyMismatch" not in result.stdout:
         raise AssertionError(
-            "unsupported RSA TLS key did not fail before listen: "
-            + result.stdout
+            "mismatched RSA TLS key did not fail before listen: " + result.stdout
         )
     with socket.socket() as probe:
         probe.settimeout(1)
         if probe.connect_ex(("127.0.0.1", cleartext_port)) == 0:
             raise AssertionError(
-                "an earlier cleartext listener was bound before TLS "
+                "an earlier cleartext listener was bound before RSA TLS "
                 "identity validation completed"
             )
 
@@ -4968,7 +5049,7 @@ def main() -> None:
         run_signed_crl_listener_case(args.broker, directory, "rsa")
         run_signed_crl_listener_case(args.broker, directory, "p384")
         run_signed_crl_listener_case(args.broker, directory, "ed25519")
-        run_unsupported_tls_key_case(args.broker, directory)
+        run_rsa_tls_identity_case(args.broker, directory)
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
@@ -4981,7 +5062,7 @@ def main() -> None:
         "policy, ordered include_dir and global/per-listener security files, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
-        "policies, P-256/P-384/Ed25519 TLS and required mTLS with OpenSSL verification, "
+        "policies, P-256/P-384/Ed25519/RSA TLS and required mTLS with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "

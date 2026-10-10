@@ -283,16 +283,18 @@ still rejects invalid credentials when a username is supplied. `certfile` and
 `keyfile` are listener-local and must occur together. Their presence upgrades
 `protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
 port is opened, every identity is loaded from a leaf-first PEM certificate
-chain and an unencrypted P-256/P-384 SEC1 or PKCS#8, or RFC 8410 Ed25519
-private key, bounded and strictly
-decoded, and checked for a matching leaf key. `include_dir` is supported by the
+chain and an unencrypted P-256/P-384 SEC1 or PKCS#8, RFC 8410 Ed25519 PKCS#8,
+or 2048/3072/4096-bit RSA PKCS#1/PKCS#8 private key. TLS-compatible constrained
+RSA-PSS PKCS#8 keys are also supported. Inputs are bounded, strictly decoded,
+prepared for allocation-free handshake signing, and checked against the leaf
+public key. `include_dir` is supported by the
 file-loading API and only in the main file. It expands top-level regular `.conf`
 files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. RSA server keys, other curves, encrypted keys, plugins,
-bridges, and full Mosquitto configuration remain outside this subset and fail
+filesystem expansion. Other curves, encrypted keys, plugins, bridges, and full
+Mosquitto configuration remain outside this subset and fail
 closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER

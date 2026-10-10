@@ -1,8 +1,10 @@
 //! Strict file-backed TLS server identities.
 //!
 //! This loader supports PEM X.509 chains with unencrypted P-256/P-384 SEC1 or
-//! PKCS#8 keys and RFC 8410 Ed25519 PKCS#8 keys. Unsupported PEM labels,
-//! ambiguous DER, and certificate/key mismatches fail closed.
+//! PKCS#8 keys, RFC 8410 Ed25519 PKCS#8 keys, and 2048/3072/4096-bit RSA
+//! PKCS#1/PKCS#8 keys. Unsupported PEM labels, ambiguous DER, parameters that
+//! cannot be represented by the TLS signer, and certificate/key mismatches fail
+//! closed.
 
 const std = @import("std");
 const vail = @import("vail");
@@ -10,6 +12,7 @@ const vail = @import("vail");
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const Ed25519 = std.crypto.sign.Ed25519;
+const Rsa = vail.crypto.rsa;
 const ServerIdentity = vail.tls.auth.ServerIdentity;
 
 pub const max_certificate_file_bytes: usize = 4 * 1024 * 1024;
@@ -39,6 +42,13 @@ pub const Identity = struct {
         ecdsa_p256_sha256: EcdsaP256Sha256.KeyPair,
         ecdsa_p384_sha384: EcdsaP384Sha384.KeyPair,
         ed25519: Ed25519.KeyPair,
+        rsa_pss: *RsaKeyPair,
+    };
+
+    pub const RsaKeyPair = struct {
+        encoded: []u8,
+        prepared: Rsa.PreparedPrivateKey,
+        signature_scheme: u16,
     };
 
     pub fn deinit(self: *Identity) void {
@@ -46,7 +56,7 @@ pub const Identity = struct {
             self.allocator.free(@constCast(certificate));
         }
         self.allocator.free(self.certificate_chain);
-        std.crypto.secureZero(u8, std.mem.asBytes(&self.key_pair));
+        deinitKeyPair(self.allocator, &self.key_pair);
         self.* = undefined;
     }
 
@@ -64,6 +74,14 @@ pub const Identity = struct {
                 },
                 .ed25519 => |key_pair| .{
                     .ed25519 = .{ .key_pair = key_pair },
+                },
+                .rsa_pss => |rsa| .{
+                    .rsa_pss = .{
+                        .prepared_key = &rsa.prepared,
+                        .signature_scheme = rsa.signature_scheme,
+                        // The stream handshake replaces this before signing.
+                        .io = undefined,
+                    },
                 },
             },
         };
@@ -128,8 +146,12 @@ pub fn parse(
         std.crypto.secureZero(u8, key_der.bytes);
         allocator.free(key_der.bytes);
     }
-    var key_pair = try parsePrivateKeyDer(key_der.label, key_der.bytes);
-    defer std.crypto.secureZero(u8, std.mem.asBytes(&key_pair));
+    var key_pair = try parsePrivateKeyDer(
+        allocator,
+        key_der.label,
+        key_der.bytes,
+    );
+    errdefer deinitKeyPair(allocator, &key_pair);
 
     const owned_chain = try certificates.toOwnedSlice(allocator);
     errdefer {
@@ -141,7 +163,6 @@ pub fn parse(
         .certificate_chain = owned_chain,
         .key_pair = key_pair,
     };
-    errdefer std.crypto.secureZero(u8, std.mem.asBytes(&identity.key_pair));
     identity.serverIdentity().validate() catch |err| switch (err) {
         error.InvalidCertificate,
         error.UnsupportedCertificateKey,
@@ -151,7 +172,7 @@ pub fn parse(
     return identity;
 }
 
-const PemLabel = enum { sec1, pkcs8 };
+const PemLabel = enum { sec1, rsa_pkcs1, pkcs8 };
 
 const DecodedPrivateKey = struct {
     label: PemLabel,
@@ -238,6 +259,12 @@ fn parsePrivateKeyPem(
         else if (std.mem.eql(
             u8,
             line.bytes,
+            "-----BEGIN RSA PRIVATE KEY-----",
+        ))
+            .rsa_pkcs1
+        else if (std.mem.eql(
+            u8,
+            line.bytes,
             "-----BEGIN PRIVATE KEY-----",
         ))
             .pkcs8
@@ -247,6 +274,7 @@ fn parsePrivateKeyPem(
             return error.InvalidPem;
         const end_marker = switch (label) {
             .sec1 => "-----END EC PRIVATE KEY-----",
+            .rsa_pkcs1 => "-----END RSA PRIVATE KEY-----",
             .pkcs8 => "-----END PRIVATE KEY-----",
         };
         const body_start = line.next;
@@ -359,18 +387,40 @@ const oid_ec_public_key = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01 };
 const oid_prime256v1 = [_]u8{ 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07 };
 const oid_secp384r1 = [_]u8{ 0x2b, 0x81, 0x04, 0x00, 0x22 };
 const oid_ed25519 = [_]u8{ 0x2b, 0x65, 0x70 };
+const oid_rsa_encryption = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+};
+const oid_rsassa_pss = [_]u8{
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0a,
+};
+const oid_rsassa_pss_shake128 = [_]u8{
+    0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x1e,
+};
+const oid_rsassa_pss_shake256 = [_]u8{
+    0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x06, 0x1f,
+};
 
-fn parsePrivateKeyDer(label: PemLabel, der: []const u8) Error!Identity.KeyPair {
+fn parsePrivateKeyDer(
+    allocator: std.mem.Allocator,
+    label: PemLabel,
+    der: []const u8,
+) Error!Identity.KeyPair {
     if (der.len == 0 or der.len > max_private_key_der_bytes) {
         return error.InvalidPrivateKey;
     }
     return switch (label) {
         .sec1 => parseSec1PrivateKey(der, null, true),
-        .pkcs8 => parsePkcs8PrivateKey(der),
+        .rsa_pkcs1 => .{
+            .rsa_pss = try parseRsaPrivateKey(allocator, der),
+        },
+        .pkcs8 => parsePkcs8PrivateKey(allocator, der),
     };
 }
 
-fn parsePkcs8PrivateKey(der: []const u8) Error!Identity.KeyPair {
+fn parsePkcs8PrivateKey(
+    allocator: std.mem.Allocator,
+    der: []const u8,
+) Error!Identity.KeyPair {
     var outer = DerReader{ .bytes = der };
     const sequence = try outer.read(0x30);
     if (!outer.done()) return error.InvalidPrivateKey;
@@ -395,8 +445,13 @@ fn parsePkcs8PrivateKey(der: []const u8) Error!Identity.KeyPair {
             return error.InvalidPrivateKey;
     } else if (std.mem.eql(u8, algorithm_oid, &oid_ed25519))
         .ed25519
-    else
-        return error.UnsupportedPrivateKey;
+    else if (std.mem.eql(u8, algorithm_oid, &oid_rsa_encryption) or
+        std.mem.eql(u8, algorithm_oid, &oid_rsassa_pss) or
+        std.mem.eql(u8, algorithm_oid, &oid_rsassa_pss_shake128) or
+        std.mem.eql(u8, algorithm_oid, &oid_rsassa_pss_shake256))
+    {
+        return .{ .rsa_pss = try parseRsaPrivateKey(allocator, der) };
+    } else return error.UnsupportedPrivateKey;
     if (!algorithm_fields.done()) return error.InvalidPrivateKey;
     const inner = try fields.read(0x04);
     if (!fields.done()) return error.InvalidPrivateKey;
@@ -404,6 +459,83 @@ fn parsePkcs8PrivateKey(der: []const u8) Error!Identity.KeyPair {
         .p256, .p384 => parseSec1PrivateKey(inner, key_kind, false),
         .ed25519 => parseEd25519PrivateKey(inner),
     };
+}
+
+fn parseRsaPrivateKey(
+    allocator: std.mem.Allocator,
+    der: []const u8,
+) Error!*Identity.RsaKeyPair {
+    const encoded = try allocator.dupe(u8, der);
+    errdefer {
+        std.crypto.secureZero(u8, encoded);
+        allocator.free(encoded);
+    }
+    const private_key = Rsa.PrivateKey.fromDer(encoded) catch |err| switch (err) {
+        error.UnsupportedModulusBits,
+        error.UnsupportedPublicExponent,
+        error.KeyAlgorithmMismatch,
+        => return error.UnsupportedPrivateKey,
+        else => return error.InvalidPrivateKey,
+    };
+    const signature_scheme = try rsaSignatureScheme(private_key);
+    var prepared = private_key.prepare() catch |err| switch (err) {
+        error.UnsupportedModulusBits,
+        error.UnsupportedPublicExponent,
+        error.KeyAlgorithmMismatch,
+        => return error.UnsupportedPrivateKey,
+        else => return error.InvalidPrivateKey,
+    };
+    errdefer prepared.deinit();
+    const key_pair = try allocator.create(Identity.RsaKeyPair);
+    key_pair.* = .{
+        .encoded = encoded,
+        .prepared = prepared,
+        .signature_scheme = signature_scheme,
+    };
+    return key_pair;
+}
+
+fn rsaSignatureScheme(private_key: Rsa.PrivateKey) Error!u16 {
+    const constraints = private_key.pss_constraints orelse
+        return vail.tls.auth.signature_scheme_rsa_pss_rsae_sha256;
+    const profile = switch (constraints) {
+        .unrestricted => return vail.tls.auth.signature_scheme_rsa_pss_pss_sha256,
+        .restricted => |profile| profile,
+    };
+    if (profile.trailer_field != 1 or profile.hash != profile.mgf_hash) {
+        return error.UnsupportedPrivateKey;
+    }
+    return switch (profile.hash) {
+        .sha256 => if (profile.salt_length <= 32)
+            vail.tls.auth.signature_scheme_rsa_pss_pss_sha256
+        else
+            error.UnsupportedPrivateKey,
+        .sha384 => if (profile.salt_length <= 48)
+            vail.tls.auth.signature_scheme_rsa_pss_pss_sha384
+        else
+            error.UnsupportedPrivateKey,
+        .sha512 => if (profile.salt_length <= 64)
+            vail.tls.auth.signature_scheme_rsa_pss_pss_sha512
+        else
+            error.UnsupportedPrivateKey,
+        else => error.UnsupportedPrivateKey,
+    };
+}
+
+fn deinitKeyPair(
+    allocator: std.mem.Allocator,
+    key_pair: *Identity.KeyPair,
+) void {
+    if (key_pair.* == .rsa_pss) {
+        const rsa = key_pair.rsa_pss;
+        rsa.prepared.deinit();
+        std.crypto.secureZero(u8, rsa.encoded);
+        allocator.free(rsa.encoded);
+        std.crypto.secureZero(Identity.RsaKeyPair, rsa[0..1]);
+        allocator.destroy(rsa);
+    }
+    std.crypto.secureZero(u8, std.mem.asBytes(key_pair));
+    key_pair.* = undefined;
 }
 
 const KeyKind = enum { p256, p384, ed25519 };
@@ -573,7 +705,11 @@ test "server identity file parses P-384 and Ed25519 PKCS8 keys" {
         "ee2b5d095ec2a897f3a588e1238e7c62160313e6cd8c65d8";
     var p384_der: [p384_der_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&p384_der, p384_der_hex);
-    var p384 = try parsePrivateKeyDer(.pkcs8, &p384_der);
+    var p384 = try parsePrivateKeyDer(
+        std.testing.allocator,
+        .pkcs8,
+        &p384_der,
+    );
     defer std.crypto.secureZero(u8, std.mem.asBytes(&p384));
     try std.testing.expect(p384 == .ecdsa_p384_sha384);
 
@@ -582,9 +718,97 @@ test "server identity file parses P-384 and Ed25519 PKCS8 keys" {
         "85aefc9f41a80df3cad89138c8dfa7f4f33b3b8485a60092b833a08640c903b6";
     var ed25519_der: [ed25519_der_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&ed25519_der, ed25519_der_hex);
-    var ed25519 = try parsePrivateKeyDer(.pkcs8, &ed25519_der);
+    var ed25519 = try parsePrivateKeyDer(
+        std.testing.allocator,
+        .pkcs8,
+        &ed25519_der,
+    );
     defer std.crypto.secureZero(u8, std.mem.asBytes(&ed25519));
     try std.testing.expect(ed25519 == .ed25519);
+}
+
+test "server identity file parses RSA PKCS8 and PKCS1 keys" {
+    const allocator = std.testing.allocator;
+    const vectors = vail.crypto.testing.rsa_signing;
+    var certificate_der: [vectors.certificate_hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&certificate_der, vectors.certificate_hex);
+    const certificate = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &certificate_der,
+    );
+    defer allocator.free(certificate);
+
+    for ([_]struct {
+        label: []const u8,
+        encoded: []const u8,
+    }{
+        .{ .label = "PRIVATE KEY", .encoded = vectors.private_key_pkcs8_hex },
+        .{ .label = "RSA PRIVATE KEY", .encoded = vectors.private_key_pkcs1_hex },
+    }) |case| {
+        const der = try allocator.alloc(u8, case.encoded.len / 2);
+        defer {
+            std.crypto.secureZero(u8, der);
+            allocator.free(der);
+        }
+        _ = try std.fmt.hexToBytes(der, case.encoded);
+        const private_key = try encodePemForTest(allocator, case.label, der);
+        defer {
+            std.crypto.secureZero(u8, private_key);
+            allocator.free(private_key);
+        }
+        var identity = try parse(allocator, certificate, private_key);
+        defer identity.deinit();
+        try std.testing.expect(identity.key_pair == .rsa_pss);
+        try std.testing.expectEqual(
+            @as(usize, 256),
+            identity.key_pair.rsa_pss.prepared.signatureLength(),
+        );
+        try identity.serverIdentity().validate();
+    }
+}
+
+test "server identity file rejects an RSA key for an EC certificate" {
+    const allocator = std.testing.allocator;
+    const encoded = vail.crypto.testing.rsa_signing.private_key_pkcs8_hex;
+    const der = try allocator.alloc(u8, encoded.len / 2);
+    defer {
+        std.crypto.secureZero(u8, der);
+        allocator.free(der);
+    }
+    _ = try std.fmt.hexToBytes(der, encoded);
+    const private_key = try encodePemForTest(allocator, "PRIVATE KEY", der);
+    defer {
+        std.crypto.secureZero(u8, private_key);
+        allocator.free(private_key);
+    }
+    try std.testing.expectError(
+        error.CertificateKeyMismatch,
+        parse(allocator, certificate_pem, private_key),
+    );
+}
+
+test "server identity file parses a constrained RSA-PSS PKCS8 key" {
+    const allocator = std.testing.allocator;
+    const certificate = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        vail.x509.testing.rsa_pss_constrained_leaf,
+    );
+    defer allocator.free(certificate);
+    const private_key = try encodePemForTest(
+        allocator,
+        "PRIVATE KEY",
+        vail.x509.testing.rsa_pss_constrained_private_key,
+    );
+    defer {
+        std.crypto.secureZero(u8, private_key);
+        allocator.free(private_key);
+    }
+    var identity = try parse(allocator, certificate, private_key);
+    defer identity.deinit();
+    try std.testing.expect(identity.key_pair == .rsa_pss);
+    try identity.serverIdentity().validate();
 }
 
 test "server identity file parses a P-384 SEC1 key" {
@@ -598,7 +822,11 @@ test "server identity file parses a P-384 SEC1 key" {
         "48d";
     var der: [der_hex.len / 2]u8 = undefined;
     _ = try std.fmt.hexToBytes(&der, der_hex);
-    var key = try parsePrivateKeyDer(.sec1, &der);
+    var key = try parsePrivateKeyDer(
+        std.testing.allocator,
+        .sec1,
+        &der,
+    );
     defer std.crypto.secureZero(u8, std.mem.asBytes(&key));
     try std.testing.expect(key == .ecdsa_p384_sha384);
 }
@@ -612,7 +840,7 @@ test "server identity file rejects unsupported and malformed modern private keys
     ed25519_der[10] = 0x05;
     try std.testing.expectError(
         error.UnsupportedPrivateKey,
-        parsePrivateKeyDer(.pkcs8, &ed25519_der),
+        parsePrivateKeyDer(std.testing.allocator, .pkcs8, &ed25519_der),
     );
 
     const p384_der_hex =
@@ -628,7 +856,7 @@ test "server identity file rejects unsupported and malformed modern private keys
     p384_der[33] ^= 1;
     try std.testing.expectError(
         error.InvalidPrivateKey,
-        parsePrivateKeyDer(.pkcs8, &p384_der),
+        parsePrivateKeyDer(std.testing.allocator, .pkcs8, &p384_der),
     );
 }
 
@@ -723,26 +951,30 @@ test "server identity file rejects ambiguous private key DER" {
         0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d,
         0x03, 0x01, 0x07,
     };
-    _ = try parsePrivateKeyDer(.sec1, &valid_sec1);
+    _ = try parsePrivateKeyDer(std.testing.allocator, .sec1, &valid_sec1);
 
     var wrong_curve = valid_sec1;
     wrong_curve[wrong_curve.len - 1] = 0x08;
     try std.testing.expectError(
         error.InvalidPrivateKey,
-        parsePrivateKeyDer(.sec1, &wrong_curve),
+        parsePrivateKeyDer(std.testing.allocator, .sec1, &wrong_curve),
     );
 
     const trailing = valid_sec1 ++ .{0x00};
     try std.testing.expectError(
         error.InvalidPrivateKey,
-        parsePrivateKeyDer(.sec1, &trailing),
+        parsePrivateKeyDer(std.testing.allocator, .sec1, &trailing),
     );
 
     const non_canonical_length = [_]u8{ 0x30, 0x81, 0x31 } ++
         valid_sec1[2..].*;
     try std.testing.expectError(
         error.InvalidPrivateKey,
-        parsePrivateKeyDer(.sec1, &non_canonical_length),
+        parsePrivateKeyDer(
+            std.testing.allocator,
+            .sec1,
+            &non_canonical_length,
+        ),
     );
 }
 
@@ -782,15 +1014,29 @@ fn encodePrivateKeyForTest(
     allocator: std.mem.Allocator,
     der: []const u8,
 ) ![]u8 {
+    return encodePemForTest(allocator, "EC PRIVATE KEY", der);
+}
+
+fn encodePemForTest(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    der: []const u8,
+) ![]u8 {
     const encoded_len = std.base64.standard.Encoder.calcSize(der.len);
-    const prefix = "-----BEGIN EC PRIVATE KEY-----\n";
-    const suffix = "\n-----END EC PRIVATE KEY-----\n";
-    const pem = try allocator.alloc(u8, prefix.len + encoded_len + suffix.len);
-    @memcpy(pem[0..prefix.len], prefix);
+    const prefix_len = "-----BEGIN ".len + label.len + "-----\n".len;
+    const suffix_len = "\n-----END ".len + label.len + "-----\n".len;
+    const pem = try allocator.alloc(
+        u8,
+        prefix_len + encoded_len + suffix_len,
+    );
+    var output: std.Io.Writer = .fixed(pem);
+    try output.print("-----BEGIN {s}-----\n", .{label});
+    const body_start = output.end;
     _ = std.base64.standard.Encoder.encode(
-        pem[prefix.len..][0..encoded_len],
+        pem[body_start..][0..encoded_len],
         der,
     );
-    @memcpy(pem[prefix.len + encoded_len ..], suffix);
+    output.end += encoded_len;
+    try output.print("\n-----END {s}-----\n", .{label});
     return pem;
 }
