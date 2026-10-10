@@ -530,6 +530,7 @@ pub const TlsServer = struct {
                 bind_address,
                 .{
                     .identity = options.identity,
+                    .identity_provider = options.identity_provider,
                     .limits = websocketLimits(
                         options.limits,
                         options.max_head_bytes,
@@ -759,6 +760,7 @@ pub const TlsServer = struct {
 
 pub const TlsListenOptions = struct {
     identity: @import("vail").tls.auth.ServerIdentity,
+    identity_provider: ?@import("../tls/mod.zig").stream.ServerIdentityProvider = null,
     limits: runtime.Limits = .{},
     max_head_bytes: usize = 64 * 1024,
     cipher_suites: []const @import("vail").tls.cipher_suite.Suite =

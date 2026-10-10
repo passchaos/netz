@@ -2155,6 +2155,209 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
+    first_ca, first_ca_key = create_ca(
+        directory, "identity-reload-first-ca", "Identity Reload First Root"
+    )
+    first_certificate, first_key = create_signed_certificate(
+        directory,
+        "identity-reload-first-server",
+        "localhost",
+        first_ca,
+        first_ca_key,
+        701,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    second_ca, second_ca_key = create_ca(
+        directory, "identity-reload-second-ca", "Identity Reload Second Root"
+    )
+    second_certificate, second_key = create_signed_certificate(
+        directory,
+        "identity-reload-second-server",
+        "localhost",
+        second_ca,
+        second_ca_key,
+        702,
+        "serverAuth",
+        "DNS:localhost",
+    )
+    active_certificate = directory / "identity-reload-active.crt"
+    active_key = directory / "identity-reload-active.key"
+    active_certificate.write_bytes(first_certificate.read_bytes())
+    active_key.write_bytes(first_key.read_bytes())
+    password_file = directory / "identity-reload.pwfile"
+    password_hash = (
+        "$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ=="
+    )
+    password_file.write_text(f"old:{password_hash}\n")
+
+    mqtt_port = free_port()
+    websocket_port = free_port()
+    while websocket_port == mqtt_port:
+        websocket_port = free_port()
+    config = directory / "identity-reload.conf"
+    config.write_text(
+        f"password_file {password_file}\n"
+        f"listener {mqtt_port} 127.0.0.1\n"
+        f"certfile {active_certificate}\n"
+        f"keyfile {active_key}\n"
+        "allow_anonymous false\n"
+        "max_connections 16\n"
+        f"listener {websocket_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {active_certificate}\n"
+        f"keyfile {active_key}\n"
+        "allow_anonymous false\n"
+        "max_connections 16\n"
+    )
+    environment = os.environ.copy()
+    environment.pop(FINITE_TEST_ENV, None)
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=environment,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners global_max_connections=32" not in ready:
+        raise RuntimeError(f"identity reload broker failed to start: {ready}")
+    listener_lines = [
+        process.stdout.readline().strip(),
+        process.stdout.readline().strip(),
+    ]
+    if not any(line.startswith("mqtts ") for line in listener_lines):
+        raise RuntimeError(f"identity reload MQTT/TLS listener missing: {listener_lines}")
+    if not any(line.startswith("wss ") for line in listener_lines):
+        raise RuntimeError(f"identity reload WSS listener missing: {listener_lines}")
+
+    def mqtt_connect(
+        cafile: Path,
+        client_id: str,
+        username: str = "old",
+        expected_reason: int = 0,
+    ) -> ssl.SSLSocket:
+        context = ssl.create_default_context(cafile=str(cafile))
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+        raw = socket.create_connection(("127.0.0.1", mqtt_port), timeout=5)
+        raw.settimeout(5)
+        try:
+            client = context.wrap_socket(raw, server_hostname="localhost")
+        except BaseException:
+            raw.close()
+            raise
+        client.sendall(connect_packet(
+            client_id,
+            username=username,
+            password="password",
+        ))
+        reason = connack_reason(read_mqtt_packet(client))
+        if reason != expected_reason:
+            client.close()
+            raise AssertionError(
+                f"identity reload CONNECT for {client_id} expected "
+                f"{expected_reason:#x}, received {reason:#x}"
+            )
+        return client
+
+    def wss_connect(
+        cafile: Path,
+        client_id: str,
+        username: str = "old",
+        expected_reason: int = 0,
+    ) -> socket.socket:
+        client = websocket_connect(websocket_port, cafile)
+        send_websocket_binary(client, connect_packet(
+            client_id,
+            username=username,
+            password="password",
+        ))
+        reason = connack_reason(read_websocket_binary(client))
+        if reason != expected_reason:
+            client.close()
+            raise AssertionError(
+                f"identity reload WSS CONNECT for {client_id} expected "
+                f"{expected_reason:#x}, received {reason:#x}"
+            )
+        return client
+
+    def expect_untrusted(connect, label: str) -> None:
+        try:
+            client = connect()
+        except ssl.SSLCertVerificationError:
+            return
+        client.close()
+        raise AssertionError(f"{label}: obsolete CA still trusted a new connection")
+
+    clients: list[socket.socket] = []
+    try:
+        old_mqtt = mqtt_connect(first_ca, "identity-old-mqtt")
+        clients.append(old_mqtt)
+        old_wss = wss_connect(first_ca, "identity-old-wss")
+        clients.append(old_wss)
+
+        active_certificate.write_bytes(second_certificate.read_bytes())
+        active_key.write_bytes(second_key.read_bytes())
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "successful TLS identity reload",
+        )
+        mqtt_ping(old_mqtt)
+        websocket_mqtt_ping(old_wss)
+
+        new_mqtt = mqtt_connect(second_ca, "identity-new-mqtt")
+        clients.append(new_mqtt)
+        new_wss = wss_connect(second_ca, "identity-new-wss")
+        clients.append(new_wss)
+        expect_untrusted(
+            lambda: mqtt_connect(first_ca, "identity-stale-mqtt"),
+            "MQTT/TLS reload",
+        )
+        expect_untrusted(
+            lambda: wss_connect(first_ca, "identity-stale-wss"),
+            "WSS reload",
+        )
+
+        active_certificate.write_text("not a certificate\n")
+        password_file.write_text(f"new:{password_hash}\n")
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload failed: error=InvalidPem",
+            "failed TLS identity reload",
+        )
+        rollback_mqtt = mqtt_connect(second_ca, "identity-rollback-mqtt")
+        clients.append(rollback_mqtt)
+        rollback_wss = wss_connect(second_ca, "identity-rollback-wss")
+        clients.append(rollback_wss)
+        rejected_new = mqtt_connect(
+            second_ca,
+            "identity-rollback-new-user",
+            username="new",
+            expected_reason=0x87,
+        )
+        rejected_new.close()
+        mqtt_ping(old_mqtt)
+        websocket_mqtt_ping(old_wss)
+    finally:
+        for client in clients:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def run_crl_reload_case(broker: Path, directory: Path) -> None:
     server_ca, server_ca_key = create_ca(
         directory, "reload-server-ca", "Reload Server Root"
@@ -4451,6 +4654,7 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_security_reload_case(args.broker, directory)
+        run_server_identity_reload_case(args.broker, directory)
         run_crl_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
@@ -4482,7 +4686,7 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "atomic password/ACL/CRL SIGHUP reload with rollback, "
+        "atomic password/ACL/CRL and TLS/WSS identity SIGHUP reload with rollback, "
         "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )

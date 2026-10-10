@@ -9,6 +9,9 @@ const netz = @import("netz");
 const reloadable_security = @import(
     "support/mqtt_reloadable_security.zig",
 );
+const reloadable_identity = @import(
+    "support/mqtt_reloadable_identity.zig",
+);
 
 const mqtt = netz.mqtt;
 
@@ -306,15 +309,25 @@ pub fn run(
     else
         null;
     defer if (checkpoint_signal) |*signal| signal.deinit();
-    const identities = try allocator.alloc(
-        ?netz.tls.server_identity_file.Identity,
+    const identity_paths = try allocator.alloc(
+        reloadable_identity.Paths,
         config.listeners.len,
     );
-    defer allocator.free(identities);
-    @memset(identities, null);
-    defer for (identities) |*maybe_identity| {
-        if (maybe_identity.*) |*identity| identity.deinit();
-    };
+    defer allocator.free(identity_paths);
+    for (config.listeners, identity_paths) |configured, *paths| {
+        paths.* = .{
+            .certificate_file = configured.certfile,
+            .private_key_file = configured.keyfile,
+        };
+    }
+    var identities = try reloadable_identity.Set.init(
+        allocator,
+        io,
+        std.Io.Dir.cwd(),
+        identity_paths,
+        &security.lock,
+    );
+    defer identities.deinit();
     const client_cas = try allocator.alloc(
         ?netz.tls.client_ca_file.File,
         config.listeners.len,
@@ -345,13 +358,6 @@ pub fn run(
     // identity must not leave an earlier configured port briefly exposed.
     for (config.listeners, 0..) |configured, index| {
         if (!configured.usesTls()) continue;
-        identities[index] = try netz.tls.server_identity_file.load(
-            allocator,
-            io,
-            std.Io.Dir.cwd(),
-            configured.certfile,
-            configured.keyfile,
-        );
         if (configured.cafile.len != 0 or configured.capath.len != 0) {
             client_cas[index] = if (configured.capath.len != 0)
                 try netz.tls.client_ca_dir.loadCombined(
@@ -388,7 +394,9 @@ pub fn run(
             };
         }
     }
-    var reload_signal = if (security.hasReloadableFiles())
+    const has_reloadable_files = security.hasReloadableFiles() or
+        identities.hasReloadableFiles();
+    var reload_signal = if (has_reloadable_files)
         ReloadSignal.install()
     else
         null;
@@ -423,14 +431,15 @@ pub fn run(
     defer allocator.free(security_policies);
 
     for (config.listeners, 0..) |configured, index| {
-        servers[index] = if (identities[index]) |*identity|
+        servers[index] = if (identities.provider(index)) |identity_provider|
             switch (configured.protocol) {
                 .mqtt => .{ .mqtt_tls = try mqtt.tls_runtime.Server.listen(
                     allocator,
                     io,
                     configured.address,
                     .{
-                        .identity = identity.serverIdentity(),
+                        .identity = identities.initialIdentity(index).?,
+                        .identity_provider = identity_provider,
                         .client_auth = client_auth_policies[index],
                         .limits = listenerLimits(config, configured),
                         .tcp_nodelay = config.set_tcp_nodelay,
@@ -442,7 +451,8 @@ pub fn run(
                         io,
                         configured.address,
                         .{
-                            .identity = identity.serverIdentity(),
+                            .identity = identities.initialIdentity(index).?,
+                            .identity_provider = identity_provider,
                             .client_auth = client_auth_policies[index],
                             .allowed_origins = configured.websocket_origins.items,
                             .max_head_bytes = config.websocket_headers_size,
@@ -571,7 +581,7 @@ pub fn run(
             .listeners = endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence or security.hasReloadableFiles()) {
+    if (config.persistence or has_reloadable_files) {
         try serveWithManagement(
             &broker,
             service,
@@ -582,7 +592,8 @@ pub fn run(
                 config.autosave_interval
             else
                 null,
-            if (security.hasReloadableFiles()) &security else null,
+            if (has_reloadable_files) &security else null,
+            if (has_reloadable_files) &identities else null,
         );
     } else {
         try serveConfigured(&broker, service);
@@ -599,6 +610,7 @@ fn serveWithManagement(
     persistence_path: ?[]const u8,
     interval_seconds: ?u32,
     security: ?*reloadable_security.Security,
+    identities: ?*reloadable_identity.Set,
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
@@ -678,7 +690,10 @@ fn serveWithManagement(
                 }
                 if (ReloadSignal.take()) {
                     if (security) |policy| {
-                        policy.reload() catch |err| {
+                        reloadSecurityAndIdentities(
+                            policy,
+                            identities orelse unreachable,
+                        ) catch |err| {
                             std.debug.print(
                                 "netz MQTT security reload failed: " ++
                                     "error={s} server_io=zio-std-io\n",
@@ -706,6 +721,24 @@ fn serveWithManagement(
             },
         }
     }
+}
+
+fn reloadSecurityAndIdentities(
+    security: *reloadable_security.Security,
+    identities: *reloadable_identity.Set,
+) !void {
+    var prepared_security = try security.prepareReload();
+    defer prepared_security.deinit();
+    var prepared_identities = try identities.prepareReload();
+    defer prepared_identities.deinit();
+    security.lock.lockUncancelable(security.io);
+    var retired_security = security.swapPreparedReload(&prepared_security);
+    var retired_identities = identities.swapPreparedReload(
+        &prepared_identities,
+    );
+    security.lock.unlock(security.io);
+    retired_security.deinit();
+    retired_identities.deinit();
 }
 
 const Service = union(enum) {

@@ -20,6 +20,31 @@ pub const ClientAuthPaths = struct {
     crl_file: []const u8 = &.{},
 };
 
+pub const PreparedReload = struct {
+    security: *Security,
+    files: ?FileSet,
+    client_crls: ?ClientCrlSet,
+
+    pub fn deinit(self: *PreparedReload) void {
+        if (self.files) |*files| files.deinit(self.security.allocator);
+        if (self.client_crls) |*crls| crls.deinit(self.security.allocator);
+        self.files = null;
+        self.client_crls = null;
+    }
+};
+
+pub const RetiredReload = struct {
+    security: *Security,
+    files: FileSet,
+    client_crls: ?ClientCrlSet,
+
+    pub fn deinit(self: *RetiredReload) void {
+        self.files.deinit(self.security.allocator);
+        if (self.client_crls) |*crls| crls.deinit(self.security.allocator);
+        self.* = undefined;
+    }
+};
+
 const FileSet = struct {
     passwords: []?mqtt.password_file.File,
     acls: []?mqtt.acl_file.File,
@@ -197,15 +222,18 @@ pub const Security = struct {
         self.client_auth_paths = paths;
     }
 
-    pub fn reload(self: *Security) !void {
-        var replacement = try FileSet.load(
+    /// Parse a detached replacement without changing the active policy. This
+    /// lets the broker validate TLS identities and authorization files before
+    /// committing either part of one SIGHUP transaction.
+    pub fn prepareReload(self: *Security) !PreparedReload {
+        var files = try FileSet.load(
             self.allocator,
             self.io,
             self.dir,
             self.paths,
         );
-        errdefer replacement.deinit(self.allocator);
-        var replacement_crls = if (self.client_crls != null)
+        errdefer files.deinit(self.allocator);
+        const client_crls = if (self.client_crls != null)
             try ClientCrlSet.load(
                 self.allocator,
                 self.io,
@@ -214,17 +242,49 @@ pub const Security = struct {
             )
         else
             null;
-        errdefer if (replacement_crls) |*crls| crls.deinit(self.allocator);
+        return .{
+            .security = self,
+            .files = files,
+            .client_crls = client_crls,
+        };
+    }
+
+    pub fn commitReload(
+        self: *Security,
+        prepared: *PreparedReload,
+    ) void {
         self.lock.lockUncancelable(self.io);
-        var previous = self.files;
-        self.files = replacement;
-        replacement = undefined;
-        var previous_crls = self.client_crls;
-        self.client_crls = replacement_crls;
-        replacement_crls = null;
+        var retired = self.swapPreparedReload(prepared);
         self.lock.unlock(self.io);
-        previous.deinit(self.allocator);
-        if (previous_crls) |*crls| crls.deinit(self.allocator);
+        retired.deinit();
+    }
+
+    /// Publish a prepared replacement while the caller holds `lock` for
+    /// writing. The detached return value must be destroyed after unlocking.
+    pub fn swapPreparedReload(
+        self: *Security,
+        prepared: *PreparedReload,
+    ) RetiredReload {
+        std.debug.assert(prepared.security == self);
+        const replacement = prepared.files orelse unreachable;
+        prepared.files = null;
+        const replacement_crls = prepared.client_crls;
+        prepared.client_crls = null;
+        const previous = self.files;
+        self.files = replacement;
+        const previous_crls = self.client_crls;
+        self.client_crls = replacement_crls;
+        return .{
+            .security = self,
+            .files = previous,
+            .client_crls = previous_crls,
+        };
+    }
+
+    pub fn reload(self: *Security) !void {
+        var prepared = try self.prepareReload();
+        defer prepared.deinit();
+        self.commitReload(&prepared);
     }
 
     pub fn hasReloadableFiles(self: *const Security) bool {

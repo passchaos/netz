@@ -291,9 +291,9 @@ files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. RSA server keys, other curves, encrypted keys, broader
-configuration reload, plugins, bridges, and full Mosquitto configuration remain
-outside this subset and fail closed. `cafile` and/or `capath` enable optional
+filesystem expansion. RSA server keys, other curves, encrypted keys, plugins,
+bridges, and full Mosquitto configuration remain outside this subset and fail
+closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER
 Subject, currently valid, and constrained for CA/keyCertSign/clientAuth use;
@@ -330,14 +330,17 @@ As in Mosquitto's current ACL-file plugin, SUBSCRIBE/UNSUBSCRIBE requests can be
 installed even when no read rule grants them; unauthorized publications remain
 undeliverable. Unknown directives/access modes and malformed patterns fail
 before listeners are bound. On Linux, `SIGHUP` atomically reloads the
-`password_file`, `acl_file`, and `crlfile` contents named by the initial
-configuration. All replacement files are parsed before one locked swap; any
-missing, malformed, unsigned, or otherwise invalid file keeps the complete
-previous policy. Existing clients immediately observe new ACL rules, password
-changes apply to later CONNECT attempts, and CRL changes apply to later TLS
-handshakes without rebinding the listener. Listener topology, anonymous policy,
-TLS identity/CA trust, limits, and persistence settings remain fixed until
-restart.
+`password_file`, `acl_file`, `crlfile`, `certfile`, and `keyfile` contents named
+by the initial configuration. All replacement files are parsed before any
+active set is changed; any missing, malformed, unsigned, mismatched, or
+otherwise invalid file keeps the complete previous policy and server identity.
+Existing clients immediately observe new ACL rules, password changes apply to
+later CONNECT attempts, and CRL plus server-certificate changes apply to later
+TLS/WSS handshakes without rebinding the listener. In-flight handshakes retain
+their selected certificate generation until completion, while established TLS
+connections retain traffic keys and do not depend on the old identity.
+Listener topology, anonymous policy, CA trust, limits, and persistence settings
+remain fixed until restart.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime

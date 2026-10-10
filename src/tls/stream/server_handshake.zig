@@ -38,9 +38,38 @@ pub const Error = std.mem.Allocator.Error ||
         UnsupportedSignatureScheme,
     };
 
-pub const Options = struct {
-    /// The identity is borrowed only while `perform` executes.
+/// One server identity generation borrowed for exactly one TLS handshake.
+/// Providers use the release callback to keep retired certificate storage
+/// alive until every handshake that selected it has completed.
+pub const ServerIdentityLease = struct {
     identity: vail.tls.auth.ServerIdentity,
+    context: ?*anyopaque = null,
+    release_fn: ?*const fn (?*anyopaque) void = null,
+
+    pub fn deinit(self: *ServerIdentityLease) void {
+        if (self.release_fn) |release| release(self.context);
+        self.* = undefined;
+    }
+};
+
+/// Late-bound server identity source. `acquire` must return a lease whose
+/// identity remains valid until the handshake releases it.
+pub const ServerIdentityProvider = struct {
+    context: *anyopaque,
+    acquire_fn: *const fn (*anyopaque) ServerIdentityLease,
+
+    pub fn acquire(self: ServerIdentityProvider) ServerIdentityLease {
+        return self.acquire_fn(self.context);
+    }
+};
+
+pub const Options = struct {
+    /// Static identity, borrowed only while `perform` executes. A configured
+    /// `identity_provider` overrides it for each handshake.
+    identity: vail.tls.auth.ServerIdentity,
+    /// Optional identity source consulted once at the start of each handshake.
+    /// This supports atomic certificate rotation without rebinding listeners.
+    identity_provider: ?ServerIdentityProvider = null,
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
     max_client_hello_size: usize = 64 * 1024,
@@ -53,6 +82,21 @@ pub const Options = struct {
     /// Server-preference ALPN list. A configured list is mandatory: the
     /// handshake fails when the client offers none of its protocols.
     alpn_protocols: []const []const u8 = &.{},
+
+    pub fn acquireIdentity(self: Options) Error!ServerIdentityLease {
+        var lease = if (self.identity_provider) |provider|
+            provider.acquire()
+        else
+            ServerIdentityLease{ .identity = self.identity };
+        errdefer lease.deinit();
+        try lease.identity.validate();
+        return lease;
+    }
+
+    pub fn validateIdentity(self: Options) Error!void {
+        var lease = try self.acquireIdentity();
+        defer lease.deinit();
+    }
 };
 
 pub const PeerCertificateChain = struct {
@@ -133,7 +177,9 @@ fn performBefore(
     options: Options,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!TrafficKeys {
-    try options.identity.validate();
+    var identity_lease = try options.acquireIdentity();
+    defer identity_lease.deinit();
+    const identity = identity_lease.identity;
 
     var client_hello_storage: std.ArrayList(u8) = .empty;
     defer client_hello_storage.deinit(allocator);
@@ -149,7 +195,7 @@ fn performBefore(
     const parsed = try vail.tls.client_hello.parse(client_hello);
     if (!clientSupportsSignatureScheme(
         parsed.signature_algorithms,
-        options.identity.signer.scheme(),
+        identity.signer.scheme(),
     )) return error.UnsupportedSignatureScheme;
 
     const share = (try parsed.keyShareForGroup(x25519_group)) orelse
@@ -173,7 +219,7 @@ fn performBefore(
 
     var flight: std.ArrayList(u8) = .empty;
     defer flight.deinit(allocator);
-    var signer = try freshSigner(io, options.identity.signer);
+    var signer = try freshSigner(io, identity.signer);
     defer wipeSigner(&signer);
     var handshake =
         try vail.tls.server_handshake.writeServerHandshakeFlight(
@@ -193,7 +239,7 @@ fn performBefore(
                 .server_random = server_random,
                 .server_key_share = &server_public,
                 .shared_secret = &shared_secret,
-                .certificate_chain = options.identity.certificate_chain,
+                .certificate_chain = identity.certificate_chain,
                 .signer = signer,
                 .client_auth = if (options.client_auth) |client_auth|
                     .{

@@ -7,6 +7,10 @@ pub const ClientVerifiedOptions =
 pub const ClientCaBundle = @import("client_connection.zig").CaBundle;
 pub const ServerConnection = @import("server_connection.zig").Connection;
 pub const ServerOptions = @import("server_connection.zig").Options;
+pub const ServerIdentityLease =
+    @import("server_handshake.zig").ServerIdentityLease;
+pub const ServerIdentityProvider =
+    @import("server_handshake.zig").ServerIdentityProvider;
 /// Public TLS 1.3 negotiation metadata shared by every stream adapter.
 pub const CipherSuite = @import("vail").tls.cipher_suite.Suite;
 pub const TranscriptHash = @import("vail").tls.secret.Hash;

@@ -13,6 +13,7 @@ const vail = @import("vail");
 const net = std.Io.net;
 
 pub const ServerIdentity = vail.tls.auth.ServerIdentity;
+pub const ServerIdentityProvider = tls_stream.ServerIdentityProvider;
 pub const ServerSigner = vail.tls.auth.Signer;
 pub const CipherSuite = vail.tls.cipher_suite.Suite;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
@@ -23,9 +24,9 @@ pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
 /// Native MQTT-over-TLS listener using vail's TLS 1.3 primitives.
 ///
 /// Each accepted socket completes its TLS handshake before the shared MQTT
-/// runtime reads CONNECT. `Server` borrows the configured certificate-chain
-/// slices while it remains able to accept; established connections retain
-/// traffic keys, not certificate or signer references.
+/// runtime reads CONNECT. Static identities remain borrowed while `Server` can
+/// accept; providers instead lease one generation through the handshake.
+/// Established connections retain traffic keys, not identity references.
 pub const Server = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -40,7 +41,17 @@ pub const Server = struct {
         bind_address: net.IpAddress,
         options: ListenOptions,
     ) mqtt_runtime.Error!Server {
-        try options.identity.validate();
+        const tls_options = tls_stream.ServerOptions{
+            .identity = options.identity,
+            .identity_provider = options.identity_provider,
+            .cipher_suites = options.cipher_suites,
+            .max_client_hello_size = options.max_client_hello_size,
+            .max_client_handshake_size = options.max_client_handshake_size,
+            .handshake_timeout = options.tls_handshake_timeout,
+            .client_auth = options.client_auth,
+            .alpn_protocols = options.alpn_protocols,
+        };
+        try tls_options.validateIdentity();
         try mqtt_runtime.validateProxyPolicy(options.limits);
         return .{
             .allocator = allocator,
@@ -50,15 +61,7 @@ pub const Server = struct {
                 .{ .reuse_address = true },
             ),
             .limits = options.limits,
-            .tls = .{
-                .identity = options.identity,
-                .cipher_suites = options.cipher_suites,
-                .max_client_hello_size = options.max_client_hello_size,
-                .max_client_handshake_size = options.max_client_handshake_size,
-                .handshake_timeout = options.tls_handshake_timeout,
-                .client_auth = options.client_auth,
-                .alpn_protocols = options.alpn_protocols,
-            },
+            .tls = tls_options,
             .tcp_nodelay = options.tcp_nodelay,
         };
     }
@@ -286,9 +289,10 @@ pub const Server = struct {
 };
 
 pub const ListenOptions = struct {
-    /// Certificate chain storage remains borrowed by `Server` and must outlive
-    /// the listener. Signer key material is copied into the listener value.
+    /// Static certificate chain storage remains borrowed by `Server`; a
+    /// configured provider overrides it with a leased identity per handshake.
     identity: ServerIdentity,
+    identity_provider: ?ServerIdentityProvider = null,
     limits: mqtt_runtime.Limits = .{},
     cipher_suites: []const CipherSuite =
         &vail.tls.cipher_suite.default_preference,

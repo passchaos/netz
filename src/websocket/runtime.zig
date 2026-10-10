@@ -989,7 +989,17 @@ pub const TlsServer = struct {
         bind_address: net.IpAddress,
         options: TlsListenOptions,
     ) Error!TlsServer {
-        try options.identity.validate();
+        const tls_options = tls_stream.ServerOptions{
+            .identity = options.identity,
+            .identity_provider = options.identity_provider,
+            .cipher_suites = options.cipher_suites,
+            .max_client_hello_size = options.max_client_hello_size,
+            .max_client_handshake_size = options.max_client_handshake_size,
+            .handshake_timeout = options.tls_handshake_timeout,
+            .client_auth = options.client_auth,
+            .alpn_protocols = options.alpn_protocols,
+        };
+        try tls_options.validateIdentity();
         return .{
             .allocator = allocator,
             .io = io,
@@ -998,15 +1008,7 @@ pub const TlsServer = struct {
                 .{ .reuse_address = true },
             ),
             .limits = options.limits,
-            .tls = .{
-                .identity = options.identity,
-                .cipher_suites = options.cipher_suites,
-                .max_client_hello_size = options.max_client_hello_size,
-                .max_client_handshake_size = options.max_client_handshake_size,
-                .handshake_timeout = options.tls_handshake_timeout,
-                .client_auth = options.client_auth,
-                .alpn_protocols = options.alpn_protocols,
-            },
+            .tls = tls_options,
             .tcp_nodelay = options.tcp_nodelay,
         };
     }
@@ -1264,7 +1266,10 @@ pub const TlsServer = struct {
 };
 
 pub const TlsListenOptions = struct {
+    /// Static identity storage must outlive the listener. A provider may
+    /// override it with a separately leased identity for each handshake.
     identity: vail.tls.auth.ServerIdentity,
+    identity_provider: ?tls_stream.ServerIdentityProvider = null,
     limits: Limits = .{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
