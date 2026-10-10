@@ -168,6 +168,78 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
     if (shared.err) |err| return err;
 }
 
+test "MQTT TLS explicitly selects vail with ordinary CA verification" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = .{
+            .certificate_chain = &.{&certificate_der},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        } },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var accepted = self.server.accept(.{ .protocol = .v5 }) catch |err| {
+                self.err = err;
+                return;
+            };
+            defer accepted.deinit(self.server.allocator);
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                self.err = err;
+                return;
+            };
+            disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
+    defer ca_bundle.deinit(allocator);
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{ .protocol = .v5, .client_id = "forced-vail" },
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+            .use_vail = true,
+        },
+    );
+    defer client.close();
+    try std.testing.expect(client.negotiatedCipherSuite() != null);
+    try std.testing.expect(client.negotiatedTranscriptHash() != null);
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "MQTT native TLS shutdown wakes a blocked packet reader" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

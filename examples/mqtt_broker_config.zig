@@ -559,8 +559,15 @@ pub fn run(
     }
     for (config.bridges) |bridge| {
         std.debug.print(
-            "  bridge {s} remote={s}:{d} rules={d} direction=in\n",
-            .{ bridge.name, bridge.host, bridge.port, bridge.rules.len },
+            "  bridge {s} remote={s}:{d} transport={s} " ++
+                "rules={d} direction=in\n",
+            .{
+                bridge.name,
+                bridge.host,
+                bridge.port,
+                if (bridge.usesTls()) "tls-vail" else "tcp",
+                bridge.rules.len,
+            },
         );
     }
 

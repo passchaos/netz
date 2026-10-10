@@ -216,7 +216,10 @@ const OwnedConnectOptions = struct {
             try allocator.dupe(u8, value)
         else
             null;
-        errdefer if (password) |value| allocator.free(value);
+        errdefer if (password) |value| {
+            std.crypto.secureZero(u8, value);
+            allocator.free(value);
+        };
         const will = if (options.will) |value|
             try OwnedWill.clone(allocator, value)
         else
@@ -244,7 +247,10 @@ const OwnedConnectOptions = struct {
 
     fn deinit(self: *OwnedConnectOptions, allocator: std.mem.Allocator) void {
         if (self.will) |*will| will.deinit(allocator);
-        if (self.password) |value| allocator.free(value);
+        if (self.password) |value| {
+            std.crypto.secureZero(u8, value);
+            allocator.free(value);
+        }
         if (self.username) |value| allocator.free(value);
         owned_properties.deinit(allocator, self.properties);
         allocator.free(self.client_id);

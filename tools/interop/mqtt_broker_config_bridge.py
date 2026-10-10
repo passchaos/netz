@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import time
 
@@ -99,8 +100,7 @@ def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
     raise AssertionError("overlong MQTT variable integer")
 
 
-def _connect_client(port: int, client_id: str) -> socket.socket:
-    client = socket.create_connection(("127.0.0.1", port), timeout=10)
+def _finish_connect(client: socket.socket, client_id: str) -> socket.socket:
     client.settimeout(10)
     client.sendall(_connect(client_id))
     connack = _read_packet(client)
@@ -111,12 +111,44 @@ def _connect_client(port: int, client_id: str) -> socket.socket:
     return client
 
 
-def _publish_message(
-    client: socket.socket, packet_id: int, payload: bytes, qos: int
-) -> None:
-    client.sendall(
-        _publish(packet_id, "remote/sensors/temperature", payload, qos)
+def _connect_client(port: int, client_id: str) -> socket.socket:
+    return _finish_connect(
+        socket.create_connection(("127.0.0.1", port), timeout=10),
+        client_id,
     )
+
+
+def _connect_tls_client(
+    port: int,
+    client_id: str,
+    ca_certificate: Path,
+    client_certificate: Path,
+    client_key: Path,
+) -> socket.socket:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.load_verify_locations(cafile=ca_certificate)
+    context.load_cert_chain(client_certificate, client_key)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+    try:
+        return _finish_connect(
+            context.wrap_socket(raw, server_hostname="localhost"),
+            client_id,
+        )
+    except BaseException:
+        raw.close()
+        raise
+
+
+def _publish_message(
+    client: socket.socket,
+    packet_id: int,
+    payload: bytes,
+    qos: int,
+    topic: str = "remote/sensors/temperature",
+) -> None:
+    client.sendall(_publish(packet_id, topic, payload, qos))
     acknowledgement = _read_packet(client)
     expected_type = 0x40 if qos == 1 else 0x50
     if (
@@ -136,7 +168,11 @@ def _publish_message(
             )
 
 
-def _expect_mapped_publish(client: socket.socket, payload: bytes) -> None:
+def _expect_mapped_publish(
+    client: socket.socket,
+    payload: bytes,
+    expected_topic: str = "local/sensors/temperature",
+) -> None:
     packet = _read_packet(client)
     if packet[0] >> 4 != 3:
         raise AssertionError(f"expected bridged PUBLISH: {packet.hex()}")
@@ -153,7 +189,7 @@ def _expect_mapped_publish(client: socket.socket, payload: bytes) -> None:
         cursor += 2
     property_length, cursor = _decode_varint(packet, cursor)
     cursor += property_length
-    if topic != "local/sensors/temperature" or packet[cursor:end] != payload:
+    if topic != expected_topic or packet[cursor:end] != payload:
         raise AssertionError(
             f"unexpected bridge mapping topic={topic!r} payload={packet[cursor:end]!r}"
         )
@@ -217,6 +253,135 @@ def _wait_clean(
         output.close()  # type: ignore[attr-defined]
     if code != 0:
         raise RuntimeError(f"{label} exited {code}: {log.read_text(errors='replace')}")
+
+
+def _expect_startup_rejection(
+    broker: Path, config: Path, port: int, expected_error: str
+) -> None:
+    environment = os.environ.copy()
+    environment[FINITE_TEST_ENV] = "1"
+    try:
+        result = subprocess.run(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=environment,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError("invalid TLS bridge configuration started") from exc
+    if result.returncode == 0 or expected_error not in result.stdout:
+        raise AssertionError(
+            f"expected {expected_error} startup rejection: {result.stdout}"
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", port)) == 0:
+            raise AssertionError("listener bound before bridge TLS validation")
+
+
+def _openssl(*arguments: object) -> None:
+    subprocess.run(
+        ["openssl", *(str(argument) for argument in arguments)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=True,
+    )
+
+
+def _create_tls_material(directory: Path) -> tuple[Path, Path, Path, Path, Path]:
+    ca_key = directory / "bridge-ca.key"
+    ca_certificate = directory / "bridge-ca.pem"
+    server_key = directory / "bridge-server.key"
+    server_request = directory / "bridge-server.csr"
+    server_certificate = directory / "bridge-server.pem"
+    server_extensions = directory / "bridge-server.ext"
+    client_key = directory / "bridge-client.key"
+    client_request = directory / "bridge-client.csr"
+    client_certificate = directory / "bridge-client.pem"
+    client_extensions = directory / "bridge-client.ext"
+
+    _openssl("ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", ca_key)
+    _openssl(
+        "req",
+        "-new",
+        "-x509",
+        "-key",
+        ca_key,
+        "-sha256",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Netz bridge test CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+        "-out",
+        ca_certificate,
+    )
+    server_extensions.write_text(
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature\n"
+        "extendedKeyUsage=serverAuth\n"
+        "subjectAltName=DNS:localhost\n"
+    )
+    client_extensions.write_text(
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature\n"
+        "extendedKeyUsage=clientAuth\n"
+    )
+    for key, request, certificate, common_name, extensions, serial in (
+        (
+            server_key,
+            server_request,
+            server_certificate,
+            "localhost",
+            server_extensions,
+            101,
+        ),
+        (
+            client_key,
+            client_request,
+            client_certificate,
+            "netz-bridge-client",
+            client_extensions,
+            102,
+        ),
+    ):
+        _openssl(
+            "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key
+        )
+        _openssl("req", "-new", "-key", key, "-subj", f"/CN={common_name}", "-out", request)
+        _openssl(
+            "x509",
+            "-req",
+            "-in",
+            request,
+            "-CA",
+            ca_certificate,
+            "-CAkey",
+            ca_key,
+            "-set_serial",
+            serial,
+            "-days",
+            "1",
+            "-sha256",
+            "-extfile",
+            extensions,
+            "-out",
+            certificate,
+        )
+    return (
+        ca_certificate,
+        server_certificate,
+        server_key,
+        client_certificate,
+        client_key,
+    )
 
 
 def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
@@ -310,3 +475,176 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
             _stop(local, local_output)
         if upstream_output is not None:
             _stop(upstream, upstream_output)
+
+
+def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
+    (
+        ca_certificate,
+        server_certificate,
+        server_key,
+        client_certificate,
+        client_key,
+    ) = _create_tls_material(directory)
+    encrypted_client_key = directory / "bridge-client-encrypted.pem"
+    client_key_password = directory / "bridge-client-key.password"
+    client_key_password.write_text("bridge-key-secret\n")
+    _openssl(
+        "pkcs8",
+        "-topk8",
+        "-in",
+        client_key,
+        "-out",
+        encrypted_client_key,
+        "-v2",
+        "aes-256-cbc",
+        "-iter",
+        2048,
+        "-passout",
+        "pass:bridge-key-secret",
+    )
+    upstream_port = _free_port()
+    local_port = _free_port()
+    upstream_config = directory / "bridge-tls-upstream.conf"
+    upstream_config.write_text(
+        f"listener {upstream_port} 127.0.0.1\n"
+        f"certfile {server_certificate}\n"
+        f"keyfile {server_key}\n"
+        f"cafile {ca_certificate}\n"
+        "require_certificate true\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+    )
+    local_config = directory / "bridge-tls-local.conf"
+    local_config.write_text(
+        f"listener {local_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        "connection secure-upstream\n"
+        f"address localhost:{upstream_port}\n"
+        "topic sensors/# in 1 tls-local/ tls-remote/\n"
+        "bridge_protocol_version mqttv50\n"
+        "cleansession false\n"
+        "bridge_session_expiry_interval 60\n"
+        f"bridge_cafile {ca_certificate}\n"
+        f"bridge_certfile {client_certificate}\n"
+        f"bridge_keyfile {encrypted_client_key}\n"
+        f"bridge_keyfile_password_file {client_key_password}\n"
+        "bridge_insecure false\n"
+        "bridge_tls_version tlsv1.3\n"
+        "restart_timeout 1\n"
+    )
+    upstream_log = directory / "bridge-tls-upstream.log"
+    local_log = directory / "bridge-tls-local.log"
+    upstream, upstream_output = _start_broker(
+        broker, upstream_config, upstream_log
+    )
+    local = None
+    local_output = None
+    subscriber = None
+    publisher = None
+    try:
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        local, local_output = _start_broker(broker, local_config, local_log)
+        _wait_for_log(local, local_log, "bridge secure-upstream remote=")
+
+        subscriber = _connect_client(local_port, "tls-bridge-subscriber")
+        subscriber.sendall(_subscribe(1, "tls-local/#", 1))
+        suback = _read_packet(subscriber)
+        if suback[0] != 0x90 or suback[-1] != 1:
+            raise AssertionError(
+                f"TLS bridge subscriber expected SUBACK: {suback.hex()}"
+            )
+
+        publisher = _connect_tls_client(
+            upstream_port,
+            "tls-bridge-publisher",
+            ca_certificate,
+            client_certificate,
+            client_key,
+        )
+        _publish_message(
+            publisher,
+            1,
+            b"vail-mtls",
+            1,
+            "tls-remote/sensors/temperature",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"vail-mtls",
+            "tls-local/sensors/temperature",
+        )
+        publisher.sendall(b"\xe0\x00")
+        publisher.close()
+        publisher = None
+        subscriber.sendall(b"\xe0\x00")
+        subscriber.close()
+        subscriber = None
+        _wait_clean(local, local_output, local_log, "local TLS bridge broker")
+        local = None
+        local_output = None
+        _wait_clean(upstream, upstream_output, upstream_log, "TLS upstream broker")
+        upstream_output = None
+    except BaseException as exc:
+        raise RuntimeError(
+            "configured TLS bridge failed:\nlocal:\n"
+            + (local_log.read_text(errors="replace") if local_log.exists() else "")
+            + "\nupstream:\n"
+            + (
+                upstream_log.read_text(errors="replace")
+                if upstream_log.exists()
+                else ""
+            )
+        ) from exc
+    finally:
+        if publisher is not None:
+            publisher.close()
+        if subscriber is not None:
+            subscriber.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        if upstream_output is not None:
+            _stop(upstream, upstream_output)
+
+    empty_ca = directory / "bridge-empty-ca.pem"
+    empty_ca.write_bytes(b"")
+    invalid_ca_port = _free_port()
+    invalid_ca_config = directory / "bridge-invalid-ca.conf"
+    invalid_ca_config.write_text(
+        f"listener {invalid_ca_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "connection invalid-ca\n"
+        "address localhost:1\n"
+        "topic # in 0\n"
+        f"bridge_cafile {empty_ca}\n"
+        "bridge_tls_version tlsv1.3\n"
+    )
+    _expect_startup_rejection(
+        broker,
+        invalid_ca_config,
+        invalid_ca_port,
+        "EmptyBridgeCaFile",
+    )
+
+    wrong_password = directory / "bridge-client-key-wrong.password"
+    wrong_password.write_text("wrong-secret\n")
+    invalid_key_port = _free_port()
+    invalid_key_config = directory / "bridge-invalid-key-password.conf"
+    invalid_key_config.write_text(
+        f"listener {invalid_key_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "connection invalid-key-password\n"
+        "address localhost:1\n"
+        "topic # in 0\n"
+        f"bridge_cafile {ca_certificate}\n"
+        f"bridge_certfile {client_certificate}\n"
+        f"bridge_keyfile {encrypted_client_key}\n"
+        f"bridge_keyfile_password_file {wrong_password}\n"
+        "bridge_tls_version tlsv1.3\n"
+    )
+    _expect_startup_rejection(
+        broker,
+        invalid_key_config,
+        invalid_key_port,
+        "InvalidPasswordOrCiphertext",
+    )

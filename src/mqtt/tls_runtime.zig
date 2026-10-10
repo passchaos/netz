@@ -963,6 +963,10 @@ pub const Client = struct {
 pub const ConnectOptions = struct {
     mqtt: mqtt_runtime.ConnectOptions,
     tls: http1_runtime.TlsClientOptions = .{},
+    /// Select the vail TLS data plane even when client authentication, ALPN,
+    /// and a custom verifier are not otherwise needed. This is useful for
+    /// production adapters that require one TLS implementation consistently.
+    use_vail: bool = false,
     /// Select the vail TLS 1.3 stream client and answer CertificateRequest.
     /// The identity storage only needs to outlive the synchronous connect call.
     client_identity: ?ClientIdentity = null,
@@ -1208,7 +1212,8 @@ fn connectStreamAttemptMaybeBefore(
     if (options.tcp_nodelay) {
         try socket_options.setTcpNoDelay(stream);
     }
-    if (options.client_identity != null or
+    if (options.use_vail or
+        options.client_identity != null or
         options.server_verifier != null or
         options.alpn_protocols.len != 0)
     {

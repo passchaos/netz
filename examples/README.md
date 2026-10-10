@@ -136,6 +136,12 @@ topic sensors/# in 1 local/ remote/
 cleansession false
 remote_clientid netz-upstream
 restart_timeout 5 30
+bridge_cafile upstream-ca.pem
+bridge_certfile bridge-client-chain.pem
+bridge_keyfile bridge-client-key.pem
+bridge_keyfile_password_file bridge-client-key.password
+bridge_alpn mqtt
+bridge_tls_version tlsv1.3
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
@@ -160,7 +166,10 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
 `cleansession`, `bridge_protocol_version`,
 `bridge_session_expiry_interval`, `keepalive_interval`, `remote_clientid`,
-`remote_username`, `remote_password`, and `restart_timeout`. Unknown directives, duplicates,
+`remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`,
+`bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
+`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`, and
+`bridge_tls_version`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. In
 production config mode, each listener's `max_connections` is its simultaneous
 admitted-client limit and the broker keeps accepting after clients disconnect.
@@ -195,6 +204,16 @@ crash-safe broker journal beside the configured snapshot. A process gate runs
 two real broker instances, verifies prefix mapping and QoS 1/2 delivery, kills
 and restarts the upstream broker, then verifies automatic resubscription and
 delivery without restarting the local broker.
+
+Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
+Trust comes from a bounded explicit `bridge_cafile`, operating-system roots
+enabled by `bridge_tls_use_os_certs true`, or both. Optional bridge mTLS uses
+the same strictly parsed P-256/P-384/P-521/Ed25519/RSA identity loader as the
+server and supports PBES2-encrypted PKCS#8 through
+`bridge_keyfile_password_file`. `bridge_alpn` supplies one protocol offer.
+`bridge_insecure true` and `bridge_tls_version tlsv1.2` are rejected rather
+than weakening authentication or silently selecting a different TLS stack.
+Every configured CA and client identity is loaded before any listener binds.
 `accept_protocol_versions` restricts that listener to `4`, `5`, or `4,5`;
 version-denied clients receive the protocol-specific Unsupported Protocol
 Version CONNACK before close. MQTT 3.1 (level 3), empty sets, duplicate values,
@@ -327,8 +346,9 @@ files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. Other curves, legacy PEM encryption, plugins, outbound
-or bidirectional configured bridges, and full Mosquitto configuration remain outside this subset and fail
+filesystem expansion. Other curves, legacy PEM encryption, plugins, bridge
+CA directories, outbound or bidirectional configured bridges, and full
+Mosquitto configuration remain outside this subset and fail
 closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER

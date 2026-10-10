@@ -1167,6 +1167,14 @@ test "MQTT broker config parses owned inbound bridges" {
         \\remote_username bridge-user
         \\remote_password bridge-secret
         \\restart_timeout 10 60
+        \\bridge_cafile roots.pem
+        \\bridge_tls_use_os_certs true
+        \\bridge_certfile client-chain.pem
+        \\bridge_keyfile client-key.pem
+        \\bridge_keyfile_password_file client-key.password
+        \\bridge_alpn mqtt
+        \\bridge_insecure false
+        \\bridge_tls_version tlsv1.3
         \\connection backup
         \\address [::1]:3883
         \\topic backup/# in 2 mirror/ source/
@@ -1194,6 +1202,22 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(@as(u16, 10), upstream.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 60), upstream.restart.cap_seconds);
     try std.testing.expect(upstream.restart.jitter);
+    try std.testing.expect(upstream.usesTls());
+    try std.testing.expect(upstream.use_os_ca_certificates);
+    try std.testing.expectEqualStrings("roots.pem", upstream.ca_file);
+    try std.testing.expectEqualStrings(
+        "client-chain.pem",
+        upstream.certificate_file,
+    );
+    try std.testing.expectEqualStrings(
+        "client-key.pem",
+        upstream.private_key_file,
+    );
+    try std.testing.expectEqualStrings(
+        "client-key.password",
+        upstream.private_key_password_file,
+    );
+    try std.testing.expectEqualStrings("mqtt", upstream.alpn);
     try std.testing.expectEqual(@as(usize, 2), upstream.rules.len);
     try std.testing.expectEqualStrings(
         "remote/sensors/#",
@@ -1318,6 +1342,30 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "bridge_session_expiry_interval 60\n"),
     );
     try std.testing.expectError(
+        error.BridgeTlsTrustRequired,
+        parse(allocator, listener ++
+            "connection tls-no-trust\naddress localhost\ntopic # in 0\n" ++
+            "bridge_tls_version tlsv1.3\n"),
+    );
+    try std.testing.expectError(
+        error.BridgeTlsIdentityIncomplete,
+        parse(allocator, listener ++
+            "connection tls-identity\naddress localhost\ntopic # in 0\n" ++
+            "bridge_cafile ca.pem\nbridge_certfile client.pem\n"),
+    );
+    try std.testing.expectError(
+        error.InsecureBridgeTlsUnsupported,
+        parse(allocator, listener ++
+            "connection insecure\naddress localhost\ntopic # in 0\n" ++
+            "bridge_cafile ca.pem\nbridge_insecure true\n"),
+    );
+    try std.testing.expectError(
+        error.UnsupportedBridgeTlsVersion,
+        parse(allocator, listener ++
+            "connection tls12\naddress localhost\ntopic # in 0\n" ++
+            "bridge_cafile ca.pem\nbridge_tls_version tlsv1.2\n"),
+    );
+    try std.testing.expectError(
         error.UnsupportedBridgeRestartTimeout,
         parse(allocator, listener ++
             "connection restart\naddress localhost\ntopic # in 0\n" ++
@@ -1329,6 +1377,36 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection addresses\naddress one.example two.example\n" ++
             "topic # in 0\n"),
     );
+}
+
+test "MQTT broker config bridge allocation failures leak nothing" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testBridgeConfigAllocationFailures,
+        .{},
+    );
+}
+
+fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
+    var config = try parse(allocator,
+        \\persistence true
+        \\listener 1883 127.0.0.1
+        \\allow_anonymous true
+        \\connection allocation-test
+        \\address broker.example:2883
+        \\topic sensors/# in 1 local/ remote/
+        \\topic commands/# in 2 command/ upstream/
+        \\remote_clientid allocation-bridge
+        \\remote_username user
+        \\remote_password secret
+        \\bridge_cafile roots.pem
+        \\bridge_certfile client.pem
+        \\bridge_keyfile client.key
+        \\bridge_keyfile_password_file client.password
+        \\bridge_alpn mqtt
+        \\bridge_tls_version tlsv1.3
+    );
+    defer config.deinit(allocator);
 }
 
 test "MQTT broker config validates global client session limit" {

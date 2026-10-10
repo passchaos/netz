@@ -1000,7 +1000,8 @@ Current protocol coverage includes:
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
   supervised inbound `connection` bridges with strict `topic ... in ...`
   QoS/prefix mapping, upstream Session/authentication settings, bounded
-  reconnect policy, and crash-safe QoS 2 state,
+  reconnect policy, vail-backed TLS 1.3 with CA/hostname verification and
+  optional encrypted-key mTLS, and crash-safe QoS 2 state,
   listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
   PBES2-encrypted PKCS#8 keys with file-backed passwords, and
   optional/required

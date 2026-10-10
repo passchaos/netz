@@ -25,11 +25,15 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     BridgeAuthenticationIncomplete,
     BridgePersistenceRequired,
     BridgePersistentSessionRequired,
+    BridgeTlsIdentityIncomplete,
+    BridgeTlsTrustRequired,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
     UnsupportedBridgeDirection,
     UnsupportedBridgeProtocol,
     UnsupportedBridgeRestartTimeout,
+    UnsupportedBridgeTlsVersion,
+    InsecureBridgeTlsUnsupported,
 };
 
 pub const RestartPolicy = struct {
@@ -65,6 +69,12 @@ pub const Bridge = struct {
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
+    ca_file: []u8 = &.{},
+    use_os_ca_certificates: bool = false,
+    certificate_file: []u8 = &.{},
+    private_key_file: []u8 = &.{},
+    private_key_password_file: []u8 = &.{},
+    alpn: []u8 = &.{},
     restart: RestartPolicy = .{},
 
     pub fn deinit(self: *Bridge, allocator: std.mem.Allocator) void {
@@ -76,6 +86,13 @@ pub const Bridge = struct {
         }
         if (self.remote_username.len != 0) allocator.free(self.remote_username);
         if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
+        if (self.ca_file.len != 0) allocator.free(self.ca_file);
+        if (self.certificate_file.len != 0) allocator.free(self.certificate_file);
+        if (self.private_key_file.len != 0) allocator.free(self.private_key_file);
+        if (self.private_key_password_file.len != 0) {
+            allocator.free(self.private_key_password_file);
+        }
+        if (self.alpn.len != 0) allocator.free(self.alpn);
         allocator.free(self.host);
         allocator.free(self.name);
         self.* = undefined;
@@ -94,6 +111,10 @@ pub const Bridge = struct {
         }
         return false;
     }
+
+    pub fn usesTls(self: Bridge) bool {
+        return self.ca_file.len != 0 or self.use_os_ca_certificates;
+    }
 };
 
 const Seen = struct {
@@ -106,6 +127,14 @@ const Seen = struct {
     remote_username: bool = false,
     remote_password: bool = false,
     restart_timeout: bool = false,
+    bridge_cafile: bool = false,
+    bridge_tls_use_os_certs: bool = false,
+    bridge_certfile: bool = false,
+    bridge_keyfile: bool = false,
+    bridge_keyfile_password_file: bool = false,
+    bridge_alpn: bool = false,
+    bridge_insecure: bool = false,
+    bridge_tls_version: bool = false,
 };
 
 pub const Builder = struct {
@@ -120,6 +149,12 @@ pub const Builder = struct {
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
+    ca_file: []u8 = &.{},
+    use_os_ca_certificates: bool = false,
+    certificate_file: []u8 = &.{},
+    private_key_file: []u8 = &.{},
+    private_key_password_file: []u8 = &.{},
+    alpn: []u8 = &.{},
     restart: RestartPolicy = .{},
     seen: Seen = .{},
     moved: bool = false,
@@ -145,6 +180,13 @@ pub const Builder = struct {
         }
         if (self.remote_username.len != 0) allocator.free(self.remote_username);
         if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
+        if (self.ca_file.len != 0) allocator.free(self.ca_file);
+        if (self.certificate_file.len != 0) allocator.free(self.certificate_file);
+        if (self.private_key_file.len != 0) allocator.free(self.private_key_file);
+        if (self.private_key_password_file.len != 0) {
+            allocator.free(self.private_key_password_file);
+        }
+        if (self.alpn.len != 0) allocator.free(self.alpn);
         if (self.host.len != 0) allocator.free(self.host);
         allocator.free(self.name);
         self.* = undefined;
@@ -202,6 +244,48 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "restart_timeout")) {
             try markOnce(&self.seen.restart_timeout);
             self.restart = try parseRestartTimeout(words);
+        } else if (std.mem.eql(u8, directive, "bridge_cafile")) {
+            try markOnce(&self.seen.bridge_cafile);
+            self.ca_file = try parseOwnedNonEmpty(allocator, words);
+        } else if (std.mem.eql(
+            u8,
+            directive,
+            "bridge_tls_use_os_certs",
+        )) {
+            try markOnce(&self.seen.bridge_tls_use_os_certs);
+            self.use_os_ca_certificates = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "bridge_certfile")) {
+            try markOnce(&self.seen.bridge_certfile);
+            self.certificate_file = try parseOwnedNonEmpty(allocator, words);
+        } else if (std.mem.eql(u8, directive, "bridge_keyfile")) {
+            try markOnce(&self.seen.bridge_keyfile);
+            self.private_key_file = try parseOwnedNonEmpty(allocator, words);
+        } else if (std.mem.eql(
+            u8,
+            directive,
+            "bridge_keyfile_password_file",
+        )) {
+            try markOnce(&self.seen.bridge_keyfile_password_file);
+            self.private_key_password_file = try parseOwnedNonEmpty(
+                allocator,
+                words,
+            );
+        } else if (std.mem.eql(u8, directive, "bridge_alpn")) {
+            try markOnce(&self.seen.bridge_alpn);
+            self.alpn = try parseOwnedUtf8(allocator, words);
+            if (self.alpn.len > std.math.maxInt(u8)) {
+                return error.InvalidDirective;
+            }
+        } else if (std.mem.eql(u8, directive, "bridge_insecure")) {
+            try markOnce(&self.seen.bridge_insecure);
+            if (try parseOneBool(words)) {
+                return error.InsecureBridgeTlsUnsupported;
+            }
+        } else if (std.mem.eql(u8, directive, "bridge_tls_version")) {
+            try markOnce(&self.seen.bridge_tls_version);
+            if (!std.mem.eql(u8, try parseOne(words), "tlsv1.3")) {
+                return error.UnsupportedBridgeTlsVersion;
+            }
         } else {
             return error.InvalidDirective;
         }
@@ -221,6 +305,24 @@ pub const Builder = struct {
             self.protocol != .v5)
         {
             return error.InvalidDirective;
+        }
+        if ((self.certificate_file.len == 0) !=
+            (self.private_key_file.len == 0))
+        {
+            return error.BridgeTlsIdentityIncomplete;
+        }
+        if (self.private_key_password_file.len != 0 and
+            self.private_key_file.len == 0)
+        {
+            return error.BridgeTlsIdentityIncomplete;
+        }
+        const tls_option_configured = self.certificate_file.len != 0 or
+            self.alpn.len != 0 or self.seen.bridge_insecure or
+            self.seen.bridge_tls_version;
+        if (tls_option_configured and
+            self.ca_file.len == 0 and !self.use_os_ca_certificates)
+        {
+            return error.BridgeTlsTrustRequired;
         }
         var uses_qos2 = false;
         for (self.rules.items) |rule| {
@@ -247,6 +349,12 @@ pub const Builder = struct {
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
+            .ca_file = self.ca_file,
+            .use_os_ca_certificates = self.use_os_ca_certificates,
+            .certificate_file = self.certificate_file,
+            .private_key_file = self.private_key_file,
+            .private_key_password_file = self.private_key_password_file,
+            .alpn = self.alpn,
             .restart = self.restart,
         };
         self.moved = true;
@@ -316,7 +424,15 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
         std.mem.eql(u8, value, "remote_password") or
-        std.mem.eql(u8, value, "restart_timeout");
+        std.mem.eql(u8, value, "restart_timeout") or
+        std.mem.eql(u8, value, "bridge_cafile") or
+        std.mem.eql(u8, value, "bridge_tls_use_os_certs") or
+        std.mem.eql(u8, value, "bridge_certfile") or
+        std.mem.eql(u8, value, "bridge_keyfile") or
+        std.mem.eql(u8, value, "bridge_keyfile_password_file") or
+        std.mem.eql(u8, value, "bridge_alpn") or
+        std.mem.eql(u8, value, "bridge_insecure") or
+        std.mem.eql(u8, value, "bridge_tls_version");
 }
 
 const Endpoint = struct {
@@ -466,6 +582,15 @@ fn parseOwnedUtf8(
         return error.InvalidDirective;
     }
     try mqtt.validateUtf8String(value);
+    return allocator.dupe(u8, value);
+}
+
+fn parseOwnedNonEmpty(
+    allocator: std.mem.Allocator,
+    words: anytype,
+) Error![]u8 {
+    const value = try parseOne(words);
+    if (value.len == 0) return error.InvalidDirective;
     return allocator.dupe(u8, value);
 }
 
