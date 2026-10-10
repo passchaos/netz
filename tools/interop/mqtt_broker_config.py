@@ -2204,10 +2204,46 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         "serverAuth",
         "DNS:localhost",
     )
+    first_key_password = "identity-first-key"
+    second_key_password = "identity-second-key"
+    first_encrypted_key = directory / "identity-reload-first-encrypted.key"
+    second_encrypted_key = directory / "identity-reload-second-encrypted.key"
+    run_openssl(
+        "pkcs8",
+        "-topk8",
+        "-in",
+        first_key,
+        "-out",
+        first_encrypted_key,
+        "-v2",
+        "aes-256-cbc",
+        "-iter",
+        "10000",
+        "-passout",
+        f"pass:{first_key_password}",
+    )
+    run_openssl(
+        "pkcs8",
+        "-topk8",
+        "-in",
+        second_key,
+        "-out",
+        second_encrypted_key,
+        "-v2",
+        "aes-128-cbc",
+        "-v2prf",
+        "hmacWithSHA384",
+        "-iter",
+        "12000",
+        "-passout",
+        f"pass:{second_key_password}",
+    )
     active_certificate = directory / "identity-reload-active.crt"
     active_key = directory / "identity-reload-active.key"
+    key_password_file = directory / "identity-reload-key.password"
     active_certificate.write_bytes(first_certificate.read_bytes())
-    active_key.write_bytes(first_key.read_bytes())
+    active_key.write_bytes(first_encrypted_key.read_bytes())
+    key_password_file.write_text(first_key_password + "\n")
     password_file = directory / "identity-reload.pwfile"
     password_hash = (
         "$7$1000$"
@@ -2226,12 +2262,14 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         f"listener {mqtt_port} 127.0.0.1\n"
         f"certfile {active_certificate}\n"
         f"keyfile {active_key}\n"
+        f"keyfile_password_file {key_password_file}\n"
         "allow_anonymous false\n"
         "max_connections 16\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
         f"certfile {active_certificate}\n"
         f"keyfile {active_key}\n"
+        f"keyfile_password_file {key_password_file}\n"
         "allow_anonymous false\n"
         "max_connections 16\n"
     )
@@ -2327,7 +2365,8 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         clients.append(old_wss)
 
         active_certificate.write_bytes(second_certificate.read_bytes())
-        active_key.write_bytes(second_key.read_bytes())
+        active_key.write_bytes(second_encrypted_key.read_bytes())
+        key_password_file.write_text(second_key_password + "\n")
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -2349,6 +2388,20 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
             lambda: wss_connect(first_ca, "identity-stale-wss"),
             "WSS reload",
         )
+
+        key_password_file.write_text("wrong-key-password\n")
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload failed: error=InvalidPasswordOrCiphertext",
+            "failed encrypted-key password reload",
+        )
+        password_rollback = mqtt_connect(
+            second_ca,
+            "identity-password-rollback",
+        )
+        clients.append(password_rollback)
+        key_password_file.write_text(second_key_password + "\n")
 
         active_certificate.write_text("not a certificate\n")
         password_file.write_text(f"new:{password_hash}\n")
@@ -4616,16 +4669,74 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
         "-out",
         rsa_certificate,
     )
+    key_password = "netz-encrypted-key"
+    key_password_file = directory / "rsa-server.password"
+    key_password_file.write_text(key_password + "\n")
+    rsa_encrypted_aes256 = directory / "rsa-server-aes256.key"
+    rsa_encrypted_aes128 = directory / "rsa-server-aes128.key"
+    run_openssl(
+        "pkcs8",
+        "-topk8",
+        "-in",
+        rsa_key,
+        "-out",
+        rsa_encrypted_aes256,
+        "-v2",
+        "aes-256-cbc",
+        "-iter",
+        "10000",
+        "-passout",
+        f"pass:{key_password}",
+    )
+    run_openssl(
+        "pkcs8",
+        "-topk8",
+        "-in",
+        rsa_key,
+        "-out",
+        rsa_encrypted_aes128,
+        "-v2",
+        "aes-128-cbc",
+        "-v2prf",
+        "hmacWithSHA512",
+        "-iter",
+        "12000",
+        "-passout",
+        f"pass:{key_password}",
+    )
 
     tls_port = free_port()
     websocket_port = free_port()
     while websocket_port == tls_port:
         websocket_port = free_port()
+    encrypted_tls_port = free_port()
+    while encrypted_tls_port in (tls_port, websocket_port):
+        encrypted_tls_port = free_port()
+    encrypted_wss_port = free_port()
+    while encrypted_wss_port in (
+        tls_port,
+        websocket_port,
+        encrypted_tls_port,
+    ):
+        encrypted_wss_port = free_port()
     config = directory / "rsa-tls-key.conf"
     config.write_text(
         f"listener {tls_port} 127.0.0.1\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {rsa_key}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {encrypted_tls_port} 127.0.0.1\n"
+        f"certfile {rsa_certificate}\n"
+        f"keyfile {rsa_encrypted_aes256}\n"
+        f"keyfile_password_file {key_password_file}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {encrypted_wss_port} 127.0.0.1\n"
+        "protocol websockets\n"
+        f"certfile {rsa_certificate}\n"
+        f"keyfile {rsa_encrypted_aes128}\n"
+        f"keyfile_password_file {key_password_file}\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {websocket_port} 127.0.0.1\n"
@@ -4644,13 +4755,13 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
     assert process.stdout is not None
     wait_process_line(
         process,
-        "configured 2 listeners for 2 clients",
+        "configured 4 listeners for 4 clients",
         "RSA TLS broker startup",
     )
-    listener_lines = read_listener_lines(process, 2, "RSA TLS broker startup")
-    if sum(line.startswith("mqtts ") for line in listener_lines) != 1:
+    listener_lines = read_listener_lines(process, 4, "RSA TLS broker startup")
+    if sum(line.startswith("mqtts ") for line in listener_lines) != 2:
         raise RuntimeError(f"RSA MQTT/TLS listeners missing: {listener_lines}")
-    if not any(line.startswith("wss ") for line in listener_lines):
+    if sum(line.startswith("wss ") for line in listener_lines) != 2:
         raise RuntimeError(f"RSA WSS listener missing: {listener_lines}")
 
     rsa_result = openssl_mqtt_client(
@@ -4667,6 +4778,26 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
         send_websocket_binary(websocket, bytes.fromhex("e000"))
     finally:
         websocket.close()
+    encrypted_result = openssl_mqtt_client(
+        encrypted_tls_port,
+        rsa_certificate,
+        signature_algorithms="rsa_pss_rsae_sha256",
+    )
+    assert_openssl_mqtt_success(encrypted_result)
+    encrypted_websocket = websocket_connect(
+        encrypted_wss_port,
+        rsa_certificate,
+    )
+    try:
+        send_websocket_binary(
+            encrypted_websocket,
+            connect_packet("rsa-encrypted-wss"),
+        )
+        if connack_reason(read_websocket_binary(encrypted_websocket)) != 0:
+            raise AssertionError("encrypted RSA WSS CONNECT failed")
+        send_websocket_binary(encrypted_websocket, bytes.fromhex("e000"))
+    finally:
+        encrypted_websocket.close()
     if process.wait(timeout=5) != 0:
         raise RuntimeError("RSA TLS broker failed: " + process.stdout.read())
 
@@ -4713,6 +4844,45 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
             raise AssertionError(
                 "an earlier cleartext listener was bound before RSA TLS "
                 "identity validation completed"
+            )
+
+    wrong_password_file = directory / "rsa-server-wrong.password"
+    wrong_password_file.write_text("wrong-password\n")
+    password_cleartext_port = free_port()
+    password_tls_port = free_port()
+    while password_tls_port == password_cleartext_port:
+        password_tls_port = free_port()
+    password_config = directory / "rsa-tls-key-password-mismatch.conf"
+    password_config.write_text(
+        f"listener {password_cleartext_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        f"listener {password_tls_port} 127.0.0.1\n"
+        f"certfile {rsa_certificate}\n"
+        f"keyfile {rsa_encrypted_aes256}\n"
+        f"keyfile_password_file {wrong_password_file}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={password_config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "InvalidPasswordOrCiphertext" not in result.stdout:
+        raise AssertionError(
+            "wrong encrypted-key password did not fail before listen: "
+            + result.stdout
+        )
+    with socket.socket() as probe:
+        probe.settimeout(1)
+        if probe.connect_ex(("127.0.0.1", password_cleartext_port)) == 0:
+            raise AssertionError(
+                "an earlier cleartext listener was bound before encrypted "
+                "private-key validation completed"
             )
 
 
@@ -5063,12 +5233,14 @@ def main() -> None:
         "policy, ordered include_dir and global/per-listener security files, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
-        "policies, P-256/P-384/P-521/Ed25519/RSA TLS and required mTLS with OpenSSL verification, "
+        "policies, P-256/P-384/P-521/Ed25519/RSA and encrypted PKCS#8 TLS "
+        "with OpenSSL verification, "
         "optional/required client certificates, bounded capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "atomic password/ACL and TLS/WSS identity/CA/CRL SIGHUP reload with rollback, "
+        "atomic password/ACL and TLS/WSS identity/key-password/CA/CRL "
+        "SIGHUP reload with rollback, "
         "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )

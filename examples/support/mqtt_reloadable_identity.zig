@@ -17,6 +17,7 @@ const ClientAuthRequirement = netz.mqtt.tls_runtime.ClientAuthRequirement;
 pub const Paths = struct {
     certificate_file: []const u8 = &.{},
     private_key_file: []const u8 = &.{},
+    private_key_password_file: []const u8 = &.{},
     client_ca_file: []const u8 = &.{},
     client_ca_path: []const u8 = &.{},
     crl_file: []const u8 = &.{},
@@ -31,7 +32,8 @@ pub const Paths = struct {
         if (self.certificate_file.len == 0 and
             (self.client_ca_file.len != 0 or
                 self.client_ca_path.len != 0 or
-                self.crl_file.len != 0))
+                self.crl_file.len != 0 or
+                self.private_key_password_file.len != 0))
         {
             return error.ClientAuthenticationWithoutServerIdentity;
         }
@@ -62,13 +64,23 @@ const Generation = struct {
     ) !*Generation {
         const generation = try allocator.create(Generation);
         errdefer allocator.destroy(generation);
-        var identity = try netz.tls.server_identity_file.load(
-            allocator,
-            io,
-            dir,
-            paths.certificate_file,
-            paths.private_key_file,
-        );
+        var identity = if (paths.private_key_password_file.len != 0)
+            try netz.tls.server_identity_file.loadWithPasswordFile(
+                allocator,
+                io,
+                dir,
+                paths.certificate_file,
+                paths.private_key_file,
+                paths.private_key_password_file,
+            )
+        else
+            try netz.tls.server_identity_file.load(
+                allocator,
+                io,
+                dir,
+                paths.certificate_file,
+                paths.private_key_file,
+            );
         errdefer identity.deinit();
         var client_ca: ?netz.tls.client_ca_file.File =
             if (paths.client_ca_path.len != 0)

@@ -318,6 +318,7 @@ pub fn run(
         paths.* = .{
             .certificate_file = configured.certfile,
             .private_key_file = configured.keyfile,
+            .private_key_password_file = configured.keyfile_password_file,
             .client_ca_file = configured.cafile,
             .client_ca_path = configured.capath,
             .crl_file = configured.crlfile,

@@ -36,6 +36,7 @@ pub const Listener = struct {
     acl_file: []u8 = &.{},
     certfile: []u8 = &.{},
     keyfile: []u8 = &.{},
+    keyfile_password_file: []u8 = &.{},
     cafile: []u8 = &.{},
     capath: []u8 = &.{},
     crlfile: []u8 = &.{},
@@ -63,6 +64,9 @@ pub const Listener = struct {
         if (self.auto_id_prefix.len != 0) allocator.free(self.auto_id_prefix);
         if (self.certfile.len != 0) allocator.free(self.certfile);
         if (self.keyfile.len != 0) allocator.free(self.keyfile);
+        if (self.keyfile_password_file.len != 0) {
+            allocator.free(self.keyfile_password_file);
+        }
         if (self.cafile.len != 0) allocator.free(self.cafile);
         if (self.capath.len != 0) allocator.free(self.capath);
         if (self.crlfile.len != 0) allocator.free(self.crlfile);
@@ -216,6 +220,7 @@ const ListenerSeen = struct {
     protocol: bool = false,
     certfile: bool = false,
     keyfile: bool = false,
+    keyfile_password_file: bool = false,
     cafile: bool = false,
     capath: bool = false,
     crlfile: bool = false,
@@ -533,6 +538,16 @@ fn parseSources(
                 } else if (std.mem.eql(u8, directive, "keyfile")) {
                     try markOnce(&seen.keyfile);
                     listener.keyfile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "keyfile_password_file",
+                )) {
+                    try markOnce(&seen.keyfile_password_file);
+                    listener.keyfile_password_file = try parseOneOwned(
+                        allocator,
+                        &words,
+                    );
                 } else if (std.mem.eql(u8, directive, "cafile")) {
                     try markOnce(&seen.cafile);
                     listener.cafile = try parseOneOwned(allocator, &words);
@@ -667,6 +682,11 @@ fn parseSources(
         if ((listener.certfile.len == 0) != (listener.keyfile.len == 0)) {
             return error.TlsIdentityIncomplete;
         }
+        if (listener.keyfile_password_file.len != 0 and
+            listener.keyfile.len == 0)
+        {
+            return error.TlsIdentityIncomplete;
+        }
         const proxy_v2 = listener.proxy_protocol == .v2;
         if (listener.require_certificate and
             !proxy_v2 and (!has_client_ca or !listener.usesTls()))
@@ -745,6 +765,7 @@ fn isListenerDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "protocol") or
         std.mem.eql(u8, value, "certfile") or
         std.mem.eql(u8, value, "keyfile") or
+        std.mem.eql(u8, value, "keyfile_password_file") or
         std.mem.eql(u8, value, "cafile") or
         std.mem.eql(u8, value, "capath") or
         std.mem.eql(u8, value, "crlfile") or
@@ -950,6 +971,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\protocol websockets
         \\certfile server-chain.pem
         \\keyfile server-key.pem
+        \\keyfile_password_file server-key.password
         \\cafile client-ca.pem
         \\crlfile clients.crl
         \\require_certificate true
@@ -1035,6 +1057,10 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqualStrings(
         "server-key.pem",
         config.listeners[1].keyfile,
+    );
+    try std.testing.expectEqualStrings(
+        "server-key.password",
+        config.listeners[1].keyfile_password_file,
     );
     try std.testing.expectEqualStrings(
         "client-ca.pem",
@@ -1623,6 +1649,10 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator, "certfile server.pem\nlistener 1883"),
     );
     try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "keyfile_password_file secret\nlistener 1883"),
+    );
+    try std.testing.expectError(
         error.TlsIdentityIncomplete,
         parse(allocator,
             \\listener 8883
@@ -1635,6 +1665,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\listener 8883
             \\keyfile server.key
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.TlsIdentityIncomplete,
+        parse(allocator,
+            \\listener 8883
+            \\keyfile_password_file server-key.password
             \\allow_anonymous true
         ),
     );

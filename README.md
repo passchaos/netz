@@ -998,7 +998,8 @@ Current protocol coverage includes:
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
-  listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile` and
+  listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
+  PBES2-encrypted PKCS#8 keys with file-backed passwords, and
   optional/required
   mTLS through strictly validated `cafile` and bounded TCP/TLS `capath` trust
   sources with `require_certificate`, plus owned certificate-CN
@@ -1008,7 +1009,7 @@ Current protocol coverage includes:
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   global or `per_listener_settings`-isolated Mosquitto password/ACL files
   with anonymous/user scopes and Linux SIGHUP atomic password/ACL plus TLS/WSS
-  server-identity/client-CA/CRL reload with whole-policy rollback and
+  server-identity/key-password/client-CA/CRL reload with whole-policy rollback and
   ref-counted in-flight handshake generations, exact per-listener WebSocket Origin allowlists,
   a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and
   per-listener zero-length Client ID admission,

@@ -2,12 +2,13 @@
 //!
 //! This loader supports PEM X.509 chains with unencrypted P-256/P-384/P-521
 //! SEC1 or PKCS#8 keys, RFC 8410 Ed25519 PKCS#8 keys, and 2048/3072/4096-bit RSA
-//! PKCS#1/PKCS#8 keys. Unsupported PEM labels, ambiguous DER, parameters that
-//! cannot be represented by the TLS signer, and certificate/key mismatches fail
-//! closed.
+//! PKCS#1/PKCS#8 keys. PBES2-encrypted PKCS#8 is available through the explicit
+//! password APIs. Unsupported PEM labels, ambiguous DER, parameters that cannot
+//! be represented by the TLS signer, and certificate/key mismatches fail closed.
 
 const std = @import("std");
 const vail = @import("vail");
+const encrypted_private_key = @import("encrypted_private_key.zig");
 
 const EcdsaP256Sha256 = std.crypto.sign.ecdsa.EcdsaP256Sha256;
 const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
@@ -18,11 +19,12 @@ const ServerIdentity = vail.tls.auth.ServerIdentity;
 
 pub const max_certificate_file_bytes: usize = 4 * 1024 * 1024;
 pub const max_private_key_file_bytes: usize = 64 * 1024;
+pub const max_private_key_password_file_bytes: usize = 4 * 1024;
 pub const max_certificates: usize = 16;
 pub const max_certificate_der_bytes: usize = 1024 * 1024;
 pub const max_private_key_der_bytes: usize = 16 * 1024;
 
-pub const Error = std.mem.Allocator.Error || error{
+pub const Error = std.mem.Allocator.Error || encrypted_private_key.Error || error{
     EmptyCertificateChain,
     TooManyCertificates,
     CertificateTooLarge,
@@ -32,6 +34,9 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidPrivateKey,
     InvalidCertificate,
     CertificateKeyMismatch,
+    EncryptedPrivateKeyPasswordRequired,
+    PrivateKeyPasswordTooLarge,
+    InvalidPrivateKeyPasswordFile,
 };
 
 pub const Identity = struct {
@@ -104,6 +109,84 @@ pub fn load(
     certificate_path: []const u8,
     private_key_path: []const u8,
 ) (Error || std.Io.Dir.ReadFileAllocError)!Identity {
+    return loadWithOptionalPassword(
+        allocator,
+        io,
+        dir,
+        certificate_path,
+        private_key_path,
+        null,
+    );
+}
+
+/// Load a server identity and decrypt PBES2 PKCS#8 key material with a
+/// caller-borrowed password. The caller remains responsible for wiping it.
+pub fn loadWithPassword(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    certificate_path: []const u8,
+    private_key_path: []const u8,
+    password: []const u8,
+) (Error || std.Io.Dir.ReadFileAllocError)!Identity {
+    return loadWithOptionalPassword(
+        allocator,
+        io,
+        dir,
+        certificate_path,
+        private_key_path,
+        password,
+    );
+}
+
+/// Load an identity using a bounded, one-line password file. The password
+/// buffer is wiped immediately after the private key has been parsed.
+pub fn loadWithPasswordFile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    certificate_path: []const u8,
+    private_key_path: []const u8,
+    password_path: []const u8,
+) (Error || std.Io.Dir.ReadFileAllocError)!Identity {
+    const source = try dir.readFileAlloc(
+        io,
+        password_path,
+        allocator,
+        .limited(max_private_key_password_file_bytes + 1),
+    );
+    defer {
+        std.crypto.secureZero(u8, source);
+        allocator.free(source);
+    }
+    if (source.len > max_private_key_password_file_bytes) {
+        return error.PrivateKeyPasswordTooLarge;
+    }
+    var end = source.len;
+    if (end != 0 and source[end - 1] == '\n') end -= 1;
+    if (end != 0 and source[end - 1] == '\r') end -= 1;
+    const password = source[0..end];
+    if (password.len == 0 or std.mem.indexOfAny(u8, password, "\r\n\x00") != null) {
+        return error.InvalidPrivateKeyPasswordFile;
+    }
+    return loadWithOptionalPassword(
+        allocator,
+        io,
+        dir,
+        certificate_path,
+        private_key_path,
+        password,
+    );
+}
+
+fn loadWithOptionalPassword(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    certificate_path: []const u8,
+    private_key_path: []const u8,
+    password: ?[]const u8,
+) (Error || std.Io.Dir.ReadFileAllocError)!Identity {
     const certificate_source = try dir.readFileAlloc(
         io,
         certificate_path,
@@ -128,13 +211,48 @@ pub fn load(
     if (private_key_source.len > max_private_key_file_bytes) {
         return error.PrivateKeyTooLarge;
     }
-    return parse(allocator, certificate_source, private_key_source);
+    return parseWithOptionalPassword(
+        allocator,
+        certificate_source,
+        private_key_source,
+        password,
+    );
 }
 
 pub fn parse(
     allocator: std.mem.Allocator,
     certificate_source: []const u8,
     private_key_pem: []const u8,
+) Error!Identity {
+    return parseWithOptionalPassword(
+        allocator,
+        certificate_source,
+        private_key_pem,
+        null,
+    );
+}
+
+/// Parse an identity and decrypt PBES2 PKCS#8 key material with a
+/// caller-borrowed password. The caller remains responsible for wiping it.
+pub fn parseWithPassword(
+    allocator: std.mem.Allocator,
+    certificate_source: []const u8,
+    private_key_pem: []const u8,
+    password: []const u8,
+) Error!Identity {
+    return parseWithOptionalPassword(
+        allocator,
+        certificate_source,
+        private_key_pem,
+        password,
+    );
+}
+
+fn parseWithOptionalPassword(
+    allocator: std.mem.Allocator,
+    certificate_source: []const u8,
+    private_key_pem: []const u8,
+    password: ?[]const u8,
 ) Error!Identity {
     if (certificate_source.len > max_certificate_file_bytes) {
         return error.CertificateTooLarge;
@@ -155,11 +273,28 @@ pub fn parse(
         std.crypto.secureZero(u8, key_der.bytes);
         allocator.free(key_der.bytes);
     }
-    var key_pair = try parsePrivateKeyDer(
+    var decrypted: ?encrypted_private_key.Plaintext = null;
+    defer if (decrypted) |*plaintext| plaintext.deinit();
+    const key_bytes = if (key_der.label == .encrypted_pkcs8) blk: {
+        const secret = password orelse
+            return error.EncryptedPrivateKeyPasswordRequired;
+        decrypted = try encrypted_private_key.decryptAlloc(
+            allocator,
+            key_der.bytes,
+            secret,
+        );
+        break :blk decrypted.?.bytes;
+    } else key_der.bytes;
+    var key_pair = parsePrivateKeyDer(
         allocator,
-        key_der.label,
-        key_der.bytes,
-    );
+        if (key_der.label == .encrypted_pkcs8) .pkcs8 else key_der.label,
+        key_bytes,
+    ) catch |err| {
+        if (key_der.label == .encrypted_pkcs8 and err == error.InvalidPrivateKey) {
+            return error.InvalidPasswordOrCiphertext;
+        }
+        return err;
+    };
     errdefer deinitKeyPair(allocator, &key_pair);
 
     const owned_chain = try certificates.toOwnedSlice(allocator);
@@ -181,7 +316,7 @@ pub fn parse(
     return identity;
 }
 
-const PemLabel = enum { sec1, rsa_pkcs1, pkcs8 };
+const PemLabel = enum { sec1, rsa_pkcs1, pkcs8, encrypted_pkcs8 };
 
 const DecodedPrivateKey = struct {
     label: PemLabel,
@@ -274,6 +409,12 @@ fn parsePrivateKeyPem(
         else if (std.mem.eql(
             u8,
             line.bytes,
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+        ))
+            .encrypted_pkcs8
+        else if (std.mem.eql(
+            u8,
+            line.bytes,
             "-----BEGIN PRIVATE KEY-----",
         ))
             .pkcs8
@@ -285,6 +426,7 @@ fn parsePrivateKeyPem(
             .sec1 => "-----END EC PRIVATE KEY-----",
             .rsa_pkcs1 => "-----END RSA PRIVATE KEY-----",
             .pkcs8 => "-----END PRIVATE KEY-----",
+            .encrypted_pkcs8 => "-----END ENCRYPTED PRIVATE KEY-----",
         };
         const body_start = line.next;
         var body_end: ?usize = null;
@@ -303,7 +445,10 @@ fn parsePrivateKeyPem(
             .bytes = try decodePemBody(
                 allocator,
                 source[body_start..encoded_end],
-                max_private_key_der_bytes,
+                if (label == .encrypted_pkcs8)
+                    encrypted_private_key.maximum_encrypted_bytes
+                else
+                    max_private_key_der_bytes,
                 true,
             ),
         };
@@ -424,6 +569,7 @@ fn parsePrivateKeyDer(
             .rsa_pss = try parseRsaPrivateKey(allocator, der),
         },
         .pkcs8 => parsePkcs8PrivateKey(allocator, der),
+        .encrypted_pkcs8 => unreachable,
     };
 }
 
@@ -970,7 +1116,7 @@ test "server identity file rejects malformed PEM and unsupported labels" {
         parse(std.testing.allocator, certificate_pem, "-----BEGIN PRIVATE KEY-----\nAA==\n"),
     );
     try std.testing.expectError(
-        error.UnsupportedPrivateKey,
+        error.EncryptedPrivateKeyPasswordRequired,
         parse(std.testing.allocator, certificate_pem, "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAA==\n" ++
             "-----END ENCRYPTED PRIVATE KEY-----\n"),
     );

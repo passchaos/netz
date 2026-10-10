@@ -132,7 +132,7 @@ max_connections 16
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
-`keyfile`, `cafile`, `capath`, `crlfile`, `require_certificate`,
+`keyfile`, `keyfile_password_file`, `cafile`, `capath`, `crlfile`, `require_certificate`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
 `accept_protocol_versions`,
@@ -283,18 +283,20 @@ still rejects invalid credentials when a username is supplied. `certfile` and
 `keyfile` are listener-local and must occur together. Their presence upgrades
 `protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
 port is opened, every identity is loaded from a leaf-first PEM certificate
-chain and an unencrypted P-256/P-384/P-521 SEC1 or PKCS#8, RFC 8410 Ed25519
-PKCS#8, or 2048/3072/4096-bit RSA PKCS#1/PKCS#8 private key. TLS-compatible constrained
-RSA-PSS PKCS#8 keys are also supported. Inputs are bounded, strictly decoded,
-prepared for allocation-free handshake signing, and checked against the leaf
-public key. `include_dir` is supported by the
+chain and P-256/P-384/P-521 SEC1 or PKCS#8, RFC 8410 Ed25519 PKCS#8, or
+2048/3072/4096-bit RSA PKCS#1/PKCS#8 private key. TLS-compatible constrained
+RSA-PSS PKCS#8 keys are also supported. `keyfile_password_file` supplies one
+non-empty line for PBES2-encrypted PKCS#8 using bounded PBKDF2-HMAC-SHA1,
+SHA-256, SHA-384 or SHA-512 with AES-128-CBC or AES-256-CBC. Inputs are bounded,
+strictly decoded, prepared for allocation-free handshake signing, and checked
+against the leaf public key. `include_dir` is supported by the
 file-loading API and only in the main file. It expands top-level regular `.conf`
 files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. Other curves, encrypted keys, plugins, bridges, and full
-Mosquitto configuration remain outside this subset and fail
+filesystem expansion. Other curves, legacy PEM encryption, plugins, bridges,
+and full Mosquitto configuration remain outside this subset and fail
 closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER
@@ -332,9 +334,10 @@ As in Mosquitto's current ACL-file plugin, SUBSCRIBE/UNSUBSCRIBE requests can be
 installed even when no read rule grants them; unauthorized publications remain
 undeliverable. Unknown directives/access modes and malformed patterns fail
 before listeners are bound. On Linux, `SIGHUP` atomically reloads the
-`password_file`, `acl_file`, `certfile`, `keyfile`, `cafile`, `capath`, and
-`crlfile` contents named by the initial configuration. All replacement files
-are parsed before any active set is changed; any missing, malformed, unsigned,
+`password_file`, `acl_file`, `certfile`, `keyfile`, `keyfile_password_file`,
+`cafile`, `capath`, and `crlfile` contents named by the initial configuration.
+All replacement files are parsed before any active set is changed; any missing,
+malformed, unsigned,
 mismatched, or otherwise invalid file keeps the complete previous policy and
 TLS identities.
 Existing clients immediately observe new ACL rules, password changes apply to
