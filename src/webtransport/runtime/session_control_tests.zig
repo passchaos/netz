@@ -1368,26 +1368,38 @@ test "WebTransport handshake session receives peer QUIC close details" {
 
     const Shared = struct {
         server: *runtime.HandshakeServer,
+        close_observed: std.Io.Event = .unset,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            runFallible(shared.server) catch |err| {
+            shared.runFallible() catch |err| {
                 shared.err = err;
             };
         }
 
-        fn runFallible(server_ptr: *runtime.HandshakeServer) !void {
-            var session = try server_ptr.accept();
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
             defer session.deinit();
             try session.h3.established.connection.closeApplication(
                 0,
                 "interop complete",
+            );
+            // `closeApplication` submits the final datagram asynchronously.
+            // Keep its connection state alive until the client has consumed
+            // the close, otherwise immediate teardown can race that send.
+            try self.close_observed.wait(
+                self.server.h3.quic_server.endpoint.io,
             );
         }
     };
 
     var shared = Shared{ .server = &server };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.close_observed.set(io);
+        thread.join();
+    };
 
     var client = try runtime.HandshakeClientSession.connect(
         allocator,
@@ -1410,7 +1422,9 @@ test "WebTransport handshake session receives peer QUIC close details" {
     );
     defer client.deinit();
 
-    switch (try client.receivePeerConnectionClose()) {
+    switch (try client.receivePeerConnectionCloseWithTimeout(
+        .fromSeconds(5),
+    )) {
         .application => |close| {
             try std.testing.expectEqual(@as(u64, 0), close.error_code);
             try std.testing.expectEqualStrings(
@@ -1421,7 +1435,9 @@ test "WebTransport handshake session receives peer QUIC close details" {
         .transport => return error.TestUnexpectedResult,
     }
 
+    shared.close_observed.set(io);
     thread.join();
+    joined = true;
     if (shared.err) |err| return err;
 }
 
