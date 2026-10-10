@@ -984,6 +984,12 @@ test "session tracks current connection Receive Maximum usage" {
         try store.handleAck(opened.handle, .pubrec, qos2.packet_id, 0),
     );
     try expectPublishWindow(&store, opened.handle, 0);
+    try store.blockPendingPubRel(opened.handle, qos2.packet_id);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try store.drainInto(opened.handle, .zero, 4, &output)).len,
+    );
+    try store.releasePendingPubRels(opened.handle);
 
     const pubrel = try store.drainInto(opened.handle, .zero, 4, &output);
     try std.testing.expectEqual(@as(usize, 1), pubrel.len);
@@ -1286,10 +1292,24 @@ test "session reconnect honors a lower Receive Maximum" {
     );
     try store.disconnect(opened.handle, null, .zero);
     const resumed = try store.open("lower-window", false, 60, .zero);
+    const first = try store.drainInto(resumed.handle, .zero, 1, &output);
     try std.testing.expectEqual(
         @as(usize, 1),
-        (try store.drainInto(resumed.handle, .zero, 1, &output)).len,
+        first.len,
     );
+    const first_id = first[0].publish.packet_id;
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(
+            resumed.handle,
+            .puback,
+            first_id,
+            0,
+        ),
+    );
+    const second = try store.drainInto(resumed.handle, .zero, 1, &output);
+    try std.testing.expectEqual(@as(usize, 1), second.len);
+    try std.testing.expect(second[0].publish.packet_id != first_id);
 }
 
 test "session drain reuses more inflight holes than newly available slots" {

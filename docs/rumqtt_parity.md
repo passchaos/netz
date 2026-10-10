@@ -3951,9 +3951,16 @@ proxy evidence for the entire suite.
    from 62,906 to 38,136 ns by medians (paired median 0.6058x, 7/7 wins).
    Ordinary-window durable QoS 2 end-to-end throughput stayed neutral across
    the five fixed shapes at 0.9993x, 1.0080x, 0.9886x, 1.0043x and 1.0034x.
-   The remaining scan for retransmission candidates is still O(n); removing or
-   indexing that pass is a separate scheduling improvement rather than a claim
-   made by this counter change.
+   A follow-up adds an exact pending-send count and a conservative lowest-slot
+   cursor, preserves slot-order retransmission, and replaces the independent
+   empty-slot count with `items.len - inflight_count`. With no pending
+   retransmission, the same 16,384-inflight drain is now independent of the
+   array length: a seven-pair fixed-binary run moved from 42,261 ns to 10 ns by
+   medians (paired median 0.0002366x, 7/7 wins). Blocked PUBREL or an actually
+   pending suffix still requires work proportional to the candidates examined;
+   this is not presented as an end-to-end 4,226x claim. The final ordinary-
+   window durable QoS 2 control remained neutral at 1.0035x, 0.9999x, 1.0142x,
+   0.9982x and 1.0158x across the five fixed shapes.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

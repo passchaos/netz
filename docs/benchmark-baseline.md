@@ -6921,6 +6921,47 @@ The complete 63,817,477-byte artifact is retained under
 `zig-out/mqtt-session-count-broker-ab`; its result-table SHA-256 is
 `b70a9ba65252ed7b20e0f043927e7399a637a2580ed7fa177e0942d27af13a76`.
 
+A follow-up removes the remaining unconditional inflight pass. Each Session
+keeps an exact pending-send count and a conservative lowest candidate slot;
+selection advances the cursor in slot order, while retry, PUBREC, reconnect
+and snapshot restore lower it. A stale low cursor after deletion costs at most
+one repair scan and cannot skip work. The same change derives reusable holes
+as `inflight.items.len - inflight_count`, replacing the other full-array scan,
+and lets immediate publish reject pending older work from the exact count.
+Blocked PUBREL and a reconnect with an output buffer smaller than the pending
+set have dedicated regressions, and debug statistics validate the count/cursor
+relationship against the underlying records.
+
+With the benchmark loop raised to 20,000 iterations and both the Store and
+result length passed through `doNotOptimizeAway`, seven CPU-11 alternating
+fixed-binary pairs compared the count-only baseline with the cursor candidate.
+The baseline measured 40,871-42,504 ns/full-window empty drain with a
+42,261-ns median; the candidate measured 9-10 ns with a 10-ns median. The
+paired candidate/baseline median was 0.0002366x (7/7 wins). This is structural
+evidence that the no-pending path no longer depends on the 16,384-entry
+inflight array; the absolute nanosecond value is not extrapolated to socket or
+broker throughput. Baseline, candidate, identical source and result-table
+SHA-256 values are respectively
+`7a1568dffda5e0d7aca38fa2bee30e00c3ae921458572c892c9b8df8d1f024bd`,
+`a060a7efd309611eec08911618ef423b9a055f66ae1efe1bd29d4068a40c58be`,
+`28f34cda67400c01854506f6dc468743f773877e47fc7c0f282dd4d315faa564`
+and
+`28e45e17bc7a4cbbb67b4287a367682eb7417f3009a8c685bd125c5f4e3ddcb1`.
+Artifacts are retained under `zig-out/mqtt-session-cursor-ab`.
+
+The final fixed-binary durable QoS 2 control again completed all 50 ordinary-
+window broker arms with exact delivery counts and checksums. Throughput paired
+medians were 1.0035x, 0.9999x, 1.0142x, 0.9982x and 1.0158x in the five-shape
+order, with overlapping ranges; the result is neutral/no-regression evidence.
+Baseline broker, candidate broker and fixed driver SHA-256 values are
+`01aaa15bbe71548cf964ae1e42938cf523f1b9303a02d3309bfc3bc9f1879982`,
+`2ce2eddba2b2a8c8911525a94848683926c189a1d11371ace0f56e0b83ed6de7`
+and
+`30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The complete 63,819,797-byte artifact is retained under
+`zig-out/mqtt-session-cursor-broker-ab`; its result-table SHA-256 is
+`8e7178f83b685236db9c8706940f5a8d7e1e7449028bb64e16ed11a9e170963e`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

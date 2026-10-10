@@ -10,7 +10,7 @@ const fanout_sessions: usize = 64;
 const fanout_messages: usize = 256;
 const fanout_samples: usize = 7;
 const full_window_inflight: usize = 16_384;
-const full_window_iterations: usize = 2_000;
+const full_window_iterations: usize = 20_000;
 const full_window_samples: usize = 7;
 
 pub fn main(init: std.process.Init) !void {
@@ -245,12 +245,14 @@ fn benchmarkFullWindowDrain(io: std.Io) !FullWindowResult {
     for (&samples) |*sample| {
         const started = nowNs(io);
         for (0..full_window_iterations) |_| {
+            std.mem.doNotOptimizeAway(&store);
             const empty = try store.drainInto(
                 opened.handle,
                 .zero,
                 @intCast(full_window_inflight),
                 &probe,
             );
+            std.mem.doNotOptimizeAway(empty.len);
             checksum +%= empty.len;
         }
         sample.* = (nowNs(io) -| started) / full_window_iterations;
