@@ -1,0 +1,499 @@
+//! Owned Mosquitto-style inbound bridge configuration.
+//!
+//! The top-level broker parser owns scope selection. This module keeps the
+//! bridge grammar, validation, and allocation lifecycle out of the already
+//! large listener configuration module.
+
+const std = @import("std");
+const mqtt = @import("mod.zig");
+const rule_helpers = @import("bridge/rules.zig");
+
+pub const default_port: u16 = 1883;
+pub const default_keep_alive_seconds: u16 = 60;
+pub const default_restart_base_seconds: u16 = 5;
+pub const default_restart_cap_seconds: u16 = 30;
+pub const maximum_restart_seconds: u16 = 3600;
+pub const maximum_host_bytes: usize = 255;
+
+pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
+    DuplicateDirective,
+    InvalidDirective,
+    InvalidBoolean,
+    InvalidInteger,
+    BridgeAddressRequired,
+    BridgeTopicRequired,
+    BridgeAuthenticationIncomplete,
+    BridgePersistenceRequired,
+    BridgePersistentSessionRequired,
+    DuplicateBridgeFilter,
+    OverlappingBridgeFilters,
+    UnsupportedBridgeDirection,
+    UnsupportedBridgeProtocol,
+    UnsupportedBridgeRestartTimeout,
+};
+
+pub const RestartPolicy = struct {
+    base_seconds: u16 = default_restart_base_seconds,
+    cap_seconds: u16 = default_restart_cap_seconds,
+    jitter: bool = true,
+};
+
+pub const Rule = struct {
+    /// Effective filter sent to the remote broker, including remote_prefix.
+    filter: []u8,
+    qos: mqtt.QoS,
+    local_prefix: []u8 = &.{},
+    remote_prefix: []u8 = &.{},
+
+    fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
+        allocator.free(self.filter);
+        if (self.local_prefix.len != 0) allocator.free(self.local_prefix);
+        if (self.remote_prefix.len != 0) allocator.free(self.remote_prefix);
+        self.* = undefined;
+    }
+};
+
+pub const Bridge = struct {
+    name: []u8,
+    host: []u8,
+    port: u16 = default_port,
+    rules: []Rule,
+    protocol: mqtt.ProtocolVersion = .v3_1_1,
+    clean_session: bool = false,
+    session_expiry_interval: u32 = 0,
+    keep_alive_seconds: u16 = default_keep_alive_seconds,
+    remote_client_id: []u8 = &.{},
+    remote_username: []u8 = &.{},
+    remote_password: []u8 = &.{},
+    restart: RestartPolicy = .{},
+
+    pub fn deinit(self: *Bridge, allocator: std.mem.Allocator) void {
+        for (self.rules) |*rule| rule.deinit(allocator);
+        allocator.free(self.rules);
+        if (self.remote_password.len != 0) {
+            std.crypto.secureZero(u8, self.remote_password);
+            allocator.free(self.remote_password);
+        }
+        if (self.remote_username.len != 0) allocator.free(self.remote_username);
+        if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
+        allocator.free(self.host);
+        allocator.free(self.name);
+        self.* = undefined;
+    }
+
+    pub fn clientId(self: Bridge) []const u8 {
+        return if (self.remote_client_id.len != 0)
+            self.remote_client_id
+        else
+            self.name;
+    }
+
+    pub fn usesQoS2(self: Bridge) bool {
+        for (self.rules) |rule| {
+            if (rule.qos == .exactly_once) return true;
+        }
+        return false;
+    }
+};
+
+const Seen = struct {
+    address: bool = false,
+    clean_session: bool = false,
+    bridge_protocol_version: bool = false,
+    bridge_session_expiry_interval: bool = false,
+    keepalive_interval: bool = false,
+    remote_client_id: bool = false,
+    remote_username: bool = false,
+    remote_password: bool = false,
+    restart_timeout: bool = false,
+};
+
+pub const Builder = struct {
+    name: []u8,
+    host: []u8 = &.{},
+    port: u16 = default_port,
+    rules: std.ArrayList(Rule) = .empty,
+    protocol: mqtt.ProtocolVersion = .v3_1_1,
+    clean_session: bool = false,
+    session_expiry_interval: u32 = 0,
+    keep_alive_seconds: u16 = default_keep_alive_seconds,
+    remote_client_id: []u8 = &.{},
+    remote_username: []u8 = &.{},
+    remote_password: []u8 = &.{},
+    restart: RestartPolicy = .{},
+    seen: Seen = .{},
+    moved: bool = false,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        name: []const u8,
+    ) Error!Builder {
+        if (name.len == 0 or name.len > std.math.maxInt(u16)) {
+            return error.InvalidDirective;
+        }
+        try mqtt.validateUtf8String(name);
+        return .{ .name = try allocator.dupe(u8, name) };
+    }
+
+    pub fn deinit(self: *Builder, allocator: std.mem.Allocator) void {
+        if (self.moved) return;
+        for (self.rules.items) |*rule| rule.deinit(allocator);
+        self.rules.deinit(allocator);
+        if (self.remote_password.len != 0) {
+            std.crypto.secureZero(u8, self.remote_password);
+            allocator.free(self.remote_password);
+        }
+        if (self.remote_username.len != 0) allocator.free(self.remote_username);
+        if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
+        if (self.host.len != 0) allocator.free(self.host);
+        allocator.free(self.name);
+        self.* = undefined;
+    }
+
+    pub fn apply(
+        self: *Builder,
+        allocator: std.mem.Allocator,
+        directive: []const u8,
+        words: anytype,
+    ) Error!void {
+        if (std.mem.eql(u8, directive, "address")) {
+            try markOnce(&self.seen.address);
+            const endpoint = try parseEndpoint(try parseOne(words));
+            self.host = try allocator.dupe(u8, endpoint.host);
+            self.port = endpoint.port;
+        } else if (std.mem.eql(u8, directive, "topic")) {
+            try self.appendRule(allocator, words);
+        } else if (std.mem.eql(u8, directive, "cleansession")) {
+            try markOnce(&self.seen.clean_session);
+            self.clean_session = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "bridge_protocol_version")) {
+            try markOnce(&self.seen.bridge_protocol_version);
+            const value = try parseOne(words);
+            self.protocol = if (std.mem.eql(u8, value, "mqttv311"))
+                .v3_1_1
+            else if (std.mem.eql(u8, value, "mqttv50"))
+                .v5
+            else
+                return error.UnsupportedBridgeProtocol;
+        } else if (std.mem.eql(
+            u8,
+            directive,
+            "bridge_session_expiry_interval",
+        )) {
+            try markOnce(&self.seen.bridge_session_expiry_interval);
+            const value = try parseOne(words);
+            self.session_expiry_interval = std.fmt.parseInt(
+                u32,
+                value,
+                0,
+            ) catch return error.InvalidInteger;
+        } else if (std.mem.eql(u8, directive, "keepalive_interval")) {
+            try markOnce(&self.seen.keepalive_interval);
+            self.keep_alive_seconds = try parsePositive(u16, words);
+        } else if (std.mem.eql(u8, directive, "remote_clientid")) {
+            try markOnce(&self.seen.remote_client_id);
+            self.remote_client_id = try parseOwnedUtf8(allocator, words);
+        } else if (std.mem.eql(u8, directive, "remote_username")) {
+            try markOnce(&self.seen.remote_username);
+            self.remote_username = try parseOwnedUtf8(allocator, words);
+        } else if (std.mem.eql(u8, directive, "remote_password")) {
+            try markOnce(&self.seen.remote_password);
+            self.remote_password = try parseOwnedUtf8(allocator, words);
+        } else if (std.mem.eql(u8, directive, "restart_timeout")) {
+            try markOnce(&self.seen.restart_timeout);
+            self.restart = try parseRestartTimeout(words);
+        } else {
+            return error.InvalidDirective;
+        }
+    }
+
+    pub fn finish(
+        self: *Builder,
+        allocator: std.mem.Allocator,
+        persistence: bool,
+    ) Error!Bridge {
+        if (!self.seen.address) return error.BridgeAddressRequired;
+        if (self.rules.items.len == 0) return error.BridgeTopicRequired;
+        if (self.remote_password.len != 0 and self.remote_username.len == 0) {
+            return error.BridgeAuthenticationIncomplete;
+        }
+        if (self.seen.bridge_session_expiry_interval and
+            self.protocol != .v5)
+        {
+            return error.InvalidDirective;
+        }
+        var uses_qos2 = false;
+        for (self.rules.items) |rule| {
+            uses_qos2 = uses_qos2 or rule.qos == .exactly_once;
+        }
+        if (uses_qos2) {
+            if (!persistence) return error.BridgePersistenceRequired;
+            if (self.clean_session or
+                (self.protocol == .v5 and self.session_expiry_interval == 0))
+            {
+                return error.BridgePersistentSessionRequired;
+            }
+        }
+        const owned_rules = try self.rules.toOwnedSlice(allocator);
+        const result = Bridge{
+            .name = self.name,
+            .host = self.host,
+            .port = self.port,
+            .rules = owned_rules,
+            .protocol = self.protocol,
+            .clean_session = self.clean_session,
+            .session_expiry_interval = self.session_expiry_interval,
+            .keep_alive_seconds = self.keep_alive_seconds,
+            .remote_client_id = self.remote_client_id,
+            .remote_username = self.remote_username,
+            .remote_password = self.remote_password,
+            .restart = self.restart,
+        };
+        self.moved = true;
+        return result;
+    }
+
+    fn appendRule(
+        self: *Builder,
+        allocator: std.mem.Allocator,
+        words: anytype,
+    ) Error!void {
+        const topic = words.next() orelse return error.InvalidDirective;
+        const direction = words.next() orelse
+            return error.UnsupportedBridgeDirection;
+        if (!std.mem.eql(u8, direction, "in")) {
+            return error.UnsupportedBridgeDirection;
+        }
+        const qos = switch (try parseInteger(u2, words.next() orelse
+            return error.InvalidDirective)) {
+            0 => mqtt.QoS.at_most_once,
+            1 => mqtt.QoS.at_least_once,
+            2 => mqtt.QoS.exactly_once,
+            else => return error.InvalidInteger,
+        };
+        const local_prefix_text = normalizeEmpty(words.next() orelse "");
+        const remote_prefix_text = normalizeEmpty(words.next() orelse "");
+        if (words.next() != null) return error.InvalidDirective;
+        try validatePrefix(local_prefix_text);
+        try validatePrefix(remote_prefix_text);
+        const filter = try effectiveFilterAlloc(
+            allocator,
+            topic,
+            remote_prefix_text,
+        );
+        errdefer allocator.free(filter);
+        for (self.rules.items) |previous| {
+            if (std.mem.eql(u8, previous.filter, filter)) {
+                return error.DuplicateBridgeFilter;
+            }
+            if (rule_helpers.filtersOverlap(previous.filter, filter)) {
+                return error.OverlappingBridgeFilters;
+            }
+        }
+        const local_prefix = try duplicateNonEmpty(allocator, local_prefix_text);
+        errdefer if (local_prefix.len != 0) allocator.free(local_prefix);
+        const remote_prefix = try duplicateNonEmpty(
+            allocator,
+            remote_prefix_text,
+        );
+        errdefer if (remote_prefix.len != 0) allocator.free(remote_prefix);
+        try self.rules.append(allocator, .{
+            .filter = filter,
+            .qos = qos,
+            .local_prefix = local_prefix,
+            .remote_prefix = remote_prefix,
+        });
+    }
+};
+
+pub fn isDirective(value: []const u8) bool {
+    return std.mem.eql(u8, value, "address") or
+        std.mem.eql(u8, value, "topic") or
+        std.mem.eql(u8, value, "cleansession") or
+        std.mem.eql(u8, value, "bridge_protocol_version") or
+        std.mem.eql(u8, value, "bridge_session_expiry_interval") or
+        std.mem.eql(u8, value, "keepalive_interval") or
+        std.mem.eql(u8, value, "remote_clientid") or
+        std.mem.eql(u8, value, "remote_username") or
+        std.mem.eql(u8, value, "remote_password") or
+        std.mem.eql(u8, value, "restart_timeout");
+}
+
+const Endpoint = struct {
+    host: []const u8,
+    port: u16,
+};
+
+fn parseEndpoint(value: []const u8) Error!Endpoint {
+    if (value.len == 0) return error.InvalidDirective;
+    if (value[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, value, ']') orelse
+            return error.InvalidDirective;
+        if (close == 1 or close + 2 > value.len or value[close + 1] != ':') {
+            return error.InvalidDirective;
+        }
+        if (std.mem.indexOfScalar(u8, value[close + 2 ..], ':') != null) {
+            return error.InvalidDirective;
+        }
+        const host = value[1..close];
+        _ = std.Io.net.IpAddress.parseIp6(host, 0) catch
+            return error.InvalidDirective;
+        return .{
+            .host = host,
+            .port = try parsePort(value[close + 2 ..]),
+        };
+    }
+    const first_colon = std.mem.indexOfScalar(u8, value, ':');
+    if (first_colon) |colon| {
+        if (colon == 0 or colon + 1 == value.len or
+            std.mem.indexOfScalar(u8, value[colon + 1 ..], ':') != null)
+        {
+            return error.InvalidDirective;
+        }
+        const host = value[0..colon];
+        try validateHost(host);
+        return .{
+            .host = host,
+            .port = try parsePort(value[colon + 1 ..]),
+        };
+    }
+    try validateHost(value);
+    return .{ .host = value, .port = default_port };
+}
+
+fn validateHost(value: []const u8) Error!void {
+    if (value.len == 0 or value.len > maximum_host_bytes or
+        std.mem.indexOfAny(u8, value, "/[]") != null)
+    {
+        return error.InvalidDirective;
+    }
+    try mqtt.validateUtf8String(value);
+}
+
+fn parsePort(value: []const u8) Error!u16 {
+    const port = try parseInteger(u16, value);
+    if (port == 0) return error.InvalidInteger;
+    return port;
+}
+
+fn parseRestartTimeout(words: anytype) Error!RestartPolicy {
+    const base = try parseRestartSeconds(words.next() orelse
+        return error.InvalidDirective);
+    const cap_text = words.next();
+    const cap = if (cap_text) |value|
+        try parseRestartSeconds(value)
+    else
+        base;
+    if (words.next() != null) return error.UnsupportedBridgeRestartTimeout;
+    if (cap < base) return error.InvalidInteger;
+    return .{
+        .base_seconds = base,
+        .cap_seconds = cap,
+        .jitter = cap_text != null,
+    };
+}
+
+fn parseRestartSeconds(value: []const u8) Error!u16 {
+    const seconds = try parseInteger(u16, value);
+    if (seconds == 0 or seconds > maximum_restart_seconds) {
+        return error.InvalidInteger;
+    }
+    return seconds;
+}
+
+fn effectiveFilterAlloc(
+    allocator: std.mem.Allocator,
+    topic: []const u8,
+    remote_prefix: []const u8,
+) Error![]u8 {
+    try mqtt.validateTopicFilter(topic);
+    if (remote_prefix.len == 0) return allocator.dupe(u8, topic);
+    if (!std.mem.startsWith(u8, topic, "$share/")) {
+        return concatFilter(allocator, remote_prefix, topic);
+    }
+    const rest = topic["$share/".len..];
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse
+        return error.InvalidSubscription;
+    const wrapper_len = "$share/".len + slash + 1;
+    const wrapper = topic[0..wrapper_len];
+    const inner = rest[slash + 1 ..];
+    const prefixed_inner = try concatFilter(allocator, remote_prefix, inner);
+    defer allocator.free(prefixed_inner);
+    const result = try std.mem.concat(allocator, u8, &.{ wrapper, prefixed_inner });
+    errdefer allocator.free(result);
+    try mqtt.validateTopicFilter(result);
+    return result;
+}
+
+fn concatFilter(
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+    filter: []const u8,
+) Error![]u8 {
+    const len = std.math.add(usize, prefix.len, filter.len) catch
+        return error.InvalidSubscription;
+    if (len > std.math.maxInt(u16)) return error.InvalidSubscription;
+    const result = try std.mem.concat(allocator, u8, &.{ prefix, filter });
+    errdefer allocator.free(result);
+    try mqtt.validateTopicFilter(result);
+    return result;
+}
+
+fn validatePrefix(prefix: []const u8) Error!void {
+    if (prefix.len == 0) return;
+    if (prefix.len >= std.math.maxInt(u16)) return error.InvalidTopic;
+    try mqtt.validateUtf8String(prefix);
+    if (mqtt.hasWildcards(prefix)) return error.InvalidTopic;
+}
+
+fn normalizeEmpty(value: []const u8) []const u8 {
+    return if (std.mem.eql(u8, value, "\"\"")) "" else value;
+}
+
+fn duplicateNonEmpty(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    return if (value.len == 0) &.{} else allocator.dupe(u8, value);
+}
+
+fn parseOwnedUtf8(
+    allocator: std.mem.Allocator,
+    words: anytype,
+) Error![]u8 {
+    const value = try parseOne(words);
+    if (value.len == 0 or value.len > std.math.maxInt(u16)) {
+        return error.InvalidDirective;
+    }
+    try mqtt.validateUtf8String(value);
+    return allocator.dupe(u8, value);
+}
+
+fn parseOne(words: anytype) Error![]const u8 {
+    const value = words.next() orelse return error.InvalidDirective;
+    if (words.next() != null) return error.InvalidDirective;
+    return value;
+}
+
+fn parseOneBool(words: anytype) Error!bool {
+    const value = try parseOne(words);
+    if (std.mem.eql(u8, value, "true")) return true;
+    if (std.mem.eql(u8, value, "false")) return false;
+    return error.InvalidBoolean;
+}
+
+fn parsePositive(comptime T: type, words: anytype) Error!T {
+    const value = try parseOne(words);
+    const parsed = try parseInteger(T, value);
+    if (parsed == 0) return error.InvalidInteger;
+    return parsed;
+}
+
+fn parseInteger(comptime T: type, value: []const u8) Error!T {
+    return std.fmt.parseInt(T, value, 10) catch error.InvalidInteger;
+}
+
+fn markOnce(flag: *bool) Error!void {
+    if (flag.*) return error.DuplicateDirective;
+    flag.* = true;
+}

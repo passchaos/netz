@@ -7,6 +7,7 @@
 const std = @import("std");
 const http1 = @import("../http1/mod.zig");
 const mqtt = @import("mod.zig");
+const bridge_config = @import("broker_config_bridge.zig");
 const broker_config_include = @import("broker_config_include.zig");
 const client_id = @import("broker/client_id.zig");
 
@@ -28,6 +29,8 @@ pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
 pub const Protocol = enum { mqtt, websockets };
+pub const Bridge = bridge_config.Bridge;
+pub const BridgeRule = bridge_config.Rule;
 
 pub const Listener = struct {
     address: net.IpAddress,
@@ -83,6 +86,7 @@ pub const Listener = struct {
 
 pub const Config = struct {
     listeners: []Listener,
+    bridges: []Bridge = &.{},
     global_max_clients: usize = default_global_max_clients,
     global_max_connections: usize = default_global_max_connections,
     per_listener_settings: bool = false,
@@ -114,6 +118,8 @@ pub const Config = struct {
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         for (self.listeners) |*listener| listener.deinit(allocator);
         allocator.free(self.listeners);
+        for (self.bridges) |*bridge| bridge.deinit(allocator);
+        if (self.bridges.len != 0) allocator.free(self.bridges);
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
         if (self.auto_id_prefix.len != 0) allocator.free(self.auto_id_prefix);
@@ -211,8 +217,10 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     TlsIdentityIncomplete,
     ClientCertificateConfigurationIncomplete,
     CapathUnsupportedForWebSockets,
+    DirectiveRequiresBridge,
+    DuplicateBridge,
     IntegerOverflow,
-} || std.mem.Allocator.Error;
+} || bridge_config.Error || std.mem.Allocator.Error;
 
 const ListenerSeen = struct {
     password_file: bool = false,
@@ -296,6 +304,11 @@ fn parseSources(
     }
     var listener_seen: std.ArrayList(ListenerSeen) = .empty;
     defer listener_seen.deinit(allocator);
+    var bridge_builders: std.ArrayList(bridge_config.Builder) = .empty;
+    defer {
+        for (bridge_builders.items) |*builder| builder.deinit(allocator);
+        bridge_builders.deinit(allocator);
+    }
     var config = Config{ .listeners = &.{} };
     errdefer {
         if (config.persistence_location.len != 0) {
@@ -317,17 +330,16 @@ fn parseSources(
     const current_listener = try allocator.alloc(?usize, scope_count);
     defer allocator.free(current_listener);
     @memset(current_listener, null);
+    const current_bridge = try allocator.alloc(?usize, scope_count);
+    defer allocator.free(current_bridge);
+    @memset(current_bridge, null);
 
     for (sources) |source| {
         if (source.scope >= current_listener.len) return error.InvalidDirective;
         var lines = std.mem.splitScalar(u8, source.bytes, '\n');
         while (lines.next()) |raw_line| {
-            const without_comment = if (std.mem.findScalar(u8, raw_line, '#')) |i|
-                raw_line[0..i]
-            else
-                raw_line;
-            const line = std.mem.trim(u8, without_comment, " \t\r");
-            if (line.len == 0) continue;
+            const line = std.mem.trim(u8, raw_line, " \t\r");
+            if (line.len == 0 or line[0] == '#') continue;
             var words = std.mem.tokenizeAny(u8, line, " \t");
             const directive = words.next().?;
 
@@ -346,6 +358,31 @@ fn parseSources(
                 try listeners.append(allocator, .{ .address = address });
                 try listener_seen.append(allocator, .{});
                 current_listener[source.scope] = listeners.items.len - 1;
+                continue;
+            }
+
+            if (std.mem.eql(u8, directive, "connection")) {
+                const name = try parseOne(&words);
+                for (bridge_builders.items) |existing| {
+                    if (std.mem.eql(u8, existing.name, name)) {
+                        return error.DuplicateBridge;
+                    }
+                }
+                var builder = try bridge_config.Builder.init(allocator, name);
+                errdefer builder.deinit(allocator);
+                try bridge_builders.append(allocator, builder);
+                current_bridge[source.scope] = bridge_builders.items.len - 1;
+                continue;
+            }
+
+            if (bridge_config.isDirective(directive)) {
+                const index = current_bridge[source.scope] orelse
+                    return error.DirectiveRequiresBridge;
+                try bridge_builders.items[index].apply(
+                    allocator,
+                    directive,
+                    &words,
+                );
                 continue;
             }
 
@@ -735,6 +772,26 @@ fn parseSources(
     const candidate = Config{ .listeners = listeners.items };
     _ = try candidate.totalMaxConnections();
     config.listeners = try listeners.toOwnedSlice(allocator);
+    errdefer {
+        for (config.listeners) |*listener| listener.deinit(allocator);
+        allocator.free(config.listeners);
+        config.listeners = &.{};
+    }
+    if (bridge_builders.items.len != 0) {
+        config.bridges = try allocator.alloc(Bridge, bridge_builders.items.len);
+        var initialized_bridges: usize = 0;
+        errdefer {
+            for (config.bridges[0..initialized_bridges]) |*bridge| {
+                bridge.deinit(allocator);
+            }
+            allocator.free(config.bridges);
+            config.bridges = &.{};
+        }
+        for (bridge_builders.items, config.bridges) |*builder, *bridge| {
+            bridge.* = try builder.finish(allocator, config.persistence);
+            initialized_bridges += 1;
+        }
+    }
     return config;
 }
 
@@ -1090,6 +1147,188 @@ test "MQTT broker config parses owned multi-listener policy" {
     const path = try config.persistencePath(allocator);
     defer allocator.free(path);
     try std.testing.expectEqualStrings("state/broker.db", path);
+}
+
+test "MQTT broker config parses owned inbound bridges" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupe(u8,
+        \\persistence true
+        \\listener 1883 127.0.0.1
+        \\allow_anonymous true
+        \\connection upstream
+        \\address broker.example:2883
+        \\topic sensors/# in 1 local/ remote/
+        \\topic $SYS/# in 0 "" ""
+        \\cleansession false
+        \\bridge_protocol_version mqttv50
+        \\bridge_session_expiry_interval 0xFFFFFFFF
+        \\keepalive_interval 45
+        \\remote_clientid edge-bridge
+        \\remote_username bridge-user
+        \\remote_password bridge-secret
+        \\restart_timeout 10 60
+        \\connection backup
+        \\address [::1]:3883
+        \\topic backup/# in 2 mirror/ source/
+    );
+    defer allocator.free(source);
+    var config = try parse(allocator, source);
+    defer config.deinit(allocator);
+    @memset(source, 'x');
+
+    try std.testing.expectEqual(@as(usize, 2), config.bridges.len);
+    const upstream = config.bridges[0];
+    try std.testing.expectEqualStrings("upstream", upstream.name);
+    try std.testing.expectEqualStrings("broker.example", upstream.host);
+    try std.testing.expectEqual(@as(u16, 2883), upstream.port);
+    try std.testing.expectEqual(mqtt.ProtocolVersion.v5, upstream.protocol);
+    try std.testing.expect(!upstream.clean_session);
+    try std.testing.expectEqual(
+        std.math.maxInt(u32),
+        upstream.session_expiry_interval,
+    );
+    try std.testing.expectEqual(@as(u16, 45), upstream.keep_alive_seconds);
+    try std.testing.expectEqualStrings("edge-bridge", upstream.clientId());
+    try std.testing.expectEqualStrings("bridge-user", upstream.remote_username);
+    try std.testing.expectEqualStrings("bridge-secret", upstream.remote_password);
+    try std.testing.expectEqual(@as(u16, 10), upstream.restart.base_seconds);
+    try std.testing.expectEqual(@as(u16, 60), upstream.restart.cap_seconds);
+    try std.testing.expect(upstream.restart.jitter);
+    try std.testing.expectEqual(@as(usize, 2), upstream.rules.len);
+    try std.testing.expectEqualStrings(
+        "remote/sensors/#",
+        upstream.rules[0].filter,
+    );
+    try std.testing.expectEqualStrings("local/", upstream.rules[0].local_prefix);
+    try std.testing.expectEqualStrings("remote/", upstream.rules[0].remote_prefix);
+    try std.testing.expectEqual(mqtt.QoS.at_least_once, upstream.rules[0].qos);
+    try std.testing.expectEqualStrings("$SYS/#", upstream.rules[1].filter);
+
+    const backup = config.bridges[1];
+    try std.testing.expectEqualStrings("::1", backup.host);
+    try std.testing.expectEqual(@as(u16, 3883), backup.port);
+    try std.testing.expectEqualStrings("backup", backup.clientId());
+    try std.testing.expect(backup.usesQoS2());
+    try std.testing.expectEqualStrings("source/backup/#", backup.rules[0].filter);
+}
+
+test "MQTT broker config applies inbound bridge defaults" {
+    var config = try parse(std.testing.allocator,
+        \\listener 1883
+        \\allow_anonymous true
+        \\connection defaulted
+        \\address localhost
+        \\topic # in 0
+        \\restart_timeout 20
+    );
+    defer config.deinit(std.testing.allocator);
+    const bridge = config.bridges[0];
+    try std.testing.expectEqualStrings("localhost", bridge.host);
+    try std.testing.expectEqual(@as(u16, 1883), bridge.port);
+    try std.testing.expectEqualStrings("defaulted", bridge.clientId());
+    try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, bridge.protocol);
+    try std.testing.expect(!bridge.clean_session);
+    try std.testing.expectEqual(@as(u16, 60), bridge.keep_alive_seconds);
+    try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
+    try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
+    try std.testing.expect(!bridge.restart.jitter);
+    try std.testing.expectEqualStrings("#", bridge.rules[0].filter);
+}
+
+test "MQTT broker config rejects incomplete or unsupported bridges" {
+    const allocator = std.testing.allocator;
+    const listener = "listener 1883\nallow_anonymous true\n";
+    try std.testing.expectError(
+        error.DirectiveRequiresBridge,
+        parse(allocator, listener ++ "address localhost\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateBridge,
+        parse(allocator, listener ++
+            "connection duplicate\naddress localhost\ntopic # in 0\n" ++
+            "connection duplicate\naddress localhost\ntopic other/# in 0\n"),
+    );
+    try std.testing.expectError(
+        error.BridgeAddressRequired,
+        parse(allocator, listener ++ "connection missing\ntopic # in 0\n"),
+    );
+    try std.testing.expectError(
+        error.BridgeTopicRequired,
+        parse(allocator, listener ++ "connection missing\naddress localhost\n"),
+    );
+    for ([_][]const u8{ "out", "both" }) |direction| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "{s}connection wrong-way\naddress localhost\n" ++
+                "topic # {s} 1\n",
+            .{ listener, direction },
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.UnsupportedBridgeDirection,
+            parse(allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.BridgeAuthenticationIncomplete,
+        parse(allocator, listener ++
+            "connection auth\naddress localhost\ntopic # in 0\n" ++
+            "remote_password secret\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateBridgeFilter,
+        parse(allocator, listener ++
+            "connection duplicate-filter\naddress localhost\n" ++
+            "topic a/# in 0\ntopic a/# in 1\n"),
+    );
+    try std.testing.expectError(
+        error.OverlappingBridgeFilters,
+        parse(allocator, listener ++
+            "connection overlap\naddress localhost\n" ++
+            "topic a/# in 0\ntopic a/+ in 1\n"),
+    );
+    try std.testing.expectError(
+        error.BridgePersistenceRequired,
+        parse(allocator, listener ++
+            "connection qos2\naddress localhost\ntopic # in 2\n"),
+    );
+    try std.testing.expectError(
+        error.BridgePersistentSessionRequired,
+        parse(allocator, "persistence true\n" ++ listener ++
+            "connection qos2\naddress localhost\ntopic # in 2\n" ++
+            "cleansession true\n"),
+    );
+    try std.testing.expectError(
+        error.BridgePersistentSessionRequired,
+        parse(allocator, "persistence true\n" ++ listener ++
+            "connection qos2\naddress localhost\ntopic # in 2\n" ++
+            "bridge_protocol_version mqttv50\n"),
+    );
+    try std.testing.expectError(
+        error.UnsupportedBridgeProtocol,
+        parse(allocator, listener ++
+            "connection old\naddress localhost\ntopic # in 0\n" ++
+            "bridge_protocol_version mqttv31\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator, listener ++
+            "connection wrong-version-property\n" ++
+            "address localhost\ntopic # in 0\n" ++
+            "bridge_session_expiry_interval 60\n"),
+    );
+    try std.testing.expectError(
+        error.UnsupportedBridgeRestartTimeout,
+        parse(allocator, listener ++
+            "connection restart\naddress localhost\ntopic # in 0\n" ++
+            "restart_timeout 5 30 30\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator, listener ++
+            "connection addresses\naddress one.example two.example\n" ++
+            "topic # in 0\n"),
+    );
 }
 
 test "MQTT broker config validates global client session limit" {
@@ -1528,6 +1767,33 @@ test "MQTT broker config isolates included file listener scopes" {
     });
     try std.testing.expectError(
         error.DirectiveRequiresListener,
+        load(allocator, io, tmp.dir, "main.conf"),
+    );
+}
+
+test "MQTT broker config isolates included file bridge scopes" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "bridges.d", .default_dir);
+    var included = try tmp.dir.openDir(io, "bridges.d", .{});
+    defer included.close(io);
+    try included.writeFile(io, .{
+        .sub_path = "10-bridge.conf",
+        .data = "connection upstream\naddress localhost\ntopic # in 0\n",
+    });
+    try included.writeFile(io, .{
+        .sub_path = "20-policy.conf",
+        .data = "restart_timeout 1\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "main.conf",
+        .data = "listener 1883\nallow_anonymous true\n" ++
+            "include_dir bridges.d\n",
+    });
+    try std.testing.expectError(
+        error.DirectiveRequiresBridge,
         load(allocator, io, tmp.dir, "main.conf"),
     );
 }

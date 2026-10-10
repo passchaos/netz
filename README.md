@@ -998,6 +998,9 @@ Current protocol coverage includes:
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
+  supervised inbound `connection` bridges with strict `topic ... in ...`
+  QoS/prefix mapping, upstream Session/authentication settings, bounded
+  reconnect policy, and crash-safe QoS 2 state,
   listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
   PBES2-encrypted PKCS#8 keys with file-backed passwords, and
   optional/required
@@ -1399,7 +1402,8 @@ zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # optional/required TLS client authentication, acceptable CA names and
 # certificate CN/full-Subject username/Client-ID mapping, P-256/P-384/RSA/Ed25519
 # signed CRL revocation, strict
-# key/CA/EKU/identity/CRL rejection, and snapshot restore through the example.
+# key/CA/EKU/identity/CRL rejection, snapshot restore, and a two-broker inbound
+# bridge prefix/reconnect plus QoS 1/2 scenario through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
 # Build the pinned Mosquitto checkout and bridge two independent broker
 # processes through netz across MQTT versions and QoS 0/1/2. QoS 2 covers the

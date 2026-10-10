@@ -12,6 +12,9 @@ const reloadable_security = @import(
 const reloadable_identity = @import(
     "support/mqtt_reloadable_identity.zig",
 );
+const configured_bridges = @import(
+    "support/mqtt_configured_bridges.zig",
+);
 
 const mqtt = netz.mqtt;
 
@@ -134,6 +137,11 @@ const ReloadSignal = if (builtin.os.tag == .linux) struct {
 
 const checkpoint_signal_poll_interval: std.Io.Clock.Duration =
     .{ .raw = .fromMilliseconds(100), .clock = .awake };
+
+const BridgeResult = struct {
+    index: usize,
+    err: ?anyerror,
+};
 
 pub const RunOptions = struct {
     /// Deterministic process-test lifecycle. Production config mode is a
@@ -299,11 +307,49 @@ pub fn run(
     });
     defer broker.deinit();
 
-    if (persistence_path) |path| {
+    const bridge_commit_log_path = if (bridgesUseQoS2(config.bridges))
+        try std.fmt.allocPrint(allocator, "{s}.bridge-journal", .{
+            persistence_path orelse return error.BridgePersistenceRequired,
+        })
+    else
+        null;
+    defer if (bridge_commit_log_path) |path| allocator.free(path);
+    if (bridge_commit_log_path) |journal_path| {
+        broker.restoreCommitLog(std.Io.Dir.cwd(), journal_path, .{}) catch |err|
+            switch (err) {
+                error.CommitLogNotFound => {
+                    if (persistence_path) |snapshot_path| {
+                        broker.restoreSnapshot(
+                            std.Io.Dir.cwd(),
+                            snapshot_path,
+                        ) catch |restore_error| {
+                            if (restore_error != error.SnapshotNotFound) {
+                                return restore_error;
+                            }
+                        };
+                    }
+                    try broker.createCommitLog(
+                        std.Io.Dir.cwd(),
+                        journal_path,
+                        .{},
+                    );
+                },
+                else => return err,
+            };
+    } else if (persistence_path) |path| {
         broker.restoreSnapshot(std.Io.Dir.cwd(), path) catch |err| {
             if (err != error.SnapshotNotFound) return err;
         };
     }
+    var shutdown: std.Io.Event = .unset;
+    var bridges = try configured_bridges.Set.init(
+        allocator,
+        io,
+        &broker,
+        config.bridges,
+        &shutdown,
+    );
+    defer bridges.deinit();
     var checkpoint_signal = if (config.persistence)
         CheckpointSignal.install()
     else
@@ -511,8 +557,13 @@ pub fn run(
             },
         );
     }
+    for (config.bridges) |bridge| {
+        std.debug.print(
+            "  bridge {s} remote={s}:{d} rules={d} direction=in\n",
+            .{ bridge.name, bridge.host, bridge.port, bridge.rules.len },
+        );
+    }
 
-    var shutdown: std.Io.Event = .unset;
     const service: Service = if (run_options.finite_test)
         .{ .finite = listeners }
     else
@@ -520,11 +571,14 @@ pub fn run(
             .listeners = endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence or has_reloadable_files) {
+    if (config.persistence or has_reloadable_files or bridges.values.len != 0) {
         try serveWithManagement(
+            allocator,
             &broker,
             service,
             io,
+            &shutdown,
+            bridges.values,
             persistence_path,
             if (!config.autosave_on_changes and
                 config.autosave_interval != 0)
@@ -543,9 +597,12 @@ pub fn run(
 }
 
 fn serveWithManagement(
+    allocator: std.mem.Allocator,
     broker: *mqtt.broker.Broker,
     service: Service,
     io: std.Io,
+    shutdown: *std.Io.Event,
+    bridges: []mqtt.bridge.Bridge,
     persistence_path: ?[]const u8,
     interval_seconds: ?u32,
     security: ?*reloadable_security.Security,
@@ -553,13 +610,19 @@ fn serveWithManagement(
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
+        bridge: BridgeResult,
         periodic_timer: std.Io.Cancelable!void,
         signal_poll: std.Io.Cancelable!void,
     };
-    var result_buffer: [3]Result = undefined;
-    var select: std.Io.Select(Result) = .init(io, &result_buffer);
+    const result_buffer = try allocator.alloc(Result, 3 + bridges.len);
+    defer allocator.free(result_buffer);
+    var select: std.Io.Select(Result) = .init(io, result_buffer);
     defer select.cancelDiscard();
+    defer shutdown.set(io);
     try select.concurrent(.serve, serveResult, .{ broker, service });
+    for (bridges, 0..) |*bridge, index| {
+        try select.concurrent(.bridge, bridgeResult, .{ bridge, index });
+    }
     if (interval_seconds) |seconds| {
         try select.concurrent(
             .periodic_timer,
@@ -582,9 +645,22 @@ fn serveWithManagement(
     while (true) {
         switch (try select.await()) {
             .serve => |maybe_error| {
+                shutdown.set(io);
                 select.cancelDiscard();
                 if (maybe_error) |err| return err;
                 return;
+            },
+            .bridge => |result| {
+                shutdown.set(io);
+                select.cancelDiscard();
+                if (result.err) |err| {
+                    std.debug.print(
+                        "netz MQTT bridge {d} stopped: error={s}\n",
+                        .{ result.index, @errorName(err) },
+                    );
+                    return err;
+                }
+                return error.UnexpectedBridgeExit;
             },
             .periodic_timer => |result| {
                 try result;
@@ -660,6 +736,23 @@ fn serveWithManagement(
             },
         }
     }
+}
+
+fn bridgeResult(
+    bridge: *mqtt.bridge.Bridge,
+    index: usize,
+) BridgeResult {
+    bridge.run(.{ .timeout = .fromSeconds(30) }) catch |err| {
+        return .{ .index = index, .err = err };
+    };
+    return .{ .index = index, .err = null };
+}
+
+fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {
+    for (bridges) |bridge| {
+        if (bridge.usesQoS2()) return true;
+    }
+    return false;
 }
 
 fn reloadSecurityAndIdentities(

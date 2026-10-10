@@ -129,6 +129,13 @@ use_identity_as_username true
 mount_point tenant/
 allow_anonymous true
 max_connections 16
+
+connection upstream
+address broker.example:1883
+topic sensors/# in 1 local/ remote/
+cleansession false
+remote_clientid netz-upstream
+restart_timeout 5 30
 ```
 
 The accepted directives are exactly `listener`, `protocol`, `certfile`,
@@ -150,7 +157,10 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `sys_interval`, `websockets_headers_size`, `set_tcp_nodelay`,
 `global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
 `persistence_location`, `persistence_file`,
-`autosave_interval`, and `autosave_on_changes`. Unknown directives, duplicates,
+`autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
+`cleansession`, `bridge_protocol_version`,
+`bridge_session_expiry_interval`, `keepalive_interval`, `remote_clientid`,
+`remote_username`, `remote_password`, and `restart_timeout`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. In
 production config mode, each listener's `max_connections` is its simultaneous
 admitted-client limit and the broker keeps accepting after clients disconnect.
@@ -163,6 +173,28 @@ MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
 payloads are rejected while representable QoS flows complete. Each listener
 accepts MQTT 3.1.1 and MQTT 5 by default.
+
+Each `connection` creates an independently reconnecting inbound bridge.
+Exactly one `address host[:port]` (or bracketed IPv6 address with a required
+port) and one or more explicit `topic FILTER in QOS [LOCAL_PREFIX]
+[REMOTE_PREFIX]` rules are required. The bridge subscribes remotely to
+`REMOTE_PREFIX + FILTER`, strips `REMOTE_PREFIX` from each delivered Topic
+Name, then prepends `LOCAL_PREFIX` before local broker routing. Empty prefixes
+may be omitted or written as `""`. Rules must be pairwise disjoint after remote
+prefix expansion. `out`, `both`, multiple addresses, MQTT 3.1, and the
+three-argument `restart_timeout` stable-period form fail explicitly instead of
+being silently downgraded. One timeout value selects a fixed delay; two select
+bounded exponential full-jitter retries. MQTT 3.1.1 is the bridge default;
+`bridge_protocol_version mqttv50` enables MQTT 5. `remote_username` and
+`remote_password` configure upstream authentication, with a password requiring
+a username. When `remote_clientid` is omitted, the unique connection name is
+used as the stable Client ID. QoS 2 additionally requires `persistence true`, a non-clean remote
+Session, and for MQTT 5 a non-zero `bridge_session_expiry_interval`; the runner
+derives a stable bridge identity from the connection identity and mappings and opens a
+crash-safe broker journal beside the configured snapshot. A process gate runs
+two real broker instances, verifies prefix mapping and QoS 1/2 delivery, kills
+and restarts the upstream broker, then verifies automatic resubscription and
+delivery without restarting the local broker.
 `accept_protocol_versions` restricts that listener to `4`, `5`, or `4,5`;
 version-denied clients receive the protocol-specific Unsupported Protocol
 Version CONNACK before close. MQTT 3.1 (level 3), empty sets, duplicate values,
@@ -295,8 +327,8 @@ files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. Other curves, legacy PEM encryption, plugins, bridges,
-and full Mosquitto configuration remain outside this subset and fail
+filesystem expansion. Other curves, legacy PEM encryption, plugins, outbound
+or bidirectional configured bridges, and full Mosquitto configuration remain outside this subset and fail
 closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the
 certificate mandatory. Every PEM CA is bounded, unique by DER

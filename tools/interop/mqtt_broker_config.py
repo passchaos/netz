@@ -16,6 +16,7 @@ import tempfile
 import time
 
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
+from mqtt_broker_config_bridge import run_inbound_bridge_case
 from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
 from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_proxy import run_proxy_protocol_case
@@ -5185,6 +5186,7 @@ def main() -> None:
         run_websocket_origins_case(args.broker, directory)
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
+        run_inbound_bridge_case(args.broker, directory)
         run_packet_and_message_size_case(args.broker, directory)
         run_retain_unavailable_case(args.broker, directory)
         run_zero_length_client_id_case(args.broker, directory)
@@ -5231,6 +5233,7 @@ def main() -> None:
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
+        "configured inbound bridge prefix mapping, QoS 1/2, and reconnect, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/P-521/Ed25519/RSA and encrypted PKCS#8 TLS "
