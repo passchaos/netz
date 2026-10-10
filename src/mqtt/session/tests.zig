@@ -1312,6 +1312,82 @@ test "session reconnect honors a lower Receive Maximum" {
     try std.testing.expect(second[0].publish.packet_id != first_id);
 }
 
+test "session reconnect preserves PUBLISH order after slot reuse" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("ordered-retry", false, 60, .zero);
+    for ([_][]const u8{ "one", "two", "three" }) |payload| {
+        _ = try store.enqueuePublish(
+            opened.handle,
+            "ordered/topic",
+            payload,
+            .{ .qos = .at_least_once, .now = .zero },
+        );
+    }
+
+    var output: [3]Transmission = undefined;
+    const initial = try store.drainInto(opened.handle, .zero, 4, &output);
+    try std.testing.expectEqual(@as(usize, 3), initial.len);
+    const first_id = initial[0].publish.packet_id;
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(opened.handle, .puback, first_id, 0),
+    );
+
+    _ = try store.enqueuePublish(
+        opened.handle,
+        "ordered/topic",
+        "four",
+        .{ .qos = .at_least_once, .now = .zero },
+    );
+    const fourth = try store.drainInto(opened.handle, .zero, 4, &output);
+    try std.testing.expectEqual(@as(usize, 1), fourth.len);
+    try std.testing.expectEqualStrings("four", fourth[0].publish.payload);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try store.writeSnapshot(&encoded, allocator, .zero);
+    var restored = Store.init(allocator, .{});
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(&cursor, .zero, 0);
+    try cursor.finish();
+    const restored_opened = try restored.open(
+        "ordered-retry",
+        false,
+        60,
+        .zero,
+    );
+    const restored_replay = try restored.drainInto(
+        restored_opened.handle,
+        .zero,
+        4,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 3), restored_replay.len);
+    try std.testing.expectEqualStrings(
+        "two",
+        restored_replay[0].publish.payload,
+    );
+    try std.testing.expectEqualStrings(
+        "three",
+        restored_replay[1].publish.payload,
+    );
+    try std.testing.expectEqualStrings(
+        "four",
+        restored_replay[2].publish.payload,
+    );
+
+    try store.disconnect(opened.handle, null, .zero);
+    const resumed = try store.open("ordered-retry", false, 60, .zero);
+    const replay = try store.drainInto(resumed.handle, .zero, 4, &output);
+    try std.testing.expectEqual(@as(usize, 3), replay.len);
+    try std.testing.expectEqualStrings("two", replay[0].publish.payload);
+    try std.testing.expectEqualStrings("three", replay[1].publish.payload);
+    try std.testing.expectEqualStrings("four", replay[2].publish.payload);
+}
+
 test "session drain reuses more inflight holes than newly available slots" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});

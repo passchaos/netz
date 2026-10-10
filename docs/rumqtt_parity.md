@@ -3961,6 +3961,19 @@ proxy evidence for the entire suite.
    this is not presented as an end-to-end 4,226x claim. The final ordinary-
    window durable QoS 2 control remained neutral at 1.0035x, 0.9999x, 1.0142x,
    0.9982x and 1.0158x across the five fixed shapes.
+   A subsequent ordering audit caught an independent MQTT-4.6.0-1 violation:
+   after an early acknowledgement created a reusable low array slot, a newer
+   PUBLISH could occupy that slot and replay before older unacknowledged
+   messages. Inflight entries now carry an allocation-free circular order
+   chain, and both reconnect drain and snapshot serialization follow it rather
+   than physical slot order. A regression proves `two,three,four` after the
+   former `four,two,three` hole-reuse case through both direct reconnect and
+   restore. The links consume existing alignment padding (`Inflight` remains
+   128 bytes and `Session` 400 bytes). Seven fixed-binary Session pairs kept
+   resume at 1.000x and reconnect drain at 0.9969x by paired medians; a final
+   five-shape durable QoS 2 control remained mixed at 0.9994x, 1.0070x,
+   0.9938x, 0.9854x and 1.0058x, so no general speed claim is attached to this
+   correctness fix.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

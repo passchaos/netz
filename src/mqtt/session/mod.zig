@@ -321,6 +321,9 @@ const Inflight = struct {
     /// intentionally omit this bit: restoring an encoded `await_pubcomp`
     /// state proves that the transition was committed and may emit PUBREL.
     pubrel_blocked: bool = false,
+    /// Stable PUBLISH insertion order, independent of reusable array slots.
+    order_previous: u16 = no_inflight_send,
+    order_next: u16 = no_inflight_send,
 };
 
 const PendingQoS0 = struct {
@@ -366,11 +369,9 @@ const Session = struct {
     /// Sent PUBLISH packets that still consume the peer's Receive Maximum.
     /// PUBREL and packets awaiting their first/retry send do not count.
     sent_publish_count: u16 = 0,
-    /// Inflight PUBLISH/PUBREL records awaiting selection by `drainInto`.
-    pending_send_count: u16 = 0,
-    /// Conservative lowest inflight slot that may need wire transmission.
-    /// Stale low values are safe and repaired by the next drain.
+    /// Earliest point in the stable inflight order that may need transmission.
     next_inflight_send: u16 = no_inflight_send,
+    inflight_order_head: u16 = no_inflight_send,
     allocation_bytes: usize,
 
     fn deinit(
@@ -408,12 +409,7 @@ const Session = struct {
 
 fn noteInflightSelected(session: *Session, inflight: *Inflight) void {
     std.debug.assert(inflight.needs_send);
-    std.debug.assert(session.pending_send_count != 0);
-    session.pending_send_count -= 1;
     inflight.needs_send = false;
-    if (session.pending_send_count == 0) {
-        session.next_inflight_send = no_inflight_send;
-    }
     if (inflight.state == .await_pubcomp) return;
     std.debug.assert(session.sent_publish_count < std.math.maxInt(u16));
     session.sent_publish_count += 1;
@@ -426,23 +422,39 @@ fn releasePublishWindow(session: *Session, inflight: *const Inflight) void {
     }
 }
 
-fn notePendingInflightIndex(session: *Session, index: usize) void {
+fn retainInflightForLater(session: *Session, index: usize) void {
     std.debug.assert(index < no_inflight_send);
-    session.next_inflight_send = @min(
-        session.next_inflight_send,
-        @as(u16, @intCast(index)),
-    );
+    if (session.next_inflight_send == no_inflight_send) {
+        session.next_inflight_send = @intCast(index);
+    }
 }
 
 fn noteInflightAdded(
     session: *Session,
     index: usize,
-    inflight: *const Inflight,
+    inflight: *Inflight,
 ) void {
+    std.debug.assert(index < no_inflight_send);
+    std.debug.assert(inflight.order_previous == no_inflight_send);
+    std.debug.assert(inflight.order_next == no_inflight_send);
+    const compact_index: u16 = @intCast(index);
+    if (session.inflight_order_head == no_inflight_send) {
+        inflight.order_previous = compact_index;
+        inflight.order_next = compact_index;
+        session.inflight_order_head = compact_index;
+    } else {
+        const head = session.inflight_order_head;
+        const tail = session.inflight.items[head].?.order_previous;
+        inflight.order_previous = tail;
+        inflight.order_next = head;
+        session.inflight.items[tail].?.order_next = compact_index;
+        session.inflight.items[head].?.order_previous = compact_index;
+    }
+
     if (inflight.needs_send) {
-        std.debug.assert(session.pending_send_count < std.math.maxInt(u16));
-        session.pending_send_count += 1;
-        notePendingInflightIndex(session, index);
+        if (session.next_inflight_send == no_inflight_send) {
+            session.next_inflight_send = compact_index;
+        }
         return;
     }
     std.debug.assert(inflight.state != .await_pubcomp);
@@ -456,28 +468,74 @@ fn noteInflightNeedsSend(
     inflight: *Inflight,
 ) void {
     if (!inflight.needs_send) {
+        const had_pending = session.next_inflight_send != no_inflight_send;
         releasePublishWindow(session, inflight);
         inflight.needs_send = true;
-        std.debug.assert(session.pending_send_count < std.math.maxInt(u16));
-        session.pending_send_count += 1;
+        session.next_inflight_send = if (had_pending)
+            session.inflight_order_head
+        else
+            @intCast(index);
+    } else if (session.next_inflight_send == no_inflight_send) {
+        session.next_inflight_send = session.inflight_order_head;
     }
-    notePendingInflightIndex(session, index);
+}
+
+fn repairInflightSendCursor(session: *Session) void {
+    session.next_inflight_send = no_inflight_send;
+    var index = session.inflight_order_head;
+    var remaining = session.inflight_count;
+    while (remaining != 0) : (remaining -= 1) {
+        const inflight = session.inflight.items[index] orelse unreachable;
+        if (inflight.needs_send) {
+            session.next_inflight_send = index;
+            return;
+        }
+        index = inflight.order_next;
+    }
 }
 
 fn assertInflightSendCursor(session: Session) void {
     if (!std.debug.runtime_safety) return;
     var pending_count: usize = 0;
-    for (session.inflight.items, 0..) |maybe_inflight, index| {
-        const inflight = maybe_inflight orelse continue;
-        if (!inflight.needs_send) continue;
-        pending_count += 1;
-        std.debug.assert(session.next_inflight_send != no_inflight_send);
-        std.debug.assert(session.next_inflight_send <= index);
+    var order_count: usize = 0;
+    if (session.inflight_count == 0) {
+        std.debug.assert(session.inflight_order_head == no_inflight_send);
+    } else {
+        std.debug.assert(session.inflight_order_head != no_inflight_send);
     }
-    std.debug.assert(pending_count == session.pending_send_count);
+    var cursor_reached = session.next_inflight_send == no_inflight_send;
+    var index: u16 = session.inflight_order_head;
+    var previous = if (index == no_inflight_send)
+        no_inflight_send
+    else
+        session.inflight.items[index].?.order_previous;
+    const expected_tail = previous;
+    while (order_count < session.inflight_count) {
+        std.debug.assert(index < session.inflight.items.len);
+        const inflight = session.inflight.items[index] orelse unreachable;
+        std.debug.assert(inflight.order_previous == previous);
+        if (index == session.next_inflight_send) cursor_reached = true;
+        if (inflight.needs_send) {
+            pending_count += 1;
+            std.debug.assert(cursor_reached);
+        }
+        previous = index;
+        index = inflight.order_next;
+        order_count += 1;
+        std.debug.assert(order_count <= session.inflight_count);
+    }
+    std.debug.assert(order_count == session.inflight_count);
+    std.debug.assert(previous == expected_tail);
     std.debug.assert(
-        pending_count != 0 or
-            session.next_inflight_send == no_inflight_send,
+        session.inflight_count == 0 or
+            index == session.inflight_order_head,
+    );
+    std.debug.assert(
+        (pending_count == 0) ==
+            (session.next_inflight_send == no_inflight_send),
+    );
+    std.debug.assert(
+        session.next_inflight_send == no_inflight_send or cursor_reached,
     );
 }
 
@@ -751,8 +809,11 @@ pub const Store = struct {
                 u32,
                 inflight_count,
             );
-            for (session.inflight.items) |maybe_inflight| {
-                const inflight = maybe_inflight orelse continue;
+            var ordered_inflight_index = session.inflight_order_head;
+            var ordered_inflight_remaining = session.inflight_count;
+            while (ordered_inflight_remaining != 0) : (ordered_inflight_remaining -= 1) {
+                const inflight = session.inflight.items[ordered_inflight_index].?;
+                ordered_inflight_index = inflight.order_next;
                 const remaining_ns = publishRemainingExpiryNs(
                     inflight.publish,
                     now.nanoseconds,
@@ -1163,9 +1224,6 @@ pub const Store = struct {
                     }
                 }
                 std.debug.assert(session.sent_publish_count == 0);
-                std.debug.assert(
-                    session.pending_send_count == session.inflight_count,
-                );
                 session.sent_publish_count = 0;
                 return .{
                     .handle = .{
@@ -1312,9 +1370,6 @@ pub const Store = struct {
             }
         }
         std.debug.assert(session.sent_publish_count == 0);
-        std.debug.assert(
-            session.pending_send_count == session.inflight_count,
-        );
         session.sent_publish_count = 0;
     }
 
@@ -1985,7 +2040,9 @@ pub const Store = struct {
         if (session.pending_qos0 != null or session.queued_count != 0) {
             return error.InflightFull;
         }
-        if (session.pending_send_count != 0) return error.InflightFull;
+        if (session.next_inflight_send != no_inflight_send) {
+            return error.InflightFull;
+        }
         if (session.sent_publish_count >= receive_maximum or
             session.inflight_count >= self.options.max_inflight_per_session or
             inflightPayloadLimitReached(
@@ -2169,16 +2226,28 @@ pub const Store = struct {
             append_needed,
         );
         var send_index: usize = session.next_inflight_send;
+        const send_tail = if (session.inflight_order_head == no_inflight_send)
+            no_inflight_send
+        else
+            session.inflight.items[session.inflight_order_head].?.order_previous;
         session.next_inflight_send = no_inflight_send;
-        while (send_index < session.inflight.items.len) : (send_index += 1) {
+        while (send_index != no_inflight_send) {
             if (written == out.len) break;
-            const inflight = &(session.inflight.items[send_index] orelse
-                continue);
-            if (!inflight.needs_send) continue;
+            std.debug.assert(send_index < session.inflight.items.len);
+            const inflight = &session.inflight.items[send_index].?;
+            const next_send_index = if (send_index == send_tail)
+                no_inflight_send
+            else
+                inflight.order_next;
+            if (!inflight.needs_send) {
+                send_index = next_send_index;
+                continue;
+            }
             if (inflight.state == .await_pubcomp and
                 inflight.pubrel_blocked)
             {
-                noteInflightNeedsSend(session, send_index, inflight);
+                retainInflightForLater(session, send_index);
+                send_index = next_send_index;
                 continue;
             }
             const transmission = transmissionForInflight(
@@ -2193,7 +2262,8 @@ pub const Store = struct {
                 // those already-sent PUBLISH packets for a later drain call
                 // rather than violating the new connection's window.
                 blocked_qos_publish = true;
-                noteInflightNeedsSend(session, send_index, inflight);
+                retainInflightForLater(session, send_index);
+                send_index = next_send_index;
                 continue;
             }
             out[written] = transmission;
@@ -2202,15 +2272,10 @@ pub const Store = struct {
                 publish_window_used += 1;
             }
             written += 1;
+            send_index = next_send_index;
         }
-        if (session.pending_send_count != 0 and
-            written == out.len and
-            send_index < session.inflight.items.len)
-        {
-            session.next_inflight_send = @min(
-                session.next_inflight_send,
-                @as(u16, @intCast(send_index)),
-            );
+        if (written == out.len and send_index != no_inflight_send) {
+            retainInflightForLater(session, send_index);
         }
         if (written == out.len) return out[0..written];
 
@@ -2936,11 +3001,20 @@ pub const Store = struct {
     ) void {
         var inflight = session.inflight.items[index].?;
         releasePublishWindow(session, &inflight);
-        if (inflight.needs_send) {
-            std.debug.assert(session.pending_send_count != 0);
-            session.pending_send_count -= 1;
-            if (session.pending_send_count == 0) {
-                session.next_inflight_send = no_inflight_send;
+        const compact_index: u16 = @intCast(index);
+        const repair_send_cursor = inflight.needs_send or
+            session.next_inflight_send == compact_index;
+        if (inflight.order_next == compact_index) {
+            std.debug.assert(inflight.order_previous == compact_index);
+            std.debug.assert(session.inflight_order_head == compact_index);
+            session.inflight_order_head = no_inflight_send;
+        } else {
+            session.inflight.items[inflight.order_previous].?.order_next =
+                inflight.order_next;
+            session.inflight.items[inflight.order_next].?.order_previous =
+                inflight.order_previous;
+            if (session.inflight_order_head == compact_index) {
+                session.inflight_order_head = inflight.order_next;
             }
         }
         session.inflight.items[index] = null;
@@ -2948,6 +3022,11 @@ pub const Store = struct {
         session.inflight_count -= 1;
         if (session.inflight_count == 0) {
             session.next_inflight_send = no_inflight_send;
+            std.debug.assert(
+                session.inflight_order_head == no_inflight_send,
+            );
+        } else if (repair_send_cursor) {
+            repairInflightSendCursor(session);
         }
         session.inflight_payload_bytes -= inflight.publish.payload.len;
         session.allocation_bytes -= inflight.publish.allocation_bytes;

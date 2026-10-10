@@ -6962,6 +6962,47 @@ The complete 63,819,797-byte artifact is retained under
 `zig-out/mqtt-session-cursor-broker-ab`; its result-table SHA-256 is
 `8e7178f83b685236db9c8706940f5a8d7e1e7449028bb64e16ed11a9e170963e`.
 
+An ordering audit then found that reusable inflight array holes could put a
+newer PUBLISH before older unacknowledged PUBLISH packets during reconnect.
+That violates MQTT-4.6.0-1's requirement to resend PUBLISH packets in their
+original send order. A deterministic regression first reproduced
+`four,two,three` after sending `one,two,three`, acknowledging `one`, and
+reusing its slot for `four`; both direct reconnect and snapshot restoration
+now produce `two,three,four`. Each inflight record participates in an
+allocation-free circular order list. Packet Identifier lookup remains O(1),
+and slot reuse keeps its existing allocation-free behavior. The pending-send
+cursor walks this stable logical order instead of physical slots. The two
+`u16` links fit existing alignment padding:
+DWARF reports `Inflight` unchanged at 128 bytes and `Session` unchanged at 400
+bytes on the measured aarch64 build.
+
+Seven CPU-11 order-alternated `bench-mqtt-session` pairs against the cursor-only
+baseline found neutral common-path cost: resume was 1.000x by paired median,
+reconnect drain was 0.9969x, and the full-window empty path remained 9 ns by
+candidate median. Allocation counts and live bytes in both fanout modes were
+unchanged. Baseline, candidate, identical benchmark source and result-table
+SHA-256 values are respectively
+`a060a7efd309611eec08911618ef423b9a055f66ae1efe1bd29d4068a40c58be`,
+`30ca20381959c8838e234d2c9a7bbdd1b70a8ea19a41c2685a4eceb2bb574992`,
+`28f34cda67400c01854506f6dc468743f773877e47fc7c0f282dd4d315faa564`
+and
+`345fed1b6c6a0707b8efba933c2866ac6400ce4fc34c165f2b9d557ae09900fe`.
+Artifacts are retained under `zig-out/mqtt-session-order-ab`.
+
+The final five-pair durable QoS 2 broker control completed all 50 arms with
+exact delivery counts and checksums. Throughput paired medians were 0.9994x,
+1.0070x, 0.9938x, 0.9854x and 1.0058x in serial, publishers-32, fanout-32,
+balanced-32x32 and 4-KiB order. The mixed, overlapping results are recorded as
+no broad performance claim; preserving the mandatory retransmission order is
+the result. Baseline broker, candidate broker and fixed driver hashes are
+`2ce2eddba2b2a8c8911525a94848683926c189a1d11371ace0f56e0b83ed6de7`,
+`6577b422bd02b70e89d3ee1f4d57ff9120f10ba3a122d72c759ef6290b7d5bcb`
+and
+`30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The complete 63,824,845-byte artifact is retained under
+`zig-out/mqtt-session-order-final-broker-ab`; its result-table SHA-256 is
+`9492a06a010fff8a9e37641660dd97c11f46f936277fc5abd1b629c59a5807f4`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
