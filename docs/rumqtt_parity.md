@@ -3942,6 +3942,18 @@ proxy evidence for the entire suite.
    and moved median throughput from 11,133 to 11,241 publishes/s (1.0%). This
    is a targeted ownership/copy result rather than closure of the broader
    durable QoS 2 scheduling gap.
+   Session drain now keeps its current-connection Receive Maximum usage as
+   explicit bounded state instead of counting sent PUBLISH records across the
+   inflight array on every call. The counter excludes unsent/retry PUBLISH and
+   `await_pubcomp` PUBREL state, resets across disconnect/restore, and is
+   exported through per-Session and aggregate statistics. A 16,384-inflight,
+   seven-pair fixed-binary microbenchmark reduced full-window empty-drain time
+   from 62,906 to 38,136 ns by medians (paired median 0.6058x, 7/7 wins).
+   Ordinary-window durable QoS 2 end-to-end throughput stayed neutral across
+   the five fixed shapes at 0.9993x, 1.0080x, 0.9886x, 1.0043x and 1.0034x.
+   The remaining scan for retransmission candidates is still O(n); removing or
+   indexing that pass is a separate scheduling improvement rather than a claim
+   made by this counter change.
 3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
    sequences, and extend the new strict broker configuration adapter toward the
    upstream harness's remaining broader-reload/general-CRL/persistence

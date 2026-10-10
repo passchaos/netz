@@ -742,6 +742,9 @@ fn validateMqttStore(store: *netz.mqtt.session.Store) !void {
     try std.testing.expect(stats.subscription_count <= 4 * 8);
     try std.testing.expect(stats.queued_count <= 4 * 8);
     try std.testing.expect(stats.inflight_count <= 4 * 4);
+    try std.testing.expect(
+        stats.outgoing_publish_window_used <= stats.inflight_count,
+    );
     try std.testing.expect(stats.incoming_qos2_count <= 4 * 8);
     try std.testing.expectEqual(
         stats.session_count,

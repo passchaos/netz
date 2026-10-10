@@ -7,6 +7,21 @@ const Store = session.Store;
 const Transmission = session.Transmission;
 const second_ns: i96 = std.time.ns_per_s;
 
+fn expectPublishWindow(
+    store: *Store,
+    handle: session.Handle,
+    expected: usize,
+) !void {
+    const stats = try store.stats(handle);
+    try std.testing.expectEqual(
+        expected,
+        stats.outgoing_publish_window_used,
+    );
+    try std.testing.expect(
+        stats.outgoing_publish_window_used <= stats.inflight_count,
+    );
+}
+
 test "session clean start and expiry control Session Present" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{});
@@ -920,6 +935,187 @@ test "session queues offline QoS and drains receive maximum" {
         "jobs/two",
         second[0].publish.topic,
     );
+}
+
+test "session tracks current connection Receive Maximum usage" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("window-usage", false, 60, .zero);
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    const staged_id = try store.stageImmediatePublish(
+        opened.handle,
+        "window/staged",
+        "one",
+        .{ .qos = .at_least_once, .now = .zero },
+        4,
+    );
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    var output: [2]Transmission = undefined;
+    const first = try store.drainInto(opened.handle, .zero, 4, &output);
+    try std.testing.expectEqual(@as(usize, 1), first.len);
+    try std.testing.expectEqual(staged_id, first[0].publish.packet_id);
+    try expectPublishWindow(&store, opened.handle, 1);
+
+    try store.retryUnsentPublish(opened.handle, staged_id);
+    try store.retryUnsentPublish(opened.handle, staged_id);
+    try expectPublishWindow(&store, opened.handle, 0);
+    const retried = try store.drainInto(opened.handle, .zero, 4, &output);
+    try std.testing.expectEqual(staged_id, retried[0].publish.packet_id);
+    try expectPublishWindow(&store, opened.handle, 1);
+
+    const qos2 = try store.beginImmediatePublish(
+        opened.handle,
+        "window/qos2",
+        "two",
+        .{ .qos = .exactly_once, .now = .zero },
+        4,
+    );
+    try expectPublishWindow(&store, opened.handle, 2);
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(opened.handle, .puback, staged_id, 0),
+    );
+    try expectPublishWindow(&store, opened.handle, 1);
+    try std.testing.expectEqual(
+        session.AckAction.send_pubrel,
+        try store.handleAck(opened.handle, .pubrec, qos2.packet_id, 0),
+    );
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    const pubrel = try store.drainInto(opened.handle, .zero, 4, &output);
+    try std.testing.expectEqual(@as(usize, 1), pubrel.len);
+    try std.testing.expect(pubrel[0] == .pubrel);
+    try expectPublishWindow(&store, opened.handle, 0);
+    try std.testing.expectEqual(
+        session.AckAction.send_pubrel,
+        try store.handleAck(opened.handle, .pubrec, qos2.packet_id, 0),
+    );
+    _ = try store.drainInto(opened.handle, .zero, 4, &output);
+    try expectPublishWindow(&store, opened.handle, 0);
+    try std.testing.expectEqual(
+        session.AckAction.completed,
+        try store.handleAck(opened.handle, .pubcomp, qos2.packet_id, 0),
+    );
+
+    const capped = try store.beginImmediatePublish(
+        opened.handle,
+        "window/capped",
+        "three",
+        .{ .qos = .at_least_once, .now = .zero },
+        4,
+    );
+    try expectPublishWindow(&store, opened.handle, 1);
+    try store.completeQoS0Transmission(
+        opened.handle,
+        opened.route_id,
+        capped.packet_id,
+    );
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    const discarded_id = try store.stageImmediatePublish(
+        opened.handle,
+        "window/discarded",
+        "four",
+        .{ .qos = .exactly_once, .now = .zero },
+        4,
+    );
+    try store.discardStagedPublish(opened.handle, discarded_id);
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    const dropped = try store.beginImmediatePublish(
+        opened.handle,
+        "window/dropped",
+        "five",
+        .{ .qos = .at_least_once, .now = .zero },
+        4,
+    );
+    try std.testing.expectEqual(
+        session.DropAction.dropped,
+        try store.dropOutgoingPublish(opened.handle, dropped.packet_id),
+    );
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    const expiring = try store.beginImmediatePublish(
+        opened.handle,
+        "window/expiring",
+        "six",
+        .{
+            .qos = .at_least_once,
+            .properties = &.{.{ .four_byte = .{
+                .id = .message_expiry_interval,
+                .value = 1,
+            } }},
+            .now = .zero,
+        },
+        4,
+    );
+    try std.testing.expect(expiring.packet_id != 0);
+    try expectPublishWindow(&store, opened.handle, 1);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        (try store.drainInto(
+            opened.handle,
+            std.Io.Timestamp.fromNanoseconds(second_ns),
+            4,
+            &output,
+        )).len,
+    );
+    try expectPublishWindow(&store, opened.handle, 0);
+
+    const reconnecting = try store.beginImmediatePublish(
+        opened.handle,
+        "window/reconnect",
+        "seven",
+        .{ .qos = .at_least_once, .now = .zero },
+        4,
+    );
+    try expectPublishWindow(&store, opened.handle, 1);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try store.writeSnapshot(&encoded, allocator, .zero);
+    var restored = Store.init(allocator, .{});
+    defer restored.deinit();
+    var cursor = persistence.Cursor.init(encoded.items);
+    try restored.restoreSnapshot(&cursor, .zero, 0);
+    try cursor.finish();
+    const restored_opened = try restored.open(
+        "window-usage",
+        false,
+        60,
+        .zero,
+    );
+    try expectPublishWindow(&restored, restored_opened.handle, 0);
+    const restored_publish = try restored.drainInto(
+        restored_opened.handle,
+        .zero,
+        1,
+        &output,
+    );
+    try std.testing.expectEqual(@as(usize, 1), restored_publish.len);
+    try std.testing.expectEqual(
+        reconnecting.packet_id,
+        restored_publish[0].publish.packet_id,
+    );
+    try expectPublishWindow(&restored, restored_opened.handle, 1);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        restored.aggregateStats().outgoing_publish_window_used,
+    );
+
+    try store.disconnect(opened.handle, null, .zero);
+    const resumed = try store.open("window-usage", false, 60, .zero);
+    try expectPublishWindow(&store, resumed.handle, 0);
+    const replay = try store.drainInto(resumed.handle, .zero, 1, &output);
+    try std.testing.expectEqual(@as(usize, 1), replay.len);
+    try std.testing.expectEqual(
+        reconnecting.packet_id,
+        replay[0].publish.packet_id,
+    );
+    try expectPublishWindow(&store, resumed.handle, 1);
 }
 
 test "session reconnect retransmits QoS1 PUBLISH with DUP and original id" {

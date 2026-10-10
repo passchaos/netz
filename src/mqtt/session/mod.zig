@@ -72,6 +72,9 @@ pub const Stats = struct {
     queued_count: usize,
     queued_payload_bytes: usize,
     inflight_count: usize,
+    /// QoS 1/2 PUBLISH packets sent on the current Network Connection that
+    /// still consume the peer's Receive Maximum window.
+    outgoing_publish_window_used: usize,
     inflight_payload_bytes: usize,
     incoming_qos2_count: usize,
     owned_wire_bytes: usize,
@@ -89,6 +92,7 @@ pub const StoreStats = struct {
     queued_count: usize,
     queued_payload_bytes: usize,
     inflight_count: usize,
+    outgoing_publish_window_used: usize,
     inflight_payload_bytes: usize,
     incoming_qos2_count: usize,
     owned_wire_bytes: usize,
@@ -359,6 +363,9 @@ const Session = struct {
     packet_index: std.AutoHashMapUnmanaged(u16, usize) = .empty,
     incoming_qos2: std.AutoHashMapUnmanaged(u16, IncomingQoS2) = .empty,
     next_packet_id: u16 = 1,
+    /// Sent PUBLISH packets that still consume the peer's Receive Maximum.
+    /// PUBREL and packets awaiting their first/retry send do not count.
+    sent_publish_count: u16 = 0,
     allocation_bytes: usize,
 
     fn deinit(
@@ -393,6 +400,23 @@ const Session = struct {
         self.* = undefined;
     }
 };
+
+fn noteInflightSelected(session: *Session, inflight: *Inflight) void {
+    std.debug.assert(inflight.needs_send);
+    inflight.needs_send = false;
+    if (inflight.state == .await_pubcomp) return;
+    std.debug.assert(session.sent_publish_count < std.math.maxInt(u16));
+    session.sent_publish_count += 1;
+}
+
+fn noteInflightNeedsSend(session: *Session, inflight: *Inflight) void {
+    if (inflight.needs_send) return;
+    if (inflight.state != .await_pubcomp) {
+        std.debug.assert(session.sent_publish_count != 0);
+        session.sent_publish_count -= 1;
+    }
+    inflight.needs_send = true;
+}
 
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -461,6 +485,7 @@ pub const Store = struct {
             .queued_count = 0,
             .queued_payload_bytes = 0,
             .inflight_count = 0,
+            .outgoing_publish_window_used = 0,
             .inflight_payload_bytes = 0,
             .incoming_qos2_count = 0,
             .owned_wire_bytes = self.total_bytes,
@@ -481,6 +506,8 @@ pub const Store = struct {
                 else
                     0;
             result.inflight_count +|= session.inflight_count;
+            result.outgoing_publish_window_used +|=
+                session.sent_publish_count;
             result.inflight_payload_bytes +|=
                 session.inflight_payload_bytes;
             result.incoming_qos2_count +|= session.incoming_qos2.count();
@@ -1057,10 +1084,12 @@ pub const Store = struct {
                 session.expires_at_ns = null;
                 for (session.inflight.items) |*maybe_inflight| {
                     if (maybe_inflight.*) |*inflight| {
-                        inflight.needs_send = true;
+                        noteInflightNeedsSend(session, inflight);
                         inflight.retransmission = true;
                     }
                 }
+                std.debug.assert(session.sent_publish_count == 0);
+                session.sent_publish_count = 0;
                 return .{
                     .handle = .{
                         .index = index,
@@ -1200,10 +1229,12 @@ pub const Store = struct {
         }
         for (session.inflight.items) |*maybe_inflight| {
             if (maybe_inflight.*) |*inflight| {
-                inflight.needs_send = true;
+                noteInflightNeedsSend(session, inflight);
                 inflight.retransmission = true;
             }
         }
+        std.debug.assert(session.sent_publish_count == 0);
+        session.sent_publish_count = 0;
     }
 
     pub fn disconnectPacket(
@@ -1513,6 +1544,7 @@ pub const Store = struct {
                 else
                     0,
             .inflight_count = session.inflight_count,
+            .outgoing_publish_window_used = session.sent_publish_count,
             .inflight_payload_bytes = session.inflight_payload_bytes,
             .incoming_qos2_count = session.incoming_qos2.count(),
             .owned_wire_bytes = session.allocation_bytes,
@@ -1875,7 +1907,7 @@ pub const Store = struct {
             const inflight = maybe_inflight orelse continue;
             if (inflight.needs_send) return error.InflightFull;
         }
-        if (countSentPublishInflight(session.*) >= receive_maximum or
+        if (session.sent_publish_count >= receive_maximum or
             session.inflight_count >= self.options.max_inflight_per_session or
             inflightPayloadLimitReached(
                 self.options,
@@ -1931,6 +1963,12 @@ pub const Store = struct {
             inflight_index,
         );
         session.inflight_count += 1;
+        if (!needs_send) {
+            std.debug.assert(
+                session.sent_publish_count < std.math.maxInt(u16),
+            );
+            session.sent_publish_count += 1;
+        }
         session.inflight_payload_bytes += publish.payload.len;
         session.allocation_bytes += publish.allocation_bytes;
         self.total_bytes += publish.allocation_bytes;
@@ -2017,7 +2055,7 @@ pub const Store = struct {
         // requesting another batch.
         if (session.pending_qos0 != null) return error.InflightFull;
         var written: usize = 0;
-        var publish_window_used = countSentPublishInflight(session.*);
+        var publish_window_used: usize = session.sent_publish_count;
         var blocked_qos_publish = false;
         const max_inflight = @min(
             self.options.max_inflight_per_session,
@@ -2074,10 +2112,10 @@ pub const Store = struct {
                 continue;
             }
             out[written] = transmission;
-            inflight.needs_send = false;
-            publish_window_used += @intFromBool(
-                transmission == .publish,
-            );
+            noteInflightSelected(session, inflight);
+            if (transmission == .publish) {
+                publish_window_used += 1;
+            }
             written += 1;
         }
         if (written == out.len) return out[0..written];
@@ -2161,6 +2199,10 @@ pub const Store = struct {
                     inflight_index,
                 );
                 session.inflight_count += 1;
+                std.debug.assert(
+                    session.sent_publish_count < std.math.maxInt(u16),
+                );
+                session.sent_publish_count += 1;
                 session.inflight_payload_bytes = std.math.add(
                     usize,
                     session.inflight_payload_bytes,
@@ -2216,7 +2258,7 @@ pub const Store = struct {
         {
             return error.InvalidAcknowledgement;
         }
-        inflight.needs_send = true;
+        noteInflightNeedsSend(session, inflight);
         inflight.retransmission = false;
     }
 
@@ -2248,7 +2290,7 @@ pub const Store = struct {
                     if (reason_code >= 0x80) {
                         return error.InvalidAcknowledgement;
                     }
-                    inflight.needs_send = true;
+                    noteInflightNeedsSend(session, inflight);
                     return .send_pubrel;
                 }
                 if (inflight.state != .await_pubrec) {
@@ -2258,8 +2300,8 @@ pub const Store = struct {
                     self.removeInflight(session, index);
                     return .completed;
                 }
+                noteInflightNeedsSend(session, inflight);
                 inflight.state = .await_pubcomp;
-                inflight.needs_send = true;
                 inflight.retransmission = false;
                 return .send_pubrel;
             },
@@ -2798,6 +2840,7 @@ pub const Store = struct {
         index: usize,
     ) void {
         var inflight = session.inflight.items[index].?;
+        noteInflightNeedsSend(session, &inflight);
         session.inflight.items[index] = null;
         _ = session.packet_index.fetchRemove(inflight.packet_id).?;
         session.inflight_count -= 1;
@@ -3143,16 +3186,6 @@ fn advanceQueueHead(session: *Session) void {
         session.queued_head = 0;
         std.debug.assert(session.queued_payload_bytes == 0);
     }
-}
-
-fn countSentPublishInflight(session: Session) usize {
-    var count: usize = 0;
-    for (session.inflight.items) |maybe_inflight| {
-        const inflight = maybe_inflight orelse continue;
-        if (inflight.state == .await_pubcomp) continue;
-        if (!inflight.needs_send) count += 1;
-    }
-    return count;
 }
 
 fn validateQueuedPayload(

@@ -9,6 +9,9 @@ const queued_per_session: usize = 4;
 const fanout_sessions: usize = 64;
 const fanout_messages: usize = 256;
 const fanout_samples: usize = 7;
+const full_window_inflight: usize = 16_384;
+const full_window_iterations: usize = 2_000;
+const full_window_samples: usize = 7;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
@@ -132,6 +135,9 @@ pub fn main(init: std.process.Init) !void {
     std.mem.sort(u64, &independent_fanout_ns, {}, lessThanU64);
     std.mem.sort(u64, &shared_fanout_ns, {}, lessThanU64);
 
+    const full_window = try benchmarkFullWindowDrain(io);
+    checksum +%= full_window.checksum;
+
     std.debug.print(
         \\MQTT persistent session benchmark
         \\  io backend: zio-std-io
@@ -149,6 +155,10 @@ pub fn main(init: std.process.Init) !void {
         \\  shared fanout allocations: {d}
         \\  independent fanout live bytes: {d}
         \\  shared fanout live bytes: {d}
+        \\  full-window inflight: {d}
+        \\  full-window empty-drain iterations/sample: {d}
+        \\  full-window empty-drain samples: {d}
+        \\  full-window empty-drain median ns/op: {d}
         \\  checksum: {d}
         \\
     , .{
@@ -166,6 +176,10 @@ pub fn main(init: std.process.Init) !void {
         shared_fanout.?.allocations,
         independent_fanout.?.live_bytes,
         shared_fanout.?.live_bytes,
+        full_window_inflight,
+        full_window_iterations,
+        full_window_samples,
+        full_window.median_ns,
         checksum,
     });
 }
@@ -176,6 +190,78 @@ const FanoutResult = struct {
     allocations: usize,
     live_bytes: usize,
 };
+
+const FullWindowResult = struct {
+    median_ns: u64,
+    checksum: u64,
+};
+
+fn benchmarkFullWindowDrain(io: std.Io) !FullWindowResult {
+    const allocator = std.heap.smp_allocator;
+    var store = netz.mqtt.session.Store.init(allocator, .{
+        .max_sessions = 1,
+        .max_queued_per_session = full_window_inflight,
+        .max_inflight_per_session = full_window_inflight,
+    });
+    defer store.deinit();
+    const opened = try store.open("full-window", false, 3_600, .zero);
+    for (0..full_window_inflight) |_| {
+        _ = try store.enqueuePublish(
+            opened.handle,
+            "bench/full-window",
+            "payload",
+            .{ .qos = .at_least_once, .now = .zero },
+        );
+    }
+
+    const initial = try allocator.alloc(
+        netz.mqtt.session.Transmission,
+        full_window_inflight,
+    );
+    defer allocator.free(initial);
+    const drained = try store.drainInto(
+        opened.handle,
+        .zero,
+        @intCast(full_window_inflight),
+        initial,
+    );
+    if (drained.len != full_window_inflight) {
+        return error.InvalidBenchmarkState;
+    }
+
+    var probe: [1]netz.mqtt.session.Transmission = undefined;
+    var checksum: u64 = 0;
+    for (0..100) |_| {
+        const empty = try store.drainInto(
+            opened.handle,
+            .zero,
+            @intCast(full_window_inflight),
+            &probe,
+        );
+        checksum +%= empty.len;
+    }
+
+    var samples: [full_window_samples]u64 = undefined;
+    for (&samples) |*sample| {
+        const started = nowNs(io);
+        for (0..full_window_iterations) |_| {
+            const empty = try store.drainInto(
+                opened.handle,
+                .zero,
+                @intCast(full_window_inflight),
+                &probe,
+            );
+            checksum +%= empty.len;
+        }
+        sample.* = (nowNs(io) -| started) / full_window_iterations;
+    }
+    std.mem.doNotOptimizeAway(checksum);
+    std.mem.sort(u64, &samples, {}, lessThanU64);
+    return .{
+        .median_ns = samples[full_window_samples / 2],
+        .checksum = checksum,
+    };
+}
 
 fn recordFanoutResult(
     expected: *?FanoutResult,

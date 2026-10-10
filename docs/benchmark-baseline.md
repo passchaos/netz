@@ -6875,6 +6875,52 @@ and `30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
 Artifacts are retained under `zig-out/mqtt-generated-write-ab` and
 `zig-out/mqtt-generated-write-profile`.
 
+Durable MQTT Sessions now maintain the number of PUBLISH packets that have
+been selected on the current Network Connection and still consume the peer's
+Receive Maximum. Selection, write rollback, acknowledgements, expiry, policy
+drops, QoS capping, reconnect and snapshot restoration update that bounded
+`u16` state directly; `drainInto` no longer performs a separate full inflight
+scan just to reconstruct the window. The value is also exposed as
+`outgoing_publish_window_used` in per-Session and aggregate statistics. A
+state-machine regression covers staged and immediate PUBLISH, repeated
+rollback, PUBACK, positive and negative PUBREC, PUBREL/PUBCOMP, expiry,
+discard/drop, QoS-0 completion, reconnect and snapshot restore.
+
+The matching `bench-mqtt-session` workload fills one Session with 16,384 sent
+QoS 1 PUBLISH packets, then measures an empty drain while the peer window is
+full. Seven CPU-11 order-alternated fixed-binary pairs were used; each binary
+reports the median of seven 2,000-iteration samples. The baseline ranged from
+62,516 to 67,720 ns/drain with a 62,906-ns median, while the candidate ranged
+from 37,825 to 38,896 ns/drain with a 38,136-ns median. The paired
+candidate/baseline median was 0.6058x (0.5615-0.6161x), with 7/7 candidate
+wins. Baseline and candidate SHA-256 values are respectively
+`c75fb096d91278f9d3e28f65591afddd640fc2231a552a9a1898a0d03898947c`
+and
+`9b07284286954637503a3f2bdd0e1fb941525647985c4acf572a5dddd4fc76e2`;
+the identical benchmark source hashed to
+`c0d0c5d21a710b8233f12acb28ced62895da915e0bf919dab89cab71a52b196b`.
+This proves removal of one redundant O(n) accounting scan, not that the whole
+drain is O(1): the remaining pass still searches for pending retransmissions.
+Artifacts are retained under `zig-out/mqtt-session-count-ab`; the result-table
+SHA-256 is
+`fc73ae84ba56f2055cf89e06f8fb75fc8e7dd778f862030a377c9a8d7d02b73e`.
+
+A fixed-binary end-to-end control then ran five AB/BA pairs of all five durable
+QoS 2 broker shapes with the server, client and sampler pinned to CPUs 10, 11
+and 13. All 50 arms completed their exact delivery counts and checksums.
+Candidate/baseline throughput paired medians were 0.9993x, 1.0080x, 0.9886x,
+1.0043x and 1.0034x for serial, publishers-32, fanout-32, balanced-32x32 and
+4-KiB payloads. These ordinary windows of 1, 4, 4, 4 and 16 are neutral, as
+expected for an optimization aimed at large retained inflight sets. Baseline
+broker, candidate broker and fixed driver hashes are respectively
+`dccf66204cdb25779951c4ae42a2fd37085710d8e45e69b98b972addceeb2836`,
+`01aaa15bbe71548cf964ae1e42938cf523f1b9303a02d3309bfc3bc9f1879982`
+and
+`30cd02ba439014bb32cf00828a929d2502811573acae629cbc6bc772bb0246ab`.
+The complete 63,817,477-byte artifact is retained under
+`zig-out/mqtt-session-count-broker-ab`; its result-table SHA-256 is
+`b70a9ba65252ed7b20e0f043927e7399a637a2580ed7fa177e0942d27af13a76`.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
