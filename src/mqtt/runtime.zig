@@ -2355,6 +2355,9 @@ pub const ConnectResult = struct {
 pub const ConnectOptions = struct {
     protocol: mqtt.ProtocolVersion = .v5,
     client_id: []const u8,
+    /// Emit Mosquitto's private bridge marker. Only MQTT 3.1.1 supports it;
+    /// configured reconnectors may retry without it after protocol refusal.
+    bridge_mode: bool = false,
     /// Reject discouraged C0/C1 control characters in every UTF-8 Encoded
     /// String received from the broker. The base wire codec always rejects
     /// MQTT-forbidden NUL and Unicode noncharacters.
@@ -3441,6 +3444,7 @@ pub const Connection = struct {
             options.protocol,
             .{
                 .client_id = options.client_id,
+                .bridge_mode = options.bridge_mode,
                 .clean_start = options.clean_start,
                 .keep_alive_seconds = options.keep_alive_seconds,
                 .properties = properties.items,

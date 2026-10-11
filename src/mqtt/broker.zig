@@ -4946,6 +4946,7 @@ pub const Broker = struct {
             *mapped,
         | {
             mapped.* = subscription;
+            applyPrivateBridgeSubscriptionPolicy(connect, mapped);
             mapped.topic_filter = try namespace.mapFilterAlloc(
                 self.allocator,
                 subscription.topic_filter,
@@ -5096,6 +5097,19 @@ pub const Broker = struct {
         // only afterwards. This preserves protocol ordering while using the
         // same Receive Maximum/backpressure path as live fanout.
         try self.flushSlotLocked(slot, true);
+    }
+
+    fn applyPrivateBridgeSubscriptionPolicy(
+        connect: mqtt.Connect,
+        subscription: *mqtt.Subscription,
+    ) void {
+        if (connect.protocol == .v3_1_1 and connect.bridge_mode) {
+            // Mosquitto's private bridge extension gives legacy subscriptions
+            // the MQTT 5-style loop prevention and retain preservation that
+            // their wire format cannot otherwise express.
+            subscription.no_local = true;
+            subscription.retain_as_published = true;
+        }
     }
 
     /// Queue retained replay while `state_mutex` is held.
@@ -7492,6 +7506,36 @@ pub const Broker = struct {
         );
     }
 };
+
+test "MQTT 3.1.1 private bridge subscriptions prevent loops and preserve retain" {
+    const bridge_connect = mqtt.Connect{
+        .protocol = .v3_1_1,
+        .bridge_mode = true,
+        .clean_start = false,
+        .keep_alive_seconds = 60,
+        .client_id = "bridge",
+    };
+    var subscription = mqtt.Subscription{
+        .topic_filter = "sensors/#",
+        .qos = .at_least_once,
+    };
+    Broker.applyPrivateBridgeSubscriptionPolicy(
+        bridge_connect,
+        &subscription,
+    );
+    try std.testing.expect(subscription.no_local);
+    try std.testing.expect(subscription.retain_as_published);
+
+    var ordinary = mqtt.Subscription{
+        .topic_filter = "sensors/#",
+        .qos = .at_least_once,
+    };
+    var ordinary_connect = bridge_connect;
+    ordinary_connect.bridge_mode = false;
+    Broker.applyPrivateBridgeSubscriptionPolicy(ordinary_connect, &ordinary);
+    try std.testing.expect(!ordinary.no_local);
+    try std.testing.expect(!ordinary.retain_as_published);
+}
 
 fn createRoutePublication(
     allocator: std.mem.Allocator,

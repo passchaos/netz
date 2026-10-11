@@ -14,6 +14,7 @@ const ConfiguredConnector = struct {
     next_address: std.atomic.Value(usize) = .init(0),
     current_address: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
     connected_at_ns: std.atomic.Value(i64) = .init(0),
+    private_bridge_supported: std.atomic.Value(bool) = .init(true),
 
     fn connector(self: *ConfiguredConnector) mqtt.runtime.ClientConnector {
         return .{
@@ -30,53 +31,7 @@ const ConfiguredConnector = struct {
         mqtt_options: mqtt.runtime.ConnectOptions,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
-        const index, const endpoint = self.takeEndpoint();
-        var attempt = if (self.tls_options) |options| blk: {
-            var tls_connector = mqtt.tls_runtime.HostReconnectConnector{
-                .host = endpoint.host,
-                .port = endpoint.port,
-                .options = options,
-            };
-            break :blk (if (self.source.bind_address) |local_address|
-                mqtt.tls_runtime.Client.connectHostAttemptBound(
-                    allocator,
-                    io,
-                    endpoint.host,
-                    endpoint.port,
-                    local_address,
-                    reconnectTlsOptions(options, mqtt_options),
-                )
-            else
-                tls_connector.connector().connectAttempt(
-                    allocator,
-                    io,
-                    mqtt_options,
-                )) catch |err| {
-                self.noteAttempt(index, false, io);
-                return err;
-            };
-        } else (if (self.source.bind_address) |local_address|
-            mqtt.runtime.Client.connectHostAttemptBound(
-                allocator,
-                io,
-                endpoint.host,
-                endpoint.port,
-                local_address,
-                mqtt_options,
-            )
-        else
-            mqtt.runtime.Client.connectHostAttempt(
-                allocator,
-                io,
-                endpoint.host,
-                endpoint.port,
-                mqtt_options,
-            )) catch |err| {
-            self.noteAttempt(index, false, io);
-            return err;
-        };
-        self.noteAttempt(index, attempt.accepted(), io);
-        return attempt;
+        return self.connectAttemptMaybeBefore(allocator, io, mqtt_options, null);
     }
 
     fn connectAttemptWithDeadline(
@@ -87,57 +42,143 @@ const ConfiguredConnector = struct {
         deadline: std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
+        return self.connectAttemptMaybeBefore(
+            allocator,
+            io,
+            mqtt_options,
+            deadline,
+        );
+    }
+
+    fn connectAttemptMaybeBefore(
+        self: *ConfiguredConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt.runtime.ConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const index, const endpoint = self.takeEndpoint();
-        var attempt = if (self.tls_options) |options| blk: {
-            var tls_connector = mqtt.tls_runtime.HostReconnectConnector{
-                .host = endpoint.host,
-                .port = endpoint.port,
-                .options = options,
+        var options = mqtt_options;
+        options.bridge_mode = options.bridge_mode and
+            self.private_bridge_supported.load(.acquire);
+        var attempt = self.connectEndpointMaybeBefore(
+            allocator,
+            io,
+            endpoint,
+            options,
+            deadline,
+        ) catch |err| {
+            self.noteAttempt(index, false, io);
+            return err;
+        };
+        if (options.bridge_mode and !attempt.accepted() and
+            attempt.connack.connack.reason_code == 0x01)
+        {
+            attempt.deinit(allocator);
+            self.private_bridge_supported.store(false, .release);
+            options.bridge_mode = false;
+            attempt = self.connectEndpointMaybeBefore(
+                allocator,
+                io,
+                endpoint,
+                options,
+                deadline,
+            ) catch |err| {
+                self.noteAttempt(index, false, io);
+                return err;
             };
-            break :blk (if (self.source.bind_address) |local_address|
-                mqtt.tls_runtime.Client.connectHostAttemptBoundWithDeadline(
+        }
+        self.noteAttempt(index, attempt.accepted(), io);
+        return attempt;
+    }
+
+    fn connectEndpointMaybeBefore(
+        self: *ConfiguredConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        endpoint: mqtt.broker_config.BridgeEndpoint,
+        mqtt_options: mqtt.runtime.ConnectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
+        if (self.tls_options) |configured| {
+            const options = reconnectTlsOptions(configured, mqtt_options);
+            if (self.source.bind_address) |local_address| {
+                return if (deadline) |absolute|
+                    mqtt.tls_runtime.Client.connectHostAttemptBoundWithDeadline(
+                        allocator,
+                        io,
+                        endpoint.host,
+                        endpoint.port,
+                        local_address,
+                        options,
+                        absolute,
+                    )
+                else
+                    mqtt.tls_runtime.Client.connectHostAttemptBound(
+                        allocator,
+                        io,
+                        endpoint.host,
+                        endpoint.port,
+                        local_address,
+                        options,
+                    );
+            }
+            return if (deadline) |absolute|
+                mqtt.tls_runtime.Client.connectHostAttemptWithDeadline(
+                    allocator,
+                    io,
+                    endpoint.host,
+                    endpoint.port,
+                    options,
+                    absolute,
+                )
+            else
+                mqtt.tls_runtime.Client.connectHostAttempt(
+                    allocator,
+                    io,
+                    endpoint.host,
+                    endpoint.port,
+                    options,
+                );
+        }
+        if (self.source.bind_address) |local_address| {
+            return if (deadline) |absolute|
+                mqtt.runtime.Client.connectHostAttemptBoundWithDeadline(
                     allocator,
                     io,
                     endpoint.host,
                     endpoint.port,
                     local_address,
-                    reconnectTlsOptions(options, mqtt_options),
-                    deadline,
+                    mqtt_options,
+                    absolute,
                 )
             else
-                tls_connector.connector().connectAttemptWithDeadline(
+                mqtt.runtime.Client.connectHostAttemptBound(
                     allocator,
                     io,
+                    endpoint.host,
+                    endpoint.port,
+                    local_address,
                     mqtt_options,
-                    deadline,
-                )) catch |err| {
-                self.noteAttempt(index, false, io);
-                return err;
-            };
-        } else (if (self.source.bind_address) |local_address|
-            mqtt.runtime.Client.connectHostAttemptBoundWithDeadline(
-                allocator,
-                io,
-                endpoint.host,
-                endpoint.port,
-                local_address,
-                mqtt_options,
-                deadline,
-            )
-        else
+                );
+        }
+        return if (deadline) |absolute|
             mqtt.runtime.Client.connectHostAttemptWithDeadline(
                 allocator,
                 io,
                 endpoint.host,
                 endpoint.port,
                 mqtt_options,
-                deadline,
-            )) catch |err| {
-            self.noteAttempt(index, false, io);
-            return err;
-        };
-        self.noteAttempt(index, attempt.accepted(), io);
-        return attempt;
+                absolute,
+            )
+        else
+            mqtt.runtime.Client.connectHostAttempt(
+                allocator,
+                io,
+                endpoint.host,
+                endpoint.port,
+                mqtt_options,
+            );
     }
 
     fn takeEndpoint(
@@ -361,7 +402,10 @@ pub const Set = struct {
                     .publish_remote = !source.notifications_local_only,
                 } else null,
             };
-            bridge.* = .{ .inbound = if (source.usesTls() or source.addressCount() > 1) blk: {
+            bridge.* = .{ .inbound = if (source.usesTls() or
+                source.addressCount() > 1 or
+                source.usesPrivateBridgeMode())
+            blk: {
                 if (source.usesTls()) {
                     try loadTlsResources(
                         resources,
@@ -537,6 +581,7 @@ fn remoteConnectOptions(
     return .{
         .protocol = source.protocol,
         .client_id = source.clientId(),
+        .bridge_mode = source.usesPrivateBridgeMode(),
         .clean_start = source.clean_session,
         .keep_alive_seconds = source.keep_alive_seconds,
         .properties = properties,
@@ -751,6 +796,7 @@ test "configured bridge maps Mosquitto remote protocol limits" {
     };
     const options = remoteConnectOptions(&source, &.{});
     try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, options.protocol);
+    try std.testing.expect(options.bridge_mode);
     try std.testing.expectEqual(@as(?u16, 7), options.receive_maximum);
     try std.testing.expectEqual(@as(u16, 3), options.topic_alias_maximum);
     try std.testing.expectEqual(@as(u16, 3), options.max_outgoing_topic_aliases);
@@ -775,6 +821,13 @@ test "configured bridge maps Mosquitto remote protocol limits" {
         std.math.maxInt(usize),
         remoteConnectOptions(&unlimited, &.{}).max_outgoing_packet_size,
     );
+
+    var public_v311 = source;
+    public_v311.try_private = false;
+    try std.testing.expect(!remoteConnectOptions(&public_v311, &.{}).bridge_mode);
+    var v5 = source;
+    v5.protocol = .v5;
+    try std.testing.expect(!remoteConnectOptions(&v5, &.{}).bridge_mode);
 }
 
 test "configured bridge rejects an empty explicit CA file" {

@@ -141,6 +141,7 @@ bridge_max_topic_alias 10
 bridge_max_packet_size 0
 bridge_outgoing_retain true
 bridge_attempt_unsubscribe true
+try_private true
 bridge_bind_address 192.0.2.10
 bridge_tcp_keepalive 60 10 3
 bridge_tcp_user_timeout 30000
@@ -177,7 +178,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `bridge_session_expiry_interval`, `keepalive_interval`,
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
 `bridge_max_packet_size`, `bridge_outgoing_retain`,
-`bridge_attempt_unsubscribe`, `bridge_bind_address`,
+`bridge_attempt_unsubscribe`, `try_private`, `bridge_bind_address`,
 `bridge_tcp_keepalive`, `bridge_tcp_user_timeout`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
@@ -240,7 +241,14 @@ remote CONNECT it sends one mapped-filter UNSUBSCRIBE before publishing, so a
 persistent Session cannot retain a subscription left by an earlier inbound
 configuration. Set it false only when that cleanup is intentionally unwanted.
 Interleaved stale deliveries remain ordered, are protocol-acknowledged, and are
-dropped rather than terminating the bridge. `bridge_bind_address` accepts one
+dropped rather than terminating the bridge. `try_private` defaults true for
+MQTT 3.1.1 and emits Mosquitto's private bridge protocol marker. A peer that
+refuses that protocol level is retried immediately on the same endpoint with
+standard MQTT 3.1.1, and later reconnects retain the successful fallback.
+Incoming private bridges receive no-local and retain-as-published subscription
+semantics, preventing loops without losing the original RETAIN flag. MQTT 5
+does not emit the private marker, and `try_private false` always uses the
+standard protocol level. `bridge_bind_address` accepts one
 numeric IPv4 or IPv6 address and binds an ephemeral local port before every
 cleartext or TLS connection attempt, including fallback and reconnect attempts.
 DNS results are restricted to the configured local address family, while a

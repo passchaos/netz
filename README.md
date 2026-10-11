@@ -1005,6 +1005,7 @@ Current protocol coverage includes:
   failover, retained local/remote connection-state notifications,
   automatic/one-shot lifecycles, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
+  Mosquitto private-bridge negotiation with same-endpoint MQTT 3.1.1 fallback,
   explicit local IPv4/IPv6 source-address binding across cleartext and TLS
   reconnects, configurable TCP keepalive plus optional Linux
   `TCP_USER_TIMEOUT` policy preserved across cleartext/TLS fallback and

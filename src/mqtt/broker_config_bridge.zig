@@ -118,6 +118,7 @@ pub const Bridge = struct {
     max_packet_size: u32 = 0,
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
+    try_private: bool = true,
     bind_address: ?net.IpAddress = null,
     tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     tcp_user_timeout_ms: ?u32 = null,
@@ -193,6 +194,10 @@ pub const Bridge = struct {
             self.use_os_ca_certificates;
     }
 
+    pub fn usesPrivateBridgeMode(self: Bridge) bool {
+        return self.protocol == .v3_1_1 and self.try_private;
+    }
+
     pub fn addressCount(self: Bridge) usize {
         return 1 + self.secondary_addresses.len;
     }
@@ -231,6 +236,7 @@ const Seen = struct {
     bridge_max_packet_size: bool = false,
     bridge_outgoing_retain: bool = false,
     bridge_attempt_unsubscribe: bool = false,
+    try_private: bool = false,
     bridge_bind_address: bool = false,
     bridge_tcp_keepalive: bool = false,
     bridge_tcp_user_timeout: bool = false,
@@ -271,6 +277,7 @@ pub const Builder = struct {
     max_packet_size: u32 = 0,
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
+    try_private: bool = true,
     bind_address: ?net.IpAddress = null,
     tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     tcp_user_timeout_ms: ?u32 = null,
@@ -396,6 +403,9 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "bridge_attempt_unsubscribe")) {
             try markOnce(&self.seen.bridge_attempt_unsubscribe);
             self.attempt_unsubscribe = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "try_private")) {
+            try markOnce(&self.seen.try_private);
+            self.try_private = try parseOneBool(words);
         } else if (std.mem.eql(u8, directive, "bridge_bind_address")) {
             try markOnce(&self.seen.bridge_bind_address);
             self.bind_address = net.IpAddress.parse(
@@ -615,6 +625,7 @@ pub const Builder = struct {
             .max_packet_size = self.max_packet_size,
             .outgoing_retain = self.outgoing_retain,
             .attempt_unsubscribe = self.attempt_unsubscribe,
+            .try_private = self.try_private,
             .bind_address = self.bind_address,
             .tcp_keepalive = self.tcp_keepalive,
             .tcp_user_timeout_ms = self.tcp_user_timeout_ms,
@@ -741,6 +752,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_max_packet_size") or
         std.mem.eql(u8, value, "bridge_outgoing_retain") or
         std.mem.eql(u8, value, "bridge_attempt_unsubscribe") or
+        std.mem.eql(u8, value, "try_private") or
         std.mem.eql(u8, value, "bridge_bind_address") or
         std.mem.eql(u8, value, "bridge_tcp_keepalive") or
         std.mem.eql(u8, value, "bridge_tcp_user_timeout") or

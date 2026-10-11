@@ -250,6 +250,14 @@ inbound configuration. Legal PUBLISH traffic interleaved before that UNSUBACK
 is retained in wire order, acknowledged, and deliberately discarded; disabling
 the option omits the cleanup packet.
 
+Mosquitto-compatible `try_private` defaults on for MQTT 3.1.1 bridges. Netz
+emits the private protocol-level marker, immediately retries the same endpoint
+with standard MQTT 3.1.1 after an Unsupported Protocol Version CONNACK, and
+remembers that fallback for later reconnects. A netz broker accepting a private
+bridge marks its legacy subscriptions no-local and retain-as-published, which
+provides loop prevention and retained-flag fidelity unavailable in standard
+MQTT 3.1.1 subscription options. MQTT 5 never emits this private extension.
+
 `bridge_bind_address` accepts a numeric IPv4 or IPv6 source address and binds
 an ephemeral local port before every cleartext or TLS connection attempt.
 Hostname lookup is restricted to the selected address family, numeric family

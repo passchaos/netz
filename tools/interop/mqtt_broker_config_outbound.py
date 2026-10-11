@@ -15,7 +15,12 @@ from mqtt_broker_config_bridge import (
 )
 
 
-def _connect_limits(packet: bytes, protocol_level: int) -> dict[int, int]:
+def _connect_limits(
+    packet: bytes,
+    protocol_level: int,
+    *,
+    private_bridge: bool = False,
+) -> dict[int, int]:
     if packet[0] != 0x10:
         raise AssertionError(f"expected bridge CONNECT: {packet.hex()}")
     _, cursor = _decode_varint(packet, 1)
@@ -23,7 +28,8 @@ def _connect_limits(packet: bytes, protocol_level: int) -> dict[int, int]:
     cursor += 2
     protocol_name = packet[cursor:cursor + protocol_name_size]
     cursor += protocol_name_size
-    if protocol_name != b"MQTT" or packet[cursor] != protocol_level:
+    expected_level = protocol_level | (0x80 if private_bridge else 0)
+    if protocol_name != b"MQTT" or packet[cursor] != expected_level:
         raise AssertionError(f"unexpected bridge protocol: {packet.hex()}")
     cursor += 4  # protocol level, flags, and Keep Alive
     if protocol_level == 4:
@@ -124,6 +130,75 @@ def _expect_tcp_keepalive_trace(
         )
 
 
+def _private_bridge_connect(port: int, client_id: str) -> socket.socket:
+    client = socket.create_connection(("127.0.0.1", port), timeout=10)
+    try:
+        client.settimeout(10)
+        body = (
+            _utf8("MQTT")
+            + b"\x84\x02"
+            + (30).to_bytes(2, "big")
+            + _utf8(client_id)
+        )
+        client.sendall(_packet(0x10, body))
+        if _read_packet(client) != b"\x20\x02\x00\x00":
+            raise AssertionError("private bridge CONNECT was not accepted")
+        return client
+    except BaseException:
+        client.close()
+        raise
+
+
+def run_private_bridge_server_case(broker: Path, directory: Path) -> None:
+    port = _distinct_ports(1)[0]
+    config = directory / "private-bridge-server.conf"
+    config.write_text(
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous true\nmax_connections 3\n"
+    )
+    log = directory / "private-bridge-server.log"
+    process, output = _start_broker(broker, config, log)
+    private = publisher = None
+    try:
+        _wait_for_log(process, log, "configured 1 listeners")
+        private = _private_bridge_connect(port, "private-bridge-peer")
+        private.sendall(_packet(0x82, b"\x00\x01" + _utf8("bridge/#") + b"\x00"))
+        if _read_packet(private) != b"\x90\x03\x00\x01\x00":
+            raise AssertionError("private bridge SUBSCRIBE was not accepted")
+
+        private.sendall(_packet(0x31, _utf8("bridge/self") + b"self"))
+        private.settimeout(0.2)
+        try:
+            unexpected = _read_packet(private)
+        except socket.timeout:
+            unexpected = None
+        if unexpected is not None:
+            raise AssertionError(
+                "private bridge no-local policy echoed its own publish: "
+                + unexpected.hex()
+            )
+
+        private.settimeout(10)
+        publisher = _connect_client(port, "private-bridge-publisher")
+        publisher.sendall(
+            _packet(0x31, _utf8("bridge/peer") + b"\x00" + b"retained")
+        )
+        forwarded = _read_packet(private)
+        if forwarded[0] & 0x01 == 0:
+            raise AssertionError(
+                "private bridge subscription did not preserve RETAIN: "
+                + forwarded.hex()
+            )
+        if _publish_contents(forwarded, 4) != ("bridge/peer", b"retained"):
+            raise AssertionError("private bridge received the wrong publication")
+    finally:
+        if publisher is not None:
+            publisher.close()
+        if private is not None:
+            private.close()
+        _stop(process, output)
+
+
 def run_outbound_bridge_protocol_limits_case(
     broker: Path, directory: Path
 ) -> None:
@@ -176,7 +251,27 @@ def run_outbound_bridge_protocol_limits_case(
                         f"bridge_bind_address mismatch: {peer!r}"
                     )
                 connect = _read_packet(bridge)
-                limits = _connect_limits(connect, protocol_level)
+                limits = _connect_limits(
+                    connect,
+                    protocol_level,
+                    private_bridge=protocol_level == 4,
+                )
+                if protocol_level == 4 and not outgoing_retain:
+                    bridge.sendall(_packet(0x20, b"\x00\x01"))
+                    bridge.close()
+                    bridge = None
+                    bridge, peer = listener.accept()
+                    bridge.settimeout(10)
+                    if peer[0] != "127.0.0.2":
+                        raise AssertionError(
+                            f"fallback bridge_bind_address mismatch: {peer!r}"
+                        )
+                    connect = _read_packet(bridge)
+                    limits = _connect_limits(
+                        connect,
+                        protocol_level,
+                        private_bridge=False,
+                    )
                 if protocol_level == 5:
                     if limits.get(0x21) != 7 or limits.get(0x22) != 3:
                         raise AssertionError(

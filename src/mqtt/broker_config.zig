@@ -1176,6 +1176,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_max_packet_size 2048
         \\bridge_outgoing_retain false
         \\bridge_attempt_unsubscribe false
+        \\try_private false
         \\bridge_bind_address 127.0.0.2
         \\bridge_tcp_keepalive 30 10 5
         \\bridge_tcp_user_timeout 30000
@@ -1240,6 +1241,8 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(@as(u32, 2048), upstream.max_packet_size);
     try std.testing.expect(!upstream.outgoing_retain);
     try std.testing.expect(!upstream.attempt_unsubscribe);
+    try std.testing.expect(!upstream.try_private);
+    try std.testing.expect(!upstream.usesPrivateBridgeMode());
     const expected_bind_address = try std.Io.net.IpAddress.parseIp4(
         "127.0.0.2",
         0,
@@ -1327,6 +1330,8 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqual(@as(u32, 0), bridge.max_packet_size);
     try std.testing.expect(bridge.outgoing_retain);
     try std.testing.expect(bridge.attempt_unsubscribe);
+    try std.testing.expect(bridge.try_private);
+    try std.testing.expect(bridge.usesPrivateBridgeMode());
     try std.testing.expectEqual(
         @as(?std.Io.net.IpAddress, null),
         bridge.bind_address,
@@ -1597,6 +1602,12 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "topic # out 0\nbridge_attempt_unsubscribe maybe\n"),
     );
     try std.testing.expectError(
+        error.InvalidBoolean,
+        parse(allocator, listener ++
+            "connection invalid-private\naddress localhost\n" ++
+            "topic # out 0\ntry_private maybe\n"),
+    );
+    try std.testing.expectError(
         error.DuplicateDirective,
         parse(allocator, listener ++
             "connection duplicate-limit\naddress localhost\n" ++
@@ -1609,6 +1620,12 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection duplicate-unsubscribe\naddress localhost\n" ++
             "topic # out 0\nbridge_attempt_unsubscribe true\n" ++
             "bridge_attempt_unsubscribe false\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-private\naddress localhost\n" ++
+            "topic # out 0\ntry_private true\ntry_private false\n"),
     );
     try std.testing.expectError(
         error.InvalidDirective,

@@ -1356,6 +1356,9 @@ fn propertyAllowedInContext(context: PropertyContext, id: PropertyId) bool {
 
 pub const Connect = struct {
     protocol: ProtocolVersion,
+    /// Mosquitto's private bridge marker carried in bit 7 of an MQTT 3.1.1
+    /// protocol level. It is never valid for MQTT 5.
+    bridge_mode: bool = false,
     clean_start: bool,
     keep_alive_seconds: u16,
     client_id: []const u8,
@@ -1372,10 +1375,15 @@ pub const Connect = struct {
 
     pub fn parse(allocator: std.mem.Allocator, packet: []const u8) Error!Connect {
         const prefix = try parseConnectProtocolPrefix(packet);
+        const bridge_mode = (prefix.level & 0x80) != 0;
+        const protocol_level = prefix.level & 0x7f;
         const protocol = std.enums.fromInt(
             ProtocolVersion,
-            prefix.level,
+            protocol_level,
         ) orelse return error.InvalidProtocolLevel;
+        if (bridge_mode and protocol != .v3_1_1) {
+            return error.InvalidProtocolLevel;
+        }
         var cursor = prefix.cursor;
         const connect_flags = try cursor.readByte();
         try validateConnectFlags(protocol, connect_flags);
@@ -1411,6 +1419,7 @@ pub const Connect = struct {
         try validateConnectClientId(protocol, client_id, clean_start);
         return .{
             .protocol = protocol,
+            .bridge_mode = bridge_mode,
             .clean_start = clean_start,
             .keep_alive_seconds = keep_alive,
             .client_id = client_id,
@@ -1478,6 +1487,8 @@ pub const LastWill = struct {
 
 pub const ConnectPacketOptions = struct {
     client_id: []const u8,
+    /// Emit Mosquitto's private bridge protocol-level bit for MQTT 3.1.1.
+    bridge_mode: bool = false,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,
     properties: []const Property = &.{},
@@ -2825,6 +2836,9 @@ pub fn writeConnectPacket(
 ) Error!void {
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
+    if (options.bridge_mode and protocol != .v3_1_1) {
+        return error.InvalidProtocolLevel;
+    }
     try validateConnectClientId(
         protocol,
         options.client_id,
@@ -2897,7 +2911,9 @@ pub fn writeConnectPacket(
     list.appendAssumeCapacity(@as(u8, @intFromEnum(PacketType.connect)) << 4);
     encodeRemainingLengthAssumeCapacity(list, remaining_len);
     appendLengthPrefixedAssumeCapacity(list, "MQTT");
-    list.appendAssumeCapacity(protocol.byte());
+    list.appendAssumeCapacity(
+        protocol.byte() | if (options.bridge_mode) @as(u8, 0x80) else 0,
+    );
     list.appendAssumeCapacity(flags);
     appendIntAssumeCapacity(list, u16, options.keep_alive_seconds);
     if (protocol == .v5) {
@@ -3823,6 +3839,41 @@ test "MQTT fixed-header flags are classified as malformed" {
     );
 }
 
+test "MQTT 3.1.1 private bridge CONNECT roundtrip is version scoped" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try writeConnectPacket(&encoded, allocator, .v3_1_1, .{
+        .client_id = "private-bridge",
+        .bridge_mode = true,
+        .clean_start = false,
+    });
+    const level_index = (try FixedHeader.parse(encoded.items)).header_len +
+        2 + "MQTT".len;
+    try std.testing.expectEqual(@as(u8, 0x84), encoded.items[level_index]);
+    var parsed = try Connect.parse(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(ProtocolVersion.v3_1_1, parsed.protocol);
+    try std.testing.expect(parsed.bridge_mode);
+
+    encoded.items[level_index] = 0x85;
+    try std.testing.expectError(
+        error.InvalidProtocolLevel,
+        Connect.parse(allocator, encoded.items),
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidProtocolLevel,
+        writeConnectPacket(&encoded, allocator, .v5, .{
+            .client_id = "invalid-private-v5",
+            .bridge_mode = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+}
+
 test "MQTT connect and publish parse" {
     const allocator = std.testing.allocator;
     var connect_bytes: std.ArrayList(u8) = .empty;
@@ -3845,6 +3896,7 @@ test "MQTT connect and publish parse" {
     var connect = try Connect.parse(allocator, connect_bytes.items);
     defer connect.deinit(allocator);
     try std.testing.expectEqual(ProtocolVersion.v5, connect.protocol);
+    try std.testing.expect(!connect.bridge_mode);
     try std.testing.expect(connect.clean_start);
     try std.testing.expectEqualStrings("client-1", connect.client_id);
     try std.testing.expectEqual(@as(usize, 1), connect.properties.len);
