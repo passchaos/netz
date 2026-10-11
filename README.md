@@ -1041,7 +1041,8 @@ Current protocol coverage includes:
   exposes a broker-internal persistent consumer with collision-proof identity,
   owned PUBLISH/PUBREL events, retained replay, explicit QoS completion, and
   journal-backed restart recovery for in-process subscription sources and
-  configured outbound bridges with direct local consumption, and
+  configured outbound bridges with direct local consumption, including
+  queue-threshold-triggered lazy connections and idle disconnects, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, generation-safe duplicate-ClientID takeover that

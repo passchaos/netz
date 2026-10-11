@@ -195,6 +195,22 @@ pub const ConfiguredBridge = union(enum) {
             inline else => |*value| try value.runOnce(options),
         }
     }
+
+    pub fn runLazy(
+        self: *ConfiguredBridge,
+        options: mqtt.reconnect.PollOptions,
+        threshold: usize,
+        idle_timeout: std.Io.Duration,
+    ) anyerror!void {
+        switch (self.*) {
+            .outbound => |*value| try value.runLazy(
+                options,
+                threshold,
+                idle_timeout,
+            ),
+            .inbound => return error.UnsupportedBridgeStartType,
+        }
+    }
 };
 
 pub const Set = struct {

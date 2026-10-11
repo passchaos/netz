@@ -170,7 +170,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`,
-`bridge_tls_version`, `round_robin`, `start_type`, `notifications`,
+`bridge_tls_version`, `round_robin`, `start_type`, `threshold`, `idle_timeout`, `notifications`,
 `notifications_local_only`, and `notification_topic`. Unknown directives,
 duplicates, bad values, and listener or bridge options before their owning
 declaration are errors. In
@@ -186,20 +186,24 @@ Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
 payloads are rejected while representable QoS flows complete. Each listener
 accepts MQTT 3.1.1 and MQTT 5 by default.
 
-Each `connection` creates an independently reconnecting inbound bridge.
+Each `connection` creates an independently reconnecting one-way bridge.
 One `address` directive containing one or more `host[:port]` targets (or
 bracketed IPv6 targets with required ports) and one or more explicit
-`topic FILTER in QOS [LOCAL_PREFIX]
-[REMOTE_PREFIX]` rules are required. The bridge subscribes remotely to
-`REMOTE_PREFIX + FILTER`, strips `REMOTE_PREFIX` from each delivered Topic
-Name, then prepends `LOCAL_PREFIX` before local broker routing. Empty prefixes
-may be omitted or written as `""`. Rules must be pairwise disjoint after remote
-prefix expansion. With the default `round_robin false`, connection attempts
+`topic FILTER in|out QOS [LOCAL_PREFIX] [REMOTE_PREFIX]` rules are required.
+Inbound bridges subscribe remotely to
+`REMOTE_PREFIX + FILTER`, strip `REMOTE_PREFIX` from each delivered Topic
+Name, then prepend `LOCAL_PREFIX` before local broker routing. Outbound bridges
+subscribe directly to the local broker's persistent Session at
+`LOCAL_PREFIX + FILTER`, remove `LOCAL_PREFIX`, and publish
+`REMOTE_PREFIX + Topic Name` without a loopback socket. Empty prefixes may be
+omitted or written as `""`. Rules must be pairwise disjoint after source-prefix
+expansion, and one connection may not mix directions. With the default
+`round_robin false`, connection attempts
 fall through the ordered targets, but the first target remains primary: a
 secondary connection is retired after the configured restart cap so the next
 attempt probes the primary again. `round_robin true` instead rotates after each
 failure or disconnect and leaves a successful target active until it fails.
-`out`, `both`, MQTT 3.1, and the
+`both`, MQTT 3.1, and the
 three-argument `restart_timeout` stable-period form fail explicitly instead of
 being silently downgraded. One timeout value selects a fixed delay; two select
 bounded exponential full-jitter retries. MQTT 3.1.1 is the bridge default;
@@ -211,10 +215,11 @@ Session, and for MQTT 5 a non-zero `bridge_session_expiry_interval`; the runner
 derives a stable bridge identity from the connection identity and mappings and opens a
 crash-safe broker journal beside the configured snapshot. A process gate runs
 real broker instances, begins through an unavailable first address, verifies
-round-robin failover plus prefix mapping and QoS 1/2 delivery, kills and
-restarts the upstream broker, then verifies automatic resubscription without
-restarting the local broker. A separate three-broker case verifies secondary
-takeover followed by active failback when the primary becomes available.
+round-robin failover plus inbound and outbound prefix mapping and QoS 1/2
+delivery, kills both upstream and local brokers at persistence boundaries, and
+verifies automatic resubscription and outbound recovery. A separate
+three-broker case verifies secondary takeover followed by active failback when
+the primary becomes available.
 
 Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
 Trust comes from a bounded explicit `bridge_cafile`, operating-system roots
@@ -235,9 +240,15 @@ client state machine without being confused with inbound bridge traffic.
 `start_type automatic` is the default and keeps reconnecting. `start_type once`
 makes the configured address sequence only once, then leaves that Bridge
 stopped after initial failure or after its first established connection ends;
-other bridges and local listeners continue running. `start_type lazy` remains
-rejected until the broker has a native outbound queue whose threshold can
-faithfully drive it.
+other bridges and local listeners continue running. Outbound bridges also
+support `start_type lazy`: the default `threshold 10` defers the remote
+connection until that many local messages are durably queued, after which the
+whole queue is drained. The default `idle_timeout 60` disconnects only after
+the queue and any coordinated QoS 2 transaction remain empty for that many
+seconds. New arrivals wake the bridge without polling, including across the
+idle-disconnect boundary. A finite `max_queued_messages` smaller than the lazy
+threshold is rejected as unreachable; inbound-only lazy and mixed-direction
+connections are likewise rejected.
 `accept_protocol_versions` restricts that listener to `4`, `5`, or `4,5`;
 version-denied clients receive the protocol-specific Unsupported Protocol
 Version CONNACK before close. MQTT 3.1 (level 3), empty sets, duplicate values,

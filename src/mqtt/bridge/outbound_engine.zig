@@ -613,6 +613,109 @@ pub fn Engine(comptime Source: type) type {
             }
         }
 
+        /// Run a broker-local source only while its durable queue has work.
+        /// The first connection is deferred until `threshold` messages are
+        /// pending. Once activated, the bridge drains the complete queue and
+        /// disconnects after one uninterrupted idle interval.
+        pub fn runLazy(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            threshold: usize,
+            idle_timeout: std.Io.Duration,
+        ) (Error || std.Io.Cancelable)!void {
+            if (comptime Source != local_source.Client) {
+                @compileError("lazy bridge lifecycle requires a local source");
+            }
+            if (threshold == 0 or idle_timeout.nanoseconds <= 0 or
+                poll_options.timeout.nanoseconds <= 0 or
+                poll_options.cancellation_check_interval.nanoseconds <= 0)
+            {
+                return error.InvalidProperty;
+            }
+            defer self.notifyLocal(false) catch {};
+            var reactivate_after_disconnect = false;
+            while (true) {
+                if (!reactivate_after_disconnect) {
+                    self.source.waitForPending(
+                        threshold,
+                    ) catch |err| switch (err) {
+                        error.Canceled => return,
+                        else => return err,
+                    };
+                }
+                reactivate_after_disconnect = false;
+                _ = self.connect() catch |err| switch (err) {
+                    error.Canceled => return,
+                    else => return err,
+                };
+
+                var observed_generation = self.source.deliveryGeneration();
+                var idle_deadline: ?std.Io.Clock.Timestamp = null;
+                while (true) {
+                    if (self.source.shutdown.isSet()) return;
+                    const pending = try self.source.pendingCount();
+                    const generation = self.source.deliveryGeneration();
+                    const has_work = pending != 0 or
+                        self.durableTransaction() != null;
+                    if (has_work) {
+                        idle_deadline = null;
+                    } else if (idle_deadline == null or
+                        generation != observed_generation)
+                    {
+                        idle_deadline = .fromNow(self.source.io, .{
+                            .raw = idle_timeout,
+                            .clock = .awake,
+                        });
+                    }
+                    observed_generation = generation;
+
+                    if (self.target.connection() == null and !has_work) {
+                        try self.notifyLocal(false);
+                        reactivate_after_disconnect =
+                            self.source.deliveryGeneration() != generation or
+                            try self.source.pendingCount() != 0;
+                        break;
+                    }
+                    if (idle_deadline) |deadline| {
+                        if (deadline.durationFromNow(
+                            self.source.io,
+                        ).raw.nanoseconds <= 0) {
+                            try self.disconnectIdleTarget();
+                            reactivate_after_disconnect =
+                                self.source.deliveryGeneration() != generation or
+                                try self.source.pendingCount() != 0;
+                            break;
+                        }
+                    }
+                    _ = self.step(lazyPollOptions(
+                        poll_options,
+                        idle_deadline,
+                        self.source.io,
+                    )) catch |err| switch (err) {
+                        error.Canceled => return,
+                        else => return err,
+                    };
+                }
+            }
+        }
+
+        fn disconnectIdleTarget(self: *Self) Error!void {
+            if (self.notifications) |value| {
+                if (value.publish_remote) if (self.target.connection()) |active| {
+                    _ = self.target.publishOneAttempt(
+                        value.topic,
+                        "0",
+                        .{
+                            .qos = .at_most_once,
+                            .retain = active.peerRetainAvailable(),
+                        },
+                    ) catch {};
+                };
+            }
+            self.target.disconnect(0) catch self.target.disconnectTransport();
+            try self.notifyLocal(false);
+        }
+
         pub fn requestReconnect(self: *Self) void {
             self.target.requestReconnect();
         }
@@ -1303,6 +1406,25 @@ fn initClient(
             client_options,
         ),
     };
+}
+
+fn lazyPollOptions(
+    options: reconnect.PollOptions,
+    idle_deadline: ?std.Io.Clock.Timestamp,
+    io: std.Io,
+) reconnect.PollOptions {
+    const deadline = idle_deadline orelse return options;
+    const remaining_ns = deadline.durationFromNow(io).raw.nanoseconds;
+    var bounded = options;
+    bounded.timeout = .fromNanoseconds(@min(
+        bounded.timeout.nanoseconds,
+        @max(remaining_ns, 1),
+    ));
+    bounded.cancellation_check_interval = .fromNanoseconds(@min(
+        bounded.cancellation_check_interval.nanoseconds,
+        bounded.timeout.nanoseconds,
+    ));
+    return bounded;
 }
 
 test {

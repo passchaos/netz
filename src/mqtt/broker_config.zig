@@ -790,7 +790,11 @@ fn parseSources(
             config.bridges = &.{};
         }
         for (bridge_builders.items, config.bridges) |*builder, *bridge| {
-            bridge.* = try builder.finish(allocator, config.persistence);
+            bridge.* = try builder.finish(
+                allocator,
+                config.persistence,
+                config.max_queued_messages,
+            );
             initialized_bridges += 1;
         }
     }
@@ -1423,8 +1427,8 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
     try std.testing.expectError(
         error.UnsupportedBridgeStartType,
         parse(allocator, listener ++
-            "connection lazy\naddress localhost\ntopic # in 0\n" ++
-            "start_type lazy\n"),
+            "connection manual\naddress localhost\ntopic # in 0\n" ++
+            "start_type manual\n"),
     );
     try std.testing.expectError(
         error.BridgeNotificationsDisabled,
@@ -1482,6 +1486,51 @@ test "MQTT broker config accepts outbound mappings and rejects mixed directions"
         "connection mixed\naddress localhost\n" ++
         "topic sensors/# in 1 local/ remote/\n" ++
         "topic data/# out 1 local/ remote/\n"));
+}
+
+test "MQTT broker config validates lazy outbound lifecycle" {
+    const allocator = std.testing.allocator;
+    const listener = "listener 1883\nallow_anonymous true\n";
+    var config = try parse(allocator, "max_queued_messages 3\n" ++ listener ++
+        "connection lazy-out\naddress localhost\n" ++
+        "topic sensors/# out 1\nstart_type lazy\n" ++
+        "threshold 3\nidle_timeout 7\n");
+    defer config.deinit(allocator);
+    try std.testing.expectEqual(
+        BridgeStartType.lazy,
+        config.bridges[0].start_type,
+    );
+    try std.testing.expectEqual(@as(usize, 3), config.bridges[0].threshold);
+    try std.testing.expectEqual(
+        @as(u32, 7),
+        config.bridges[0].idle_timeout_seconds,
+    );
+
+    try std.testing.expectError(
+        error.UnsupportedBridgeStartType,
+        parse(allocator, listener ++
+            "connection lazy-in\naddress localhost\n" ++
+            "topic sensors/# in 1\nstart_type lazy\n"),
+    );
+    try std.testing.expectError(
+        error.BridgeLazyThresholdExceedsQueueLimit,
+        parse(allocator, "max_queued_messages 2\n" ++ listener ++
+            "connection unreachable\naddress localhost\n" ++
+            "topic sensors/# out 1\nstart_type lazy\nthreshold 3\n"),
+    );
+    for ([_][]const u8{ "threshold 0\n", "idle_timeout 0\n" }) |invalid| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "{s}connection invalid-lazy\naddress localhost\n" ++
+                "topic sensors/# out 1\nstart_type lazy\n{s}",
+            .{ listener, invalid },
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(allocator, source),
+        );
+    }
 }
 
 test "MQTT broker config bridge allocation failures leak nothing" {

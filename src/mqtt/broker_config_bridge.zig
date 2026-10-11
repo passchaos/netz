@@ -12,6 +12,8 @@ pub const default_port: u16 = 1883;
 pub const default_keep_alive_seconds: u16 = 60;
 pub const default_restart_base_seconds: u16 = 5;
 pub const default_restart_cap_seconds: u16 = 30;
+pub const default_lazy_idle_timeout_seconds: u32 = 60;
+pub const default_lazy_threshold: usize = 10;
 pub const maximum_restart_seconds: u16 = 3600;
 pub const maximum_host_bytes: usize = 255;
 
@@ -28,6 +30,7 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     BridgeTlsIdentityIncomplete,
     BridgeTlsTrustRequired,
     BridgeNotificationsDisabled,
+    BridgeLazyThresholdExceedsQueueLimit,
     DuplicateBridgeAddress,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
@@ -47,6 +50,7 @@ pub const RestartPolicy = struct {
 
 pub const StartType = enum {
     automatic,
+    lazy,
     once,
 };
 
@@ -110,6 +114,8 @@ pub const Bridge = struct {
     alpn: []u8 = &.{},
     round_robin: bool = false,
     start_type: StartType = .automatic,
+    idle_timeout_seconds: u32 = default_lazy_idle_timeout_seconds,
+    threshold: usize = default_lazy_threshold,
     notifications: bool = true,
     notifications_local_only: bool = false,
     notification_topic: []u8 = &.{},
@@ -213,6 +219,8 @@ const Seen = struct {
     bridge_tls_version: bool = false,
     round_robin: bool = false,
     start_type: bool = false,
+    idle_timeout: bool = false,
+    threshold: bool = false,
     notifications: bool = false,
     notifications_local_only: bool = false,
     notification_topic: bool = false,
@@ -239,6 +247,8 @@ pub const Builder = struct {
     alpn: []u8 = &.{},
     round_robin: bool = false,
     start_type: StartType = .automatic,
+    idle_timeout_seconds: u32 = default_lazy_idle_timeout_seconds,
+    threshold: usize = default_lazy_threshold,
     notifications: bool = true,
     notifications_local_only: bool = false,
     notification_topic: []u8 = &.{},
@@ -393,10 +403,18 @@ pub const Builder = struct {
             const value = try parseOne(words);
             self.start_type = if (std.mem.eql(u8, value, "automatic"))
                 .automatic
+            else if (std.mem.eql(u8, value, "lazy"))
+                .lazy
             else if (std.mem.eql(u8, value, "once"))
                 .once
             else
                 return error.UnsupportedBridgeStartType;
+        } else if (std.mem.eql(u8, directive, "idle_timeout")) {
+            try markOnce(&self.seen.idle_timeout);
+            self.idle_timeout_seconds = try parsePositive(u32, words);
+        } else if (std.mem.eql(u8, directive, "threshold")) {
+            try markOnce(&self.seen.threshold);
+            self.threshold = try parsePositive(u31, words);
         } else if (std.mem.eql(u8, directive, "notifications")) {
             try markOnce(&self.seen.notifications);
             self.notifications = try parseOneBool(words);
@@ -417,6 +435,7 @@ pub const Builder = struct {
         self: *Builder,
         allocator: std.mem.Allocator,
         persistence: bool,
+        max_queued_messages: usize,
     ) Error!Bridge {
         if (!self.seen.address) return error.BridgeAddressRequired;
         if (self.rules.items.len == 0) return error.BridgeTopicRequired;
@@ -465,8 +484,18 @@ pub const Builder = struct {
             }
         }
         var uses_qos2 = false;
+        var has_outbound = false;
         for (self.rules.items) |rule| {
             uses_qos2 = uses_qos2 or rule.qos == .exactly_once;
+            has_outbound = has_outbound or rule.direction == .out;
+        }
+        if (self.start_type == .lazy and !has_outbound) {
+            return error.UnsupportedBridgeStartType;
+        }
+        if (self.start_type == .lazy and max_queued_messages != 0 and
+            self.threshold > max_queued_messages)
+        {
+            return error.BridgeLazyThresholdExceedsQueueLimit;
         }
         if (uses_qos2) {
             if (!persistence) return error.BridgePersistenceRequired;
@@ -504,6 +533,8 @@ pub const Builder = struct {
             .alpn = self.alpn,
             .round_robin = self.round_robin,
             .start_type = self.start_type,
+            .idle_timeout_seconds = self.idle_timeout_seconds,
+            .threshold = self.threshold,
             .notifications = self.notifications,
             .notifications_local_only = self.notifications_local_only,
             .notification_topic = self.notification_topic,
@@ -622,6 +653,8 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_tls_version") or
         std.mem.eql(u8, value, "round_robin") or
         std.mem.eql(u8, value, "start_type") or
+        std.mem.eql(u8, value, "idle_timeout") or
+        std.mem.eql(u8, value, "threshold") or
         std.mem.eql(u8, value, "notifications") or
         std.mem.eql(u8, value, "notifications_local_only") or
         std.mem.eql(u8, value, "notification_topic");

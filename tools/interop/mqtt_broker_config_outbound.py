@@ -104,3 +104,113 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         if subscriber is not None: subscriber.close()
         if local is not None: _stop(local, local_output)
         _stop(remote, remote_output)
+
+
+def run_lazy_outbound_bridge_case(broker: Path, directory: Path) -> None:
+    remote_port, local_port = _distinct_ports(2)
+    remote_config = directory / "lazy-outbound-remote.conf"
+    remote_config.write_text(
+        f"listener {remote_port} 127.0.0.1\nallow_anonymous true\n"
+        "max_connections 4\n"
+    )
+    local_config = directory / "lazy-outbound-local.conf"
+    local_config.write_text(
+        f"persistence true\npersistence_location {directory}\n"
+        "persistence_file lazy-outbound.db\n"
+        f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+        "max_connections 4\nconnection lazy-out\n"
+        f"address 127.0.0.1:{remote_port}\n"
+        "topic sensors/# out 2 local/ remote/\n"
+        "cleansession false\nbridge_protocol_version mqttv50\n"
+        "bridge_session_expiry_interval 0xFFFFFFFF\n"
+        "remote_clientid configured-lazy-outbound\n"
+        "start_type lazy\nthreshold 2\nidle_timeout 1\n"
+        "notification_topic bridge/lazy/state\nrestart_timeout 1\n"
+    )
+    remote_log = directory / "lazy-outbound-remote.log"
+    local_log = directory / "lazy-outbound-local.log"
+    remote, remote_output = _start_broker(broker, remote_config, remote_log)
+    local = local_output = subscriber = publisher = local_observer = None
+
+    def publish(payload: bytes, packet_id: int) -> None:
+        assert publisher is not None
+        body = _utf8("local/sensors/lazy") + packet_id.to_bytes(2, "big")
+        publisher.sendall(_packet(0x32, body + b"\x00" + payload))
+        ack = _read_packet(publisher)
+        if ack[0] != 0x40 or ack[2:4] != packet_id.to_bytes(2, "big"):
+            raise AssertionError(f"lazy local PUBACK mismatch: {ack.hex()}")
+
+    def expect_quiet() -> None:
+        assert subscriber is not None
+        subscriber.settimeout(0.3)
+        try:
+            packet = _read_packet(subscriber)
+        except socket.timeout:
+            return
+        finally:
+            subscriber.settimeout(10)
+        raise AssertionError(f"lazy bridge connected below threshold: {packet.hex()}")
+
+    try:
+        _wait_for_log(remote, remote_log, "configured 1 listeners")
+        local, local_output = _start_broker(broker, local_config, local_log)
+        _wait_for_log(local, local_log, "bridge lazy-out remote=")
+        subscriber = _connect_client(remote_port, "lazy-outbound-observer")
+        _subscribe_client(subscriber, 1, "bridge/lazy/state", 1)
+        _subscribe_client(subscriber, 2, "remote/#", 1)
+        expect_quiet()
+
+        publisher = _connect_client(local_port, "lazy-outbound-publisher")
+        local_observer = _connect_client(local_port, "lazy-state-observer")
+        _subscribe_client(local_observer, 1, "bridge/lazy/state", 1)
+        publish(b"first", 1)
+        expect_quiet()
+        publish(b"second", 2)
+        _expect_bridge_state(subscriber, "bridge/lazy/state", b"1")
+        _expect_bridge_state(local_observer, "bridge/lazy/state", b"1")
+        for expected in (b"first", b"second"):
+            topic, payload = _read_publish_and_ack(subscriber)
+            if (topic, payload) != ("remote/sensors/lazy", expected):
+                raise AssertionError(
+                    f"lazy outbound delivery mismatch: {(topic, payload)!r}"
+                )
+        _expect_bridge_state(subscriber, "bridge/lazy/state", b"0")
+        _expect_bridge_state(local_observer, "bridge/lazy/state", b"0")
+
+        publish(b"persisted-below-threshold", 3)
+        expect_quiet()
+        publisher.close()
+        publisher = None
+        local_observer.close()
+        local_observer = None
+        local.kill()
+        local.wait(timeout=5)
+        local_output.close()
+        local = local_output = None
+
+        local, local_output = _start_broker(broker, local_config, local_log)
+        _wait_for_log(local, local_log, "bridge lazy-out remote=")
+        local_observer = _connect_client(local_port, "lazy-state-observer-after")
+        _subscribe_client(local_observer, 1, "bridge/lazy/state", 1)
+        _expect_bridge_state(local_observer, "bridge/lazy/state", b"0")
+        expect_quiet()
+        publisher = _connect_client(local_port, "lazy-outbound-publisher-after")
+        publish(b"threshold-after-restart", 4)
+        _expect_bridge_state(subscriber, "bridge/lazy/state", b"1")
+        _expect_bridge_state(local_observer, "bridge/lazy/state", b"1")
+        for expected in (b"persisted-below-threshold", b"threshold-after-restart"):
+            topic, payload = _read_publish_and_ack(subscriber)
+            if (topic, payload) != ("remote/sensors/lazy", expected):
+                raise AssertionError(
+                    f"lazy restart delivery mismatch: {(topic, payload)!r}"
+                )
+    finally:
+        if publisher is not None:
+            publisher.close()
+        if subscriber is not None:
+            subscriber.close()
+        if local_observer is not None:
+            local_observer.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        _stop(remote, remote_output)

@@ -92,6 +92,7 @@ pub const LocalConsumer = local_consumer_mod.Handle;
 pub const LocalConsumerOptions = local_consumer_mod.Options;
 pub const LocalConsumerEvent = local_consumer_mod.Event;
 pub const LocalConsumerAckAction = local_consumer_mod.AckAction;
+pub const LocalConsumerWake = local_consumer_mod.Wake;
 
 pub const PendingQoS2Store = qos2_mod.Store;
 
@@ -1979,7 +1980,10 @@ pub const Broker = struct {
         u64,
         router_mod.SubscriberId,
     ) = .empty,
-    local_consumer_routes: std.AutoHashMapUnmanaged(u64, session_mod.Handle) = .empty,
+    local_consumer_routes: std.AutoHashMapUnmanaged(
+        u64,
+        local_consumer_mod.Registration,
+    ) = .empty,
     will_publishers: will_mod.PublisherMap = .empty,
     slots: []ClientSlot,
     session_delivery_writers: session_writer.Pool,
@@ -2315,6 +2319,7 @@ pub const Broker = struct {
     pub const openLocalConsumer = local_consumer_api.openLocalConsumer;
     pub const closeLocalConsumer = local_consumer_api.closeLocalConsumer;
     pub const pollLocalConsumer = local_consumer_api.pollLocalConsumer;
+    pub const localConsumerPendingCount = local_consumer_api.localConsumerPendingCount;
     pub const acknowledgeLocalConsumer = local_consumer_api.acknowledgeLocalConsumer;
     pub const completeLocalConsumerQoS0 = local_consumer_api.completeLocalConsumerQoS0;
     pub const retryLocalConsumerEvent = local_consumer_api.retryLocalConsumerEvent;
@@ -5876,8 +5881,11 @@ pub const Broker = struct {
             const internal_consumer = local_consumer_mod.isInternalClientId(
                 try self.sessions.clientId(handle),
             );
-            const internal_online = internal_consumer and
-                self.local_consumer_routes.contains(route.route_id);
+            const local_registration = if (internal_consumer)
+                self.local_consumer_routes.get(route.route_id)
+            else
+                null;
+            const internal_online = local_registration != null;
             // Live Sessions use the current destination listener policy. An
             // offline Session has no listener until it reconnects, so retain
             // its granted QoS and cap it immediately before a later write.
@@ -5962,6 +5970,9 @@ pub const Broker = struct {
             if (publication_effect_committed) |committed| {
                 committed.* = committed.* or route_enqueued;
             }
+            if (route_enqueued) if (local_registration) |registration| {
+                if (registration.wake) |wake| wake.signal(self.io);
+            };
             if (online) {
                 route.output_subscriber_id =
                     sessionSubscriberId(route.route_id);

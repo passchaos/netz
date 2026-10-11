@@ -18,6 +18,44 @@ pub const Options = struct {
     /// Maximum concurrently selected QoS 1/2 PUBLISH packets. A selected
     /// QoS 0 event must be completed or retried before the next poll.
     receive_maximum: u16 = 16,
+    /// Optional edge-triggered notification for newly queued deliveries.
+    /// The caller owns this object and must keep it alive until close.
+    wake: ?*Wake = null,
+};
+
+/// Reusable, allocation-free notification for a broker-internal consumer.
+///
+/// `generation` makes resetting the level-triggered Event race-free: a caller
+/// observes a generation, checks its queue, then waits for a change. A signal
+/// racing either queue check is detected even if the Event itself was reset.
+pub const Wake = struct {
+    event: std.Io.Event = .unset,
+    generation: std.atomic.Value(u64) = .init(0),
+
+    pub fn signal(self: *Wake, io: std.Io) void {
+        _ = self.generation.fetchAdd(1, .release);
+        self.event.set(io);
+    }
+
+    pub fn observe(self: *const Wake) u64 {
+        return self.generation.load(.acquire);
+    }
+
+    pub fn waitForChange(
+        self: *Wake,
+        io: std.Io,
+        observed: u64,
+    ) std.Io.Cancelable!void {
+        if (self.observe() != observed) return;
+        self.event.reset();
+        if (self.observe() != observed) return;
+        return self.event.wait(io);
+    }
+};
+
+pub const Registration = struct {
+    session: session.Handle,
+    wake: ?*Wake,
 };
 
 pub const Handle = struct {
@@ -256,7 +294,7 @@ pub fn Operations(comptime Context: type) type {
             try self.sessions.disconnect(opened.handle, null, now);
             self.local_consumer_routes.putAssumeCapacityNoClobber(
                 opened.route_id,
-                opened.handle,
+                .{ .session = opened.handle, .wake = options.wake },
             );
             registration_complete = true;
             Context.recordPersistentChangeLocked(self, persistent_changed);
@@ -372,6 +410,22 @@ pub fn Operations(comptime Context: type) type {
             return event;
         }
 
+        /// Count queued and in-flight messages owned by this consumer.
+        /// The result includes a selected QoS 0 message until completion.
+        pub fn localConsumerPendingCount(
+            self: *Broker,
+            consumer: *const LocalConsumer,
+        ) Error!usize {
+            if (!consumer.active) return error.LocalConsumerClosed;
+            self.state_mutex.lockUncancelable(self.io);
+            defer self.state_mutex.unlock(self.io);
+            if (!ownsConsumerLocked(self, consumer)) {
+                return error.LocalConsumerClosed;
+            }
+            const value = try self.sessions.stats(consumer.session);
+            return value.queued_count +| value.inflight_count;
+        }
+
         pub fn acknowledgeLocalConsumer(
             self: *Broker,
             consumer: *LocalConsumer,
@@ -468,8 +522,8 @@ pub fn Operations(comptime Context: type) type {
         fn ownsConsumerLocked(self: *Broker, consumer: *const LocalConsumer) bool {
             const current = self.local_consumer_routes.get(consumer.route_id) orelse
                 return false;
-            return current.index == consumer.session.index and
-                current.generation == consumer.session.generation;
+            return current.session.index == consumer.session.index and
+                current.session.generation == consumer.session.generation;
         }
 
         fn cloneLocalConsumerEvent(

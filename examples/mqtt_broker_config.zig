@@ -564,7 +564,7 @@ pub fn run(
     for (config.bridges) |bridge| {
         std.debug.print(
             "  bridge {s} remote={s}:{d} addresses={d} transport={s} " ++
-                "rules={d} direction={s}\n",
+                "rules={d} direction={s} start_type={s}\n",
             .{
                 bridge.name,
                 bridge.host,
@@ -573,6 +573,7 @@ pub fn run(
                 if (bridge.usesTls()) "tls-vail" else "tcp",
                 bridge.rules.len,
                 if (bridge.hasOutbound()) "out" else "in",
+                @tagName(bridge.start_type),
             },
         );
     }
@@ -783,18 +784,28 @@ fn bridgeResult(
     bridges: *configured_bridges.Set,
     index: usize,
 ) BridgeResult {
-    const once = bridges.configured[index].start_type == .once;
+    const configured = bridges.configured[index];
     const bridge = &bridges.values[index];
-    if (once) {
-        bridge.runOnce(.{ .timeout = .fromSeconds(30) }) catch |err| {
-            return .{ .index = index, .err = err, .expected_stop = true };
-        };
-    } else {
-        bridge.run(.{ .timeout = .fromSeconds(30) }) catch |err| {
+    switch (configured.start_type) {
+        .automatic => bridge.run(.{ .timeout = .fromSeconds(30) }) catch |err| {
             return .{ .index = index, .err = err, .expected_stop = false };
-        };
+        },
+        .lazy => bridge.runLazy(
+            .{ .timeout = .fromSeconds(30) },
+            configured.threshold,
+            .fromSeconds(configured.idle_timeout_seconds),
+        ) catch |err| {
+            return .{ .index = index, .err = err, .expected_stop = false };
+        },
+        .once => bridge.runOnce(.{ .timeout = .fromSeconds(30) }) catch |err| {
+            return .{ .index = index, .err = err, .expected_stop = true };
+        },
     }
-    return .{ .index = index, .err = null, .expected_stop = once };
+    return .{
+        .index = index,
+        .err = null,
+        .expected_stop = configured.start_type == .once,
+    };
 }
 
 fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {

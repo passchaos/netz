@@ -2,6 +2,61 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const Broker = @import("../broker.zig").Broker;
 const LocalConsumerAckAction = @import("local_consumer.zig").AckAction;
+const LocalConsumerWake = @import("local_consumer.zig").Wake;
+
+test "broker local consumer reports pending messages and signals arrivals" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var wake: LocalConsumerWake = .{};
+    var consumer = try broker.openLocalConsumer(.{
+        .id = [_]u8{0x79} ** 16,
+        .subscriptions = &.{.{
+            .topic_filter = "lazy/#",
+            .qos = .at_least_once,
+        }},
+        .wake = &wake,
+    });
+    defer broker.closeLocalConsumer(&consumer);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try broker.localConsumerPendingCount(&consumer),
+    );
+    const generation = wake.observe();
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "lazy/value",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "queued",
+    });
+    try wake.waitForChange(io, generation, .fromSeconds(1));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try broker.localConsumerPendingCount(&consumer),
+    );
+    var event = (try broker.pollLocalConsumer(&consumer)).?;
+    defer event.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        try broker.localConsumerPendingCount(&consumer),
+    );
+    _ = try broker.acknowledgeLocalConsumer(
+        &consumer,
+        .puback,
+        event.publish.value.packet_id.?,
+        0,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        try broker.localConsumerPendingCount(&consumer),
+    );
+}
 
 fn publishValue(broker: *Broker, topic: []const u8, payload: []const u8, qos: mqtt.QoS) !void {
     try broker.publishLocal(.{

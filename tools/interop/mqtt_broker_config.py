@@ -23,7 +23,10 @@ from mqtt_broker_config_bridge import (
     run_tls_inbound_bridge_case,
 )
 from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
-from mqtt_broker_config_outbound import run_outbound_bridge_case
+from mqtt_broker_config_outbound import (
+    run_lazy_outbound_bridge_case,
+    run_outbound_bridge_case,
+)
 from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_proxy import run_proxy_protocol_case
 from mqtt_broker_config_queue import run_queued_limits_case
@@ -5195,6 +5198,7 @@ def main() -> None:
         run_inbound_bridge_case(args.broker, directory)
         run_outbound_bridge_case(args.broker, directory)
         run_outbound_bridge_case(args.broker, directory, tls=True)
+        run_lazy_outbound_bridge_case(args.broker, directory)
         run_primary_failback_case(args.broker, directory)
         run_once_bridge_case(args.broker, directory)
         run_tls_inbound_bridge_case(args.broker, directory)
@@ -5245,7 +5249,8 @@ def main() -> None:
         "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, mTLS, "
-        "QoS 1/2, round-robin failover, primary failback, reconnect, and "
+        "QoS 1/2, lazy threshold/idle lifecycle with restart recovery, "
+        "round-robin failover, primary failback, reconnect, and "
         "retained local/remote state notifications with Last Will plus "
         "disabled one-shot lifecycle, "
         "mixed anonymous policy, shared TCP/WebSocket "

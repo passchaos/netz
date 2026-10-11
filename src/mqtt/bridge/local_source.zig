@@ -63,6 +63,7 @@ pub const Client = struct {
     id: [16]u8,
     client_id: []u8,
     shutdown: *std.Io.Event,
+    wake: *broker_mod.LocalConsumerWake,
     subscriptions: std.ArrayList(subscription.Owned) = .empty,
     consumer: ?broker_mod.LocalConsumer = null,
     receipts: session.Store,
@@ -79,6 +80,9 @@ pub const Client = struct {
     ) Error!Client {
         const client_id = try allocator.dupe(u8, options.client_id);
         errdefer allocator.free(client_id);
+        const wake = try allocator.create(broker_mod.LocalConsumerWake);
+        errdefer allocator.destroy(wake);
+        wake.* = .{};
         var receipts = session.Store.init(allocator, .{ .max_sessions = 1 });
         errdefer receipts.deinit();
         const opened = try receipts.open(client_id, false, std.math.maxInt(u32), .zero);
@@ -89,6 +93,7 @@ pub const Client = struct {
             .id = id,
             .client_id = client_id,
             .shutdown = shutdown,
+            .wake = wake,
             .receipts = receipts,
             .receipt_handle = opened.handle,
         };
@@ -99,6 +104,7 @@ pub const Client = struct {
         for (self.subscriptions.items) |*value| value.deinit(self.allocator);
         self.subscriptions.deinit(self.allocator);
         self.receipts.deinit();
+        self.allocator.destroy(self.wake);
         self.allocator.free(self.client_id);
         self.* = undefined;
     }
@@ -127,10 +133,61 @@ pub const Client = struct {
             .id = self.id,
             .subscriptions = values,
             .receive_maximum = 1,
+            .wake = self.wake,
         });
         errdefer self.broker.closeLocalConsumer(&consumer);
         self.consumer = consumer;
         return .{ .session_present = consumer.session_present, .failed_attempts = 0 };
+    }
+
+    pub fn pendingCount(self: *Client) Error!usize {
+        if (self.consumer == null) return error.SourceSessionLost;
+        return self.broker.localConsumerPendingCount(&self.consumer.?);
+    }
+
+    pub fn deliveryGeneration(self: *const Client) u64 {
+        return self.wake.observe();
+    }
+
+    /// Sleep without polling until the durable local queue reaches `threshold`.
+    /// Queue and shutdown Events are awaited concurrently.
+    pub fn waitForPending(
+        self: *Client,
+        threshold: usize,
+    ) Error!void {
+        if (threshold == 0) return error.InvalidProperty;
+        while (true) {
+            if (self.shutdown.isSet()) return error.Canceled;
+            const observed = self.wake.observe();
+            if (try self.pendingCount() >= threshold) return;
+            const WakeResult = union(enum) {
+                ready: std.Io.Cancelable!void,
+                shutdown: std.Io.Cancelable!void,
+            };
+            var wake_buffer: [2]WakeResult = undefined;
+            var select: std.Io.Select(WakeResult) = .init(
+                self.io,
+                &wake_buffer,
+            );
+            defer select.cancelDiscard();
+            try select.concurrent(
+                .ready,
+                broker_mod.LocalConsumerWake.waitForChange,
+                .{ self.wake, self.io, observed },
+            );
+            try select.concurrent(
+                .shutdown,
+                std.Io.Event.wait,
+                .{ self.shutdown, self.io },
+            );
+            switch (try select.await()) {
+                .ready => |result| try result,
+                .shutdown => |result| {
+                    try result;
+                    return error.Canceled;
+                },
+            }
+        }
     }
 
     pub fn disconnectTransport(self: *Client) void {
