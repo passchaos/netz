@@ -170,7 +170,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`, and
-`bridge_tls_version`, plus `round_robin`. Unknown directives, duplicates,
+`bridge_tls_version`, `round_robin`, and `start_type`. Unknown directives, duplicates,
 bad values, and listener options before the first listener are errors. In
 production config mode, each listener's `max_connections` is its simultaneous
 admitted-client limit and the broker keeps accepting after clients disconnect.
@@ -223,6 +223,12 @@ server and supports PBES2-encrypted PKCS#8 through
 `bridge_insecure true` and `bridge_tls_version tlsv1.2` are rejected rather
 than weakening authentication or silently selecting a different TLS stack.
 Every configured CA and client identity is loaded before any listener binds.
+`start_type automatic` is the default and keeps reconnecting. `start_type once`
+makes the configured address sequence only once, then leaves that Bridge
+stopped after initial failure or after its first established connection ends;
+other bridges and local listeners continue running. `start_type lazy` remains
+rejected until the broker has a native outbound queue whose threshold can
+faithfully drive it.
 `accept_protocol_versions` restricts that listener to `4`, `5`, or `4,5`;
 version-denied clients receive the protocol-specific Unsupported Protocol
 Version CONNACK before close. MQTT 3.1 (level 3), empty sets, duplicate values,

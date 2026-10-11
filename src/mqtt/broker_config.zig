@@ -32,6 +32,7 @@ pub const Protocol = enum { mqtt, websockets };
 pub const Bridge = bridge_config.Bridge;
 pub const BridgeRule = bridge_config.Rule;
 pub const BridgeEndpoint = bridge_config.Endpoint;
+pub const BridgeStartType = bridge_config.StartType;
 
 pub const Listener = struct {
     address: net.IpAddress,
@@ -1177,6 +1178,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_insecure false
         \\bridge_tls_version tlsv1.3
         \\round_robin true
+        \\start_type automatic
         \\connection backup
         \\address [::1]:3883
         \\topic backup/# in 2 mirror/ source/
@@ -1198,6 +1200,10 @@ test "MQTT broker config parses owned inbound bridges" {
     );
     try std.testing.expectEqual(@as(u16, 3883), upstream.addressAt(1).port);
     try std.testing.expect(upstream.round_robin);
+    try std.testing.expectEqual(
+        BridgeStartType.automatic,
+        upstream.start_type,
+    );
     try std.testing.expectEqual(mqtt.ProtocolVersion.v5, upstream.protocol);
     try std.testing.expect(!upstream.clean_session);
     try std.testing.expectEqual(
@@ -1265,6 +1271,10 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
+    try std.testing.expectEqual(
+        BridgeStartType.automatic,
+        bridge.start_type,
+    );
     try std.testing.expectEqualStrings("#", bridge.rules[0].filter);
 }
 
@@ -1379,6 +1389,12 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         parse(allocator, listener ++
             "connection restart\naddress localhost\ntopic # in 0\n" ++
             "restart_timeout 5 30 30\n"),
+    );
+    try std.testing.expectError(
+        error.UnsupportedBridgeStartType,
+        parse(allocator, listener ++
+            "connection lazy\naddress localhost\ntopic # in 0\n" ++
+            "start_type lazy\n"),
     );
     var primary_preferred = try parse(allocator, listener ++
         "connection addresses\naddress one.example two.example\n" ++

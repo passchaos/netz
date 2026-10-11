@@ -141,6 +141,7 @@ const checkpoint_signal_poll_interval: std.Io.Clock.Duration =
 const BridgeResult = struct {
     index: usize,
     err: ?anyerror,
+    expected_stop: bool,
 };
 
 pub const RunOptions = struct {
@@ -629,8 +630,8 @@ fn serveWithManagement(
     defer select.cancelDiscard();
     defer shutdown.set(io);
     try select.concurrent(.serve, serveResult, .{ broker, service });
-    for (bridges.values, 0..) |*bridge, index| {
-        try select.concurrent(.bridge, bridgeResult, .{ bridge, index });
+    for (bridges.values, 0..) |_, index| {
+        try select.concurrent(.bridge, bridgeResult, .{ bridges, index });
     }
     if (bridges.needsPrimaryFailback()) {
         try select.concurrent(
@@ -667,6 +668,22 @@ fn serveWithManagement(
                 return;
             },
             .bridge => |result| {
+                if (result.expected_stop) {
+                    if (result.err) |err| {
+                        std.debug.print(
+                            "netz MQTT bridge {d} completed " ++
+                                "start_type=once error={s}\n",
+                            .{ result.index, @errorName(err) },
+                        );
+                    } else {
+                        std.debug.print(
+                            "netz MQTT bridge {d} completed " ++
+                                "start_type=once\n",
+                            .{result.index},
+                        );
+                    }
+                    continue;
+                }
                 shutdown.set(io);
                 select.cancelDiscard();
                 if (result.err) |err| {
@@ -759,13 +776,21 @@ fn serveWithManagement(
 }
 
 fn bridgeResult(
-    bridge: *mqtt.bridge.Bridge,
+    bridges: *configured_bridges.Set,
     index: usize,
 ) BridgeResult {
-    bridge.run(.{ .timeout = .fromSeconds(30) }) catch |err| {
-        return .{ .index = index, .err = err };
-    };
-    return .{ .index = index, .err = null };
+    const once = bridges.configured[index].start_type == .once;
+    const bridge = &bridges.values[index];
+    if (once) {
+        bridge.runOnce(.{ .timeout = .fromSeconds(30) }) catch |err| {
+            return .{ .index = index, .err = err, .expected_stop = true };
+        };
+    } else {
+        bridge.run(.{ .timeout = .fromSeconds(30) }) catch |err| {
+            return .{ .index = index, .err = err, .expected_stop = false };
+        };
+    }
+    return .{ .index = index, .err = null, .expected_stop = once };
 }
 
 fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {

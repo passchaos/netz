@@ -33,6 +33,7 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     UnsupportedBridgeDirection,
     UnsupportedBridgeProtocol,
     UnsupportedBridgeRestartTimeout,
+    UnsupportedBridgeStartType,
     UnsupportedBridgeTlsVersion,
     InsecureBridgeTlsUnsupported,
 };
@@ -41,6 +42,11 @@ pub const RestartPolicy = struct {
     base_seconds: u16 = default_restart_base_seconds,
     cap_seconds: u16 = default_restart_cap_seconds,
     jitter: bool = true,
+};
+
+pub const StartType = enum {
+    automatic,
+    once,
 };
 
 pub const Rule = struct {
@@ -88,6 +94,7 @@ pub const Bridge = struct {
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
     round_robin: bool = false,
+    start_type: StartType = .automatic,
     restart: RestartPolicy = .{},
 
     pub fn deinit(self: *Bridge, allocator: std.mem.Allocator) void {
@@ -162,6 +169,7 @@ const Seen = struct {
     bridge_insecure: bool = false,
     bridge_tls_version: bool = false,
     round_robin: bool = false,
+    start_type: bool = false,
 };
 
 pub const Builder = struct {
@@ -184,6 +192,7 @@ pub const Builder = struct {
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
     round_robin: bool = false,
+    start_type: StartType = .automatic,
     restart: RestartPolicy = .{},
     seen: Seen = .{},
     moved: bool = false,
@@ -320,6 +329,15 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "round_robin")) {
             try markOnce(&self.seen.round_robin);
             self.round_robin = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "start_type")) {
+            try markOnce(&self.seen.start_type);
+            const value = try parseOne(words);
+            self.start_type = if (std.mem.eql(u8, value, "automatic"))
+                .automatic
+            else if (std.mem.eql(u8, value, "once"))
+                .once
+            else
+                return error.UnsupportedBridgeStartType;
         } else {
             return error.InvalidDirective;
         }
@@ -397,6 +415,7 @@ pub const Builder = struct {
             .private_key_password_file = self.private_key_password_file,
             .alpn = self.alpn,
             .round_robin = self.round_robin,
+            .start_type = self.start_type,
             .restart = self.restart,
         };
         self.moved = true;
@@ -510,7 +529,8 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_alpn") or
         std.mem.eql(u8, value, "bridge_insecure") or
         std.mem.eql(u8, value, "bridge_tls_version") or
-        std.mem.eql(u8, value, "round_robin");
+        std.mem.eql(u8, value, "round_robin") or
+        std.mem.eql(u8, value, "start_type");
 }
 
 fn parseEndpoint(value: []const u8) Error!Endpoint {

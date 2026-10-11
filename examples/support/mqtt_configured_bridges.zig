@@ -173,6 +173,7 @@ const ConnectorResources = struct {
 
 pub const Set = struct {
     allocator: std.mem.Allocator,
+    configured: []const mqtt.broker_config.Bridge,
     values: []mqtt.bridge.Bridge,
     connector_resources: []ConnectorResources,
 
@@ -248,6 +249,10 @@ pub const Set = struct {
                     else
                         .fixed,
                     .jitter = if (source.restart.jitter) .full else .none,
+                    .max_attempts = if (source.start_type == .once)
+                        source.addressCount()
+                    else
+                        0,
                 },
                 .rules = rules,
                 .bridge_id = if (source.usesQoS2())
@@ -289,6 +294,7 @@ pub const Set = struct {
         }
         return .{
             .allocator = allocator,
+            .configured = configured,
             .values = values,
             .connector_resources = connector_resources,
         };
@@ -312,7 +318,8 @@ pub const Set = struct {
         for (self.connector_resources) |*resources| {
             if (resources.connector_configured and
                 resources.connector.source.addressCount() > 1 and
-                !resources.connector.source.round_robin)
+                !resources.connector.source.round_robin and
+                resources.connector.source.start_type == .automatic)
             {
                 return true;
             }
@@ -341,6 +348,7 @@ pub const Set = struct {
             );
             for (self.connector_resources, self.values) |*resources, *bridge| {
                 if (resources.connector_configured and
+                    resources.connector.source.start_type == .automatic and
                     resources.connector.shouldFailBack(now_ns))
                 {
                     bridge.requestReconnect();

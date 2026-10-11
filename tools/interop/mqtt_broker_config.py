@@ -18,6 +18,7 @@ import time
 from mqtt_broker_config_inflight import run_max_inflight_messages_case
 from mqtt_broker_config_bridge import (
     run_inbound_bridge_case,
+    run_once_bridge_case,
     run_primary_failback_case,
     run_tls_inbound_bridge_case,
 )
@@ -5192,6 +5193,7 @@ def main() -> None:
         run_include_directory_case(args.broker, directory)
         run_inbound_bridge_case(args.broker, directory)
         run_primary_failback_case(args.broker, directory)
+        run_once_bridge_case(args.broker, directory)
         run_tls_inbound_bridge_case(args.broker, directory)
         run_packet_and_message_size_case(args.broker, directory)
         run_retain_unavailable_case(args.broker, directory)
@@ -5240,7 +5242,8 @@ def main() -> None:
         "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound bridge prefix mapping, mTLS, "
-        "QoS 1/2, round-robin failover, primary failback, and reconnect, "
+        "QoS 1/2, round-robin failover, primary failback, reconnect, and "
+        "one-shot lifecycle, "
         "mixed anonymous policy, shared TCP/WebSocket "
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/P-521/Ed25519/RSA and encrypted PKCS#8 TLS "

@@ -580,6 +580,117 @@ def run_primary_failback_case(broker: Path, directory: Path) -> None:
             _stop(secondary, secondary_output)
 
 
+def run_once_bridge_case(broker: Path, directory: Path) -> None:
+    upstream_port, local_port = _distinct_ports(2)
+    upstream_config = directory / "bridge-once-upstream.conf"
+    upstream_config.write_text(
+        f"listener {upstream_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+    )
+    restart_config = directory / "bridge-once-upstream-restart.conf"
+    restart_config.write_text(
+        f"listener {upstream_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    local_config = directory / "bridge-once-local.conf"
+    local_config.write_text(
+        f"listener {local_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        "connection one-shot\n"
+        f"address 127.0.0.1:{upstream_port}\n"
+        "topic sensors/# in 1 local/ remote/\n"
+        "start_type once\n"
+    )
+    upstream_log = directory / "bridge-once-upstream.log"
+    restart_log = directory / "bridge-once-upstream-restart.log"
+    local_log = directory / "bridge-once-local.log"
+    upstream, upstream_output = _start_broker(
+        broker, upstream_config, upstream_log
+    )
+    restarted = None
+    restarted_output = None
+    local = None
+    local_output = None
+    subscriber = None
+    publisher = None
+    try:
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        local, local_output = _start_broker(broker, local_config, local_log)
+        _wait_for_log(local, local_log, "bridge one-shot remote=")
+        subscriber = _connect_client(local_port, "once-bridge-subscriber")
+        subscriber.sendall(_subscribe(1, "local/#", 1))
+        suback = _read_packet(subscriber)
+        if suback[0] != 0x90 or suback[-1] != 1:
+            raise AssertionError(f"once bridge expected SUBACK: {suback.hex()}")
+
+        publisher = _connect_client(upstream_port, "once-publisher-before")
+        _publish_message(publisher, 1, b"once-before", 1)
+        _expect_mapped_publish(subscriber, b"once-before")
+        publisher.sendall(b"\xe0\x00")
+        publisher.close()
+        publisher = None
+
+        upstream.kill()
+        upstream.wait(timeout=5)
+        upstream_output.close()
+        upstream_output = None
+        _wait_for_log(local, local_log, "completed start_type=once")
+        if local.poll() is not None:
+            raise RuntimeError(
+                "start_type=once stopped the local broker: "
+                + local_log.read_text(errors="replace")
+            )
+
+        restarted, restarted_output = _start_broker(
+            broker, restart_config, restart_log
+        )
+        _wait_for_log(restarted, restart_log, "configured 1 listeners")
+        publisher = _connect_client(upstream_port, "once-publisher-after")
+        _publish_message(publisher, 2, b"once-after", 1)
+        publisher.sendall(b"\xe0\x00")
+        publisher.close()
+        publisher = None
+        _wait_clean(
+            restarted,
+            restarted_output,
+            restart_log,
+            "restarted once upstream",
+        )
+        restarted = None
+        restarted_output = None
+
+        subscriber.settimeout(2)
+        try:
+            unexpected = _read_packet(subscriber)
+        except socket.timeout:
+            pass
+        else:
+            raise AssertionError(
+                "start_type=once reconnected after upstream restart: "
+                + unexpected.hex()
+            )
+        subscriber.sendall(b"\xe0\x00")
+        subscriber.close()
+        subscriber = None
+        _wait_clean(local, local_output, local_log, "once bridge broker")
+        local = None
+        local_output = None
+    finally:
+        if publisher is not None:
+            publisher.close()
+        if subscriber is not None:
+            subscriber.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        if restarted is not None and restarted_output is not None:
+            _stop(restarted, restarted_output)
+        if upstream_output is not None:
+            _stop(upstream, upstream_output)
+
+
 def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
     (
         ca_certificate,

@@ -570,6 +570,24 @@ pub const Bridge = struct {
         }
     }
 
+    /// Connect once and process the established transport until it closes.
+    /// Retry policy still governs the bounded initial connection attempts,
+    /// but a later transport loss never starts another connection cycle.
+    pub fn runOnce(
+        self: *Bridge,
+        poll_options: reconnect.PollOptions,
+    ) (Error || std.Io.Cancelable)!void {
+        _ = try self.connect();
+        var bounded = poll_options;
+        bounded.reconnect_after_transport_error = false;
+        while (self.client.connection() != null) {
+            _ = self.step(bounded) catch |err| switch (err) {
+                error.Canceled => return,
+                else => return err,
+            };
+        }
+    }
+
     fn ensureSubscription(
         self: *Bridge,
         _: reconnect.ConnectEvent,
