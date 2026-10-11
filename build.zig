@@ -2138,6 +2138,29 @@ pub fn build(b: *std.Build) void {
     );
     http1_hyper_interop_step.dependOn(&http1_hyper_interop.step);
 
+    const http1_ocsp_client = b.addExecutable(.{
+        .name = "netz-http1-ocsp-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http1_ocsp_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http1_ocsp_interop = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http1_ocsp_client.py",
+    });
+    http1_ocsp_interop.addArtifactArg(http1_ocsp_client);
+    const http1_ocsp_interop_step = b.step(
+        "interop-http1-ocsp",
+        "Require good OpenSSL OCSP staples from the HTTP/1 client",
+    );
+    http1_ocsp_interop_step.dependOn(&http1_ocsp_interop.step);
+    test_step.dependOn(&http1_ocsp_interop.step);
+
     const quic_peer_client = b.addExecutable(.{
         .name = "netz-quic-peer-client",
         .root_module = b.createModule(.{

@@ -1140,6 +1140,12 @@ hands off the encrypted byte stream. The Hyper HTTP/1 process gate now runs its
 HTTPS client direction through that vail path: rustls sends a real reciprocal
 KeyUpdate before the response, netz verifies the server chain and negotiation
 metadata, responds exactly once, and completes the remaining HTTP/1 scenarios.
+`VailTlsClientOptions` also exposes `stapled_ocsp` and `request_ocsp`.
+Status requests default on for RFC 7633 Must-Staple compatibility; `.require`
+rejects missing, expired, malformed, unknown, revoked, or incorrectly signed
+staples. An OpenSSL TLS 1.3 process gate completes a real HTTP request only for
+a signed `good` response and proves missing/revoked responses fail before any
+HTTP bytes are sent.
 
 RFC 9218 scheduling now selects urgency and the lowest-ID exclusive
 non-incremental stream in one candidate scan rather than two. The priority-aware

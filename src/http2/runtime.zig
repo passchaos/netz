@@ -2195,17 +2195,7 @@ pub const Client = struct {
         errdefer if (stream_owned) stream.close(io);
         errdefer allocator.free(owned_authority);
         if (limits.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
-        const options: tls_stream.ClientVerifiedOptions = .{
-            .server_name = tls_host,
-            .verify_host = tls_options.verify_host,
-            .ca_bundle = tls_options.ca_bundle,
-            .server_verifier = tls_options.server_verifier,
-            .client_identity = tls_options.client_identity,
-            .alpn_protocols = &.{"h2"},
-            .cipher_suites = tls_options.cipher_suites,
-            .max_server_handshake_size = tls_options.max_server_handshake_size,
-            .handshake_timeout = tls_options.tls_handshake_timeout,
-        };
+        const options = verifiedTlsClientOptions(tls_host, tls_options);
         const tls_connection = if (deadline) |absolute|
             try tls_stream.ClientConnection.initVerifiedWithDeadline(
                 allocator,
@@ -3102,10 +3092,17 @@ pub const Client = struct {
     }
 };
 
+pub const StapledOcspPolicy = tls_stream.StapledOcspPolicy;
+
 pub const TlsConnectOptions = struct {
     verify_host: bool = true,
     ca_bundle: ?tls_stream.ClientCaBundle = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
+    /// Built-in verifier policy for RFC 6066 stapled OCSP responses.
+    stapled_ocsp: StapledOcspPolicy = .ignore,
+    /// Emit status_request. Must remain enabled for `.require` and defaults on
+    /// so RFC 7633 Must-Staple certificates work without another option.
+    request_ocsp: bool = true,
     client_identity: ?vail.tls.client_auth.ClientIdentity = null,
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
@@ -3113,6 +3110,35 @@ pub const TlsConnectOptions = struct {
     /// Absolute receive budget spanning ServerHello and the encrypted flight.
     tls_handshake_timeout: ?std.Io.Duration = null,
 };
+
+fn verifiedTlsClientOptions(
+    tls_host: []const u8,
+    options: TlsConnectOptions,
+) tls_stream.ClientVerifiedOptions {
+    return .{
+        .server_name = tls_host,
+        .verify_host = options.verify_host,
+        .ca_bundle = options.ca_bundle,
+        .server_verifier = options.server_verifier,
+        .stapled_ocsp = options.stapled_ocsp,
+        .request_ocsp = options.request_ocsp,
+        .client_identity = options.client_identity,
+        .alpn_protocols = &.{"h2"},
+        .cipher_suites = options.cipher_suites,
+        .max_server_handshake_size = options.max_server_handshake_size,
+        .handshake_timeout = options.tls_handshake_timeout,
+    };
+}
+
+test "HTTP/2 TLS options preserve stapled OCSP policy" {
+    const mapped = verifiedTlsClientOptions("example.com", .{
+        .stapled_ocsp = .require,
+        .request_ocsp = true,
+    });
+    try std.testing.expectEqual(StapledOcspPolicy.require, mapped.stapled_ocsp);
+    try std.testing.expect(mapped.request_ocsp);
+    try std.testing.expectEqualStrings("h2", mapped.alpn_protocols[0]);
+}
 
 pub const Role = enum {
     client,

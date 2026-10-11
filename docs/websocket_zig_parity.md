@@ -867,6 +867,9 @@ and counters. A client/server mTLS test requests a reciprocal update and then
 exchanges a complete WebSocket message under the rotated epochs.
 An ordinary-client test exercises the same metadata, exporter and reciprocal-
 update path without presenting a client certificate.
+The same vail WSS option object carries `stapled_ocsp` and `request_ocsp` into
+the shared TLS verifier. Status requests default on; mandatory policy rejects
+missing or invalid staples before the HTTP Upgrade request is emitted.
 RFC 8441 connections forward the complete peer-chain, ALPN, cipher/hash,
 exporter, KeyUpdate and counter API to their shared parent HTTP/2 TLS
 connection, so an application cannot accidentally inspect or rotate only one

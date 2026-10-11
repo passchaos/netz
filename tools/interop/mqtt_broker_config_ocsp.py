@@ -97,6 +97,8 @@ def _start_openssl_stapling_server(
     certificate: Path,
     key: Path,
     response: Path | None,
+    *,
+    alpn: str = "mqtt",
 ) -> subprocess.Popen[bytes]:
     command = [
         "openssl",
@@ -110,7 +112,7 @@ def _start_openssl_stapling_server(
         str(key),
         "-tls1_3",
         "-alpn",
-        "mqtt",
+        alpn,
     ]
     if response is not None:
         command.extend(("-status_file", str(response)))
@@ -131,6 +133,7 @@ def _start_openssl_stapling_server(
             probe = socket.create_connection(("127.0.0.1", port), timeout=0.1)
         except OSError:
             if time.monotonic() >= deadline:
+                _stop_openssl_server(process)
                 raise TimeoutError("OpenSSL OCSP server did not listen")
             time.sleep(0.02)
         else:

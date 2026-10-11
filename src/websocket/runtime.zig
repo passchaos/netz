@@ -1936,6 +1936,7 @@ pub const PendingUpgrade = struct {
 };
 
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
+pub const StapledOcspPolicy = tls_client_identity.StapledOcspPolicy;
 
 /// Result of an HTTP/1 Upgrade attempt before a non-101 response is mapped to
 /// the compatibility `InvalidResponse` error. Rejection status, headers,

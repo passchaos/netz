@@ -2425,7 +2425,10 @@ TLS and vail-backed WSS. Unsupported cleartext and standard-library TLS paths
 return null instead of synthesizing negotiation state.
 MQTT-over-WebSocket can select the vail path independently of client identity,
 so ordinary WSS clients receive the same metadata and exporter/KeyUpdate
-surface instead of requiring mTLS as an accidental feature flag.
+surface instead of requiring mTLS as an accidental feature flag. Native MQTT
+TLS and MQTT-over-WSS options both expose the shared `stapled_ocsp` /
+`request_ocsp` policy; requiring a staple selects vail automatically and
+rejects the TLS connection before MQTT or WebSocket bytes are emitted.
 The same transports expose explicit RFC 8446 application traffic-key rotation
 and sent/received update counters. Native MQTT TLS tests require a reciprocal
 update before PING/DISCONNECT, proving MQTT framing survives both new epochs.

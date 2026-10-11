@@ -662,6 +662,18 @@ test "public modules are reachable" {
         "connectTlsAddressWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "StapledOcspPolicy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http2.runtime.TlsConnectOptions,
+        "stapled_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http2.runtime.TlsConnectOptions,
+        "request_ocsp",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime.Client,
         "requestUriWithDeadline",
     ));
@@ -985,6 +997,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http1.runtime,
         "VailTlsClientOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime,
+        "StapledOcspPolicy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.VailTlsClientOptions,
+        "stapled_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.VailTlsClientOptions,
+        "request_ocsp",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.RequestWriter,
@@ -6419,6 +6443,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.websocket_runtime.ConnectOptions,
+        "stapled_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
+        "request_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.websocket_runtime.ConnectOptions,
         "alpn_protocols",
     ));
     try std.testing.expect(@hasField(
@@ -6428,6 +6460,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,
         "TlsClientIdentityOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "StapledOcspPolicy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.TlsClientIdentityOptions,
+        "stapled_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.TlsClientIdentityOptions,
+        "request_ocsp",
     ));
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime,

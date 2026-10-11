@@ -230,7 +230,9 @@ Current protocol coverage includes:
 - Shared vail-backed TLS 1.3 stream client/server wrappers with optional/required
   client authentication, explicit ALPN offer/selection enforcement, owned
   negotiated-protocol metadata, authenticated cipher-suite/transcript-hash
-  introspection, RFC 8446 post-handshake KeyUpdate with reciprocal-update
+  introspection, default RFC 6066 OCSP status requests plus optional mandatory
+  staple validation across HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT-over-WSS,
+  RFC 8446 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation
 - Strict owned TLS server-identity loading from PEM certificate chains and

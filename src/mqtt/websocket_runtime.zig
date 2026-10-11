@@ -24,6 +24,7 @@ fn websocketAcceptOptions(
 
 pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
+pub const StapledOcspPolicy = websocket_runtime.StapledOcspPolicy;
 
 /// MQTT-over-WebSocket listener.
 ///
@@ -1937,6 +1938,11 @@ pub const ConnectOptions = struct {
     /// Optional pin/custom trust callback for the client-identity path.
     /// Otherwise `tls.ca_bundle` or system roots verify the server and host.
     server_verifier: ?ClientCertificateVerifier = null,
+    /// Stapled OCSP verification for vail-backed WSS connections.
+    stapled_ocsp: StapledOcspPolicy = .ignore,
+    /// Emit status_request on vail-backed WSS. Must remain enabled for
+    /// `.require` and defaults on for RFC 7633 Must-Staple compatibility.
+    request_ocsp: bool = true,
     /// Ordered TLS ALPN offers for WSS, typically `http/1.1`.
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
@@ -2222,6 +2228,18 @@ test "MQTT WebSocket limits preserve TCP socket policy" {
         @as(?u32, 54_321),
         client.tcp_user_timeout_ms,
     );
+
+    const ocsp = websocketConnectOptions(.{
+        .mqtt = .{ .client_id = "ocsp-policy" },
+        .stapled_ocsp = .require,
+        .request_ocsp = true,
+    });
+    try std.testing.expect(ocsp.vail_tls != null);
+    try std.testing.expectEqual(
+        StapledOcspPolicy.require,
+        ocsp.vail_tls.?.stapled_ocsp,
+    );
+    try std.testing.expect(ocsp.vail_tls.?.request_ocsp);
 }
 
 fn websocketConnectOptions(
@@ -2243,10 +2261,13 @@ fn websocketConnectOptions(
         ),
         .vail_tls = if (options.use_vail_tls or
             options.client_identity != null or
-            options.server_verifier != null)
+            options.server_verifier != null or
+            options.stapled_ocsp != .ignore)
             .{
                 .identity = options.client_identity,
                 .server_verifier = options.server_verifier,
+                .stapled_ocsp = options.stapled_ocsp,
+                .request_ocsp = options.request_ocsp,
                 .alpn_protocols = options.alpn_protocols,
                 .cipher_suites = options.cipher_suites,
                 .max_server_handshake_size = options.max_server_handshake_size,
