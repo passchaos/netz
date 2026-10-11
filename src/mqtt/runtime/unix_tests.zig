@@ -2,6 +2,36 @@ const std = @import("std");
 const mqtt = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 
+test "MQTT Unix sockets reject TCP user timeout policy" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        return error.SkipZigTest;
+    }
+    const address = try std.Io.net.UnixAddress.init(
+        "/tmp/netz-mqtt-tcp-user-timeout-unsupported.sock",
+    );
+    try std.testing.expectError(
+        error.SocketOptionUnsupported,
+        runtime.UnixServer.listen(
+            std.testing.allocator,
+            std.testing.io,
+            address,
+            .{ .tcp_user_timeout_ms = 1 },
+        ),
+    );
+    try std.testing.expectError(
+        error.SocketOptionUnsupported,
+        runtime.Client.connectUnixAttempt(
+            std.testing.allocator,
+            std.testing.io,
+            address,
+            .{
+                .client_id = "unsupported-timeout",
+                .limits = .{ .tcp_user_timeout_ms = 1 },
+            },
+        ),
+    );
+}
+
 test "MQTT Unix server handles concurrent clients" {
     if (comptime @import("builtin").os.tag == .windows) {
         return error.SkipZigTest;

@@ -2178,14 +2178,32 @@ fn websocketLimits(
         .max_frame_bytes = limits.max_packet_size,
         .max_message_bytes = limits.max_packet_size,
         .tcp_nodelay = limits.tcp_nodelay,
+        .tcp_user_timeout_ms = limits.tcp_user_timeout_ms,
     };
 }
 
-test "MQTT WebSocket limits preserve TCP no-delay policy" {
-    try std.testing.expect(websocketLimits(.{ .tcp_nodelay = true }, 1234)
-        .tcp_nodelay);
-    try std.testing.expect(!websocketLimits(.{ .tcp_nodelay = false }, 1234)
-        .tcp_nodelay);
+test "MQTT WebSocket limits preserve TCP socket policy" {
+    const enabled = websocketLimits(.{
+        .tcp_nodelay = true,
+        .tcp_user_timeout_ms = 12_345,
+    }, 1234);
+    try std.testing.expect(enabled.tcp_nodelay);
+    try std.testing.expectEqual(@as(?u32, 12_345), enabled.tcp_user_timeout_ms);
+
+    const defaults = websocketLimits(.{ .tcp_nodelay = false }, 1234);
+    try std.testing.expect(!defaults.tcp_nodelay);
+    try std.testing.expectEqual(@as(?u32, null), defaults.tcp_user_timeout_ms);
+
+    const client = websocketConnectOptions(.{
+        .mqtt = .{
+            .client_id = "socket-policy",
+            .limits = .{ .tcp_user_timeout_ms = 54_321 },
+        },
+    });
+    try std.testing.expectEqual(
+        @as(?u32, 54_321),
+        client.tcp_user_timeout_ms,
+    );
 }
 
 fn websocketConnectOptions(
@@ -2197,6 +2215,7 @@ fn websocketConnectOptions(
         .origin = options.origin,
         .protocols = &.{mqtt_subprotocol},
         .tcp_nodelay = options.tcp_nodelay,
+        .tcp_user_timeout_ms = options.mqtt.limits.tcp_user_timeout_ms,
         .connect_timeout = options.mqtt.network_connect_timeout,
         .tls_handshake_timeout = options.tls_handshake_timeout,
         .limits = websocketLimits(

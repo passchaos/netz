@@ -166,9 +166,10 @@ pub const Server = struct {
             deadline,
         );
         errdefer if (proxy_metadata) |*metadata| metadata.deinit();
-        if (self.tcp_nodelay) {
-            try socket_options.setTcpNoDelay(stream);
-        }
+        try socket_options.applyTcp(stream, .{
+            .no_delay = self.tcp_nodelay,
+            .user_timeout_ms = self.limits.tcp_user_timeout_ms,
+        });
         const tls_connection = if (deadline) |absolute|
             try tls_stream.ServerConnection.initWithDeadline(
                 self.allocator,
@@ -1268,9 +1269,10 @@ fn connectStreamAttemptMaybeBefore(
 ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
-    if (options.tcp_nodelay) {
-        try socket_options.setTcpNoDelay(stream);
-    }
+    try socket_options.applyTcp(stream, .{
+        .no_delay = options.tcp_nodelay,
+        .user_timeout_ms = options.mqtt.limits.tcp_user_timeout_ms,
+    });
     if (options.use_vail or
         options.client_identity != null or
         options.server_verifier != null or

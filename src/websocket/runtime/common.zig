@@ -30,6 +30,24 @@ pub const Limits = struct {
     /// messages are already application-framed and control replies should not
     /// wait behind delayed ACK merely because a peer uses split writes.
     tcp_nodelay: bool = true,
+    /// Linux TCP_USER_TIMEOUT in milliseconds. Null leaves the kernel default
+    /// untouched; zero is an explicit request to restore that default.
+    tcp_user_timeout_ms: ?u32 = null,
+};
+
+/// Message limits retained after the HTTP/TLS handshake and TCP socket setup.
+/// Keeping transport-only policy out of every live connection avoids charging
+/// long-lived WebSocket sessions for one-time admission settings.
+pub const MessageLimits = struct {
+    max_frame_bytes: usize = 16 * 1024 * 1024,
+    max_message_bytes: usize = 16 * 1024 * 1024,
+
+    pub fn from(limits: Limits) MessageLimits {
+        return .{
+            .max_frame_bytes = limits.max_frame_bytes,
+            .max_message_bytes = limits.max_message_bytes,
+        };
+    }
 };
 
 pub const OutgoingValidationError = websocket.Error || error{
@@ -227,7 +245,7 @@ pub fn clearPendingOutboundLocked(connection: anytype) void {
 /// Validate one complete outbound application message before a transport
 /// acquires its send lock, allocates compressor scratch, or masks caller data.
 pub fn validateOutgoingMessage(
-    limits: Limits,
+    limits: anytype,
     opcode: websocket.Opcode,
     payload: []const u8,
 ) OutgoingValidationError!void {
@@ -242,7 +260,7 @@ pub fn validateOutgoingMessage(
 }
 
 pub fn validateOutgoingMessageLength(
-    limits: Limits,
+    limits: anytype,
     payload_len: usize,
 ) error{MessageTooLarge}!void {
     if (payload_len > limits.max_frame_bytes or
@@ -254,7 +272,7 @@ pub fn validateOutgoingMessageLength(
 
 /// Validate borrowed slices that will be emitted as one binary frame.
 pub fn validateOutgoingMessageParts(
-    limits: Limits,
+    limits: anytype,
     parts: []const []const u8,
 ) OutgoingValidationError!usize {
     const payload_len = try outgoingPayloadLen(parts);
@@ -264,7 +282,7 @@ pub fn validateOutgoingMessageParts(
 
 /// Validate caller-selected wire fragments and their logical aggregate.
 pub fn validateOutgoingFragments(
-    limits: Limits,
+    limits: anytype,
     opcode: websocket.Opcode,
     fragments: []const []const u8,
 ) OutgoingValidationError!usize {
@@ -292,7 +310,7 @@ pub fn validateOutgoingFragments(
 /// Validate public Ping, Pong, and Close writes against both the configured
 /// frame bound and RFC 6455's stricter control-frame rules.
 pub fn validateOutgoingControlFrame(
-    limits: Limits,
+    limits: anytype,
     opcode: websocket.Opcode,
     payload: []const u8,
 ) OutgoingValidationError!void {

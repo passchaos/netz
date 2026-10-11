@@ -428,7 +428,7 @@ pub fn Connection(comptime role: common.Role) type {
             .client => http3.runtime.HandshakeClient,
             .server => http3.runtime.HandshakeServerSession,
         },
-        limits: common.Limits,
+        limits: common.MessageLimits = .{},
         selected_protocol: ?[]u8 = null,
         inbuf: std.ArrayList(u8) = .empty,
         inbuf_consumed: usize = 0,
@@ -489,7 +489,7 @@ pub fn Connection(comptime role: common.Role) type {
                 .allocator = allocator,
                 .stream_id = stream_id,
                 .h3 = h3,
-                .limits = limits,
+                .limits = common.MessageLimits.from(limits),
                 .selected_protocol = selected_protocol,
                 .permessage_deflate = negotiated_extension.permessage_deflate,
                 .compression_send_context_takeover = negotiated_extension.permessage_deflate and switch (role) {
@@ -5882,8 +5882,8 @@ fn compressedFragmentRange(
 test "WebSocket RFC 9220 connections keep resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
-        try std.testing.expectEqual(@as(usize, 18_512), @sizeOf(ClientConnection));
-        try std.testing.expectEqual(@as(usize, 17_920), @sizeOf(ServerConnection));
+        try std.testing.expectEqual(@as(usize, 18_432), @sizeOf(ClientConnection));
+        try std.testing.expectEqual(@as(usize, 17_832), @sizeOf(ServerConnection));
     }
 }
 

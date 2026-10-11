@@ -266,6 +266,7 @@ def _start_broker(
     log: Path,
     *,
     finite: bool = True,
+    trace_socket_options: Path | None = None,
 ) -> tuple[subprocess.Popen[bytes], object]:
     output = log.open("wb")
     environment = os.environ.copy()
@@ -273,8 +274,18 @@ def _start_broker(
         environment[FINITE_TEST_ENV] = "1"
     else:
         environment.pop(FINITE_TEST_ENV, None)
+    command = [str(binary), f"--config={config}"]
+    if trace_socket_options is not None:
+        command = [
+            "strace",
+            "--follow-forks",
+            "--kill-on-exit",
+            "--trace=setsockopt",
+            f"--output={trace_socket_options}",
+            *command,
+        ]
     process = subprocess.Popen(
-        [str(binary), f"--config={config}"],
+        command,
         stdout=output,
         stderr=subprocess.STDOUT,
         env=environment,

@@ -1177,6 +1177,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_outgoing_retain false
         \\bridge_attempt_unsubscribe false
         \\bridge_bind_address 127.0.0.2
+        \\bridge_tcp_user_timeout 30000
         \\remote_clientid edge-bridge
         \\remote_username bridge-user
         \\remote_password bridge-secret
@@ -1245,6 +1246,10 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expect(upstream.bind_address.?.eql(
         &expected_bind_address,
     ));
+    try std.testing.expectEqual(
+        @as(?u32, 30_000),
+        upstream.tcp_user_timeout_ms,
+    );
     try std.testing.expectEqualStrings("edge-bridge", upstream.clientId());
     try std.testing.expectEqualStrings("bridge-user", upstream.remote_username);
     try std.testing.expectEqualStrings("bridge-secret", upstream.remote_password);
@@ -1317,6 +1322,10 @@ test "MQTT broker config applies inbound bridge defaults" {
         @as(?std.Io.net.IpAddress, null),
         bridge.bind_address,
     );
+    try std.testing.expectEqual(
+        @as(?u32, null),
+        bridge.tcp_user_timeout_ms,
+    );
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
@@ -1378,6 +1387,28 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expect(ipv6.bridges[0].bind_address.?.eql(
         &expected_ipv6_bind,
     ));
+
+    var timeout_boundaries = try parse(std.testing.allocator,
+        \\listener 1887
+        \\allow_anonymous true
+        \\connection timeout-zero
+        \\address localhost
+        \\topic zero/# in 0
+        \\bridge_tcp_user_timeout 0
+        \\connection timeout-max
+        \\address localhost
+        \\topic max/# in 0
+        \\bridge_tcp_user_timeout 2147483647
+    );
+    defer timeout_boundaries.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        @as(?u32, 0),
+        timeout_boundaries.bridges[0].tcp_user_timeout_ms,
+    );
+    try std.testing.expectEqual(
+        @as(?u32, bridge_config.maximum_tcp_user_timeout_ms),
+        timeout_boundaries.bridges[1].tcp_user_timeout_ms,
+    );
 }
 
 test "MQTT broker config rejects incomplete or unsupported bridges" {
@@ -1511,6 +1542,8 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         "bridge_max_topic_alias 65536\n",
         "bridge_max_packet_size -1\n",
         "bridge_max_packet_size 4294967296\n",
+        "bridge_tcp_user_timeout -1\n",
+        "bridge_tcp_user_timeout 2147483648\n",
     }) |invalid| {
         const source = try std.fmt.allocPrint(
             allocator,
@@ -1568,6 +1601,13 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection duplicate-bind\naddress localhost\n" ++
             "topic # out 0\nbridge_bind_address 127.0.0.1\n" ++
             "bridge_bind_address 127.0.0.2\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-timeout\naddress localhost\n" ++
+            "topic # out 0\nbridge_tcp_user_timeout 0\n" ++
+            "bridge_tcp_user_timeout 1\n"),
     );
     try std.testing.expectError(
         error.UnsupportedBridgeStartType,

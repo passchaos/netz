@@ -60,6 +60,7 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
     SocketOptionFailed,
+    SocketOptionUnsupported,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 pub const Limits = common.Limits;
@@ -683,9 +684,10 @@ pub const Server = struct {
     ) Error!PendingUpgrade {
         var http_conn = http_connection;
         errdefer http_conn.close();
-        if (self.limits.tcp_nodelay) {
-            try socket_options.setTcpNoDelay(http_conn.stream);
-        }
+        try socket_options.applyTcp(http_conn.stream, .{
+            .no_delay = self.limits.tcp_nodelay,
+            .user_timeout_ms = self.limits.tcp_user_timeout_ms,
+        });
 
         return receiveUpgradeRequestFromTransport(
             self.http.allocator,
@@ -759,6 +761,9 @@ pub const UnixServer = struct {
         address: net.UnixAddress,
         limits: Limits,
     ) Error!UnixServer {
+        if (limits.tcp_user_timeout_ms != null) {
+            return error.SocketOptionUnsupported;
+        }
         return .{
             .http = try .listen(allocator, io, address, .{
                 .max_head_bytes = limits.max_head_bytes,
@@ -908,6 +913,7 @@ pub const UnixServer = struct {
         errdefer if (http_owned) http_connection_owned.close();
         var limits = self.limits;
         limits.tcp_nodelay = false;
+        limits.tcp_user_timeout_ms = null;
         const pending = try receiveUpgradeRequestFromTransport(
             self.http.allocator,
             self.http.io,
@@ -1190,7 +1196,10 @@ pub const TlsServer = struct {
     ) Error!PendingUpgrade {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(self.io);
-        if (self.tcp_nodelay) try socket_options.setTcpNoDelay(stream);
+        try socket_options.applyTcp(stream, .{
+            .no_delay = self.tcp_nodelay,
+            .user_timeout_ms = self.limits.tcp_user_timeout_ms,
+        });
         const tls_connection = if (deadline) |absolute|
             try tls_stream.ServerConnection.initWithDeadline(
                 self.allocator,
@@ -1834,7 +1843,7 @@ pub const PendingUpgrade = struct {
                 else => null,
             },
             .role = .server,
-            .limits = limits,
+            .limits = common.MessageLimits.from(limits),
             .selected_protocol = selected_protocol,
             .permessage_deflate = negotiated_extension.permessage_deflate,
             .compression_send_context_takeover = negotiated_extension.permessage_deflate and
@@ -2025,7 +2034,7 @@ pub const ConnectAttempt = struct {
                 else => null,
             },
             .role = .client,
-            .limits = self.limits,
+            .limits = common.MessageLimits.from(self.limits),
             .selected_protocol = selected_protocol,
             .permessage_deflate = selected_extension.permessage_deflate,
             .compression_send_context_takeover = selected_extension.permessage_deflate and
@@ -2289,6 +2298,9 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
+        if (options.tcp_user_timeout_ms != null) {
+            return error.SocketOptionUnsupported;
+        }
         if (options.host.len == 0) return error.InvalidUri;
         const stream = try tcp_connect.unix(io, address, options.connect_timeout);
         var stream_owned = true;
@@ -2333,6 +2345,9 @@ pub const Client = struct {
     ) Error!ConnectAttempt {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
+        }
+        if (options.tcp_user_timeout_ms != null) {
+            return error.SocketOptionUnsupported;
         }
         if (options.host.len == 0) return error.InvalidUri;
         const stream = try tcp_connect.unixWithDeadline(
@@ -2890,6 +2905,10 @@ pub const Client = struct {
     ) Error!ConnectAttempt {
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        try socket_options.applyTcp(stream, .{
+            .no_delay = options.tcp_nodelay,
+            .user_timeout_ms = options.tcp_user_timeout_ms,
+        });
         const default_host = try std.fmt.allocPrint(
             allocator,
             "{s}:{d}",
@@ -3237,6 +3256,10 @@ pub const Client = struct {
         };
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
+        try socket_options.applyTcp(stream, .{
+            .no_delay = options.tcp_nodelay,
+            .user_timeout_ms = options.tcp_user_timeout_ms,
+        });
         if (is_wss) {
             if (options.vail_tls orelse options.tls_identity) |identity| {
                 const tls_conn = if (deadline) |absolute|
@@ -3355,9 +3378,10 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: ?std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        if (options.tcp_nodelay) {
-            try socket_options.setTcpNoDelay(stream);
-        }
+        try socket_options.applyTcp(stream, .{
+            .no_delay = options.tcp_nodelay,
+            .user_timeout_ms = options.tcp_user_timeout_ms,
+        });
         const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
         return connectTransportAttempt(
             allocator,
@@ -3607,6 +3631,9 @@ pub const ConnectOptions = struct {
     /// Set to zero to attempt every data message or maxInt to receive-only.
     compression_threshold: usize = default_compression_threshold,
     tcp_nodelay: bool = true,
+    /// Linux TCP_USER_TIMEOUT in milliseconds. Null preserves the kernel
+    /// default; requesting a value on an unsupported platform fails.
+    tcp_user_timeout_ms: ?u32 = null,
     /// Absolute budget for DNS resolution plus all TCP connection attempts.
     /// TLS and HTTP Upgrade retain their separate handshake policies.
     connect_timeout: ?std.Io.Duration = null,
@@ -3639,7 +3666,7 @@ pub const Connection = struct {
     tls_vail_conn: ?*tls_stream.ClientConnection = null,
     tls_server_conn: ?*tls_stream.ServerConnection = null,
     role: Role,
-    limits: Limits = .{},
+    limits: common.MessageLimits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     inbuf_consumed: usize = 0,
     send_mutex: std.Io.Mutex = .init,
@@ -6574,7 +6601,7 @@ pub const Connection = struct {
 test "WebSocket HTTP/1 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
-        try std.testing.expectEqual(@as(usize, 1536), @sizeOf(Connection));
+        try std.testing.expectEqual(@as(usize, 1456), @sizeOf(Connection));
     }
 }
 
@@ -6583,7 +6610,7 @@ pub const H2Connection = struct {
     tunnel: http2_runtime.Tunnel,
     tunnel_owned: bool = false,
     role: Role,
-    limits: Limits = .{},
+    limits: common.MessageLimits = .{},
     inbuf: std.ArrayList(u8) = .empty,
     inbuf_consumed: usize = 0,
     send_mutex: std.Io.Mutex = .init,
@@ -6637,7 +6664,7 @@ pub const H2Connection = struct {
             .tunnel = tunnel,
             .tunnel_owned = true,
             .role = role,
-            .limits = limits,
+            .limits = common.MessageLimits.from(limits),
             .selected_protocol = selected_protocol,
             .permessage_deflate = negotiated_extension.permessage_deflate,
             .compression_send_context_takeover = negotiated_extension.permessage_deflate and switch (role) {
@@ -9609,7 +9636,7 @@ pub const H2Connection = struct {
 test "WebSocket RFC 8441 connection keeps resumable writes compact" {
     if (@sizeOf(usize) == 8) {
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingH2Write));
-        try std.testing.expectEqual(@as(usize, 1568), @sizeOf(H2Connection));
+        try std.testing.expectEqual(@as(usize, 1488), @sizeOf(H2Connection));
     }
 }
 
@@ -10643,7 +10670,7 @@ pub const testing = if (builtin.is_test) struct {
             .allocator = allocator,
             .stream = stream,
             .role = role,
-            .limits = limits,
+            .limits = common.MessageLimits.from(limits),
         };
     }
 
@@ -15726,7 +15753,7 @@ test "WebSocket HTTP1 and HTTP2 sends enforce configured outbound limits" {
         .stream = undefined,
         .role = .client,
         .permessage_deflate = true,
-        .limits = limits,
+        .limits = common.MessageLimits.from(limits),
     };
     try std.testing.expectError(
         error.MessageTooLarge,
@@ -15765,7 +15792,7 @@ test "WebSocket HTTP1 and HTTP2 sends enforce configured outbound limits" {
         .tunnel = undefined,
         .role = .client,
         .permessage_deflate = true,
-        .limits = limits,
+        .limits = common.MessageLimits.from(limits),
     };
     try std.testing.expectError(
         error.MessageTooLarge,

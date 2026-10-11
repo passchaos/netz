@@ -2,6 +2,36 @@ const std = @import("std");
 const runtime = @import("../runtime.zig");
 const websocket = @import("../mod.zig");
 
+test "WebSocket Unix sockets reject TCP user timeout policy" {
+    if (comptime @import("builtin").os.tag == .windows) {
+        return error.SkipZigTest;
+    }
+    const address = try std.Io.net.UnixAddress.init(
+        "/tmp/netz-websocket-tcp-user-timeout-unsupported.sock",
+    );
+    try std.testing.expectError(
+        error.SocketOptionUnsupported,
+        runtime.UnixServer.listen(
+            std.testing.allocator,
+            std.testing.io,
+            address,
+            .{ .tcp_user_timeout_ms = 1 },
+        ),
+    );
+    try std.testing.expectError(
+        error.SocketOptionUnsupported,
+        runtime.Client.connectUnixAttempt(
+            std.testing.allocator,
+            std.testing.io,
+            address,
+            .{
+                .host = "localhost",
+                .tcp_user_timeout_ms = 1,
+            },
+        ),
+    );
+}
+
 test "WebSocket client and server exchange over a Unix socket" {
     if (comptime @import("builtin").os.tag == .windows) {
         return error.SkipZigTest;

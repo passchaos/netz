@@ -1,7 +1,9 @@
 """Production outbound configuration, local consumer and coordinator restart."""
 
 from pathlib import Path
+import shutil
 import socket
+import sys
 import time
 
 from mqtt_broker_config_bridge import (
@@ -87,6 +89,19 @@ def _unsubscribe_filters(
     if cursor != end:
         raise AssertionError(f"malformed bridge UNSUBSCRIBE: {packet.hex()}")
     return packet_id, filters
+
+
+def _expect_tcp_user_timeout_trace(trace: Path, expected_ms: int) -> None:
+    expected = f"TCP_USER_TIMEOUT, [{expected_ms}], 4) = 0"
+    calls = [
+        line
+        for line in trace.read_text(errors="replace").splitlines()
+        if "TCP_USER_TIMEOUT" in line
+    ]
+    if not any(expected in call for call in calls):
+        raise AssertionError(
+            f"bridge did not apply {expected_ms}ms TCP_USER_TIMEOUT: {calls!r}"
+        )
 
 
 def run_outbound_bridge_protocol_limits_case(
@@ -268,6 +283,7 @@ def run_outbound_bridge_protocol_limits_case(
 
 def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False) -> None:
     remote_port, local_port, unavailable_port = _distinct_ports(3)
+    tcp_user_timeout_ms = 4321
     remote_tls = local_tls = ""
     if tls:
         ca, cert, key, client_cert, client_key = _create_tls_material(directory)
@@ -303,15 +319,31 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         "cleansession false\nbridge_protocol_version mqttv50\n"
         "bridge_session_expiry_interval 0xFFFFFFFF\n"
         "bridge_bind_address 127.0.0.2\n"
+        f"bridge_tcp_user_timeout {tcp_user_timeout_ms}\n"
         f"remote_clientid configured-outbound\nrestart_timeout 1\n{local_tls}"
     )
     remote_log = directory / "outbound-remote.log"
     local_log = directory / "outbound-local.log"
+    socket_trace = directory / (
+        "outbound-local-tls.socket.trace"
+        if tls
+        else "outbound-local-cleartext.socket.trace"
+    )
+    trace_socket_options = (
+        socket_trace
+        if sys.platform.startswith("linux") and shutil.which("strace")
+        else None
+    )
     remote, remote_output = _start_broker(broker, remote_config, remote_log)
     local = local_output = subscriber = publisher = None
     try:
         _wait_for_log(remote, remote_log, "configured 1 listeners")
-        local, local_output = _start_broker(broker, local_config, local_log)
+        local, local_output = _start_broker(
+            broker,
+            local_config,
+            local_log,
+            trace_socket_options=trace_socket_options,
+        )
         _wait_for_log(local, local_log, "bridge outbound remote=")
         subscriber = (_connect_tls_client(remote_port, "outbound-observer", ca, client_cert, client_key)
                       if tls else _connect_client(remote_port, "outbound-observer"))
@@ -350,7 +382,12 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         local_output.close()
         local = local_output = None
         _expect_bridge_state(subscriber, notification, b"0")
-        local, local_output = _start_broker(broker, local_config, local_log)
+        local, local_output = _start_broker(
+            broker,
+            local_config,
+            local_log,
+            trace_socket_options=trace_socket_options,
+        )
         _wait_for_log(local, local_log, "bridge outbound remote=")
         _expect_bridge_state(subscriber, notification, b"1")
         publisher = _connect_client(local_port, "outbound-publisher-after")
@@ -366,6 +403,8 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         if subscriber is not None: subscriber.close()
         if local is not None: _stop(local, local_output)
         _stop(remote, remote_output)
+    if trace_socket_options is not None:
+        _expect_tcp_user_timeout_trace(socket_trace, tcp_user_timeout_ms)
     if tls:
         empty_ca_path = directory / "empty-outbound-server-capath"
         empty_ca_path.mkdir()

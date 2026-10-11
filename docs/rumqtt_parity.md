@@ -258,6 +258,16 @@ the bind. The implementation uses zio's native cancelable bind/connect path;
 foreign `std.Io` backends receive `OptionUnsupported` instead of silently
 ignoring the requested source address.
 
+`bridge_tcp_user_timeout` configures Linux `TCP_USER_TIMEOUT` in milliseconds
+on every remote bridge connection, including fallback and reconnect attempts.
+The omitted state leaves the kernel default untouched, while explicit zero is
+preserved as a real `setsockopt` request; values follow Mosquitto's non-negative
+C `int` range. The same optional socket policy is carried by the MQTT and
+WebSocket runtimes across TCP, TLS, WS, and WSS before protocol handshakes.
+Unsupported platforms and Unix-domain transports fail explicitly rather than
+silently discarding it. The process gate traces successful cleartext and TLS
+bridge sockets and checks the actual `TCP_USER_TIMEOUT` syscall value.
+
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use
 Mosquitto's mapping order: subscribe to `local_prefix + filter`, strip the

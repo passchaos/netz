@@ -21,6 +21,8 @@ pub const default_max_topic_alias: u16 = 10;
 pub const maximum_restart_seconds: u16 = 3600;
 pub const maximum_restart_cap_seconds: u16 = 7200;
 pub const maximum_host_bytes: usize = 255;
+/// Mosquitto parses bridge_tcp_user_timeout into a non-negative C `int`.
+pub const maximum_tcp_user_timeout_ms: u32 = std.math.maxInt(i32);
 
 pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     DuplicateDirective,
@@ -116,6 +118,7 @@ pub const Bridge = struct {
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
     bind_address: ?net.IpAddress = null,
+    tcp_user_timeout_ms: ?u32 = null,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -227,6 +230,7 @@ const Seen = struct {
     bridge_outgoing_retain: bool = false,
     bridge_attempt_unsubscribe: bool = false,
     bridge_bind_address: bool = false,
+    bridge_tcp_user_timeout: bool = false,
     remote_client_id: bool = false,
     remote_username: bool = false,
     remote_password: bool = false,
@@ -265,6 +269,7 @@ pub const Builder = struct {
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
     bind_address: ?net.IpAddress = null,
+    tcp_user_timeout_ms: ?u32 = null,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -393,6 +398,13 @@ pub const Builder = struct {
                 try parseOne(words),
                 0,
             ) catch return error.InvalidDirective;
+        } else if (std.mem.eql(u8, directive, "bridge_tcp_user_timeout")) {
+            try markOnce(&self.seen.bridge_tcp_user_timeout);
+            const milliseconds = try parseOneInteger(u32, words);
+            if (milliseconds > maximum_tcp_user_timeout_ms) {
+                return error.InvalidInteger;
+            }
+            self.tcp_user_timeout_ms = milliseconds;
         } else if (std.mem.eql(u8, directive, "remote_clientid")) {
             try markOnce(&self.seen.remote_client_id);
             self.remote_client_id = try parseOwnedUtf8(allocator, words);
@@ -592,6 +604,7 @@ pub const Builder = struct {
             .outgoing_retain = self.outgoing_retain,
             .attempt_unsubscribe = self.attempt_unsubscribe,
             .bind_address = self.bind_address,
+            .tcp_user_timeout_ms = self.tcp_user_timeout_ms,
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
@@ -716,6 +729,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_outgoing_retain") or
         std.mem.eql(u8, value, "bridge_attempt_unsubscribe") or
         std.mem.eql(u8, value, "bridge_bind_address") or
+        std.mem.eql(u8, value, "bridge_tcp_user_timeout") or
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
         std.mem.eql(u8, value, "remote_password") or

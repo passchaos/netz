@@ -1006,7 +1006,8 @@ Current protocol coverage includes:
   automatic/one-shot lifecycles, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
   explicit local IPv4/IPv6 source-address binding across cleartext and TLS
-  reconnects, and crash-safe QoS 2 state,
+  reconnects, optional Linux `TCP_USER_TIMEOUT` policy preserved across
+  cleartext/TLS fallback and reconnect attempts, and crash-safe QoS 2 state,
   listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
   PBES2-encrypted PKCS#8 keys with file-backed passwords, and
   optional/required
@@ -1055,7 +1056,8 @@ Current protocol coverage includes:
   Keep Alive enforcement with 1.5x inbound inactivity deadlines, zero-disable
   semantics, bounded large-packet progress renewal and ungraceful Will/Session
   cleanup, plus a blocking TCP
-  client/server runtime with a
+  client/server runtime with a shared optional, fail-closed Linux
+  `TCP_USER_TIMEOUT` socket policy across TCP, TLS, WS, and WSS and a
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
   system, caller-provided file, or bounded OpenSSL-style CA-directory roots,
   hostname verification, and optional

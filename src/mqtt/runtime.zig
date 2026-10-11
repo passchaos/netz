@@ -46,6 +46,8 @@ pub const Error = packet_transport.Error || error{
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
     ConnectorDeadlineUnsupported,
+    SocketOptionFailed,
+    SocketOptionUnsupported,
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
     net.IpAddress.ListenError || net.IpAddress.ConnectError ||
     net.UnixAddress.ListenError || net.UnixAddress.ConnectError ||
@@ -70,6 +72,10 @@ pub const Limits = struct {
     /// delayed-ACK cliff; callers can opt back into coalescing for WAN bulk
     /// transports.
     tcp_nodelay: bool = true,
+    /// Linux TCP_USER_TIMEOUT in milliseconds. Null leaves the kernel default
+    /// untouched; zero explicitly restores it. Unsupported transports and
+    /// platforms fail rather than silently dropping a configured policy.
+    tcp_user_timeout_ms: ?u32 = null,
     /// Require and consume one trusted-proxy header before MQTT CONNECT. This
     /// is opt-in because accepting source metadata from arbitrary peers would
     /// allow address spoofing. `connect_timeout` covers this header and CONNECT
@@ -340,10 +346,10 @@ pub const Server = struct {
             outer_deadline,
             try deadline_policy.fromTimeout(self.io, options.connect_timeout),
         );
-        if (self.limits.tcp_nodelay) {
-            socket_options.setTcpNoDelay(stream) catch
-                return error.SocketOptionFailed;
-        }
+        try socket_options.applyTcp(stream, .{
+            .no_delay = self.limits.tcp_nodelay,
+            .user_timeout_ms = self.limits.tcp_user_timeout_ms,
+        });
         var proxy_metadata = try readProxyMetadata(
             self.allocator,
             self.io,
@@ -443,6 +449,9 @@ pub const UnixServer = struct {
         address: net.UnixAddress,
         limits: Limits,
     ) Error!UnixServer {
+        if (limits.tcp_user_timeout_ms != null) {
+            return error.SocketOptionUnsupported;
+        }
         if (limits.proxy_protocol != null or
             limits.proxy_v2_require_tls or
             limits.proxy_v2_require_client_certificate)
@@ -2113,6 +2122,9 @@ pub const Client = struct {
         address: net.UnixAddress,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
+        if (options.limits.tcp_user_timeout_ms != null) {
+            return error.SocketOptionUnsupported;
+        }
         const stream = try tcp_connect.unix(
             io,
             address,
@@ -2130,6 +2142,9 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
+        if (options.limits.tcp_user_timeout_ms != null) {
+            return error.SocketOptionUnsupported;
+        }
         const network_deadline = try cappedConnectDeadline(
             io,
             deadline,
@@ -2256,11 +2271,14 @@ fn connectStreamAttemptBefore(
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
     var limits = options.limits;
-    limits.tcp_nodelay = tcp_nodelay_available and limits.tcp_nodelay;
-    if (limits.tcp_nodelay) {
-        socket_options.setTcpNoDelay(stream) catch
-            return error.SocketOptionFailed;
+    if (!tcp_nodelay_available and limits.tcp_user_timeout_ms != null) {
+        return error.SocketOptionUnsupported;
     }
+    limits.tcp_nodelay = tcp_nodelay_available and limits.tcp_nodelay;
+    try socket_options.applyTcp(stream, .{
+        .no_delay = limits.tcp_nodelay,
+        .user_timeout_ms = limits.tcp_user_timeout_ms,
+    });
 
     var connection = Connection{
         .allocator = allocator,
