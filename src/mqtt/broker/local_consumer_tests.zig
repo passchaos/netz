@@ -119,6 +119,92 @@ test "broker local consumer close restores pending QoS0 and rejects stale handle
     try std.testing.expect((try broker.pollLocalConsumer(&resumed)) == null);
 }
 
+test "broker clean local consumer replaces and discards Session state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var broker = try Broker.init(allocator, threaded.io(), .{});
+    defer broker.deinit();
+    const id = [_]u8{0x70} ** 16;
+    var persistent = try broker.openLocalConsumer(.{
+        .id = id,
+        .subscriptions = &.{.{
+            .topic_filter = "old/#",
+            .qos = .at_least_once,
+        }},
+    });
+    try publishValue(&broker, "old/queued", "discard", .at_least_once);
+    broker.closeLocalConsumer(&persistent);
+
+    var clean = try broker.openLocalConsumer(.{
+        .id = id,
+        .subscriptions = &.{.{
+            .topic_filter = "new/#",
+            .qos = .at_least_once,
+        }},
+        .clean_session = true,
+    });
+    try std.testing.expect(!clean.session_present);
+    try std.testing.expect((try broker.pollLocalConsumer(&clean)) == null);
+    try publishValue(&broker, "old/ignored", "old", .at_least_once);
+    try std.testing.expect((try broker.pollLocalConsumer(&clean)) == null);
+    try publishValue(&broker, "new/value", "new", .at_least_once);
+    var event = (try broker.pollLocalConsumer(&clean)).?;
+    defer event.deinit();
+    try std.testing.expectEqualStrings("new", event.publish.value.payload);
+    _ = try broker.acknowledgeLocalConsumer(
+        &clean,
+        .puback,
+        event.publish.value.packet_id.?,
+        0,
+    );
+    broker.closeLocalConsumer(&clean);
+
+    var reopened = try broker.openLocalConsumer(.{
+        .id = id,
+        .subscriptions = &.{.{
+            .topic_filter = "new/#",
+            .qos = .at_least_once,
+        }},
+    });
+    defer broker.closeLocalConsumer(&reopened);
+    try std.testing.expect(!reopened.session_present);
+    try std.testing.expect((try broker.pollLocalConsumer(&reopened)) == null);
+}
+
+test "broker clean local consumer removal is journaled" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const options: @import("local_consumer.zig").Options = .{
+        .id = [_]u8{0x6f} ** 16,
+        .subscriptions = &.{.{
+            .topic_filter = "clean/#",
+            .qos = .at_least_once,
+        }},
+    };
+    {
+        var broker = try Broker.init(allocator, io, .{});
+        defer broker.deinit();
+        try broker.createCommitLog(tmp.dir, "clean.log", .{});
+        var persistent = try broker.openLocalConsumer(options);
+        broker.closeLocalConsumer(&persistent);
+        var clean_options = options;
+        clean_options.clean_session = true;
+        var clean = try broker.openLocalConsumer(clean_options);
+        broker.closeLocalConsumer(&clean);
+    }
+    var restored = try Broker.init(allocator, io, .{});
+    defer restored.deinit();
+    try restored.restoreCommitLog(tmp.dir, "clean.log", .{});
+    var reopened = try restored.openLocalConsumer(options);
+    defer restored.closeLocalConsumer(&reopened);
+    try std.testing.expect(!reopened.session_present);
+}
+
 test "broker local consumer restores every QoS2 journal phase" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

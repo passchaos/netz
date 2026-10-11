@@ -5243,6 +5243,10 @@ test "public modules are reachable" {
         "serve",
     ));
     try std.testing.expect(@hasDecl(netz.mqtt.broker.Broker, "init"));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker.LocalConsumerOptions,
+        "clean_session",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.broker.Broker,
         "serveListeners",

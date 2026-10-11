@@ -113,6 +113,7 @@ pub const Bridge = struct {
     rules: []Rule,
     protocol: mqtt.ProtocolVersion = .v3_1_1,
     clean_session: bool = false,
+    local_clean_session: bool = false,
     session_expiry_interval: u32 = 0,
     keep_alive_seconds: u16 = default_keep_alive_seconds,
     receive_maximum: u16 = default_receive_maximum,
@@ -234,6 +235,7 @@ pub const Bridge = struct {
 const Seen = struct {
     address: bool = false,
     clean_session: bool = false,
+    local_clean_session: bool = false,
     bridge_protocol_version: bool = false,
     bridge_session_expiry_interval: bool = false,
     keepalive_interval: bool = false,
@@ -278,6 +280,7 @@ pub const Builder = struct {
     rules: std.ArrayList(Rule) = .empty,
     protocol: mqtt.ProtocolVersion = .v3_1_1,
     clean_session: bool = false,
+    local_clean_session: ?bool = null,
     session_expiry_interval: u32 = 0,
     keep_alive_seconds: u16 = default_keep_alive_seconds,
     receive_maximum: ?u16 = null,
@@ -375,6 +378,9 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "cleansession")) {
             try markOnce(&self.seen.clean_session);
             self.clean_session = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "local_cleansession")) {
+            try markOnce(&self.seen.local_clean_session);
+            self.local_clean_session = try parseOneBool(words);
         } else if (std.mem.eql(u8, directive, "bridge_protocol_version")) {
             try markOnce(&self.seen.bridge_protocol_version);
             const value = try parseOne(words);
@@ -604,9 +610,12 @@ pub const Builder = struct {
         }
         var uses_qos2 = false;
         var has_outbound = false;
+        var uses_persistent_outbound_qos = false;
         for (self.rules.items) |rule| {
             uses_qos2 = uses_qos2 or rule.qos == .exactly_once;
             has_outbound = has_outbound or rule.direction == .out;
+            uses_persistent_outbound_qos = uses_persistent_outbound_qos or
+                (rule.direction == .out and rule.qos != .at_most_once);
         }
         if (self.start_type == .lazy and !has_outbound) {
             return error.UnsupportedBridgeStartType;
@@ -624,6 +633,11 @@ pub const Builder = struct {
                 return error.BridgePersistentSessionRequired;
             }
         }
+        if (uses_persistent_outbound_qos and
+            (self.local_clean_session orelse self.clean_session))
+        {
+            return error.BridgePersistentSessionRequired;
+        }
         const owned_rules = try self.rules.toOwnedSlice(allocator);
         errdefer {
             for (owned_rules) |*rule| rule.deinit(allocator);
@@ -639,6 +653,8 @@ pub const Builder = struct {
             .rules = owned_rules,
             .protocol = self.protocol,
             .clean_session = self.clean_session,
+            .local_clean_session = self.local_clean_session orelse
+                self.clean_session,
             .session_expiry_interval = self.session_expiry_interval,
             .keep_alive_seconds = self.keep_alive_seconds,
             .receive_maximum = self.receive_maximum orelse
@@ -768,6 +784,7 @@ pub fn isDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "address") or
         std.mem.eql(u8, value, "topic") or
         std.mem.eql(u8, value, "cleansession") or
+        std.mem.eql(u8, value, "local_cleansession") or
         std.mem.eql(u8, value, "bridge_protocol_version") or
         std.mem.eql(u8, value, "bridge_session_expiry_interval") or
         std.mem.eql(u8, value, "keepalive_interval") or

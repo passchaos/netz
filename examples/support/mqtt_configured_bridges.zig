@@ -459,6 +459,16 @@ pub const Set = struct {
         self.* = undefined;
     }
 
+    /// Normalize every broker-local source before a final persistence
+    /// snapshot. Persistent Sessions retain retransmittable work; clean
+    /// Sessions remove their routes and queued deliveries.
+    pub fn disconnectLocalSources(self: *Set) void {
+        for (self.values) |*bridge| switch (bridge.*) {
+            .inbound => {},
+            .outbound => |*value| value.source.disconnectTransport(),
+        };
+    }
+
     pub fn needsPrimaryFailback(self: *const Set) bool {
         for (self.connector_resources) |*resources| {
             if (resources.connector_configured and
@@ -524,6 +534,13 @@ fn initOutbound(
         initialized += 1;
     }
     var properties: [1]mqtt.Property = .{.{ .four_byte = .{ .id = .session_expiry_interval, .value = source.session_expiry_interval } }};
+    const local_properties: []const mqtt.Property = if (source.local_clean_session)
+        &.{}
+    else
+        &.{.{ .four_byte = .{
+            .id = .session_expiry_interval,
+            .value = std.math.maxInt(u32),
+        } }};
     const id = stableOutboundId(source.*);
     const journal_path = if (source.usesQoS2()) try std.fmt.allocPrint(allocator, "{s}.outbound-{s}.journal", .{
         persistence_path orelse return error.BridgePersistenceRequired,
@@ -541,7 +558,12 @@ fn initOutbound(
     const notification_topic = if (source.notifications) try source.notificationTopicAlloc(allocator) else null;
     defer if (notification_topic) |topic| allocator.free(topic);
     const options = mqtt.bridge.outbound.MultiOptions{
-        .source_connect = .{ .protocol = .v5, .client_id = source.name, .clean_start = false, .properties = &.{.{ .four_byte = .{ .id = .session_expiry_interval, .value = std.math.maxInt(u32) } }} },
+        .source_connect = .{
+            .protocol = .v5,
+            .client_id = source.name,
+            .clean_start = source.local_clean_session,
+            .properties = local_properties,
+        },
         .target_connect = remoteConnectOptions(
             source,
             if (source.protocol == .v5 and
@@ -962,4 +984,40 @@ test "configured bridges use Mosquitto decorrelated restart state" {
         @as(i96, 11 * std.time.ns_per_s),
         policy.stable_connection_period.nanoseconds,
     );
+}
+
+test "configured outbound bridge maps local clean Session policy" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var shutdown: std.Io.Event = .unset;
+    var name = "local-clean".*;
+    var host = "localhost".*;
+    var filter = "out/#".*;
+    var rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &filter,
+        .qos = .at_most_once,
+        .direction = .out,
+    }};
+    const configured = [_]mqtt.broker_config.Bridge{.{
+        .name = &name,
+        .host = &host,
+        .rules = &rules,
+        .local_clean_session = true,
+    }};
+    var bridges = try Set.init(
+        allocator,
+        io,
+        &broker,
+        &configured,
+        &shutdown,
+        null,
+    );
+    defer bridges.deinit();
+    const bridge = &bridges.values[0].outbound;
+    try std.testing.expect(bridge.source.clean_session);
+    try std.testing.expect(bridge.source.isConnected());
+    bridges.disconnectLocalSources();
+    try std.testing.expect(!bridge.source.isConnected());
 }

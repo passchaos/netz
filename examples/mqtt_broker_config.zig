@@ -605,6 +605,7 @@ pub fn run(
     } else {
         try serveConfigured(&broker, service);
     }
+    bridges.disconnectLocalSources();
     if (persistence_path) |path| {
         try broker.saveSnapshot(std.Io.Dir.cwd(), path);
     }

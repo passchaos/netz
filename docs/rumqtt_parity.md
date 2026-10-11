@@ -315,6 +315,17 @@ The MQTT rule that `prefix/#` also matches the parent `prefix` is handled
 explicitly: a non-empty remote prefix maps that parent, while an empty final
 Topic Name is consumed rather than emitted or treated as a transport failure.
 
+Configured outbound bridges implement Mosquitto's `local_cleansession`
+separately from the remote `cleansession`; when omitted it inherits the remote
+setting. Clean local startup atomically replaces any earlier internal
+subscription Session, and clean shutdown removes its routes and queued
+deliveries from both live state and the persistence journal. The process gate
+queues QoS 0 while the remote is unavailable, restarts the local broker, proves
+the stale message is absent, and then forwards a fresh message. Because the
+bridge's QoS 1/2 contract depends on a recoverable source Session, combining
+outbound QoS 1/2 with a clean local Session is rejected during configuration
+instead of silently weakening delivery guarantees.
+
 QoS 0 is forwarded after the target socket write, with the expected
 fire-and-forget loss window. QoS 1 requires a persistent source Session. The
 bridge withholds PUBACK from its source subscription until the target PUBACK is

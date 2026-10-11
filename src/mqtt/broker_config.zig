@@ -1168,6 +1168,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\topic sensors/# in 1 local/ remote/
         \\topic $SYS/# in 0 "" ""
         \\cleansession false
+        \\local_cleansession true
         \\bridge_protocol_version mqttv50
         \\bridge_session_expiry_interval 0xFFFFFFFF
         \\keepalive_interval 45
@@ -1233,6 +1234,7 @@ test "MQTT broker config parses owned inbound bridges" {
     );
     try std.testing.expectEqual(mqtt.ProtocolVersion.v5, upstream.protocol);
     try std.testing.expect(!upstream.clean_session);
+    try std.testing.expect(upstream.local_clean_session);
     try std.testing.expectEqual(
         std.math.maxInt(u32),
         upstream.session_expiry_interval,
@@ -1332,6 +1334,7 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqualStrings("defaulted", bridge.clientId());
     try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, bridge.protocol);
     try std.testing.expect(!bridge.clean_session);
+    try std.testing.expect(!bridge.local_clean_session);
     try std.testing.expectEqual(@as(u16, 60), bridge.keep_alive_seconds);
     try std.testing.expectEqual(@as(u16, 9), bridge.receive_maximum);
     try std.testing.expectEqual(@as(u16, 10), bridge.max_topic_alias);
@@ -1387,6 +1390,29 @@ test "MQTT broker config applies inbound bridge defaults" {
     );
     defer disabled.deinit(std.testing.allocator);
     try std.testing.expect(!disabled.bridges[0].notifications);
+
+    var inherited_clean = try parse(std.testing.allocator,
+        \\listener 1886
+        \\allow_anonymous true
+        \\connection inherited-clean
+        \\address localhost
+        \\topic # out 0
+        \\cleansession true
+    );
+    defer inherited_clean.deinit(std.testing.allocator);
+    try std.testing.expect(inherited_clean.bridges[0].local_clean_session);
+
+    var overridden_clean = try parse(std.testing.allocator,
+        \\listener 1887
+        \\allow_anonymous true
+        \\connection overridden-clean
+        \\address localhost
+        \\topic # out 0
+        \\cleansession true
+        \\local_cleansession false
+    );
+    defer overridden_clean.deinit(std.testing.allocator);
+    try std.testing.expect(!overridden_clean.bridges[0].local_clean_session);
 
     var unlimited = try parse(std.testing.allocator,
         \\max_inflight_messages 0
@@ -1518,6 +1544,20 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "bridge_protocol_version mqttv50\n"),
     );
     try std.testing.expectError(
+        error.BridgePersistentSessionRequired,
+        parse(allocator, "persistence true\n" ++ listener ++
+            "connection local-clean-qos2\naddress localhost\n" ++
+            "topic # out 2\nbridge_protocol_version mqttv50\n" ++
+            "bridge_session_expiry_interval 60\n" ++
+            "local_cleansession true\n"),
+    );
+    try std.testing.expectError(
+        error.BridgePersistentSessionRequired,
+        parse(allocator, "persistence true\n" ++ listener ++
+            "connection local-clean-qos1\naddress localhost\n" ++
+            "topic # out 1\nlocal_cleansession true\n"),
+    );
+    try std.testing.expectError(
         error.UnsupportedBridgeProtocol,
         parse(allocator, listener ++
             "connection old\naddress localhost\ntopic # in 0\n" ++
@@ -1595,6 +1635,19 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection duplicate-ocsp\naddress localhost\ntopic # in 0\n" ++
             "bridge_cafile ca.pem\nbridge_require_ocsp true\n" ++
             "bridge_require_ocsp false\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-local-clean\naddress localhost\n" ++
+            "topic # out 0\nlocal_cleansession true\n" ++
+            "local_cleansession false\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidBoolean,
+        parse(allocator, listener ++
+            "connection invalid-local-clean\naddress localhost\n" ++
+            "topic # out 0\nlocal_cleansession sometimes\n"),
     );
     try std.testing.expectError(
         error.InvalidBoolean,

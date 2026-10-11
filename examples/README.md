@@ -135,6 +135,7 @@ address broker.example:1883 backup.example:1883
 round_robin true
 topic sensors/# in 1 local/ remote/
 cleansession false
+local_cleansession false
 remote_clientid netz-upstream
 bridge_receive_maximum 20
 bridge_max_topic_alias 10
@@ -176,7 +177,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
 `persistence_location`, `persistence_file`,
 `autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
-`cleansession`, `bridge_protocol_version`,
+`cleansession`, `local_cleansession`, `bridge_protocol_version`,
 `bridge_session_expiry_interval`, `keepalive_interval`,
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
 `bridge_max_packet_size`, `bridge_outgoing_retain`,
@@ -282,6 +283,15 @@ delivery, kills both upstream and local brokers at persistence boundaries, and
 verifies automatic resubscription and outbound recovery. A separate
 three-broker case verifies secondary takeover followed by active failback when
 the primary becomes available.
+
+`local_cleansession` controls the broker-internal source Session used by
+outbound rules and defaults to the value of `cleansession`, matching Mosquitto.
+When true, opening the source removes any previous subscriptions and queued
+deliveries, and closing it removes the replacement Session durably. A process
+restart gate verifies that an offline queued QoS 0 message is not replayed
+while a newly published message is still forwarded. Outbound QoS 1/2 requires
+a persistent local Session to preserve its delivery contract, so those rules
+combined with `local_cleansession true` fail before listeners open.
 
 Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
 Trust comes from a bounded explicit `bridge_cafile`, a non-recursive

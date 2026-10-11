@@ -15,6 +15,9 @@ pub const Options = struct {
     /// set is rejected; use another identity when reconfiguring the source.
     id: [16]u8,
     subscriptions: []const mqtt.Subscription,
+    /// Start with no prior local Session state and discard this Session when
+    /// the consumer closes. Persistent consumers retain the existing default.
+    clean_session: bool = false,
     /// Maximum concurrently selected QoS 1/2 PUBLISH packets. A selected
     /// QoS 0 event must be completed or retried before the next poll.
     receive_maximum: u16 = 16,
@@ -63,6 +66,7 @@ pub const Handle = struct {
     route_id: u64,
     receive_maximum: u16,
     session_present: bool,
+    clean_session: bool,
     active: bool = true,
 };
 
@@ -211,20 +215,24 @@ pub fn Operations(comptime Context: type) type {
             };
             try self.local_consumer_routes.ensureUnusedCapacity(self.allocator, 1);
             const previous = self.sessions.find(client_id, now);
+            const previous_route_id = if (previous) |handle|
+                try self.sessions.routeId(handle)
+            else
+                null;
             if (previous) |handle| {
-                const route_id = try self.sessions.routeId(handle);
-                if (self.local_consumer_routes.contains(route_id)) {
+                if (self.local_consumer_routes.contains(previous_route_id.?)) {
                     return error.LocalConsumerAlreadyOpen;
                 }
-                if (!try localConsumerSubscriptionsEqualLocked(
-                    self,
-                    handle,
-                    options.subscriptions,
-                )) return error.LocalConsumerIdentityMismatch;
+                if (!options.clean_session and
+                    !try localConsumerSubscriptionsEqualLocked(
+                        self,
+                        handle,
+                        options.subscriptions,
+                    )) return error.LocalConsumerIdentityMismatch;
             }
             const opened = try self.sessions.open(
                 client_id,
-                false,
+                options.clean_session,
                 std.math.maxInt(u32),
                 now,
             );
@@ -235,6 +243,14 @@ pub fn Operations(comptime Context: type) type {
                 ) catch {};
                 self.sessions.discardHandle(opened.handle) catch {};
             };
+            if (previous_route_id) |route_id| {
+                if (route_id != opened.route_id) {
+                    persistent_changed = true;
+                    _ = try self.router.removeSubscriber(
+                        session_route.sessionSubscriberId(route_id),
+                    );
+                }
+            }
             if (!opened.session_present) {
                 persistent_changed = true;
                 for (options.subscriptions) |subscription| {
@@ -318,6 +334,7 @@ pub fn Operations(comptime Context: type) type {
                 .route_id = opened.route_id,
                 .receive_maximum = options.receive_maximum,
                 .session_present = opened.session_present,
+                .clean_session = options.clean_session,
             };
         }
 
@@ -327,18 +344,38 @@ pub fn Operations(comptime Context: type) type {
         ) void {
             if (!consumer.active) return;
             self.state_mutex.lockUncancelable(self.io);
+            var persistent_changed = false;
             if (ownsConsumerLocked(self, consumer)) {
-                // Return a selected QoS 0 message before open() changes the Session
-                // generation. QoS 1/2 become retransmittable on the next open.
-                self.sessions.disconnect(
-                    consumer.session,
-                    null,
-                    std.Io.Clock.awake.now(self.io),
-                ) catch unreachable;
                 _ = self.local_consumer_routes.remove(consumer.route_id);
+                if (consumer.clean_session) {
+                    _ = self.router.removeSubscriber(
+                        session_route.sessionSubscriberId(consumer.route_id),
+                    ) catch unreachable;
+                    self.sessions.discardHandle(
+                        consumer.session,
+                    ) catch unreachable;
+                    persistent_changed = true;
+                } else {
+                    // Return a selected QoS 0 message before open() changes the
+                    // Session generation. QoS 1/2 become retransmittable on the
+                    // next open.
+                    self.sessions.disconnect(
+                        consumer.session,
+                        null,
+                        std.Io.Clock.awake.now(self.io),
+                    ) catch unreachable;
+                }
+                Context.recordPersistentChangeLocked(
+                    self,
+                    persistent_changed,
+                );
             }
             self.state_mutex.unlock(self.io);
             consumer.active = false;
+            Context.finishPartialPersistentChange(
+                self,
+                persistent_changed,
+            );
         }
 
         /// Return one owned Session transmission, or null when no work is ready.

@@ -62,6 +62,7 @@ pub const Client = struct {
     broker: *broker_mod.Broker,
     id: [16]u8,
     client_id: []u8,
+    clean_session: bool,
     shutdown: *std.Io.Event,
     wake: *broker_mod.LocalConsumerWake,
     subscriptions: std.ArrayList(subscription.Owned) = .empty,
@@ -85,13 +86,19 @@ pub const Client = struct {
         wake.* = .{};
         var receipts = session.Store.init(allocator, .{ .max_sessions = 1 });
         errdefer receipts.deinit();
-        const opened = try receipts.open(client_id, false, std.math.maxInt(u32), .zero);
+        const opened = try receipts.open(
+            client_id,
+            options.clean_start,
+            if (options.clean_start) 0 else std.math.maxInt(u32),
+            .zero,
+        );
         return .{
             .allocator = allocator,
             .io = io,
             .broker = broker,
             .id = id,
             .client_id = client_id,
+            .clean_session = options.clean_start,
             .shutdown = shutdown,
             .wake = wake,
             .receipts = receipts,
@@ -134,6 +141,7 @@ pub const Client = struct {
             .subscriptions = values,
             .receive_maximum = 1,
             .wake = self.wake,
+            .clean_session = self.clean_session,
         });
         errdefer self.broker.closeLocalConsumer(&consumer);
         self.consumer = consumer;
