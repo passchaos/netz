@@ -1840,6 +1840,11 @@ pub const Listener = struct {
     /// Optional simultaneous admitted-client limit for this listener. The
     /// finite `connection_count` remains the number of accept attempts.
     max_connections: ?usize = null,
+    /// Endpoints with the same group share `max_connections`. The identifier
+    /// must be a valid index whose root endpoint names itself, and every group
+    /// member must configure the same limit. Null gives this endpoint an
+    /// independent cap.
+    capacity_group: ?usize = null,
     /// Finite accept count for deterministic process/test teardown.
     connection_count: usize,
 };
@@ -1866,8 +1871,35 @@ pub const ListenerEndpoint = struct {
     /// `accept_concurrency` greater than this value to actively close excess
     /// peers instead of leaving them queued in the transport backlog.
     max_connections: ?usize = null,
+    /// Endpoints with the same group share `max_connections`. The identifier
+    /// must be a valid index whose root endpoint names itself, and every group
+    /// member must configure the same limit. Null gives this endpoint an
+    /// independent cap.
+    capacity_group: ?usize = null,
     accept_concurrency: usize = 1,
 };
+
+fn validateCapacityGroup(
+    comptime ListenerType: type,
+    listeners: []const ListenerType,
+    listener: ListenerType,
+    listener_index: usize,
+) error{InvalidProperty}!void {
+    const group = listener.capacity_group orelse return;
+    if (group >= listeners.len or
+        listeners[group].capacity_group != group or
+        listener.max_connections == null)
+    {
+        return error.InvalidProperty;
+    }
+    for (listeners[0..listener_index]) |previous| {
+        if (previous.capacity_group == group and
+            previous.max_connections != listener.max_connections)
+        {
+            return error.InvalidProperty;
+        }
+    }
+}
 
 pub const ListenerErrorStage = enum {
     accept,
@@ -3386,7 +3418,7 @@ pub const Broker = struct {
         listeners: []const Listener,
     ) anyerror!void {
         var connection_count: usize = 0;
-        for (listeners) |listener| {
+        for (listeners, 0..) |listener, listener_index| {
             _ = try listener_namespace.Namespace.init(
                 listener.namespace.prefix,
             );
@@ -3402,6 +3434,12 @@ pub const Broker = struct {
             if (listener.max_connections == 0) {
                 return error.InvalidProperty;
             }
+            try validateCapacityGroup(
+                Listener,
+                listeners,
+                listener,
+                listener_index,
+            );
             connection_count = std.math.add(
                 usize,
                 connection_count,
@@ -3468,14 +3506,16 @@ pub const Broker = struct {
         }
 
         var next_result: usize = 0;
-        for (listeners, capacities) |listener, *capacity| {
+        for (listeners, 0..) |listener, listener_index| {
+            const capacity_index = listener.capacity_group orelse
+                listener_index;
             for (0..listener.connection_count) |_| {
                 const result = &errors[next_result];
                 next_result += 1;
                 const accept_task = ListenerAcceptTask{
                     .broker = self,
                     .listener = self.listenerWithTraffic(listener),
-                    .capacity = capacity,
+                    .capacity = &capacities[capacity_index],
                     .result = result,
                 };
                 group.async(
@@ -3520,7 +3560,7 @@ pub const Broker = struct {
         if (options.accept_error_backoff.nanoseconds < 0) {
             return error.InvalidProperty;
         }
-        for (listeners) |listener| {
+        for (listeners, 0..) |listener, listener_index| {
             _ = try listener_namespace.Namespace.init(
                 listener.namespace.prefix,
             );
@@ -3539,6 +3579,12 @@ pub const Broker = struct {
             if (listener.max_connections == 0) {
                 return error.InvalidProperty;
             }
+            try validateCapacityGroup(
+                ListenerEndpoint,
+                listeners,
+                listener,
+                listener_index,
+            );
         }
         const capacities = try self.allocator.alloc(
             ListenerCapacity,
@@ -3581,7 +3627,9 @@ pub const Broker = struct {
             group.cancel(self.io);
         };
 
-        for (listeners, capacities, 0..) |listener, *capacity, listener_index| {
+        for (listeners, 0..) |listener, listener_index| {
+            const capacity_index = listener.capacity_group orelse
+                listener_index;
             for (0..listener.accept_concurrency) |_| {
                 try group.concurrent(
                     self.io,
@@ -3591,7 +3639,7 @@ pub const Broker = struct {
                         .listener = self.listenerEndpointWithTraffic(
                             listener,
                         ),
-                        .capacity = capacity,
+                        .capacity = &capacities[capacity_index],
                         .listener_index = listener_index,
                     }},
                 );

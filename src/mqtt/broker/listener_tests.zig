@@ -1828,6 +1828,159 @@ test "listener supervisor rejects over-capacity peer and reuses slot" {
     try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
 }
 
+test "listener supervisor shares capacity across one logical listener group" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 2,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var first_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer first_server.deinit();
+    var second_server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer second_server.deinit();
+
+    const Supervisor = struct {
+        broker: *Broker,
+        endpoints: [2]mqtt.broker.ListenerEndpoint,
+        shutdown: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListenersUntil(&self.endpoints, .{
+                .shutdown = &self.shutdown,
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var supervisor = Supervisor{
+        .broker = &broker,
+        .endpoints = .{
+            .{
+                .source = first_server.pendingSource(),
+                .max_connections = 1,
+                .capacity_group = 0,
+                .accept_concurrency = 2,
+            },
+            .{
+                .source = second_server.pendingSource(),
+                .max_connections = 1,
+                .capacity_group = 0,
+                .accept_concurrency = 2,
+            },
+        },
+    };
+    const thread = try std.Thread.spawn(.{}, Supervisor.run, .{&supervisor});
+    var joined = false;
+    defer if (!joined) {
+        supervisor.shutdown.set(io);
+        thread.join();
+    };
+
+    var held = try runtime.Client.connect(
+        allocator,
+        io,
+        first_server.address(),
+        .{ .protocol = .v5, .client_id = "group-capacity-held" },
+    );
+    defer held.close();
+    try held.ping();
+    try std.testing.expectError(
+        error.ConnectionClosed,
+        runtime.Client.connect(
+            allocator,
+            io,
+            second_server.address(),
+            .{ .protocol = .v5, .client_id = "group-capacity-refused" },
+        ),
+    );
+    try held.disconnect(0);
+    try waitForPeerClose(&held);
+
+    var replacement = try runtime.Client.connect(
+        allocator,
+        io,
+        second_server.address(),
+        .{ .protocol = .v5, .client_id = "group-capacity-replacement" },
+    );
+    defer replacement.close();
+    try replacement.ping();
+    supervisor.shutdown.set(io);
+    try waitForPeerClose(&replacement);
+
+    thread.join();
+    joined = true;
+    if (supervisor.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
+}
+
+test "listener supervisor rejects malformed capacity groups" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+    var shutdown: std.Io.Event = .unset;
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.serveListenersUntil(&.{.{
+            .source = server.pendingSource(),
+            .max_connections = 1,
+            .capacity_group = 1,
+        }}, .{ .shutdown = &shutdown }),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.serveListenersUntil(&.{
+            .{
+                .source = server.pendingSource(),
+                .max_connections = 1,
+                .capacity_group = 0,
+            },
+            .{
+                .source = server.pendingSource(),
+                .max_connections = 2,
+                .capacity_group = 0,
+            },
+        }, .{ .shutdown = &shutdown }),
+    );
+}
+
 test "listener supervisor isolates malformed CONNECT errors" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

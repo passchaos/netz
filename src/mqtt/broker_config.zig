@@ -38,6 +38,9 @@ pub const BridgeStartType = bridge_config.StartType;
 
 pub const Listener = struct {
     address: net.IpAddress,
+    /// An omitted bind address without `socket_domain` requests separate
+    /// IPv4 and IPv6 wildcard sockets when both families are available.
+    bind_all_socket_domains: bool = false,
     socket_domain: ?SocketDomain = null,
     protocol: Protocol = .mqtt,
     password_file: []u8 = &.{},
@@ -359,7 +362,10 @@ fn parseSources(
                 if (words.next() != null) return error.InvalidDirective;
                 const address = net.IpAddress.parse(host, port) catch
                     return error.InvalidDirective;
-                try listeners.append(allocator, .{ .address = address });
+                try listeners.append(allocator, .{
+                    .address = address,
+                    .bind_all_socket_domains = explicit_host == null,
+                });
                 try listener_seen.append(allocator, .{
                     .address_explicit = explicit_host != null,
                 });
@@ -584,6 +590,7 @@ fn parseSources(
                         .ipv6
                     else
                         return error.InvalidDirective;
+                    listener.bind_all_socket_domains = false;
                     const port = listener.address.getPort();
                     if (!seen.address_explicit) {
                         listener.address = switch (listener.socket_domain.?) {
@@ -1221,6 +1228,7 @@ test "MQTT broker config scopes socket domains to listeners" {
     defer config.deinit(allocator);
 
     try std.testing.expectEqual(SocketDomain.ipv4, config.listeners[0].socket_domain.?);
+    try std.testing.expect(!config.listeners[0].bind_all_socket_domains);
     try std.testing.expect(config.listeners[0].address == .ip4);
     try std.testing.expectEqualSlices(
         u8,
@@ -1236,7 +1244,25 @@ test "MQTT broker config scopes socket domains to listeners" {
         &config.listeners[1].address.ip6.bytes,
     );
     try std.testing.expect(config.listeners[2].address == .ip6);
+    try std.testing.expect(!config.listeners[2].bind_all_socket_domains);
     try std.testing.expectEqual(@as(u8, 1), config.listeners[2].address.ip6.bytes[15]);
+}
+
+test "MQTT broker config keeps omitted socket domain dual-stack intent" {
+    var config = try parse(std.testing.allocator,
+        \\listener 1883
+        \\allow_anonymous true
+        \\listener 1884 127.0.0.1
+        \\allow_anonymous true
+    );
+    defer config.deinit(std.testing.allocator);
+
+    try std.testing.expect(config.listeners[0].bind_all_socket_domains);
+    try std.testing.expect(!config.listeners[1].bind_all_socket_domains);
+    try std.testing.expectEqual(
+        @as(?SocketDomain, null),
+        config.listeners[0].socket_domain,
+    );
 }
 
 test "MQTT broker config rejects invalid socket domains" {

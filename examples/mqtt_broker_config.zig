@@ -195,76 +195,85 @@ const ConfiguredServer = union(enum) {
     }
 };
 
-fn listenMqtt(
+fn openConfiguredServer(
     allocator: std.mem.Allocator,
     io: std.Io,
-    prebound: ?std.Io.net.Server,
-    address: std.Io.net.IpAddress,
-    limits: mqtt.runtime.Limits,
-) !mqtt.runtime.Server {
-    return if (prebound) |listener|
-        mqtt.runtime.Server.initWithListener(allocator, io, listener, limits)
-    else
-        mqtt.runtime.Server.listen(allocator, io, address, limits);
-}
+    config: mqtt.broker_config.Config,
+    configured: mqtt.broker_config.Listener,
+    identity: ?mqtt.tls_runtime.ServerIdentity,
+    identity_provider: ?mqtt.tls_runtime.ServerIdentityProvider,
+    client_auth: ?mqtt.tls_runtime.ClientAuthPolicy,
+    bind_address: std.Io.net.IpAddress,
+) !ConfiguredServer {
+    var listener = try netz.runtime.listenTcp(io, bind_address, .{
+        .reuse_address = true,
+        .ip6_only = if (bind_address == .ip6) true else null,
+    });
+    errdefer listener.deinit(io);
 
-fn listenMqttTls(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    prebound: ?std.Io.net.Server,
-    address: std.Io.net.IpAddress,
-    options: mqtt.tls_runtime.ListenOptions,
-) !mqtt.tls_runtime.Server {
-    return if (prebound) |listener|
-        mqtt.tls_runtime.Server.initWithListener(
+    return if (identity_provider) |provider| switch (configured.protocol) {
+        .mqtt => .{ .mqtt_tls = try mqtt.tls_runtime.Server.initWithListener(
             allocator,
             io,
             listener,
-            options,
-        )
-    else
-        mqtt.tls_runtime.Server.listen(allocator, io, address, options);
-}
-
-fn listenMqttWebsocket(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    prebound: ?std.Io.net.Server,
-    address: std.Io.net.IpAddress,
-    options: mqtt.websocket_runtime.ListenOptions,
-) !mqtt.websocket_runtime.Server {
-    return if (prebound) |listener|
-        mqtt.websocket_runtime.Server.initWithListener(
+            .{
+                .identity = identity.?,
+                .identity_provider = provider,
+                .client_auth = client_auth,
+                .alpn_protocols = &.{"mqtt"},
+                .require_alpn = false,
+                .limits = listenerLimits(config, configured),
+                .tcp_nodelay = config.set_tcp_nodelay,
+            },
+        ) },
+        .websockets => .{
+            .secure_websockets = try mqtt.websocket_runtime.TlsServer.initWithListener(
+                allocator,
+                io,
+                listener,
+                .{
+                    .identity = identity.?,
+                    .identity_provider = provider,
+                    .client_auth = client_auth,
+                    .allowed_origins = configured.websocket_origins.items,
+                    .max_head_bytes = config.websocket_headers_size,
+                    .limits = listenerLimits(config, configured),
+                    .tcp_nodelay = config.set_tcp_nodelay,
+                },
+            ),
+        },
+    } else switch (configured.protocol) {
+        .mqtt => .{ .mqtt = try mqtt.runtime.Server.initWithListener(
             allocator,
             io,
             listener,
-            options,
-        )
-    else
-        mqtt.websocket_runtime.Server.listen(allocator, io, address, options);
+            listenerLimits(config, configured),
+        ) },
+        .websockets => .{
+            .websockets = try mqtt.websocket_runtime.Server.initWithListener(
+                allocator,
+                io,
+                listener,
+                .{
+                    .limits = listenerLimits(config, configured),
+                    .allowed_origins = configured.websocket_origins.items,
+                    .max_head_bytes = config.websocket_headers_size,
+                },
+            ),
+        },
+    };
 }
 
-fn listenMqttWebsocketTls(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    prebound: ?std.Io.net.Server,
-    address: std.Io.net.IpAddress,
-    options: mqtt.websocket_runtime.TlsListenOptions,
-) !mqtt.websocket_runtime.TlsServer {
-    return if (prebound) |listener|
-        mqtt.websocket_runtime.TlsServer.initWithListener(
-            allocator,
-            io,
-            listener,
-            options,
-        )
-    else
-        mqtt.websocket_runtime.TlsServer.listen(
-            allocator,
-            io,
-            address,
-            options,
-        );
+fn unavailableSocketFamily(err: anyerror) bool {
+    return switch (err) {
+        error.AddressFamilyUnsupported,
+        error.ProtocolUnsupportedBySystem,
+        error.ProtocolUnsupportedByAddressFamily,
+        error.SocketModeUnsupported,
+        error.OptionUnsupported,
+        => true,
+        else => false,
+    };
 }
 
 fn listenerLimits(
@@ -461,10 +470,12 @@ pub fn run(
         null;
     defer if (reload_signal) |*signal| signal.deinit();
 
-    const servers = try allocator.alloc(
-        ConfiguredServer,
+    const maximum_server_count = std.math.mul(
+        usize,
         config.listeners.len,
-    );
+        2,
+    ) catch return error.IntegerOverflow;
+    const servers = try allocator.alloc(ConfiguredServer, maximum_server_count);
     defer allocator.free(servers);
     var initialized_servers: usize = 0;
     defer {
@@ -475,90 +486,26 @@ pub fn run(
     }
     const listeners = try allocator.alloc(
         mqtt.broker.Listener,
-        config.listeners.len,
+        maximum_server_count,
     );
     defer allocator.free(listeners);
     const endpoints = try allocator.alloc(
         mqtt.broker.ListenerEndpoint,
-        config.listeners.len,
+        maximum_server_count,
     );
     defer allocator.free(endpoints);
+    const server_config_indices = try allocator.alloc(
+        usize,
+        maximum_server_count,
+    );
+    defer allocator.free(server_config_indices);
     const security_policies = try allocator.alloc(
         reloadable_security.ListenerPolicy,
         config.listeners.len,
     );
     defer allocator.free(security_policies);
 
-    for (config.listeners, 0..) |configured, index| {
-        var prebound_listener: ?std.Io.net.Server =
-            if (configured.socket_domain) |domain|
-                try netz.runtime.listenTcp(io, configured.address, .{
-                    .reuse_address = true,
-                    .ip6_only = domain == .ipv6,
-                })
-            else
-                null;
-        errdefer if (prebound_listener) |*listener| listener.deinit(io);
-        servers[index] = if (identities.provider(index)) |identity_provider|
-            switch (configured.protocol) {
-                .mqtt => .{ .mqtt_tls = try listenMqttTls(
-                    allocator,
-                    io,
-                    prebound_listener,
-                    configured.address,
-                    .{
-                        .identity = identities.initialIdentity(index).?,
-                        .identity_provider = identity_provider,
-                        .client_auth = identities.initialClientAuth(index),
-                        .alpn_protocols = &.{"mqtt"},
-                        .require_alpn = false,
-                        .limits = listenerLimits(config, configured),
-                        .tcp_nodelay = config.set_tcp_nodelay,
-                    },
-                ) },
-                .websockets => .{
-                    .secure_websockets = try listenMqttWebsocketTls(
-                        allocator,
-                        io,
-                        prebound_listener,
-                        configured.address,
-                        .{
-                            .identity = identities.initialIdentity(index).?,
-                            .identity_provider = identity_provider,
-                            .client_auth = identities.initialClientAuth(index),
-                            .allowed_origins = configured.websocket_origins.items,
-                            .max_head_bytes = config.websocket_headers_size,
-                            .limits = listenerLimits(config, configured),
-                            .tcp_nodelay = config.set_tcp_nodelay,
-                        },
-                    ),
-                },
-            }
-        else switch (configured.protocol) {
-            .mqtt => .{ .mqtt = try listenMqtt(
-                allocator,
-                io,
-                prebound_listener,
-                configured.address,
-                listenerLimits(config, configured),
-            ) },
-            .websockets => .{
-                .websockets = try listenMqttWebsocket(
-                    allocator,
-                    io,
-                    prebound_listener,
-                    configured.address,
-                    .{
-                        .limits = listenerLimits(config, configured),
-                        .allowed_origins = configured.websocket_origins.items,
-                        .max_head_bytes = config.websocket_headers_size,
-                    },
-                ),
-            },
-        };
-        prebound_listener = null;
-        initialized_servers += 1;
-
+    for (config.listeners, 0..) |configured, config_index| {
         var accept = base_accept;
         if (config.per_listener_settings) {
             accept.allow_zero_length_client_id =
@@ -572,68 +519,136 @@ pub fn run(
         accept.topic_alias_maximum = configured.max_topic_alias;
         accept.max_outgoing_topic_aliases =
             configured.max_topic_alias_broker;
-        security_policies[index] = security.listenerPolicy(
-            index,
+        security_policies[config_index] = security.listenerPolicy(
+            config_index,
             configured.allow_anonymous,
         );
-        const listener_access_control = security_policies[index]
+        const listener_access_control = security_policies[config_index]
             .accessControl();
-        listeners[index] = .{
-            .source = servers[index].pendingSource(),
-            .namespace = try mqtt.listener_namespace.Namespace.init(
-                configured.mount_point,
-            ),
-            .auto_client_id_prefix = config.autoIdPrefixForListener(
-                configured,
-            ),
-            .accept = accept,
-            .authorization = .{
-                .connect = if (security.hasPasswordFile(index) and
-                    !configured.use_identity_as_username and
-                    !configured.use_subject_as_username) .{
-                    .context = &security_policies[index],
-                    .authorize = reloadable_security.ListenerPolicy
-                        .authorizeConnect,
-                } else null,
-                .access_control = listener_access_control,
-                .use_username_as_client_id = configured.use_username_as_client_id,
-                .use_identity_as_username = configured.use_identity_as_username,
-                .use_subject_as_username = configured.use_subject_as_username,
-                .retained_source_id = configured.address.getPort(),
-            },
-            .max_connections = configured.max_connections,
-            .connection_count = configured.max_connections,
+        const authorization = mqtt.broker.ListenerAuthorization{
+            .connect = if (security.hasPasswordFile(config_index) and
+                !configured.use_identity_as_username and
+                !configured.use_subject_as_username) .{
+                .context = &security_policies[config_index],
+                .authorize = reloadable_security.ListenerPolicy
+                    .authorizeConnect,
+            } else null,
+            .access_control = listener_access_control,
+            .use_username_as_client_id = configured.use_username_as_client_id,
+            .use_identity_as_username = configured.use_identity_as_username,
+            .use_subject_as_username = configured.use_subject_as_username,
+            .retained_source_id = configured.address.getPort(),
         };
         const accept_concurrency = std.math.add(
             usize,
             @min(configured.max_connections, active_connection_limit),
             1,
         ) catch return error.IntegerOverflow;
-        endpoints[index] = .{
-            .source = listeners[index].source,
-            .namespace = listeners[index].namespace,
-            .auto_client_id_prefix = listeners[index].auto_client_id_prefix,
-            .accept = listeners[index].accept,
-            .authorization = listeners[index].authorization,
-            .max_connections = configured.max_connections,
-            .accept_concurrency = accept_concurrency,
-        };
+        const namespace = try mqtt.listener_namespace.Namespace.init(
+            configured.mount_point,
+        );
+        const identity = identities.initialIdentity(config_index);
+        const identity_provider = identities.provider(config_index);
+        const client_auth = identities.initialClientAuth(config_index);
+        var bind_addresses: [2]std.Io.net.IpAddress = undefined;
+        const requested_count: usize = if (configured.bind_all_socket_domains)
+            2
+        else
+            1;
+        if (configured.bind_all_socket_domains) {
+            const port = configured.address.getPort();
+            bind_addresses = .{
+                .{ .ip4 = .unspecified(port) },
+                .{ .ip6 = .unspecified(port) },
+            };
+        } else {
+            bind_addresses[0] = configured.address;
+        }
+
+        const group_start = initialized_servers;
+        var last_unavailable_error: ?anyerror = null;
+        for (bind_addresses[0..requested_count]) |bind_address| {
+            servers[initialized_servers] = openConfiguredServer(
+                allocator,
+                io,
+                config,
+                configured,
+                identity,
+                identity_provider,
+                client_auth,
+                bind_address,
+            ) catch |err| {
+                if (configured.bind_all_socket_domains and
+                    unavailableSocketFamily(err))
+                {
+                    last_unavailable_error = err;
+                    continue;
+                }
+                return err;
+            };
+            server_config_indices[initialized_servers] = config_index;
+            initialized_servers += 1;
+        }
+        const group_count = initialized_servers - group_start;
+        if (group_count == 0) {
+            return last_unavailable_error orelse
+                error.AddressFamilyUnsupported;
+        }
+        const capacity_group = if (group_count > 1) group_start else null;
+        for (group_start..initialized_servers) |server_index| {
+            const group_offset = server_index - group_start;
+            const finite_count = configured.max_connections / group_count +
+                @intFromBool(
+                    group_offset < configured.max_connections % group_count,
+                );
+            listeners[server_index] = .{
+                .source = servers[server_index].pendingSource(),
+                .namespace = namespace,
+                .auto_client_id_prefix = config.autoIdPrefixForListener(
+                    configured,
+                ),
+                .accept = accept,
+                .authorization = authorization,
+                .max_connections = configured.max_connections,
+                .capacity_group = capacity_group,
+                .connection_count = finite_count,
+            };
+            endpoints[server_index] = .{
+                .source = listeners[server_index].source,
+                .namespace = listeners[server_index].namespace,
+                .auto_client_id_prefix = listeners[server_index]
+                    .auto_client_id_prefix,
+                .accept = listeners[server_index].accept,
+                .authorization = listeners[server_index].authorization,
+                .max_connections = configured.max_connections,
+                .capacity_group = capacity_group,
+                .accept_concurrency = accept_concurrency,
+            };
+        }
     }
+
+    const active_servers = servers[0..initialized_servers];
+    const active_listeners = listeners[0..initialized_servers];
+    const active_endpoints = endpoints[0..initialized_servers];
 
     if (run_options.finite_test) {
         std.debug.print(
             "netz MQTT 3.1.1/5 broker configured {d} listeners for {d} " ++
                 "clients server_io=zio-std-io\n",
-            .{ listeners.len, connection_count },
+            .{ config.listeners.len, connection_count },
         );
     } else {
         std.debug.print(
             "netz MQTT 3.1.1/5 broker configured {d} listeners " ++
                 "global_max_connections={d} server_io=zio-std-io\n",
-            .{ listeners.len, active_connection_limit },
+            .{ config.listeners.len, active_connection_limit },
         );
     }
-    for (servers, config.listeners) |server, configured| {
+    for (active_servers, server_config_indices[0..initialized_servers]) |
+        server,
+        config_index,
+    | {
+        const configured = config.listeners[config_index];
         std.debug.print(
             "  {s} {f} mount_point={s} max_connections={d}\n",
             .{
@@ -665,10 +680,10 @@ pub fn run(
     }
 
     const service: Service = if (run_options.finite_test)
-        .{ .finite = listeners }
+        .{ .finite = active_listeners }
     else
         .{ .continuous = .{
-            .listeners = endpoints,
+            .listeners = active_endpoints,
             .shutdown = &shutdown,
         } };
     if (config.persistence or has_reloadable_files or bridges.values.len != 0) {

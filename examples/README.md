@@ -212,8 +212,10 @@ selects `0.0.0.0` or `::`; an explicit address from the other family is
 rejected. IPv6 listeners set `IPV6_V6ONLY` before bind, so an IPv4-mapped
 connection cannot bypass the policy. Backends that cannot apply that pre-bind
 option return `OptionUnsupported` instead of silently creating a dual-stack
-socket. Without `socket_domain`, the current default remains the existing IPv4
-wildcard.
+socket. Without an explicit bind address or `socket_domain`, netz opens
+separate IPv4 and IPv6 wildcard sockets, skips a socket family only when the
+platform reports that family unsupported, and applies one shared logical
+listener connection limit across both sockets.
 
 Each `connection` creates an independently reconnecting one-way bridge.
 One `address` directive containing one or more `host[:port]` targets (or

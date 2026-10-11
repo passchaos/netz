@@ -10,9 +10,10 @@ const net = std.Io.net;
 pub const Options = struct {
     kernel_backlog: u31 = std.Io.net.default_kernel_backlog,
     reuse_address: bool = false,
-    /// Reject IPv4-mapped connections on an IPv6 listener. This option must be
-    /// applied before bind, so unsupported `std.Io` backends fail closed.
-    ip6_only: bool = false,
+    /// Null leaves the platform default unchanged. False explicitly permits
+    /// IPv4-mapped connections and true rejects them. Either explicit policy
+    /// must be applied before bind, so unsupported backends fail closed.
+    ip6_only: ?bool = null,
 };
 
 /// Create a TCP listener while retaining Netz's `std.Io.net.Server` protocol
@@ -24,7 +25,7 @@ pub fn listen(
     options: Options,
 ) net.IpAddress.ListenError!net.Server {
     _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
-    if (options.ip6_only and address != .ip6) {
+    if (options.ip6_only != null and address != .ip6) {
         return error.OptionUnsupported;
     }
 
@@ -41,7 +42,7 @@ pub fn listen(
         // Match std.Io's reuse_address behavior where SO_REUSEPORT exists.
         socket.setReusePort(true) catch {};
     }
-    if (options.ip6_only) try setIpv6Only(socket);
+    if (options.ip6_only) |enabled| try setIpv6Only(socket, enabled);
 
     socket.bind(.{ .ip = zioIpAddress(address) }) catch |err|
         return mapBindError(err);
@@ -60,18 +61,21 @@ pub fn listen(
     };
 }
 
-fn setIpv6Only(socket: zio.net.Socket) net.IpAddress.ListenError!void {
+fn setIpv6Only(
+    socket: zio.net.Socket,
+    enabled: bool,
+) net.IpAddress.ListenError!void {
     const option: u32 = switch (builtin.os.tag) {
         .linux => 26,
         .windows, .macos, .ios, .freebsd, .netbsd, .openbsd, .dragonfly => 27,
         else => return error.OptionUnsupported,
     };
-    const enabled: c_int = 1;
+    const value: c_int = @intFromBool(enabled);
     zio.os.net.setsockopt(
         socket.handle,
         zio.os.net.IPPROTO.IPV6,
         option,
-        std.mem.asBytes(&enabled),
+        std.mem.asBytes(&value),
     ) catch return error.OptionUnsupported;
 }
 

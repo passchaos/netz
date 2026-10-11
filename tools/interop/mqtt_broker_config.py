@@ -744,6 +744,55 @@ def run_ipv6_socket_domain_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_default_dual_socket_domain_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    config = directory / "default-dual-socket-domain.conf"
+    config.write_text(
+        f"listener {port}\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 2 clients" not in ready:
+        raise RuntimeError(f"dual-family configured broker failed to start: {ready}")
+
+    clients: list[socket.socket] = []
+    try:
+        for address in (("127.0.0.1", port), ("::1", port)):
+            client = socket.create_connection(address, timeout=5)
+            client.settimeout(5)
+            clients.append(client)
+        for client, client_id in zip(clients, ("dual-v4", "dual-v6")):
+            client.sendall(connect_packet(client_id))
+            if connack_reason(read_mqtt_packet(client)) != 0:
+                raise AssertionError(
+                    f"default dual-family MQTT CONNECT failed for {client_id}"
+                )
+            client.sendall(b"\xe0\x00")
+    finally:
+        for client in clients:
+            client.close()
+
+    try:
+        return_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("dual-family configured broker did not finish")
+    if return_code != 0:
+        raise RuntimeError(
+            f"dual-family configured broker exited {return_code}: "
+            + process.stdout.read()
+        )
+
+
 def run_per_listener_security_case(broker: Path, directory: Path) -> None:
     first_passwords = directory / "listener-first.pwfile"
     first_passwords.write_text(
@@ -5262,6 +5311,7 @@ def main() -> None:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
+        run_default_dual_socket_domain_case(args.broker, directory)
         run_accepted_protocol_versions_case(args.broker, directory)
         run_proxy_protocol_case(args.broker, directory)
         run_websocket_origins_case(args.broker, directory)
@@ -5319,7 +5369,7 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
-        "IPv4/IPv6-only TCP/TLS/WS/WSS listener domains, "
+        "default dual-family and IPv4/IPv6-only TCP/TLS/WS/WSS listeners, "
         "global client-session plus global/listener live-connection capacity, "
         "persistent-client and "
         "retained-message "
