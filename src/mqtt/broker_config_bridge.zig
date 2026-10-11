@@ -1,4 +1,4 @@
-//! Owned Mosquitto-style inbound bridge configuration.
+//! Owned Mosquitto-style bridge configuration.
 //!
 //! The top-level broker parser owns scope selection. This module keeps the
 //! bridge grammar, validation, and allocation lifecycle out of the already
@@ -56,6 +56,18 @@ pub const Rule = struct {
     qos: mqtt.QoS,
     local_prefix: []u8 = &.{},
     remote_prefix: []u8 = &.{},
+    direction: Direction = .in,
+
+    /// Allocate the unprefixed outbound filter, preserving a shared-subscription
+    /// wrapper around its unprefixed inner Topic Filter.
+    pub fn outboundFilterAlloc(self: Rule, allocator: std.mem.Allocator) Error![]u8 {
+        try mqtt.validateTopicFilter(self.filter);
+        const inner = rule_helpers.effectiveFilter(self.filter);
+        if (!std.mem.startsWith(u8, inner, self.remote_prefix)) return error.InvalidSubscription;
+        const base = inner[self.remote_prefix.len..];
+        if (!std.mem.startsWith(u8, self.filter, "$share/")) return allocator.dupe(u8, base);
+        return std.mem.concat(allocator, u8, &.{ self.filter[0 .. self.filter.len - inner.len], base });
+    }
 
     fn deinit(self: *Rule, allocator: std.mem.Allocator) void {
         allocator.free(self.filter);
@@ -64,6 +76,8 @@ pub const Rule = struct {
         self.* = undefined;
     }
 };
+
+pub const Direction = enum { in, out };
 
 pub const Endpoint = struct {
     host: []const u8,
@@ -140,6 +154,11 @@ pub const Bridge = struct {
         for (self.rules) |rule| {
             if (rule.qos == .exactly_once) return true;
         }
+        return false;
+    }
+
+    pub fn hasOutbound(self: Bridge) bool {
+        for (self.rules) |rule| if (rule.direction != .in) return true;
         return false;
     }
 
@@ -535,11 +554,9 @@ pub const Builder = struct {
         words: anytype,
     ) Error!void {
         const topic = words.next() orelse return error.InvalidDirective;
-        const direction = words.next() orelse
+        const direction_text = words.next() orelse
             return error.UnsupportedBridgeDirection;
-        if (!std.mem.eql(u8, direction, "in")) {
-            return error.UnsupportedBridgeDirection;
-        }
+        const direction = std.meta.stringToEnum(Direction, direction_text) orelse return error.UnsupportedBridgeDirection;
         const qos = switch (try parseInteger(u2, words.next() orelse
             return error.InvalidDirective)) {
             0 => mqtt.QoS.at_most_once,
@@ -559,6 +576,7 @@ pub const Builder = struct {
         );
         errdefer allocator.free(filter);
         for (self.rules.items) |previous| {
+            if (previous.direction != direction) return error.UnsupportedBridgeDirection;
             if (std.mem.eql(u8, previous.filter, filter)) {
                 return error.DuplicateBridgeFilter;
             }
@@ -578,6 +596,7 @@ pub const Builder = struct {
             .qos = qos,
             .local_prefix = local_prefix,
             .remote_prefix = remote_prefix,
+            .direction = direction,
         });
     }
 };

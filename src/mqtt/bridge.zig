@@ -999,4 +999,5 @@ fn persistentSession(connect: runtime.ConnectOptions) bool {
 
 test {
     _ = @import("bridge/tests.zig");
+    _ = outbound;
 }

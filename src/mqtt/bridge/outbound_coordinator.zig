@@ -123,7 +123,7 @@ pub const OwnedTransaction = struct {
 
 pub const Error = commit_log.Error || reconnect.Error ||
     reconnect.SessionSnapshotError ||
-    codec.Error || error{
+    codec.Error || @import("local_source.zig").Error || error{
     CoordinatorIdentityMismatch,
     CorruptCoordinatorSnapshot,
     OwnedPropertyLimitExceeded,
@@ -149,7 +149,7 @@ pub const Store = struct {
         sub_path: []const u8,
         options: Options,
         identity: Identity,
-        source: *reconnect.Client,
+        source: anytype,
         target: *reconnect.Client,
     ) Error!Store {
         try validateState(
@@ -198,7 +198,7 @@ pub const Store = struct {
         sub_path: []const u8,
         options: Options,
         identity: Identity,
-        source: *reconnect.Client,
+        source: anytype,
         target: *reconnect.Client,
     ) Error!Store {
         var log = try commit_log.Log.open(
@@ -258,7 +258,7 @@ pub const Store = struct {
     /// the in-memory transaction always matches the newest durable image.
     pub fn commit(
         self: *Store,
-        source: *reconnect.Client,
+        source: anytype,
         target: *reconnect.Client,
         source_session_epoch: u64,
         target_session_epoch: u64,
@@ -304,7 +304,7 @@ pub const Store = struct {
 
 fn validateDecoded(
     decoded: *const Decoded,
-    source: *reconnect.Client,
+    source: anytype,
     target: *reconnect.Client,
 ) Error!void {
     return validateState(
@@ -320,7 +320,7 @@ fn validateState(
     maybe_transaction: ?Transaction,
     source_session_epoch: u64,
     target_session_epoch: u64,
-    source: *reconnect.Client,
+    source: anytype,
     target: *reconnect.Client,
 ) Error!void {
     const transaction = maybe_transaction orelse {
@@ -396,7 +396,7 @@ fn encode(
     source_session_epoch: u64,
     target_session_epoch: u64,
     transaction: ?Transaction,
-    source: *reconnect.Client,
+    source: anytype,
     target: *reconnect.Client,
     monotonic_now: std.Io.Timestamp,
     realtime_now: std.Io.Timestamp,

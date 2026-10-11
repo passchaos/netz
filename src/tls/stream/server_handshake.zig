@@ -83,9 +83,12 @@ pub const Options = struct {
     /// trickles records. Null preserves the existing blocking behavior.
     handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
-    /// Server-preference ALPN list. A configured list is mandatory: the
-    /// handshake fails when the client offers none of its protocols.
+    /// Server-preference ALPN list. When `require_alpn` is true, the handshake
+    /// fails unless the client offers one of these protocols.
     alpn_protocols: []const []const u8 = &.{},
+    /// Permit clients without ALPN while still selecting an offered protocol.
+    /// This supports protocols such as MQTT whose TLS mapping makes ALPN optional.
+    require_alpn: bool = true,
 
     pub fn acquireIdentity(self: Options) Error!ServerIdentityLease {
         var lease = if (self.identity_provider) |provider|
@@ -257,7 +260,7 @@ fn performBefore(
     defer handshake.handshake_secret.deinit();
     defer handshake.client_handshake_traffic_secret.deinit();
     defer handshake.server_handshake_traffic_secret.deinit();
-    if (options.alpn_protocols.len != 0 and
+    if ((options.require_alpn or parsed.alpn_protocols.len != 0) and options.alpn_protocols.len != 0 and
         handshake.selection.alpn_protocol == null)
     {
         return error.InvalidAlpn;

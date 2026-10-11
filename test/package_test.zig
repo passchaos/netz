@@ -4147,6 +4147,7 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "outbound"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "OutboundBridge"));
     try std.testing.expect(@hasDecl(netz.mqtt.bridge, "OutboundRule"));
+    try std.testing.expect(@hasDecl(netz.mqtt.bridge.outbound, "LocalBridge"));
     try std.testing.expect(@hasDecl(
         netz.mqtt.bridge.OutboundRule,
         "validate",

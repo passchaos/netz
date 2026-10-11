@@ -1329,7 +1329,7 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         error.BridgeTopicRequired,
         parse(allocator, listener ++ "connection missing\naddress localhost\n"),
     );
-    for ([_][]const u8{ "out", "both" }) |direction| {
+    for ([_][]const u8{ "both", "sideways" }) |direction| {
         const source = try std.fmt.allocPrint(
             allocator,
             "{s}connection wrong-way\naddress localhost\n" ++
@@ -1455,6 +1455,33 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "address one.example:1883 one.example\n" ++
             "topic # in 0\nround_robin true\n"),
     );
+}
+
+test "MQTT broker config accepts outbound mappings and rejects mixed directions" {
+    const allocator = std.testing.allocator;
+    const listener = "listener 1883\nallow_anonymous true\n";
+    var config = try parse(allocator, listener ++
+        "connection outgoing\naddress localhost\n" ++
+        "topic sensors/# out 1 local/ remote/\n");
+    defer config.deinit(allocator);
+    const bridge = config.bridges[0];
+    try std.testing.expect(bridge.hasOutbound());
+    try std.testing.expectEqualStrings("remote/sensors/#", bridge.rules[0].filter);
+    try std.testing.expectEqualStrings("local/", bridge.rules[0].local_prefix);
+    const base = try bridge.rules[0].outboundFilterAlloc(allocator);
+    defer allocator.free(base);
+    try std.testing.expectEqualStrings("sensors/#", base);
+    var shared = try parse(allocator, listener ++
+        "connection shared\naddress localhost\n" ++
+        "topic $share/workers/sensors/# out 1 local/ remote/\n");
+    defer shared.deinit(allocator);
+    const shared_base = try shared.bridges[0].rules[0].outboundFilterAlloc(allocator);
+    defer allocator.free(shared_base);
+    try std.testing.expectEqualStrings("$share/workers/sensors/#", shared_base);
+    try std.testing.expectError(error.UnsupportedBridgeDirection, parse(allocator, listener ++
+        "connection mixed\naddress localhost\n" ++
+        "topic sensors/# in 1 local/ remote/\n" ++
+        "topic data/# out 1 local/ remote/\n"));
 }
 
 test "MQTT broker config bridge allocation failures leak nothing" {

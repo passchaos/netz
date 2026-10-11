@@ -181,7 +181,7 @@ fn runQoS1ReconnectCase(
 
         fn waitForAcknowledgement(
             self: *@This(),
-            accepted: *runtime.AcceptedConnection,
+            accepted: *runtime.AcceptedClient,
             packet_id: u16,
         ) !void {
             while (true) {
@@ -211,6 +211,7 @@ fn runQoS1ReconnectCase(
     const TargetPeer = struct {
         server: *runtime.Server,
         protocol: mqtt.ProtocolVersion,
+        expect_user_property: bool,
         session_present: bool,
         expire_before_reconnect: bool,
         first_received: *std.Io.Event,
@@ -228,6 +229,7 @@ fn runQoS1ReconnectCase(
             {
                 var first = try self.server.accept(.{
                     .protocol = self.protocol,
+                    .topic_alias_maximum = 0,
                 });
                 defer first.deinit(self.server.allocator);
                 var publish = try first.connection.readPublish();
@@ -257,6 +259,7 @@ fn runQoS1ReconnectCase(
             }
             var second = try self.server.accept(.{
                 .protocol = self.protocol,
+                .topic_alias_maximum = 0,
                 .session_present = self.session_present,
             });
             defer second.deinit(self.server.allocator);
@@ -421,7 +424,10 @@ fn runQoS1ReconnectCase(
     step_thread.join();
     step_joined = true;
     if (step.result) |err| return err;
-    try std.testing.expect(source_acked.isSet());
+    try source_acked.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } });
     try bridge.disconnect(0);
 
     source_thread.join();
@@ -517,7 +523,7 @@ test "outbound bridge routes between two brokers" {
         allocator,
         io,
         target.address(),
-        .{ .protocol = .v5, .client_id = "outbound-subscriber" },
+        .{ .protocol = .v5, .client_id = "outbound-subscriber", .topic_alias_maximum = 0 },
         timeout,
     );
     defer subscriber.close();
@@ -1913,6 +1919,9 @@ test "outbound bridge fails closed when source Session is lost" {
                 .session_present = false,
             });
             defer fresh.deinit(self.server.allocator);
+            var subscribe = try fresh.connection.readSubscribe();
+            defer subscribe.deinit(self.server.allocator);
+            try fresh.connection.writeSubAck(subscribe.subscribe.packet_id, &.{0x02}, &.{});
             fresh.connection.shutdown() catch {};
         }
     };

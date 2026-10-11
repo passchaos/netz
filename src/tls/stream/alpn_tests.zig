@@ -306,3 +306,7 @@ test "TLS stream rejects ALPN without a shared protocol" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test {
+    _ = @import("optional_alpn_tests.zig");
+}

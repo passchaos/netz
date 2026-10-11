@@ -82,7 +82,7 @@ const LocalConsumerContext = struct {
     pub const finishPartialPersistentChange = Broker.finishPartialPersistentChange;
     pub const retainedSourceAuthorized = Broker.retainedSourceAuthorized;
     pub const enqueueSessionDeliveryLocked = Broker.enqueueSessionDeliveryLocked;
-    pub const finalizePersistentChange = Broker.finalizePersistentChange;
+    pub const finalizePersistentChange = Broker.finalizeLocalConsumerChange;
     pub const prepareRetainedDeliveryProperties = prepareLocalConsumerProperties;
 };
 
@@ -2912,6 +2912,26 @@ pub const Broker = struct {
     ) Error!void {
         defer self.finishPersistentChange(changed);
         if (append_commit) try self.appendCommitIfEnabled();
+    }
+
+    /// Internal consumers run independently of listener registration. A
+    /// provisional CONNECT cannot be serialized yet, but must not make an
+    /// otherwise valid bridge ACK fail or discard its durability barrier.
+    /// Wait outside both locks until admission attaches or rolls back; actual
+    /// journal and allocation failures still propagate to the source owner.
+    fn finalizeLocalConsumerChange(
+        self: *Broker,
+        append_commit: bool,
+        changed: bool,
+    ) Error!void {
+        while (true) {
+            self.finalizePersistentChange(append_commit, changed) catch |err| {
+                if (err != error.SnapshotBusy) return err;
+                try std.Io.sleep(self.io, .fromMilliseconds(1), .awake);
+                continue;
+            };
+            return;
+        }
     }
 
     /// Variant for callers that already own `persistence_mutex`. The global

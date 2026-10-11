@@ -171,10 +171,36 @@ const ConnectorResources = struct {
     }
 };
 
+pub const ConfiguredBridge = union(enum) {
+    inbound: mqtt.bridge.Bridge,
+    outbound: mqtt.bridge.outbound.LocalBridge,
+
+    pub fn deinit(self: *ConfiguredBridge) void {
+        switch (self.*) {
+            inline else => |*value| value.deinit(),
+        }
+    }
+    pub fn requestReconnect(self: *ConfiguredBridge) void {
+        switch (self.*) {
+            inline else => |*value| value.requestReconnect(),
+        }
+    }
+    pub fn run(self: *ConfiguredBridge, options: mqtt.reconnect.PollOptions) anyerror!void {
+        switch (self.*) {
+            inline else => |*value| try value.run(options),
+        }
+    }
+    pub fn runOnce(self: *ConfiguredBridge, options: mqtt.reconnect.PollOptions) anyerror!void {
+        switch (self.*) {
+            inline else => |*value| try value.runOnce(options),
+        }
+    }
+};
+
 pub const Set = struct {
     allocator: std.mem.Allocator,
     configured: []const mqtt.broker_config.Bridge,
-    values: []mqtt.bridge.Bridge,
+    values: []ConfiguredBridge,
     connector_resources: []ConnectorResources,
 
     pub fn init(
@@ -183,8 +209,9 @@ pub const Set = struct {
         local: *mqtt.broker.Broker,
         configured: []const mqtt.broker_config.Bridge,
         shutdown: *std.Io.Event,
+        persistence_path: ?[]const u8,
     ) !Set {
-        const values = try allocator.alloc(mqtt.bridge.Bridge, configured.len);
+        const values = try allocator.alloc(ConfiguredBridge, configured.len);
         errdefer allocator.free(values);
         const connector_resources = try allocator.alloc(
             ConnectorResources,
@@ -203,6 +230,11 @@ pub const Set = struct {
             }
         }
         for (configured, values, connector_resources) |*source, *bridge, *resources| {
+            if (source.hasOutbound()) {
+                bridge.* = .{ .outbound = try initOutbound(allocator, io, local, source, resources, shutdown, persistence_path) };
+                initialized += 1;
+                continue;
+            }
             const rules = try allocator.alloc(mqtt.bridge.Rule, source.rules.len);
             defer allocator.free(rules);
             for (source.rules, rules) |rule, *runtime_rule| {
@@ -270,7 +302,7 @@ pub const Set = struct {
                     .publish_remote = !source.notifications_local_only,
                 } else null,
             };
-            bridge.* = if (source.usesTls() or source.addressCount() > 1) blk: {
+            bridge.* = .{ .inbound = if (source.usesTls() or source.addressCount() > 1) blk: {
                 if (source.usesTls()) {
                     try loadTlsResources(
                         resources,
@@ -299,7 +331,7 @@ pub const Set = struct {
                 source.port,
                 options,
                 shutdown,
-            );
+            ) };
             initialized += 1;
         }
         return .{
@@ -367,6 +399,79 @@ pub const Set = struct {
         }
     }
 };
+
+fn initOutbound(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    local: *mqtt.broker.Broker,
+    source: *const mqtt.broker_config.Bridge,
+    resources: *ConnectorResources,
+    shutdown: *std.Io.Event,
+    persistence_path: ?[]const u8,
+) !mqtt.bridge.outbound.LocalBridge {
+    const rules = try allocator.alloc(mqtt.bridge.OutboundRule, source.rules.len);
+    defer allocator.free(rules);
+    var initialized: usize = 0;
+    defer for (rules[0..initialized]) |rule| allocator.free(rule.filter);
+    for (source.rules, rules) |rule, *value| {
+        // Config owns a remote-prefixed effective filter. OutboundRule owns
+        // the base filter and adds local_prefix to the subscription source.
+        const filter = try rule.outboundFilterAlloc(allocator);
+        value.* = .{ .filter = filter, .qos = rule.qos, .local_prefix = rule.local_prefix, .remote_prefix = rule.remote_prefix };
+        initialized += 1;
+    }
+    var properties: [1]mqtt.Property = .{.{ .four_byte = .{ .id = .session_expiry_interval, .value = source.session_expiry_interval } }};
+    const id = stableOutboundId(source.*);
+    const journal_path = if (source.usesQoS2()) try std.fmt.allocPrint(allocator, "{s}.outbound-{s}.journal", .{
+        persistence_path orelse return error.BridgePersistenceRequired,
+        std.fmt.bytesToHex(id, .lower),
+    }) else null;
+    defer if (journal_path) |path| allocator.free(path);
+    const mode: mqtt.bridge.outbound.CoordinatorMode = if (journal_path) |path| blk: {
+        var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| switch (err) {
+            error.FileNotFound => break :blk .create,
+            else => return err,
+        };
+        file.close(io);
+        break :blk .restore;
+    } else .create;
+    const notification_topic = if (source.notifications) try source.notificationTopicAlloc(allocator) else null;
+    defer if (notification_topic) |topic| allocator.free(topic);
+    const options = mqtt.bridge.outbound.MultiOptions{
+        .source_connect = .{ .protocol = .v5, .client_id = source.name, .clean_start = false, .properties = &.{.{ .four_byte = .{ .id = .session_expiry_interval, .value = std.math.maxInt(u32) } }} },
+        .target_connect = .{
+            .protocol = source.protocol,
+            .client_id = source.clientId(),
+            .clean_start = source.clean_session,
+            .keep_alive_seconds = source.keep_alive_seconds,
+            .properties = if (source.protocol == .v5 and source.session_expiry_interval != 0) &properties else &.{},
+            .username = if (source.remote_username.len != 0) source.remote_username else null,
+            .password = if (source.remote_password.len != 0) source.remote_password else null,
+        },
+        .target_reconnect_policy = .{
+            .initial_delay = .fromSeconds(source.restart.base_seconds),
+            .max_delay = .fromSeconds(source.restart.cap_seconds),
+            .backoff = if (source.restart.jitter) .exponential else .fixed,
+            .jitter = if (source.restart.jitter) .full else .none,
+            .max_attempts = if (source.start_type == .once) source.addressCount() else 0,
+        },
+        .rules = rules,
+        .coordinator = if (journal_path) |path| .{ .bridge_id = id, .dir = std.Io.Dir.cwd(), .sub_path = path, .mode = mode } else null,
+        .notifications = if (notification_topic) |topic| .{ .topic = topic, .publish_remote = !source.notifications_local_only } else null,
+    };
+    if (source.usesTls()) try loadTlsResources(resources, allocator, io, std.Io.Dir.cwd(), source) else {
+        resources.connector = .{ .source = source };
+        resources.connector_configured = true;
+    }
+    return mqtt.bridge.outbound.LocalBridge.initEndpoints(allocator, io, .{ .broker = local, .id = id }, .{ .connector = resources.connector.connector() }, options, shutdown);
+}
+
+fn stableOutboundId(source: mqtt.broker_config.Bridge) [16]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("netz mqtt outbound consumer v1\x00");
+    hashField(&hasher, source.name);
+    return hasher.finalResult()[0..16].*;
+}
 
 fn loadTlsResources(
     resources: *ConnectorResources,

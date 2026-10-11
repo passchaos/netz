@@ -570,3 +570,64 @@ test "broker local consumer identity binds its subscriptions" {
         }),
     );
 }
+
+test "broker local consumer ACK waits outside locks for provisional CONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var broker = try Broker.init(allocator, io, .{ .limits = .{ .max_connections = 1 } });
+    defer broker.deinit();
+    try broker.createCommitLog(tmp.dir, "admission.log", .{});
+    var consumer = try broker.openLocalConsumer(.{ .id = [_]u8{0x78} ** 16, .subscriptions = &.{.{ .topic_filter = "admission", .qos = .at_least_once }} });
+    defer broker.closeLocalConsumer(&consumer);
+    try publishValue(&broker, "admission", "durable", .at_least_once);
+    var event = (try broker.pollLocalConsumer(&consumer)).?;
+    defer event.deinit();
+    broker.slots[0].state.active = true;
+    var task = struct {
+        broker: *Broker,
+        consumer: *@import("local_consumer.zig").Handle,
+        packet_id: u16,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            _ = self.broker.acknowledgeLocalConsumer(self.consumer, .puback, self.packet_id, 0) catch |err| {
+                self.err = err;
+            };
+        }
+    }{ .broker = &broker, .consumer = &consumer, .packet_id = event.publish.value.packet_id.? };
+    const thread = try std.Thread.spawn(.{}, @TypeOf(task).run, .{&task});
+    var joined = false;
+    defer if (!joined) {
+        broker.state_mutex.lockUncancelable(io);
+        broker.slots[0].state.active = false;
+        broker.state_mutex.unlock(io);
+        thread.join();
+    };
+    // Wait for ACK state to advance, then prove the persistence waiter released
+    // the state mutex so admission can finish and unblock its journal barrier.
+    const deadline = std.Io.Clock.awake.now(io).addDuration(.fromSeconds(2));
+    while (true) {
+        broker.state_mutex.lockUncancelable(io);
+        const owned = broker.sessions.ownsPacketId(consumer.session, task.packet_id);
+        broker.state_mutex.unlock(io);
+        if (!owned) break;
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline.nanoseconds) return error.Timeout;
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    broker.state_mutex.lockUncancelable(io);
+    broker.slots[0].state.active = false;
+    broker.state_mutex.unlock(io);
+    thread.join();
+    joined = true;
+    if (task.err) |err| return err;
+    broker.closeLocalConsumer(&consumer);
+    var restored = try Broker.init(allocator, io, .{ .limits = .{ .max_connections = 1 } });
+    defer restored.deinit();
+    try restored.restoreCommitLog(tmp.dir, "admission.log", .{});
+    var resumed = try restored.openLocalConsumer(.{ .id = [_]u8{0x78} ** 16, .subscriptions = &.{.{ .topic_filter = "admission", .qos = .at_least_once }} });
+    defer restored.closeLocalConsumer(&resumed);
+    try std.testing.expect((try restored.pollLocalConsumer(&resumed)) == null);
+}

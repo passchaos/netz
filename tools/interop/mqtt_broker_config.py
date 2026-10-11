@@ -23,6 +23,7 @@ from mqtt_broker_config_bridge import (
     run_tls_inbound_bridge_case,
 )
 from mqtt_broker_config_keepalive import run_zero_maximum_keep_alive_case
+from mqtt_broker_config_outbound import run_outbound_bridge_case
 from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_proxy import run_proxy_protocol_case
 from mqtt_broker_config_queue import run_queued_limits_case
@@ -5192,6 +5193,8 @@ def main() -> None:
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
         run_inbound_bridge_case(args.broker, directory)
+        run_outbound_bridge_case(args.broker, directory)
+        run_outbound_bridge_case(args.broker, directory, tls=True)
         run_primary_failback_case(args.broker, directory)
         run_once_bridge_case(args.broker, directory)
         run_tls_inbound_bridge_case(args.broker, directory)
@@ -5241,7 +5244,7 @@ def main() -> None:
         "expiration, and periodic $SYS policy, "
         "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
         "policy, ordered include_dir and global/per-listener security files, "
-        "configured cleartext/TLS inbound bridge prefix mapping, mTLS, "
+        "configured cleartext/TLS inbound/outbound bridge prefix mapping, mTLS, "
         "QoS 1/2, round-robin failover, primary failback, reconnect, and "
         "retained local/remote state notifications with Last Will plus "
         "disabled one-shot lifecycle, "

@@ -50,6 +50,7 @@ pub const Server = struct {
             .handshake_timeout = options.tls_handshake_timeout,
             .client_auth = options.client_auth,
             .alpn_protocols = options.alpn_protocols,
+            .require_alpn = options.require_alpn,
         };
         try tls_options.validateIdentity();
         try mqtt_runtime.validateProxyPolicy(options.limits);
@@ -303,9 +304,10 @@ pub const ListenOptions = struct {
     /// Request and verify a TLS 1.3 client certificate. `required` is the
     /// default within the policy; use `.optional` to retain anonymous clients.
     client_auth: ?ClientAuthPolicy = null,
-    /// Supported ALPN protocols. A non-empty list requires the client to offer
-    /// one of these protocols and exposes the selection on Connection.
+    /// Supported ALPN protocols, with selection exposed on Connection.
     alpn_protocols: []const []const u8 = &.{},
+    /// When false, a peer may omit ALPN; an unrelated offer remains invalid.
+    require_alpn: bool = true,
     /// MQTT control packets are latency sensitive, matching the client
     /// default. Disable this when deliberate TCP batching is preferred.
     tcp_nodelay: bool = true,

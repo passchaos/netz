@@ -349,6 +349,7 @@ pub fn run(
         &broker,
         config.bridges,
         &shutdown,
+        persistence_path,
     );
     defer bridges.deinit();
     var checkpoint_signal = if (config.persistence)
@@ -427,6 +428,8 @@ pub fn run(
                         .identity = identities.initialIdentity(index).?,
                         .identity_provider = identity_provider,
                         .client_auth = identities.initialClientAuth(index),
+                        .alpn_protocols = &.{"mqtt"},
+                        .require_alpn = false,
                         .limits = listenerLimits(config, configured),
                         .tcp_nodelay = config.set_tcp_nodelay,
                     },
@@ -561,7 +564,7 @@ pub fn run(
     for (config.bridges) |bridge| {
         std.debug.print(
             "  bridge {s} remote={s}:{d} addresses={d} transport={s} " ++
-                "rules={d} direction=in\n",
+                "rules={d} direction={s}\n",
             .{
                 bridge.name,
                 bridge.host,
@@ -569,6 +572,7 @@ pub fn run(
                 bridge.addressCount(),
                 if (bridge.usesTls()) "tls-vail" else "tcp",
                 bridge.rules.len,
+                if (bridge.hasOutbound()) "out" else "in",
             },
         );
     }
