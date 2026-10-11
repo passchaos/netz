@@ -108,6 +108,7 @@ autosave_on_changes false
 
 listener 1883 127.0.0.1
 socket_domain ipv4
+bind_interface lo
 accept_protocol_versions 4,5
 enable_proxy_protocol 1
 allow_anonymous false
@@ -160,7 +161,8 @@ bridge_require_ocsp true
 bridge_tls_version tlsv1.3
 ```
 
-The accepted directives are exactly `listener`, `protocol`, `socket_domain`, `certfile`,
+The accepted directives are exactly `listener`, `protocol`, `socket_domain`,
+`bind_interface`, `certfile`,
 `keyfile`, `keyfile_password_file`, `cafile`, `capath`, `crlfile`, `require_certificate`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
@@ -216,6 +218,13 @@ socket. Without an explicit bind address or `socket_domain`, netz opens
 separate IPv4 and IPv6 wildcard sockets, skips a socket family only when the
 platform reports that family unsupported, and applies one shared logical
 listener connection limit across both sockets.
+Listener-local `bind_interface` resolves the named interface's first IPv4 and
+IPv6 addresses at startup without requiring `SO_BINDTODEVICE` privileges. It
+takes precedence over the address on the `listener` line, while
+`socket_domain` still selects one family. Missing interfaces, interfaces with
+no usable address, unsupported platforms, and an unavailable explicitly
+selected family fail before serving; when no family is selected, an unavailable
+family is skipped in the same way as the default wildcard listener.
 
 Each `connection` creates an independently reconnecting one-way bridge.
 One `address` directive containing one or more `host[:port]` targets (or

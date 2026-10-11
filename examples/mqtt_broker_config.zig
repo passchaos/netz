@@ -276,6 +276,47 @@ fn unavailableSocketFamily(err: anyerror) bool {
     };
 }
 
+fn listenerBindAddresses(
+    configured: mqtt.broker_config.Listener,
+    storage: *[2]std.Io.net.IpAddress,
+) ![]const std.Io.net.IpAddress {
+    if (configured.bind_interface.len != 0) {
+        const resolved = try netz.runtime.resolveInterfaceAddresses(
+            configured.bind_interface,
+            configured.address.getPort(),
+        );
+        if (configured.socket_domain) |domain| {
+            storage[0] = switch (domain) {
+                .ipv4 => resolved.ip4 orelse
+                    return error.AddressFamilyUnsupported,
+                .ipv6 => resolved.ip6 orelse
+                    return error.AddressFamilyUnsupported,
+            };
+            return storage[0..1];
+        }
+        var count: usize = 0;
+        if (resolved.ip4) |address| {
+            storage[count] = address;
+            count += 1;
+        }
+        if (resolved.ip6) |address| {
+            storage[count] = address;
+            count += 1;
+        }
+        return storage[0..count];
+    }
+    if (configured.bind_all_socket_domains) {
+        const port = configured.address.getPort();
+        storage.* = .{
+            .{ .ip4 = .unspecified(port) },
+            .{ .ip6 = .unspecified(port) },
+        };
+        return storage;
+    }
+    storage[0] = configured.address;
+    return storage[0..1];
+}
+
 fn listenerLimits(
     config: mqtt.broker_config.Config,
     listener: mqtt.broker_config.Listener,
@@ -550,24 +591,15 @@ pub fn run(
         const identity = identities.initialIdentity(config_index);
         const identity_provider = identities.provider(config_index);
         const client_auth = identities.initialClientAuth(config_index);
-        var bind_addresses: [2]std.Io.net.IpAddress = undefined;
-        const requested_count: usize = if (configured.bind_all_socket_domains)
-            2
-        else
-            1;
-        if (configured.bind_all_socket_domains) {
-            const port = configured.address.getPort();
-            bind_addresses = .{
-                .{ .ip4 = .unspecified(port) },
-                .{ .ip6 = .unspecified(port) },
-            };
-        } else {
-            bind_addresses[0] = configured.address;
-        }
+        var bind_address_storage: [2]std.Io.net.IpAddress = undefined;
+        const bind_addresses = try listenerBindAddresses(
+            configured,
+            &bind_address_storage,
+        );
 
         const group_start = initialized_servers;
         var last_unavailable_error: ?anyerror = null;
-        for (bind_addresses[0..requested_count]) |bind_address| {
+        for (bind_addresses) |bind_address| {
             servers[initialized_servers] = openConfiguredServer(
                 allocator,
                 io,
@@ -578,7 +610,7 @@ pub fn run(
                 client_auth,
                 bind_address,
             ) catch |err| {
-                if (configured.bind_all_socket_domains and
+                if (bind_addresses.len > 1 and
                     unavailableSocketFamily(err))
                 {
                     last_unavailable_error = err;

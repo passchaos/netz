@@ -478,12 +478,14 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
         f"acl_file {acl_file}\n"
         f"listener {tcp_port} 127.0.0.1\n"
         "socket_domain ipv4\n"
+        "bind_interface lo\n"
         "allow_anonymous false\n"
         "max_qos 1\n"
         "max_keepalive 30\n"
         "max_connections 4\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "socket_domain ipv4\n"
+        "bind_interface lo\n"
         "protocol websockets\n"
         "mount_point tenant/\n"
         "allow_anonymous true\n"
@@ -695,6 +697,7 @@ def run_ipv6_socket_domain_case(broker: Path, directory: Path) -> None:
     config.write_text(
         f"listener {port}\n"
         "socket_domain ipv6\n"
+        "bind_interface lo\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
     )
@@ -1886,6 +1889,27 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     ):
         raise AssertionError(
             "allow_anonymous false did not fail closed without credentials: "
+            + result.stdout
+        )
+
+    missing_interface = directory / "missing-bind-interface.conf"
+    missing_interface.write_text(
+        f"listener {free_port()}\n"
+        "bind_interface netz-interface-that-does-not-exist\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={missing_interface}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "InterfaceNotFound" not in result.stdout:
+        raise AssertionError(
+            "missing bind_interface did not fail before serving: "
             + result.stdout
         )
 
@@ -3436,12 +3460,14 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         "set_tcp_nodelay true\n"
         f"listener {tls_port} 127.0.0.1\n"
         "socket_domain ipv4\n"
+        "bind_interface lo\n"
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
         "socket_domain ipv4\n"
+        "bind_interface lo\n"
         "protocol websockets\n"
         "websockets_origin https://secure.example\n"
         f"certfile {certificate}\n"
@@ -5369,7 +5395,8 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
-        "default dual-family and IPv4/IPv6-only TCP/TLS/WS/WSS listeners, "
+        "default dual-family, named-interface, and IPv4/IPv6-only "
+        "TCP/TLS/WS/WSS listeners, "
         "global client-session plus global/listener live-connection capacity, "
         "persistent-client and "
         "retained-message "

@@ -42,6 +42,7 @@ pub const Listener = struct {
     /// IPv4 and IPv6 wildcard sockets when both families are available.
     bind_all_socket_domains: bool = false,
     socket_domain: ?SocketDomain = null,
+    bind_interface: []u8 = &.{},
     protocol: Protocol = .mqtt,
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
@@ -72,6 +73,7 @@ pub const Listener = struct {
     fn deinit(self: *Listener, allocator: std.mem.Allocator) void {
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
+        if (self.bind_interface.len != 0) allocator.free(self.bind_interface);
         if (self.auto_id_prefix.len != 0) allocator.free(self.auto_id_prefix);
         if (self.certfile.len != 0) allocator.free(self.certfile);
         if (self.keyfile.len != 0) allocator.free(self.keyfile);
@@ -237,6 +239,7 @@ const ListenerSeen = struct {
     acl_file: bool = false,
     protocol: bool = false,
     socket_domain: bool = false,
+    bind_interface: bool = false,
     certfile: bool = false,
     keyfile: bool = false,
     keyfile_password_file: bool = false,
@@ -597,19 +600,15 @@ fn parseSources(
                             .ipv4 => .{ .ip4 = .unspecified(port) },
                             .ipv6 => .{ .ip6 = .unspecified(port) },
                         };
-                    } else switch (listener.socket_domain.?) {
-                        .ipv4 => if (listener.address != .ip4)
-                            return error.InvalidDirective,
-                        .ipv6 => if (listener.address != .ip6)
-                            return error.InvalidDirective,
                     }
-                    for (listeners.items, 0..) |other, other_index| {
-                        if (other_index != index and
-                            other.address.eql(&listener.address))
-                        {
-                            return error.DuplicateListener;
-                        }
-                    }
+                } else if (std.mem.eql(u8, directive, "bind_interface")) {
+                    try markOnce(&seen.bind_interface);
+                    listener.bind_interface = try parseOneOwned(
+                        allocator,
+                        &words,
+                    );
+                    listener.bind_all_socket_domains =
+                        listener.socket_domain == null;
                 } else if (std.mem.eql(u8, directive, "certfile")) {
                     try markOnce(&seen.certfile);
                     listener.certfile = try parseOneOwned(allocator, &words);
@@ -756,12 +755,26 @@ fn parseSources(
     }
     for (listeners.items, 0..) |listener, index| {
         for (listeners.items[0..index]) |previous| {
-            if (previous.address.eql(&listener.address)) {
+            if (previous.bind_interface.len == 0 and
+                listener.bind_interface.len == 0 and
+                previous.address.eql(&listener.address))
+            {
                 return error.DuplicateListener;
             }
         }
     }
     for (listeners.items, listener_seen.items) |listener, seen| {
+        if (listener.bind_interface.len == 0 and
+            seen.address_explicit and
+            listener.socket_domain != null)
+        {
+            switch (listener.socket_domain.?) {
+                .ipv4 => if (listener.address != .ip4)
+                    return error.InvalidDirective,
+                .ipv6 => if (listener.address != .ip6)
+                    return error.InvalidDirective,
+            }
+        }
         const has_client_ca = listener.cafile.len != 0 or
             listener.capath.len != 0;
         if ((listener.certfile.len == 0) != (listener.keyfile.len == 0)) {
@@ -883,6 +896,7 @@ fn markOnce(flag: *bool) error{DuplicateDirective}!void {
 fn isListenerDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "protocol") or
         std.mem.eql(u8, value, "socket_domain") or
+        std.mem.eql(u8, value, "bind_interface") or
         std.mem.eql(u8, value, "certfile") or
         std.mem.eql(u8, value, "keyfile") or
         std.mem.eql(u8, value, "keyfile_password_file") or
@@ -1265,11 +1279,52 @@ test "MQTT broker config keeps omitted socket domain dual-stack intent" {
     );
 }
 
+test "MQTT broker config owns listener interface names" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupe(u8,
+        \\listener 1883 192.0.2.1
+        \\bind_interface lo
+        \\socket_domain ipv6
+        \\allow_anonymous true
+    );
+    defer allocator.free(source);
+    var config = try parse(allocator, source);
+    defer config.deinit(allocator);
+    @memset(source, 'x');
+
+    try std.testing.expectEqualStrings("lo", config.listeners[0].bind_interface);
+    try std.testing.expectEqual(SocketDomain.ipv6, config.listeners[0].socket_domain.?);
+    try std.testing.expect(!config.listeners[0].bind_all_socket_domains);
+
+    var all_families = try parse(allocator,
+        \\listener 1884 192.0.2.2
+        \\bind_interface lo
+        \\allow_anonymous true
+    );
+    defer all_families.deinit(allocator);
+    try std.testing.expect(all_families.listeners[0].bind_all_socket_domains);
+
+    var interface_precedence = try parse(allocator,
+        \\listener 1885
+        \\bind_interface lo
+        \\allow_anonymous true
+        \\listener 1885
+        \\bind_interface eth0
+        \\allow_anonymous true
+    );
+    defer interface_precedence.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), interface_precedence.listeners.len);
+}
+
 test "MQTT broker config rejects invalid socket domains" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(
         error.DirectiveRequiresListener,
         parse(allocator, "socket_domain ipv6\nlistener 1883\n"),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "bind_interface lo\nlistener 1883\n"),
     );
     try std.testing.expectError(
         error.InvalidDirective,
@@ -1285,6 +1340,15 @@ test "MQTT broker config rejects invalid socket domains" {
             \\listener 1883
             \\socket_domain ipv4
             \\socket_domain ipv4
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\bind_interface lo
+            \\bind_interface eth0
             \\allow_anonymous true
         ),
     );

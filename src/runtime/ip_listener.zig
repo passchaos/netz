@@ -7,6 +7,45 @@ const zio = @import("zio");
 
 const net = std.Io.net;
 
+const supports_interface_addresses = switch (builtin.os.tag) {
+    .linux, .macos, .ios, .freebsd, .netbsd, .openbsd, .dragonfly => true,
+    else => false,
+};
+
+const IfAddrs = extern struct {
+    next: ?*IfAddrs,
+    name: [*:0]const u8,
+    flags: c_uint,
+    address: ?*const zio.os.net.sockaddr,
+    netmask: ?*const zio.os.net.sockaddr,
+    ifu: ?*const zio.os.net.sockaddr,
+    data: ?*anyopaque,
+};
+
+const libc = if (supports_interface_addresses) struct {
+    extern "c" fn getifaddrs(result: *?*IfAddrs) c_int;
+    extern "c" fn freeifaddrs(addresses: *IfAddrs) void;
+} else struct {};
+
+pub const InterfaceAddresses = struct {
+    ip4: ?net.IpAddress = null,
+    ip6: ?net.IpAddress = null,
+
+    pub fn count(self: InterfaceAddresses) usize {
+        return @as(usize, @intFromBool(self.ip4 != null)) +
+            @as(usize, @intFromBool(self.ip6 != null));
+    }
+};
+
+pub const InterfaceAddressError = error{
+    InvalidInterfaceName,
+    InterfaceNotFound,
+    AddressFamilyUnsupported,
+    SystemResources,
+    OptionUnsupported,
+    Unexpected,
+};
+
 pub const Options = struct {
     kernel_backlog: u31 = std.Io.net.default_kernel_backlog,
     reuse_address: bool = false,
@@ -15,6 +54,60 @@ pub const Options = struct {
     /// must be applied before bind, so unsupported backends fail closed.
     ip6_only: ?bool = null,
 };
+
+/// Return the first IPv4 and IPv6 addresses assigned to a named interface,
+/// matching Mosquitto's listener selection. The result borrows no libc state.
+pub fn resolveInterfaceAddresses(
+    name: []const u8,
+    port: u16,
+) InterfaceAddressError!InterfaceAddresses {
+    if (comptime !supports_interface_addresses) {
+        return error.OptionUnsupported;
+    }
+    if (name.len == 0 or std.mem.indexOfScalar(u8, name, 0) != null) {
+        return error.InvalidInterfaceName;
+    }
+
+    var head: ?*IfAddrs = null;
+    const rc = libc.getifaddrs(&head);
+    if (rc != 0) {
+        return switch (std.posix.errno(rc)) {
+            .NOMEM => error.SystemResources,
+            else => error.Unexpected,
+        };
+    }
+    defer if (head) |addresses| libc.freeifaddrs(addresses);
+
+    var found_interface = false;
+    var result: InterfaceAddresses = .{};
+    var current = head;
+    while (current) |entry| : (current = entry.next) {
+        if (!std.ascii.eqlIgnoreCase(name, std.mem.span(entry.name))) continue;
+        found_interface = true;
+        const address = entry.address orelse continue;
+        const address_len: zio.os.net.socklen_t = switch (address.family) {
+            zio.os.net.AF.INET => @sizeOf(zio.os.net.sockaddr.in),
+            zio.os.net.AF.INET6 => @sizeOf(zio.os.net.sockaddr.in6),
+            else => continue,
+        };
+        var resolved = stdIpAddress(
+            zio.net.Address.fromPosix(address, address_len).ip,
+        );
+        resolved.setPort(port);
+        switch (resolved) {
+            .ip4 => {
+                if (result.ip4 == null) result.ip4 = resolved;
+            },
+            .ip6 => {
+                if (result.ip6 == null) result.ip6 = resolved;
+            },
+        }
+        if (result.count() == 2) break;
+    }
+    if (!found_interface) return error.InterfaceNotFound;
+    if (result.count() == 0) return error.AddressFamilyUnsupported;
+    return result;
+}
 
 /// Create a TCP listener while retaining Netz's `std.Io.net.Server` protocol
 /// boundary. The current Netz runtime is zio-backed; foreign I/O backends are
@@ -182,4 +275,18 @@ test "TCP listener sets IPv6-only before bind" {
         std.mem.asBytes(&enabled),
     );
     try std.testing.expectEqual(@as(c_int, 1), enabled);
+}
+
+test "interface address resolution selects loopback addresses" {
+    if (comptime !supports_interface_addresses) return error.SkipZigTest;
+
+    const interface_name = if (builtin.os.tag.isDarwin()) "lo0" else "lo";
+    const addresses = try resolveInterfaceAddresses(interface_name, 1883);
+    const ip4 = addresses.ip4 orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual([_]u8{ 127, 0, 0, 1 }, ip4.ip4.bytes);
+    try std.testing.expectEqual(@as(u16, 1883), ip4.getPort());
+    try std.testing.expectError(
+        error.InterfaceNotFound,
+        resolveInterfaceAddresses("netz-interface-that-does-not-exist", 1883),
+    );
 }

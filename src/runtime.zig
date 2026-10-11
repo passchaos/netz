@@ -6,6 +6,9 @@ const ip_listener = @import("runtime/ip_listener.zig");
 
 pub const TcpListenerOptions = ip_listener.Options;
 pub const listenTcp = ip_listener.listen;
+pub const InterfaceAddresses = ip_listener.InterfaceAddresses;
+pub const InterfaceAddressError = ip_listener.InterfaceAddressError;
+pub const resolveInterfaceAddresses = ip_listener.resolveInterfaceAddresses;
 
 /// Runtime backend for netz examples and applications.
 ///

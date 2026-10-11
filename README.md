@@ -1000,7 +1000,8 @@ Current protocol coverage includes:
   publication-time Will access-control hooks, a strict Mosquitto-style broker
   configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
   separate IPv4/IPv6 wildcard sockets by default plus listener-local
-  single-family socket domains enforced before bind,
+  single-family socket domains and named-interface address binding enforced
+  before bind,
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
   supervised inbound `connection` bridges with strict `topic ... in ...`
   QoS/prefix mapping, upstream Session/authentication settings, bounded
