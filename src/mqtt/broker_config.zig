@@ -1174,6 +1174,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\remote_password bridge-secret
         \\restart_timeout 10 60 120
         \\bridge_cafile roots.pem
+        \\bridge_capath roots.d
         \\bridge_tls_use_os_certs true
         \\bridge_certfile client-chain.pem
         \\bridge_keyfile client-key.pem
@@ -1237,6 +1238,7 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expect(upstream.usesTls());
     try std.testing.expect(upstream.use_os_ca_certificates);
     try std.testing.expectEqualStrings("roots.pem", upstream.ca_file);
+    try std.testing.expectEqualStrings("roots.d", upstream.ca_path);
     try std.testing.expectEqualStrings(
         "client-chain.pem",
         upstream.certificate_file,
@@ -1413,6 +1415,12 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         parse(allocator, listener ++
             "connection tls-identity\naddress localhost\ntopic # in 0\n" ++
             "bridge_cafile ca.pem\nbridge_certfile client.pem\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-capath\naddress localhost\ntopic # in 0\n" ++
+            "bridge_capath roots-a\nbridge_capath roots-b\n"),
     );
     try std.testing.expectError(
         error.InsecureBridgeTlsUnsupported,
@@ -1597,6 +1605,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\remote_username user
         \\remote_password secret
         \\bridge_cafile roots.pem
+        \\bridge_capath roots.d
         \\bridge_certfile client.pem
         \\bridge_keyfile client.key
         \\bridge_keyfile_password_file client.password

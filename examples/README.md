@@ -167,7 +167,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
 `cleansession`, `bridge_protocol_version`,
 `bridge_session_expiry_interval`, `keepalive_interval`, `remote_clientid`,
-`remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`,
+`remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`,
 `bridge_tls_version`, `round_robin`, `start_type`, `threshold`, `idle_timeout`, `notifications`,
@@ -224,8 +224,12 @@ three-broker case verifies secondary takeover followed by active failback when
 the primary becomes available.
 
 Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
-Trust comes from a bounded explicit `bridge_cafile`, operating-system roots
-enabled by `bridge_tls_use_os_certs true`, or both. Optional bridge mTLS uses
+Trust comes from a bounded explicit `bridge_cafile`, a non-recursive
+OpenSSL-style `bridge_capath`, operating-system roots enabled by
+`bridge_tls_use_os_certs true`, or any combination. Directory loading accepts
+`.pem` files and safe `hhhhhhhh.N` rehash links, deduplicates link targets, and
+enforces entry, certificate, per-file, and aggregate-byte limits before any
+listener opens. Optional bridge mTLS uses
 the same strictly parsed P-256/P-384/P-521/Ed25519/RSA identity loader as the
 server and supports PBES2-encrypted PKCS#8 through
 `bridge_keyfile_password_file`. `bridge_alpn` supplies one protocol offer.

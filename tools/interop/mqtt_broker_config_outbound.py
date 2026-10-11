@@ -8,7 +8,8 @@ from mqtt_broker_config_bridge import (
     _distinct_ports, _start_broker, _stop, _wait_for_log,
     _connect_client, _subscribe_client, _expect_bridge_state,
     _read_publish_and_ack, _packet, _utf8, _read_packet,
-    _create_tls_material, _connect_tls_client, _openssl,
+    _create_tls_material, _connect_tls_client, _expect_startup_rejection,
+    _openssl,
 )
 
 
@@ -17,13 +18,19 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
     remote_tls = local_tls = ""
     if tls:
         ca, cert, key, client_cert, client_key = _create_tls_material(directory)
+        server_ca_path = directory / "outbound-server-capath"
+        server_ca_path.mkdir()
+        (server_ca_path / "server-root.pem").write_bytes(ca.read_bytes())
+        _openssl("rehash", server_ca_path)
+        if not any(entry.is_symlink() for entry in server_ca_path.iterdir()):
+            raise AssertionError("openssl rehash did not create bridge_capath links")
         encrypted_key = directory / "outbound-client-encrypted.pem"
         key_password = directory / "outbound-client.password"
         key_password.write_text("outbound-secret\n")
         _openssl("pkcs8", "-topk8", "-in", client_key, "-out", encrypted_key,
                  "-v2", "aes-256-cbc", "-iter", 2048, "-passout", "pass:outbound-secret")
         remote_tls = f"certfile {cert}\nkeyfile {key}\ncafile {ca}\nrequire_certificate true\n"
-        local_tls = (f"bridge_cafile {ca}\nbridge_certfile {client_cert}\n"
+        local_tls = (f"bridge_capath {server_ca_path}\nbridge_certfile {client_cert}\n"
                      f"bridge_keyfile {encrypted_key}\nbridge_keyfile_password_file {key_password}\n"
                      "bridge_alpn mqtt\nbridge_tls_version tlsv1.3\n")
     remote_config = directory / "outbound-remote.conf"
@@ -105,6 +112,23 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         if subscriber is not None: subscriber.close()
         if local is not None: _stop(local, local_output)
         _stop(remote, remote_output)
+    if tls:
+        empty_ca_path = directory / "empty-outbound-server-capath"
+        empty_ca_path.mkdir()
+        invalid_port = _distinct_ports(1)[0]
+        invalid_config = directory / "empty-outbound-capath.conf"
+        invalid_config.write_text(
+            f"listener {invalid_port} 127.0.0.1\nallow_anonymous true\n"
+            "connection empty-capath\naddress localhost:1\n"
+            "topic # in 0\n"
+            f"bridge_capath {empty_ca_path}\n"
+        )
+        _expect_startup_rejection(
+            broker,
+            invalid_config,
+            invalid_port,
+            "EmptyCertificateDirectory",
+        )
 
 
 def run_lazy_outbound_bridge_case(broker: Path, directory: Path) -> None:

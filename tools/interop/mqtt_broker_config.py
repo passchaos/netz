@@ -5258,7 +5258,7 @@ def main() -> None:
         "state, ACL read/write/deny/pattern policy, mount point, listener "
         "policies, P-256/P-384/P-521/Ed25519/RSA and encrypted PKCS#8 TLS "
         "with OpenSSL verification, "
-        "optional/required client certificates, bounded capath trust, "
+        "optional/required client certificates, bounded listener/bridge capath trust, "
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "

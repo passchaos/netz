@@ -504,14 +504,25 @@ fn loadTlsResources(
     dir: std.Io.Dir,
     source: *const mqtt.broker_config.Bridge,
 ) !void {
-    if (source.ca_file.len != 0) {
-        if (source.use_os_ca_certificates) {
-            try resources.ca_bundle.rescan(
-                allocator,
-                io,
-                std.Io.Clock.real.now(io),
-            );
-        }
+    const now = std.Io.Clock.real.now(io);
+    if (source.use_os_ca_certificates) {
+        try resources.ca_bundle.rescan(allocator, io, now);
+    }
+    if (source.ca_path.len != 0) {
+        var explicit = try netz.tls.client_ca_dir.loadCombined(
+            allocator,
+            io,
+            dir,
+            if (source.ca_file.len != 0) source.ca_file else null,
+            source.ca_path,
+        );
+        defer explicit.deinit();
+        try explicit.appendToBundle(
+            allocator,
+            &resources.ca_bundle,
+            now.toSeconds(),
+        );
+    } else if (source.ca_file.len != 0) {
         const ca_source = try dir.readFileAlloc(
             io,
             source.ca_file,
@@ -530,7 +541,7 @@ fn loadTlsResources(
         try resources.ca_bundle.addCertsFromFilePath(
             allocator,
             io,
-            std.Io.Clock.real.now(io),
+            now,
             dir,
             source.ca_file,
         );
@@ -564,7 +575,9 @@ fn loadTlsResources(
         .tls_options = .{
             .mqtt = .{ .client_id = source.clientId() },
             .tls = .{
-                .ca_bundle = if (source.ca_file.len != 0) .{
+                .ca_bundle = if (source.ca_file.len != 0 or
+                    source.ca_path.len != 0 or
+                    source.use_os_ca_certificates) .{
                     .bundle = &resources.ca_bundle,
                     .lock = &resources.ca_lock,
                 } else null,
@@ -664,6 +677,54 @@ test "configured bridge rejects an empty explicit CA file" {
     try std.testing.expectError(
         error.EmptyBridgeCaFile,
         loadTlsResources(&resources, allocator, io, tmp.dir, &source),
+    );
+}
+
+test "configured bridge rejects an empty CA directory" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.createDir(io, "empty-cas", .default_dir);
+    var name = "tls-capath-upstream".*;
+    var host = "localhost".*;
+    var ca_path = "empty-cas".*;
+    const source = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .rules = &.{},
+        .ca_path = &ca_path,
+    };
+    var resources: ConnectorResources = .{};
+    defer resources.deinit(allocator);
+    try std.testing.expectError(
+        error.EmptyCertificateDirectory,
+        loadTlsResources(&resources, allocator, io, tmp.dir, &source),
+    );
+}
+
+test "configured bridge passes operating-system roots without a CA file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var name = "tls-system-roots".*;
+    var host = "localhost".*;
+    const source = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .rules = &.{},
+        .use_os_ca_certificates = true,
+    };
+    var resources: ConnectorResources = .{};
+    defer resources.deinit(allocator);
+    try loadTlsResources(
+        &resources,
+        allocator,
+        io,
+        std.Io.Dir.cwd(),
+        &source,
+    );
+    try std.testing.expect(
+        resources.connector.tls_options.?.tls.ca_bundle != null,
     );
 }
 

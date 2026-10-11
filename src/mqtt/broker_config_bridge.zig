@@ -109,6 +109,7 @@ pub const Bridge = struct {
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
     ca_file: []u8 = &.{},
+    ca_path: []u8 = &.{},
     use_os_ca_certificates: bool = false,
     certificate_file: []u8 = &.{},
     private_key_file: []u8 = &.{},
@@ -133,6 +134,7 @@ pub const Bridge = struct {
         if (self.remote_username.len != 0) allocator.free(self.remote_username);
         if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
         if (self.ca_file.len != 0) allocator.free(self.ca_file);
+        if (self.ca_path.len != 0) allocator.free(self.ca_path);
         if (self.certificate_file.len != 0) allocator.free(self.certificate_file);
         if (self.private_key_file.len != 0) allocator.free(self.private_key_file);
         if (self.private_key_password_file.len != 0) {
@@ -171,7 +173,8 @@ pub const Bridge = struct {
     }
 
     pub fn usesTls(self: Bridge) bool {
-        return self.ca_file.len != 0 or self.use_os_ca_certificates;
+        return self.ca_file.len != 0 or self.ca_path.len != 0 or
+            self.use_os_ca_certificates;
     }
 
     pub fn addressCount(self: Bridge) usize {
@@ -212,6 +215,7 @@ const Seen = struct {
     remote_password: bool = false,
     restart_timeout: bool = false,
     bridge_cafile: bool = false,
+    bridge_capath: bool = false,
     bridge_tls_use_os_certs: bool = false,
     bridge_certfile: bool = false,
     bridge_keyfile: bool = false,
@@ -242,6 +246,7 @@ pub const Builder = struct {
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
     ca_file: []u8 = &.{},
+    ca_path: []u8 = &.{},
     use_os_ca_certificates: bool = false,
     certificate_file: []u8 = &.{},
     private_key_file: []u8 = &.{},
@@ -280,6 +285,7 @@ pub const Builder = struct {
         if (self.remote_username.len != 0) allocator.free(self.remote_username);
         if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
         if (self.ca_file.len != 0) allocator.free(self.ca_file);
+        if (self.ca_path.len != 0) allocator.free(self.ca_path);
         if (self.certificate_file.len != 0) allocator.free(self.certificate_file);
         if (self.private_key_file.len != 0) allocator.free(self.private_key_file);
         if (self.private_key_password_file.len != 0) {
@@ -358,6 +364,9 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "bridge_cafile")) {
             try markOnce(&self.seen.bridge_cafile);
             self.ca_file = try parseOwnedNonEmpty(allocator, words);
+        } else if (std.mem.eql(u8, directive, "bridge_capath")) {
+            try markOnce(&self.seen.bridge_capath);
+            self.ca_path = try parseOwnedNonEmpty(allocator, words);
         } else if (std.mem.eql(
             u8,
             directive,
@@ -463,7 +472,8 @@ pub const Builder = struct {
             self.alpn.len != 0 or self.seen.bridge_insecure or
             self.seen.bridge_tls_version;
         if (tls_option_configured and
-            self.ca_file.len == 0 and !self.use_os_ca_certificates)
+            self.ca_file.len == 0 and self.ca_path.len == 0 and
+            !self.use_os_ca_certificates)
         {
             return error.BridgeTlsTrustRequired;
         }
@@ -528,6 +538,7 @@ pub const Builder = struct {
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
             .ca_file = self.ca_file,
+            .ca_path = self.ca_path,
             .use_os_ca_certificates = self.use_os_ca_certificates,
             .certificate_file = self.certificate_file,
             .private_key_file = self.private_key_file,
@@ -646,6 +657,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "remote_password") or
         std.mem.eql(u8, value, "restart_timeout") or
         std.mem.eql(u8, value, "bridge_cafile") or
+        std.mem.eql(u8, value, "bridge_capath") or
         std.mem.eql(u8, value, "bridge_tls_use_os_certs") or
         std.mem.eql(u8, value, "bridge_certfile") or
         std.mem.eql(u8, value, "bridge_keyfile") or

@@ -1054,7 +1054,8 @@ Current protocol coverage includes:
   cleanup, plus a blocking TCP
   client/server runtime with a
   `std.Io.async` concurrent server helper, native MQTT-over-TLS clients with
-  system or caller-provided CA roots, hostname verification, and optional
+  system, caller-provided file, or bounded OpenSSL-style CA-directory roots,
+  hostname verification, and optional
   client identities, plus configurable absolute TLS 1.3 handshake budgets for
   listeners and identity-enabled clients, plus TLS 1.3
   servers with caller-provided certificate chains/signers and concurrent

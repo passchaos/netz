@@ -51,6 +51,28 @@ pub const File = struct {
     pub fn authorities(self: *const File) []const []const u8 {
         return self.certificate_authorities;
     }
+
+    /// Append the validated DER certificates to another trust bundle. The
+    /// destination owns its copies; this File remains independently owned.
+    pub fn appendToBundle(
+        self: *const File,
+        allocator: std.mem.Allocator,
+        destination: *Certificate.Bundle,
+        now_seconds: i64,
+    ) Certificate.Bundle.ParseCertError!void {
+        for (self.certificates) |certificate| {
+            const start = destination.bytes.items.len;
+            try destination.bytes.appendSlice(allocator, certificate);
+            destination.parseCert(
+                allocator,
+                @intCast(start),
+                now_seconds,
+            ) catch |err| {
+                destination.bytes.items.len = start;
+                return err;
+            };
+        }
+    }
 };
 
 pub fn load(
@@ -358,6 +380,20 @@ test "client CA file owns trust bundle and DER authority names" {
     );
     var verifier = file.verifier(1_900_000_000);
     _ = verifier.clientVerifier();
+}
+
+test "client CA file appends owned certificates to a server trust bundle" {
+    const allocator = std.testing.allocator;
+    var file = try parse(allocator, ca_pem, 1_900_000_000);
+    defer file.deinit();
+    var destination: Certificate.Bundle = .empty;
+    defer destination.deinit(allocator);
+    try file.appendToBundle(allocator, &destination, 1_900_000_000);
+    try std.testing.expectEqual(@as(usize, 1), destination.map.count());
+    const bytes_after_first = destination.bytes.items.len;
+    try file.appendToBundle(allocator, &destination, 1_900_000_000);
+    try std.testing.expectEqual(@as(usize, 1), destination.map.count());
+    try std.testing.expectEqual(bytes_after_first, destination.bytes.items.len);
 }
 
 test "client CA file rejects non-CA, duplicate, and malformed input" {
