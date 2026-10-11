@@ -195,6 +195,78 @@ const ConfiguredServer = union(enum) {
     }
 };
 
+fn listenMqtt(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    prebound: ?std.Io.net.Server,
+    address: std.Io.net.IpAddress,
+    limits: mqtt.runtime.Limits,
+) !mqtt.runtime.Server {
+    return if (prebound) |listener|
+        mqtt.runtime.Server.initWithListener(allocator, io, listener, limits)
+    else
+        mqtt.runtime.Server.listen(allocator, io, address, limits);
+}
+
+fn listenMqttTls(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    prebound: ?std.Io.net.Server,
+    address: std.Io.net.IpAddress,
+    options: mqtt.tls_runtime.ListenOptions,
+) !mqtt.tls_runtime.Server {
+    return if (prebound) |listener|
+        mqtt.tls_runtime.Server.initWithListener(
+            allocator,
+            io,
+            listener,
+            options,
+        )
+    else
+        mqtt.tls_runtime.Server.listen(allocator, io, address, options);
+}
+
+fn listenMqttWebsocket(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    prebound: ?std.Io.net.Server,
+    address: std.Io.net.IpAddress,
+    options: mqtt.websocket_runtime.ListenOptions,
+) !mqtt.websocket_runtime.Server {
+    return if (prebound) |listener|
+        mqtt.websocket_runtime.Server.initWithListener(
+            allocator,
+            io,
+            listener,
+            options,
+        )
+    else
+        mqtt.websocket_runtime.Server.listen(allocator, io, address, options);
+}
+
+fn listenMqttWebsocketTls(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    prebound: ?std.Io.net.Server,
+    address: std.Io.net.IpAddress,
+    options: mqtt.websocket_runtime.TlsListenOptions,
+) !mqtt.websocket_runtime.TlsServer {
+    return if (prebound) |listener|
+        mqtt.websocket_runtime.TlsServer.initWithListener(
+            allocator,
+            io,
+            listener,
+            options,
+        )
+    else
+        mqtt.websocket_runtime.TlsServer.listen(
+            allocator,
+            io,
+            address,
+            options,
+        );
+}
+
 fn listenerLimits(
     config: mqtt.broker_config.Config,
     listener: mqtt.broker_config.Listener,
@@ -418,11 +490,21 @@ pub fn run(
     defer allocator.free(security_policies);
 
     for (config.listeners, 0..) |configured, index| {
+        var prebound_listener: ?std.Io.net.Server =
+            if (configured.socket_domain) |domain|
+                try netz.runtime.listenTcp(io, configured.address, .{
+                    .reuse_address = true,
+                    .ip6_only = domain == .ipv6,
+                })
+            else
+                null;
+        errdefer if (prebound_listener) |*listener| listener.deinit(io);
         servers[index] = if (identities.provider(index)) |identity_provider|
             switch (configured.protocol) {
-                .mqtt => .{ .mqtt_tls = try mqtt.tls_runtime.Server.listen(
+                .mqtt => .{ .mqtt_tls = try listenMqttTls(
                     allocator,
                     io,
+                    prebound_listener,
                     configured.address,
                     .{
                         .identity = identities.initialIdentity(index).?,
@@ -435,9 +517,10 @@ pub fn run(
                     },
                 ) },
                 .websockets => .{
-                    .secure_websockets = try mqtt.websocket_runtime.TlsServer.listen(
+                    .secure_websockets = try listenMqttWebsocketTls(
                         allocator,
                         io,
+                        prebound_listener,
                         configured.address,
                         .{
                             .identity = identities.initialIdentity(index).?,
@@ -452,16 +535,18 @@ pub fn run(
                 },
             }
         else switch (configured.protocol) {
-            .mqtt => .{ .mqtt = try mqtt.runtime.Server.listen(
+            .mqtt => .{ .mqtt = try listenMqtt(
                 allocator,
                 io,
+                prebound_listener,
                 configured.address,
                 listenerLimits(config, configured),
             ) },
             .websockets => .{
-                .websockets = try mqtt.websocket_runtime.Server.listen(
+                .websockets = try listenMqttWebsocket(
                     allocator,
                     io,
+                    prebound_listener,
                     configured.address,
                     .{
                         .limits = listenerLimits(config, configured),
@@ -471,6 +556,7 @@ pub fn run(
                 ),
             },
         };
+        prebound_listener = null;
         initialized_servers += 1;
 
         var accept = base_accept;

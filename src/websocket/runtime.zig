@@ -460,8 +460,24 @@ pub const Server = struct {
     limits: Limits = .{},
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        return initWithListener(
+            allocator,
+            io,
+            try bind_address.listen(io, .{ .reuse_address = true }),
+            limits,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers to the
+    /// returned server, which closes it from `deinit`.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        limits: Limits,
+    ) Server {
         return .{
-            .http = try .listen(allocator, io, bind_address, .{
+            .http = .initWithListener(allocator, io, listener, .{
                 .max_head_bytes = limits.max_head_bytes,
                 .max_body_bytes = 0,
             }),
@@ -1001,6 +1017,36 @@ pub const TlsServer = struct {
         bind_address: net.IpAddress,
         options: TlsListenOptions,
     ) Error!TlsServer {
+        const tls_options = try validatedTlsOptions(options);
+        return initValidated(
+            allocator,
+            io,
+            try bind_address.listen(io, .{ .reuse_address = true }),
+            options,
+            tls_options,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers only when
+    /// TLS validation succeeds; the returned server closes it from `deinit`.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        options: TlsListenOptions,
+    ) Error!TlsServer {
+        return initValidated(
+            allocator,
+            io,
+            listener,
+            options,
+            try validatedTlsOptions(options),
+        );
+    }
+
+    fn validatedTlsOptions(
+        options: TlsListenOptions,
+    ) Error!tls_stream.ServerOptions {
         const tls_options = tls_stream.ServerOptions{
             .identity = options.identity,
             .identity_provider = options.identity_provider,
@@ -1012,13 +1058,20 @@ pub const TlsServer = struct {
             .alpn_protocols = options.alpn_protocols,
         };
         try tls_options.validateIdentity();
+        return tls_options;
+    }
+
+    fn initValidated(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        options: TlsListenOptions,
+        tls_options: tls_stream.ServerOptions,
+    ) TlsServer {
         return .{
             .allocator = allocator,
             .io = io,
-            .listener = try bind_address.listen(
-                io,
-                .{ .reuse_address = true },
-            ),
+            .listener = listener,
             .limits = options.limits,
             .tls = tls_options,
             .tcp_nodelay = options.tcp_nodelay,

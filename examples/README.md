@@ -107,6 +107,7 @@ autosave_interval 30
 autosave_on_changes false
 
 listener 1883 127.0.0.1
+socket_domain ipv4
 accept_protocol_versions 4,5
 enable_proxy_protocol 1
 allow_anonymous false
@@ -117,6 +118,7 @@ max_topic_alias_broker 10
 max_connections 16
 
 listener 8080 127.0.0.1
+socket_domain ipv4
 protocol websockets
 websockets_origin https://console.example
 listener_auto_id_prefix tenant-
@@ -158,7 +160,7 @@ bridge_require_ocsp true
 bridge_tls_version tlsv1.3
 ```
 
-The accepted directives are exactly `listener`, `protocol`, `certfile`,
+The accepted directives are exactly `listener`, `protocol`, `socket_domain`, `certfile`,
 `keyfile`, `keyfile_password_file`, `cafile`, `capath`, `crlfile`, `require_certificate`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
@@ -203,7 +205,15 @@ full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
 payloads are rejected while representable QoS flows complete. Each listener
-accepts MQTT 3.1.1 and MQTT 5 by default.
+accepts MQTT 3.1.1 and MQTT 5 by default. Listener-local
+`socket_domain ipv4|ipv6` constrains TCP, TLS, WebSocket, and WSS sockets to one
+address family. When the `listener` line omits its bind address, the directive
+selects `0.0.0.0` or `::`; an explicit address from the other family is
+rejected. IPv6 listeners set `IPV6_V6ONLY` before bind, so an IPv4-mapped
+connection cannot bypass the policy. Backends that cannot apply that pre-bind
+option return `OptionUnsupported` instead of silently creating a dual-stack
+socket. Without `socket_domain`, the current default remains the existing IPv4
+wildcard.
 
 Each `connection` creates an independently reconnecting one-way bridge.
 One `address` directive containing one or more `host[:port]` targets (or

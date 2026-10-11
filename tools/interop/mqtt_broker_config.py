@@ -62,6 +62,13 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+def free_ipv6_port() -> int:
+    with socket.socket(socket.AF_INET6) as probe:
+        probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        probe.bind(("::1", 0))
+        return probe.getsockname()[1]
+
+
 def variable_integer(value: int) -> bytes:
     encoded = bytearray()
     while True:
@@ -470,11 +477,13 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
         f"password_file {password_file}\n"
         f"acl_file {acl_file}\n"
         f"listener {tcp_port} 127.0.0.1\n"
+        "socket_domain ipv4\n"
         "allow_anonymous false\n"
         "max_qos 1\n"
         "max_keepalive 30\n"
         "max_connections 4\n"
         f"listener {websocket_port} 127.0.0.1\n"
+        "socket_domain ipv4\n"
         "protocol websockets\n"
         "mount_point tenant/\n"
         "allow_anonymous true\n"
@@ -677,6 +686,61 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
     if return_code != 0:
         raise RuntimeError(
             f"configured broker exited {return_code}: {process.stdout.read()}"
+        )
+
+
+def run_ipv6_socket_domain_case(broker: Path, directory: Path) -> None:
+    port = free_ipv6_port()
+    config = directory / "ipv6-socket-domain.conf"
+    config.write_text(
+        f"listener {port}\n"
+        "socket_domain ipv6\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"IPv6-only configured broker failed to start: {ready}")
+
+    ipv4 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ipv4.settimeout(0.5)
+    try:
+        try:
+            ipv4.connect(("127.0.0.1", port))
+        except OSError:
+            pass
+        else:
+            raise AssertionError("socket_domain ipv6 accepted an IPv4 connection")
+    finally:
+        ipv4.close()
+
+    ipv6 = socket.create_connection(("::1", port), timeout=5)
+    ipv6.settimeout(5)
+    try:
+        ipv6.sendall(connect_packet("ipv6-only"))
+        if connack_reason(read_mqtt_packet(ipv6)) != 0:
+            raise AssertionError("IPv6-only MQTT CONNECT failed")
+        ipv6.sendall(b"\xe0\x00")
+    finally:
+        ipv6.close()
+
+    try:
+        return_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("IPv6-only configured broker did not finish")
+    if return_code != 0:
+        raise RuntimeError(
+            f"IPv6-only configured broker exited {return_code}: "
+            + process.stdout.read()
         )
 
 
@@ -3322,11 +3386,13 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
     config.write_text(
         "set_tcp_nodelay true\n"
         f"listener {tls_port} 127.0.0.1\n"
+        "socket_domain ipv4\n"
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
+        "socket_domain ipv4\n"
         "protocol websockets\n"
         "websockets_origin https://secure.example\n"
         f"certfile {certificate}\n"
@@ -5195,6 +5261,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
         run_shared_listener_case(args.broker, directory)
+        run_ipv6_socket_domain_case(args.broker, directory)
         run_accepted_protocol_versions_case(args.broker, directory)
         run_proxy_protocol_case(args.broker, directory)
         run_websocket_origins_case(args.broker, directory)
@@ -5252,6 +5319,7 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
+        "IPv4/IPv6-only TCP/TLS/WS/WSS listener domains, "
         "global client-session plus global/listener live-connection capacity, "
         "persistent-client and "
         "retained-message "

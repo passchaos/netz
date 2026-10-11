@@ -30,6 +30,7 @@ pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
 
 pub const Protocol = enum { mqtt, websockets };
+pub const SocketDomain = enum { ipv4, ipv6 };
 pub const Bridge = bridge_config.Bridge;
 pub const BridgeRule = bridge_config.Rule;
 pub const BridgeEndpoint = bridge_config.Endpoint;
@@ -37,6 +38,7 @@ pub const BridgeStartType = bridge_config.StartType;
 
 pub const Listener = struct {
     address: net.IpAddress,
+    socket_domain: ?SocketDomain = null,
     protocol: Protocol = .mqtt,
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
@@ -227,9 +229,11 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
 } || bridge_config.Error || std.mem.Allocator.Error;
 
 const ListenerSeen = struct {
+    address_explicit: bool = false,
     password_file: bool = false,
     acl_file: bool = false,
     protocol: bool = false,
+    socket_domain: bool = false,
     certfile: bool = false,
     keyfile: bool = false,
     keyfile_password_file: bool = false,
@@ -350,17 +354,15 @@ fn parseSources(
             if (std.mem.eql(u8, directive, "listener")) {
                 const port_text = words.next() orelse return error.InvalidDirective;
                 const port = parsePort(port_text) catch return error.InvalidInteger;
-                const host = words.next() orelse "0.0.0.0";
+                const explicit_host = words.next();
+                const host = explicit_host orelse "0.0.0.0";
                 if (words.next() != null) return error.InvalidDirective;
                 const address = net.IpAddress.parse(host, port) catch
                     return error.InvalidDirective;
-                for (listeners.items) |existing| {
-                    if (existing.address.eql(&address)) {
-                        return error.DuplicateListener;
-                    }
-                }
                 try listeners.append(allocator, .{ .address = address });
-                try listener_seen.append(allocator, .{});
+                try listener_seen.append(allocator, .{
+                    .address_explicit = explicit_host != null,
+                });
                 current_listener[source.scope] = listeners.items.len - 1;
                 continue;
             }
@@ -573,6 +575,34 @@ fn parseSources(
                         .websockets
                     else
                         return error.InvalidDirective;
+                } else if (std.mem.eql(u8, directive, "socket_domain")) {
+                    try markOnce(&seen.socket_domain);
+                    const value = try parseOne(&words);
+                    listener.socket_domain = if (std.mem.eql(u8, value, "ipv4"))
+                        .ipv4
+                    else if (std.mem.eql(u8, value, "ipv6"))
+                        .ipv6
+                    else
+                        return error.InvalidDirective;
+                    const port = listener.address.getPort();
+                    if (!seen.address_explicit) {
+                        listener.address = switch (listener.socket_domain.?) {
+                            .ipv4 => .{ .ip4 = .unspecified(port) },
+                            .ipv6 => .{ .ip6 = .unspecified(port) },
+                        };
+                    } else switch (listener.socket_domain.?) {
+                        .ipv4 => if (listener.address != .ip4)
+                            return error.InvalidDirective,
+                        .ipv6 => if (listener.address != .ip6)
+                            return error.InvalidDirective,
+                    }
+                    for (listeners.items, 0..) |other, other_index| {
+                        if (other_index != index and
+                            other.address.eql(&listener.address))
+                        {
+                            return error.DuplicateListener;
+                        }
+                    }
                 } else if (std.mem.eql(u8, directive, "certfile")) {
                     try markOnce(&seen.certfile);
                     listener.certfile = try parseOneOwned(allocator, &words);
@@ -717,6 +747,13 @@ fn parseSources(
     {
         return error.PersistenceRequired;
     }
+    for (listeners.items, 0..) |listener, index| {
+        for (listeners.items[0..index]) |previous| {
+            if (previous.address.eql(&listener.address)) {
+                return error.DuplicateListener;
+            }
+        }
+    }
     for (listeners.items, listener_seen.items) |listener, seen| {
         const has_client_ca = listener.cafile.len != 0 or
             listener.capath.len != 0;
@@ -838,6 +875,7 @@ fn markOnce(flag: *bool) error{DuplicateDirective}!void {
 
 fn isListenerDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "protocol") or
+        std.mem.eql(u8, value, "socket_domain") or
         std.mem.eql(u8, value, "certfile") or
         std.mem.eql(u8, value, "keyfile") or
         std.mem.eql(u8, value, "keyfile_password_file") or
@@ -1165,6 +1203,92 @@ test "MQTT broker config parses owned multi-listener policy" {
     const path = try config.persistencePath(allocator);
     defer allocator.free(path);
     try std.testing.expectEqualStrings("state/broker.db", path);
+}
+
+test "MQTT broker config scopes socket domains to listeners" {
+    const allocator = std.testing.allocator;
+    var config = try parse(allocator,
+        \\listener 1883
+        \\socket_domain ipv4
+        \\allow_anonymous true
+        \\listener 1883
+        \\socket_domain ipv6
+        \\allow_anonymous true
+        \\listener 1885 ::1
+        \\socket_domain ipv6
+        \\allow_anonymous true
+    );
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqual(SocketDomain.ipv4, config.listeners[0].socket_domain.?);
+    try std.testing.expect(config.listeners[0].address == .ip4);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 0, 0, 0 },
+        &config.listeners[0].address.ip4.bytes,
+    );
+    try std.testing.expectEqual(SocketDomain.ipv6, config.listeners[1].socket_domain.?);
+    try std.testing.expect(config.listeners[1].address == .ip6);
+    try std.testing.expectEqual(@as(u16, 1883), config.listeners[1].address.getPort());
+    try std.testing.expectEqualSlices(
+        u8,
+        &([_]u8{0} ** 16),
+        &config.listeners[1].address.ip6.bytes,
+    );
+    try std.testing.expect(config.listeners[2].address == .ip6);
+    try std.testing.expectEqual(@as(u8, 1), config.listeners[2].address.ip6.bytes[15]);
+}
+
+test "MQTT broker config rejects invalid socket domains" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "socket_domain ipv6\nlistener 1883\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 1883
+            \\socket_domain dual
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\socket_domain ipv4
+            \\socket_domain ipv4
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 1883 127.0.0.1
+            \\socket_domain ipv6
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 1883 ::1
+            \\socket_domain ipv4
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateListener,
+        parse(allocator,
+            \\listener 1883 ::
+            \\socket_domain ipv6
+            \\allow_anonymous true
+            \\listener 1883
+            \\socket_domain ipv6
+            \\allow_anonymous true
+        ),
+    );
 }
 
 test "MQTT broker config parses owned inbound bridges" {

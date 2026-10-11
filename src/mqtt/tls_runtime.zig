@@ -42,6 +42,33 @@ pub const Server = struct {
         bind_address: net.IpAddress,
         options: ListenOptions,
     ) mqtt_runtime.Error!Server {
+        const tls_options = try validatedTlsOptions(options);
+        try mqtt_runtime.validateProxyPolicy(options.limits);
+        return initValidated(
+            allocator,
+            io,
+            try bind_address.listen(io, .{ .reuse_address = true }),
+            options,
+            tls_options,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers only when
+    /// TLS and MQTT listener validation succeeds.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        options: ListenOptions,
+    ) mqtt_runtime.Error!Server {
+        const tls_options = try validatedTlsOptions(options);
+        try mqtt_runtime.validateProxyPolicy(options.limits);
+        return initValidated(allocator, io, listener, options, tls_options);
+    }
+
+    fn validatedTlsOptions(
+        options: ListenOptions,
+    ) mqtt_runtime.Error!tls_stream.ServerOptions {
         const tls_options = tls_stream.ServerOptions{
             .identity = options.identity,
             .identity_provider = options.identity_provider,
@@ -54,14 +81,20 @@ pub const Server = struct {
             .require_alpn = options.require_alpn,
         };
         try tls_options.validateIdentity();
-        try mqtt_runtime.validateProxyPolicy(options.limits);
+        return tls_options;
+    }
+
+    fn initValidated(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        options: ListenOptions,
+        tls_options: tls_stream.ServerOptions,
+    ) Server {
         return .{
             .allocator = allocator,
             .io = io,
-            .listener = try bind_address.listen(
-                io,
-                .{ .reuse_address = true },
-            ),
+            .listener = listener,
             .limits = options.limits,
             .tls = tls_options,
             .tcp_nodelay = options.tcp_nodelay,

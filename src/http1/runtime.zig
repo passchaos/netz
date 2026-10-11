@@ -1332,10 +1332,26 @@ pub const Server = struct {
     limits: Limits = .{},
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
+        return initWithListener(
+            allocator,
+            io,
+            try bind_address.listen(io, .{ .reuse_address = true }),
+            limits,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers to the
+    /// returned server, which closes it from `deinit`.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        limits: Limits,
+    ) Server {
         return .{
             .io = io,
             .allocator = allocator,
-            .listener = try bind_address.listen(io, .{ .reuse_address = true }),
+            .listener = listener,
             .limits = limits,
         };
     }

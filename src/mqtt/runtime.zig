@@ -198,10 +198,36 @@ pub const Server = struct {
 
     pub fn listen(allocator: std.mem.Allocator, io: std.Io, bind_address: net.IpAddress, limits: Limits) Error!Server {
         try validateProxyPolicy(limits);
+        return initValidated(
+            allocator,
+            io,
+            try bind_address.listen(io, .{ .reuse_address = true }),
+            limits,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers only when
+    /// validation succeeds; the returned server closes it from `deinit`.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        limits: Limits,
+    ) Error!Server {
+        try validateProxyPolicy(limits);
+        return initValidated(allocator, io, listener, limits);
+    }
+
+    fn initValidated(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: net.Server,
+        limits: Limits,
+    ) Server {
         return .{
             .io = io,
             .allocator = allocator,
-            .listener = try bind_address.listen(io, .{ .reuse_address = true }),
+            .listener = listener,
             .limits = limits,
         };
     }

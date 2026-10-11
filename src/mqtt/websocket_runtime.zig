@@ -45,14 +45,47 @@ pub const Server = struct {
         options: ListenOptions,
     ) runtime.Error!Server {
         try runtime.validateProxyPolicy(options.limits);
-        return .{
-            .allocator = allocator,
-            .websocket_server = try .listen(
+        return initValidated(
+            allocator,
+            try .listen(
                 allocator,
                 io,
                 bind_address,
                 websocketLimits(options.limits, options.max_head_bytes),
             ),
+            options,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers only when
+    /// MQTT listener validation succeeds.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: std.Io.net.Server,
+        options: ListenOptions,
+    ) runtime.Error!Server {
+        try runtime.validateProxyPolicy(options.limits);
+        return initValidated(
+            allocator,
+            .initWithListener(
+                allocator,
+                io,
+                listener,
+                websocketLimits(options.limits, options.max_head_bytes),
+            ),
+            options,
+        );
+    }
+
+    fn initValidated(
+        allocator: std.mem.Allocator,
+        websocket_server: websocket_runtime.Server,
+        options: ListenOptions,
+    ) Server {
+        return .{
+            .allocator = allocator,
+            .websocket_server = websocket_server,
             .limits = options.limits,
             .allowed_origins = options.allowed_origins,
         };
@@ -523,28 +556,67 @@ pub const TlsServer = struct {
         options: TlsListenOptions,
     ) runtime.Error!TlsServer {
         try runtime.validateProxyPolicy(options.limits);
-        return .{
-            .allocator = allocator,
-            .websocket_server = try .listen(
+        return initValidated(
+            allocator,
+            try .listen(
                 allocator,
                 io,
                 bind_address,
-                .{
-                    .identity = options.identity,
-                    .identity_provider = options.identity_provider,
-                    .limits = websocketLimits(
-                        options.limits,
-                        options.max_head_bytes,
-                    ),
-                    .cipher_suites = options.cipher_suites,
-                    .max_client_hello_size = options.max_client_hello_size,
-                    .max_client_handshake_size = options.max_client_handshake_size,
-                    .tls_handshake_timeout = options.tls_handshake_timeout,
-                    .client_auth = options.client_auth,
-                    .alpn_protocols = options.alpn_protocols,
-                    .tcp_nodelay = options.tcp_nodelay,
-                },
+                websocketTlsOptions(options),
             ),
+            options,
+        );
+    }
+
+    /// Adopt an already-bound TCP listener. Ownership transfers only when
+    /// MQTT and TLS listener validation succeeds.
+    pub fn initWithListener(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        listener: std.Io.net.Server,
+        options: TlsListenOptions,
+    ) runtime.Error!TlsServer {
+        try runtime.validateProxyPolicy(options.limits);
+        return initValidated(
+            allocator,
+            try .initWithListener(
+                allocator,
+                io,
+                listener,
+                websocketTlsOptions(options),
+            ),
+            options,
+        );
+    }
+
+    fn websocketTlsOptions(
+        options: TlsListenOptions,
+    ) websocket_runtime.TlsListenOptions {
+        return .{
+            .identity = options.identity,
+            .identity_provider = options.identity_provider,
+            .limits = websocketLimits(
+                options.limits,
+                options.max_head_bytes,
+            ),
+            .cipher_suites = options.cipher_suites,
+            .max_client_hello_size = options.max_client_hello_size,
+            .max_client_handshake_size = options.max_client_handshake_size,
+            .tls_handshake_timeout = options.tls_handshake_timeout,
+            .client_auth = options.client_auth,
+            .alpn_protocols = options.alpn_protocols,
+            .tcp_nodelay = options.tcp_nodelay,
+        };
+    }
+
+    fn initValidated(
+        allocator: std.mem.Allocator,
+        websocket_server: websocket_runtime.TlsServer,
+        options: TlsListenOptions,
+    ) TlsServer {
+        return .{
+            .allocator = allocator,
+            .websocket_server = websocket_server,
             .limits = options.limits,
             .allowed_origins = options.allowed_origins,
         };

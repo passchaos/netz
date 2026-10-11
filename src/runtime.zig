@@ -2,6 +2,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zio = @import("zio");
 
+const ip_listener = @import("runtime/ip_listener.zig");
+
+pub const TcpListenerOptions = ip_listener.Options;
+pub const listenTcp = ip_listener.listen;
+
 /// Runtime backend for netz examples and applications.
 ///
 /// zio owns scheduling and platform I/O while protocol modules consume only
