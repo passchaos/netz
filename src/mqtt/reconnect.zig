@@ -17,6 +17,7 @@ const delivery_queue = @import("reconnect/delivery_queue.zig");
 const owned_subscription = @import("reconnect/subscription.zig");
 const session_snapshot = @import("reconnect/snapshot.zig");
 const reconnect_target = @import("reconnect/target.zig");
+const backoff = @import("reconnect/backoff.zig");
 
 const net = std.Io.net;
 
@@ -52,93 +53,9 @@ pub const SessionSnapshotFileError = SessionSnapshotError ||
 const OptionsError = mqtt.Error || std.mem.Allocator.Error ||
     error{OwnedPropertyLimitExceeded};
 
-pub const Backoff = enum {
-    fixed,
-    linear,
-    exponential,
-};
-
-pub const Jitter = enum {
-    none,
-    /// Uniformly choose a delay in [0, backoff]. This is the AWS-style full
-    /// jitter strategy and minimizes synchronized reconnect storms.
-    full,
-    /// Uniformly choose a delay in [backoff/2, backoff]. Equal jitter retains
-    /// a minimum cooldown while still spreading reconnect attempts.
-    equal,
-};
-
-/// Retry delays are bounded and saturating. `max_delay` may equal
-/// `initial_delay`, yielding a fixed delay independently of `backoff`.
-pub const ReconnectPolicy = struct {
-    initial_delay: std.Io.Duration = .fromSeconds(1),
-    max_delay: std.Io.Duration = .fromSeconds(30),
-    backoff: Backoff = .exponential,
-    jitter: Jitter = .none,
-    /// Zero means retry until cancellation, matching long-lived client loops.
-    max_attempts: usize = 0,
-
-    pub fn validate(self: ReconnectPolicy) Error!void {
-        if (self.initial_delay.nanoseconds <= 0 or
-            self.max_delay.nanoseconds < self.initial_delay.nanoseconds)
-        {
-            return error.InvalidReconnectPolicy;
-        }
-    }
-
-    pub fn delay(self: ReconnectPolicy, failed_attempts: usize) std.Io.Duration {
-        if (failed_attempts == 0) return .zero;
-        const initial = self.initial_delay.nanoseconds;
-        const maximum = self.max_delay.nanoseconds;
-        if (initial >= maximum) return self.max_delay;
-        const scaled = switch (self.backoff) {
-            .fixed => initial,
-            .linear => blk: {
-                const attempts: i96 = std.math.cast(
-                    i96,
-                    failed_attempts,
-                ) orelse break :blk maximum;
-                break :blk std.math.mul(i96, initial, attempts) catch maximum;
-            },
-            .exponential => blk: {
-                const shift = @min(failed_attempts - 1, 95);
-                const factor = @as(i96, 1) << @intCast(shift);
-                break :blk std.math.mul(i96, initial, factor) catch maximum;
-            },
-        };
-        return .fromNanoseconds(@min(scaled, self.max_delay.nanoseconds));
-    }
-
-    /// Apply the configured jitter using an explicit sample. Keeping this
-    /// calculation pure makes bounds and edge values deterministic in tests.
-    pub fn jitteredDelay(
-        self: ReconnectPolicy,
-        failed_attempts: usize,
-        random_sample: u64,
-    ) std.Io.Duration {
-        const base = self.delay(failed_attempts).nanoseconds;
-        if (base <= 0 or self.jitter == .none) {
-            return .fromNanoseconds(base);
-        }
-        const base_unsigned: u128 = @intCast(base);
-        const minimum: u128 = switch (self.jitter) {
-            .none => unreachable,
-            .full => 0,
-            .equal => base_unsigned / 2,
-        };
-        const width = base_unsigned - minimum;
-        // Multiplication-high maps every u64 sample into an inclusive bounded
-        // interval without modulo bias. `width + 1` is safe because durations
-        // are positive i96 values.
-        const offset: u128 = if (random_sample == std.math.maxInt(u64))
-            width
-        else
-            @intCast(
-                (@as(u192, random_sample) * @as(u192, width + 1)) >> 64,
-            );
-        return .fromNanoseconds(@intCast(minimum + offset));
-    }
-};
+pub const Backoff = backoff.Backoff;
+pub const Jitter = backoff.Jitter;
+pub const ReconnectPolicy = backoff.Policy;
 
 const OwnedWill = struct {
     topic: []u8,
@@ -1200,6 +1117,7 @@ pub const Client = struct {
     target: Target,
     options: OwnedConnectOptions,
     policy: ReconnectPolicy,
+    retry_schedule: backoff.Schedule,
     shutdown: *std.Io.Event,
     connection_state: ?runtime.Connection = null,
     outgoing: session.Store,
@@ -1423,6 +1341,7 @@ pub const Client = struct {
             .target = owned_target,
             .options = owned_options,
             .policy = policy,
+            .retry_schedule = .init(policy),
             .shutdown = shutdown,
             .client_options = client_options,
             .outgoing = outgoing,
@@ -1453,8 +1372,9 @@ pub const Client = struct {
         self.reconnect_requested.store(true, .release);
     }
 
-    /// Connect immediately, then retry failures after the configured delay.
-    /// The initial failure count is one, so `delay(1)` is the first sleep.
+    /// Connect immediately unless policy retained a post-disconnect delay,
+    /// then retry failures after the configured delay. The initial failure
+    /// count is one, so `delay(1)` is the first failed-attempt sleep.
     /// Protocol-level CONNACK refusal is terminal; retrying credentials or an
     /// administratively rejected Client Identifier would only hide the cause.
     pub fn connect(self: *Client) (Error || std.Io.Cancelable)!ConnectEvent {
@@ -1497,29 +1417,24 @@ pub const Client = struct {
                     return error.Timeout;
                 }
             }
-            if (failed_attempts != 0) {
-                if (self.policy.max_attempts != 0 and
-                    failed_attempts >= self.policy.max_attempts)
-                {
-                    return error.ConnectionUnavailable;
-                }
-                const retry_delay = if (self.policy.jitter == .none)
-                    self.policy.delay(failed_attempts)
-                else blk: {
-                    var random_bytes: [8]u8 = undefined;
-                    self.io.random(&random_bytes);
-                    break :blk self.policy.jitteredDelay(
-                        failed_attempts,
-                        std.mem.readInt(u64, &random_bytes, .little),
-                    );
-                };
-                try self.waitBackoffUntil(retry_delay, deadline);
-            }
+            try self.waitForScheduledAttempt(deadline);
 
             var attempt = self.connectAttemptBefore(deadline) catch |err| {
                 if (err == error.Timeout) return err;
                 if (!retryableConnectError(err)) return err;
                 failed_attempts += 1;
+                if (self.policy.max_attempts != 0 and
+                    failed_attempts >= self.policy.max_attempts)
+                {
+                    self.retry_schedule.clearScheduled();
+                    return error.ConnectionUnavailable;
+                }
+                _ = self.retry_schedule.scheduleFailure(
+                    self.policy,
+                    failed_attempts,
+                    std.Io.Clock.awake.now(self.io),
+                    self.retrySample(),
+                );
                 continue;
             };
             if (!attempt.accepted()) {
@@ -1570,6 +1485,9 @@ pub const Client = struct {
             }
             self.noteControlSent();
             self.ping_response_deadline = null;
+            self.retry_schedule.noteConnected(
+                std.Io.Clock.awake.now(self.io),
+            );
             return .{
                 .session_present = session_present,
                 .failed_attempts = failed_attempts,
@@ -1604,7 +1522,14 @@ pub const Client = struct {
     /// owned by this client and is marked for retransmission on the next
     /// successful connection.
     pub fn disconnectTransport(self: *Client) void {
-        if (self.connection_state) |*active| active.close();
+        if (self.connection_state) |*active| {
+            self.retry_schedule.noteDisconnected(
+                self.policy,
+                std.Io.Clock.awake.now(self.io),
+                self.retrySample(),
+            );
+            active.close();
+        }
         self.connection_state = null;
         self.keep_alive_deadline = null;
         self.ping_response_deadline = null;
@@ -1616,6 +1541,13 @@ pub const Client = struct {
             ) catch {};
             self.outgoing_open = false;
         }
+    }
+
+    /// Clear any delay scheduled for the next connection attempt while
+    /// retaining the decorrelated-jitter history. Lifecycle policies such as
+    /// a lazy bridge use this after an intentional idle disconnect.
+    pub fn clearScheduledReconnectDelay(self: *Client) void {
+        self.retry_schedule.clearScheduled();
     }
 
     /// Send a graceful MQTT DISCONNECT and retire only the Network
@@ -2931,6 +2863,26 @@ pub const Client = struct {
         }
     }
 
+    fn waitForScheduledAttempt(
+        self: *Client,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) (std.Io.Cancelable || error{Timeout})!void {
+        const remaining = self.retry_schedule.remaining(
+            std.Io.Clock.awake.now(self.io),
+        ) orelse return;
+        if (remaining.nanoseconds > 0) {
+            try self.waitBackoffUntil(remaining, deadline);
+        }
+        self.retry_schedule.clearScheduled();
+    }
+
+    fn retrySample(self: *Client) u64 {
+        if (self.policy.jitter == .none) return 0;
+        var random_bytes: [8]u8 = undefined;
+        self.io.random(&random_bytes);
+        return std.mem.readInt(u64, &random_bytes, .little);
+    }
+
     fn resetOutgoingState(self: *Client) Error!void {
         self.outgoing.deinit();
         self.outgoing = session.Store.init(
@@ -3565,81 +3517,4 @@ fn retryableConnectError(err: anyerror) bool {
         => true,
         else => false,
     };
-}
-
-test "MQTT reconnect policy bounds fixed linear and exponential delays" {
-    const initial = std.Io.Duration.fromMilliseconds(100);
-    const maximum = std.Io.Duration.fromMilliseconds(450);
-    const fixed = ReconnectPolicy{
-        .initial_delay = initial,
-        .max_delay = maximum,
-        .backoff = .fixed,
-    };
-    try std.testing.expectEqual(@as(i96, 100_000_000), fixed.delay(3).nanoseconds);
-    const linear = ReconnectPolicy{
-        .initial_delay = initial,
-        .max_delay = maximum,
-        .backoff = .linear,
-    };
-    try std.testing.expectEqual(@as(i96, 300_000_000), linear.delay(3).nanoseconds);
-    const exponential = ReconnectPolicy{
-        .initial_delay = initial,
-        .max_delay = maximum,
-    };
-    try std.testing.expectEqual(@as(i96, 400_000_000), exponential.delay(3).nanoseconds);
-    try std.testing.expectEqual(@as(i96, 450_000_000), exponential.delay(99).nanoseconds);
-    try std.testing.expectError(error.InvalidReconnectPolicy, (ReconnectPolicy{
-        .initial_delay = .fromMilliseconds(2),
-        .max_delay = .fromMilliseconds(1),
-    }).validate());
-}
-
-test "MQTT reconnect jitter remains inside policy bounds" {
-    const base = ReconnectPolicy{
-        .initial_delay = .fromMilliseconds(100),
-        .max_delay = .fromMilliseconds(800),
-        .jitter = .full,
-    };
-    try std.testing.expectEqual(
-        @as(i96, 0),
-        base.jitteredDelay(3, 0).nanoseconds,
-    );
-    try std.testing.expectEqual(
-        @as(i96, 400_000_000),
-        base.jitteredDelay(3, std.math.maxInt(u64)).nanoseconds,
-    );
-
-    var equal = base;
-    equal.jitter = .equal;
-    try std.testing.expectEqual(
-        @as(i96, 200_000_000),
-        equal.jitteredDelay(3, 0).nanoseconds,
-    );
-    try std.testing.expectEqual(
-        @as(i96, 400_000_000),
-        equal.jitteredDelay(3, std.math.maxInt(u64)).nanoseconds,
-    );
-    try std.testing.expectEqual(
-        @as(i96, 0),
-        equal.jitteredDelay(0, std.math.maxInt(u64)).nanoseconds,
-    );
-
-    var none = base;
-    none.jitter = .none;
-    try std.testing.expectEqual(
-        @as(i96, 400_000_000),
-        none.jitteredDelay(3, 0).nanoseconds,
-    );
-
-    const huge_ns = std.math.maxInt(i96) - 1;
-    const huge = ReconnectPolicy{
-        .initial_delay = .fromNanoseconds(huge_ns),
-        .max_delay = .fromNanoseconds(huge_ns),
-        .backoff = .fixed,
-        .jitter = .full,
-    };
-    try std.testing.expectEqual(
-        huge_ns,
-        huge.jitteredDelay(1, std.math.maxInt(u64)).nanoseconds,
-    );
 }

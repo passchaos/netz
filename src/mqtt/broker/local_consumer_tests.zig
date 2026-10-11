@@ -35,7 +35,7 @@ test "broker local consumer reports pending messages and signals arrivals" {
         .properties = &.{},
         .payload = "queued",
     });
-    try wake.waitForChange(io, generation, .fromSeconds(1));
+    try wake.waitForChange(io, generation);
     try std.testing.expectEqual(
         @as(usize, 1),
         try broker.localConsumerPendingCount(&consumer),

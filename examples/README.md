@@ -136,7 +136,7 @@ round_robin true
 topic sensors/# in 1 local/ remote/
 cleansession false
 remote_clientid netz-upstream
-restart_timeout 5 30
+restart_timeout 5 30 120
 bridge_cafile upstream-ca.pem
 bridge_certfile bridge-client-chain.pem
 bridge_keyfile bridge-client-key.pem
@@ -203,10 +203,12 @@ fall through the ordered targets, but the first target remains primary: a
 secondary connection is retired after the configured restart cap so the next
 attempt probes the primary again. `round_robin true` instead rotates after each
 failure or disconnect and leaves a successful target active until it fails.
-`both`, MQTT 3.1, and the
-three-argument `restart_timeout` stable-period form fail explicitly instead of
-being silently downgraded. One timeout value selects a fixed delay; two select
-bounded exponential full-jitter retries. MQTT 3.1.1 is the bridge default;
+`both` and MQTT 3.1 fail explicitly instead of being silently downgraded. One
+`restart_timeout` value selects a fixed delay. Two values select bounded
+decorrelated jitter; an optional third value is the stable-connection period
+in seconds after which the delay resets to the base. Reconnects after an
+established connection wait for the selected delay, while the initial startup
+attempt remains immediate. MQTT 3.1.1 is the bridge default;
 `bridge_protocol_version mqttv50` enables MQTT 5. `remote_username` and
 `remote_password` configure upstream authentication, with a password requiring
 a username. When `remote_clientid` is omitted, the unique connection name is

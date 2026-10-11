@@ -297,11 +297,15 @@ pub const Set = struct {
                         source.restart.base_seconds,
                     ),
                     .max_delay = .fromSeconds(source.restart.cap_seconds),
-                    .backoff = if (source.restart.jitter)
-                        .exponential
+                    .backoff = .fixed,
+                    .jitter = if (source.restart.jitter)
+                        .decorrelated
                     else
-                        .fixed,
-                    .jitter = if (source.restart.jitter) .full else .none,
+                        .none,
+                    .stable_connection_period = .fromSeconds(
+                        source.restart.stable_connection_seconds,
+                    ),
+                    .delay_after_disconnect = true,
                     .max_attempts = if (source.start_type == .once)
                         source.addressCount()
                     else
@@ -467,8 +471,12 @@ fn initOutbound(
         .target_reconnect_policy = .{
             .initial_delay = .fromSeconds(source.restart.base_seconds),
             .max_delay = .fromSeconds(source.restart.cap_seconds),
-            .backoff = if (source.restart.jitter) .exponential else .fixed,
-            .jitter = if (source.restart.jitter) .full else .none,
+            .backoff = .fixed,
+            .jitter = if (source.restart.jitter) .decorrelated else .none,
+            .stable_connection_period = .fromSeconds(
+                source.restart.stable_connection_seconds,
+            ),
+            .delay_after_disconnect = true,
             .max_attempts = if (source.start_type == .once) source.addressCount() else 0,
         },
         .rules = rules,
@@ -656,5 +664,48 @@ test "configured bridge rejects an empty explicit CA file" {
     try std.testing.expectError(
         error.EmptyBridgeCaFile,
         loadTlsResources(&resources, allocator, io, tmp.dir, &source),
+    );
+}
+
+test "configured bridges use Mosquitto decorrelated restart state" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var shutdown: std.Io.Event = .unset;
+    var name = "jittered".*;
+    var host = "localhost".*;
+    var filter = "out/#".*;
+    var rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &filter,
+        .qos = .at_least_once,
+        .direction = .out,
+    }};
+    const configured = [_]mqtt.broker_config.Bridge{.{
+        .name = &name,
+        .host = &host,
+        .rules = &rules,
+        .restart = .{
+            .base_seconds = 2,
+            .cap_seconds = 9,
+            .jitter = true,
+            .stable_connection_seconds = 11,
+        },
+    }};
+    var bridges = try Set.init(
+        allocator,
+        io,
+        &broker,
+        &configured,
+        &shutdown,
+        null,
+    );
+    defer bridges.deinit();
+    const policy = bridges.values[0].outbound.target.policy;
+    try std.testing.expectEqual(mqtt.reconnect.Jitter.decorrelated, policy.jitter);
+    try std.testing.expect(policy.delay_after_disconnect);
+    try std.testing.expectEqual(
+        @as(i96, 11 * std.time.ns_per_s),
+        policy.stable_connection_period.nanoseconds,
     );
 }

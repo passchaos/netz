@@ -5250,6 +5250,7 @@ def main() -> None:
         "policy, ordered include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, mTLS, "
         "QoS 1/2, lazy threshold/idle lifecycle with restart recovery, "
+        "decorrelated-jitter reconnect with stable-period reset, "
         "round-robin failover, primary failback, reconnect, and "
         "retained local/remote state notifications with Last Will plus "
         "disabled one-shot lifecycle, "

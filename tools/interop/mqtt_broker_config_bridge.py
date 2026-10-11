@@ -119,10 +119,12 @@ def _finish_connect(client: socket.socket, client_id: str) -> socket.socket:
 
 
 def _connect_client(port: int, client_id: str) -> socket.socket:
-    return _finish_connect(
-        socket.create_connection(("127.0.0.1", port), timeout=10),
-        client_id,
-    )
+    raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+    try:
+        return _finish_connect(raw, client_id)
+    except BaseException:
+        raw.close()
+        raise
 
 
 def _connect_tls_client(
@@ -258,10 +260,19 @@ def _wait_for_log(process: subprocess.Popen[bytes], log: Path, marker: str) -> N
     raise TimeoutError(f"timed out waiting for {marker!r}: {log.read_text()}")
 
 
-def _start_broker(binary: Path, config: Path, log: Path) -> tuple[subprocess.Popen[bytes], object]:
+def _start_broker(
+    binary: Path,
+    config: Path,
+    log: Path,
+    *,
+    finite: bool = True,
+) -> tuple[subprocess.Popen[bytes], object]:
     output = log.open("wb")
     environment = os.environ.copy()
-    environment[FINITE_TEST_ENV] = "1"
+    if finite:
+        environment[FINITE_TEST_ENV] = "1"
+    else:
+        environment.pop(FINITE_TEST_ENV, None)
     process = subprocess.Popen(
         [str(binary), f"--config={config}"],
         stdout=output,
@@ -446,7 +457,7 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         "bridge_protocol_version mqttv50\n"
         "bridge_session_expiry_interval 0xFFFFFFFF\n"
         "remote_clientid configured-inbound-bridge\n"
-        "restart_timeout 1\n"
+        "restart_timeout 1 2 1\n"
     )
     upstream_log = directory / "bridge-upstream.log"
     local_log = directory / "bridge-local.log"

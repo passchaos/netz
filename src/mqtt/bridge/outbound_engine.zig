@@ -713,6 +713,7 @@ pub fn Engine(comptime Source: type) type {
                 };
             }
             self.target.disconnect(0) catch self.target.disconnectTransport();
+            self.target.clearScheduledReconnectDelay();
             try self.notifyLocal(false);
         }
 

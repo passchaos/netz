@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import socket
+import time
 
 from mqtt_broker_config_bridge import (
     _distinct_ports, _start_broker, _stop, _wait_for_log,
@@ -129,7 +130,12 @@ def run_lazy_outbound_bridge_case(broker: Path, directory: Path) -> None:
     )
     remote_log = directory / "lazy-outbound-remote.log"
     local_log = directory / "lazy-outbound-local.log"
-    remote, remote_output = _start_broker(broker, remote_config, remote_log)
+    remote, remote_output = _start_broker(
+        broker,
+        remote_config,
+        remote_log,
+        finite=False,
+    )
     local = local_output = subscriber = publisher = local_observer = None
 
     def publish(payload: bytes, packet_id: int) -> None:
@@ -151,9 +157,34 @@ def run_lazy_outbound_bridge_case(broker: Path, directory: Path) -> None:
             subscriber.settimeout(10)
         raise AssertionError(f"lazy bridge connected below threshold: {packet.hex()}")
 
+    def connect_after_restart(client_id: str) -> socket.socket:
+        assert local is not None
+        deadline = time.monotonic() + 3
+        while True:
+            try:
+                return _connect_client(local_port, client_id)
+            except (OSError, EOFError) as error:
+                if local.poll() is not None:
+                    raise RuntimeError(
+                        "lazy broker exited during restart: "
+                        + local_log.read_text(errors="replace")
+                    ) from error
+                if time.monotonic() >= deadline:
+                    raise AssertionError(
+                        "lazy broker did not accept a stable post-restart "
+                        "connection: "
+                        + local_log.read_text(errors="replace")
+                    ) from error
+                time.sleep(0.02)
+
     try:
         _wait_for_log(remote, remote_log, "configured 1 listeners")
-        local, local_output = _start_broker(broker, local_config, local_log)
+        local, local_output = _start_broker(
+            broker,
+            local_config,
+            local_log,
+            finite=False,
+        )
         _wait_for_log(local, local_log, "bridge lazy-out remote=")
         subscriber = _connect_client(remote_port, "lazy-outbound-observer")
         _subscribe_client(subscriber, 1, "bridge/lazy/state", 1)
@@ -188,9 +219,14 @@ def run_lazy_outbound_bridge_case(broker: Path, directory: Path) -> None:
         local_output.close()
         local = local_output = None
 
-        local, local_output = _start_broker(broker, local_config, local_log)
+        local, local_output = _start_broker(
+            broker,
+            local_config,
+            local_log,
+            finite=False,
+        )
         _wait_for_log(local, local_log, "bridge lazy-out remote=")
-        local_observer = _connect_client(local_port, "lazy-state-observer-after")
+        local_observer = connect_after_restart("lazy-state-observer-after")
         _subscribe_client(local_observer, 1, "bridge/lazy/state", 1)
         _expect_bridge_state(local_observer, "bridge/lazy/state", b"0")
         expect_quiet()

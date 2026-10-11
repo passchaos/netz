@@ -15,6 +15,7 @@ pub const default_restart_cap_seconds: u16 = 30;
 pub const default_lazy_idle_timeout_seconds: u32 = 60;
 pub const default_lazy_threshold: usize = 10;
 pub const maximum_restart_seconds: u16 = 3600;
+pub const maximum_restart_cap_seconds: u16 = 7200;
 pub const maximum_host_bytes: usize = 255;
 
 pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
@@ -46,6 +47,7 @@ pub const RestartPolicy = struct {
     base_seconds: u16 = default_restart_base_seconds,
     cap_seconds: u16 = default_restart_cap_seconds,
     jitter: bool = true,
+    stable_connection_seconds: u32 = 0,
 };
 
 pub const StartType = enum {
@@ -717,21 +719,34 @@ fn parseRestartTimeout(words: anytype) Error!RestartPolicy {
         return error.InvalidDirective);
     const cap_text = words.next();
     const cap = if (cap_text) |value|
-        try parseRestartSeconds(value)
+        try parseRestartCapSeconds(value)
     else
         base;
+    const stable_connection_seconds = if (words.next()) |value|
+        try parseInteger(u32, value)
+    else
+        0;
     if (words.next() != null) return error.UnsupportedBridgeRestartTimeout;
     if (cap < base) return error.InvalidInteger;
     return .{
         .base_seconds = base,
         .cap_seconds = cap,
         .jitter = cap_text != null,
+        .stable_connection_seconds = stable_connection_seconds,
     };
 }
 
 fn parseRestartSeconds(value: []const u8) Error!u16 {
     const seconds = try parseInteger(u16, value);
     if (seconds == 0 or seconds > maximum_restart_seconds) {
+        return error.InvalidInteger;
+    }
+    return seconds;
+}
+
+fn parseRestartCapSeconds(value: []const u8) Error!u16 {
+    const seconds = try parseInteger(u16, value);
+    if (seconds == 0 or seconds > maximum_restart_cap_seconds) {
         return error.InvalidInteger;
     }
     return seconds;

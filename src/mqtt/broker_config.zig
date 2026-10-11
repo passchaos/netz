@@ -1172,7 +1172,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\remote_clientid edge-bridge
         \\remote_username bridge-user
         \\remote_password bridge-secret
-        \\restart_timeout 10 60
+        \\restart_timeout 10 60 120
         \\bridge_cafile roots.pem
         \\bridge_tls_use_os_certs true
         \\bridge_certfile client-chain.pem
@@ -1230,6 +1230,10 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(@as(u16, 10), upstream.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 60), upstream.restart.cap_seconds);
     try std.testing.expect(upstream.restart.jitter);
+    try std.testing.expectEqual(
+        @as(u32, 120),
+        upstream.restart.stable_connection_seconds,
+    );
     try std.testing.expect(upstream.usesTls());
     try std.testing.expect(upstream.use_os_ca_certificates);
     try std.testing.expectEqualStrings("roots.pem", upstream.ca_file);
@@ -1284,6 +1288,10 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        bridge.restart.stable_connection_seconds,
+    );
     try std.testing.expectEqual(
         BridgeStartType.automatic,
         bridge.start_type,
@@ -1422,7 +1430,13 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         error.UnsupportedBridgeRestartTimeout,
         parse(allocator, listener ++
             "connection restart\naddress localhost\ntopic # in 0\n" ++
-            "restart_timeout 5 30 30\n"),
+            "restart_timeout 5 30 30 30\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, listener ++
+            "connection negative-stable\naddress localhost\ntopic # in 0\n" ++
+            "restart_timeout 5 30 -1\n"),
     );
     try std.testing.expectError(
         error.UnsupportedBridgeStartType,
@@ -1531,6 +1545,34 @@ test "MQTT broker config validates lazy outbound lifecycle" {
             parse(allocator, source),
         );
     }
+}
+
+test "MQTT broker config accepts decorrelated restart stable period" {
+    const allocator = std.testing.allocator;
+    const listener = "listener 1883\nallow_anonymous true\n";
+    var config = try parse(allocator, listener ++
+        "connection jittered\naddress localhost\ntopic # in 0\n" ++
+        "restart_timeout 3600 7200 0\n");
+    defer config.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u16, 3600),
+        config.bridges[0].restart.base_seconds,
+    );
+    try std.testing.expectEqual(
+        @as(u16, 7200),
+        config.bridges[0].restart.cap_seconds,
+    );
+    try std.testing.expect(config.bridges[0].restart.jitter);
+    try std.testing.expectEqual(
+        @as(u32, 0),
+        config.bridges[0].restart.stable_connection_seconds,
+    );
+    try std.testing.expectError(
+        error.InvalidInteger,
+        parse(allocator, listener ++
+            "connection excessive-cap\naddress localhost\ntopic # in 0\n" ++
+            "restart_timeout 1 7201\n"),
+    );
 }
 
 test "MQTT broker config bridge allocation failures leak nothing" {
