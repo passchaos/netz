@@ -5324,7 +5324,7 @@ pub const Broker = struct {
                 publisher_id,
                 publisher,
                 canonical_publish,
-                0x95,
+                0x83,
             );
         }
         if (canonical_publish.qos == .exactly_once) {

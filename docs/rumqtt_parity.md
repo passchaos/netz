@@ -15,7 +15,7 @@ and same-client broker results are kept separate.
 | Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, TLS or WS/WSS Upgrade, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata. The production Mosquitto-style config exposes listener-local `enable_proxy_protocol 1|2` and `proxy_protocol_v2_require_tls`; on cleartext v2 listeners, `require_certificate` requires verified connection/session certificate evidence and `use_identity_as_username` accepts only a validated SSL-TLV commonName. Local TLS termination and full-Subject identity remain invalid with v2 | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery. Mosquitto-compatible global `max_inflight_messages` defaults to 20, bounds each client's incoming and outgoing QoS 1/2 transactions, advertises MQTT 5 Receive Maximum, enforces the same unadvertised bound for MQTT 3.1.1, and maps zero to the protocol default of 65,535 while retaining independent aggregate/memory bounds. Global `max_inflight_bytes` independently bounds outgoing QoS 1/2 payload bytes for transient connections and durable Sessions through final acknowledgement, and defaults to unlimited | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills and exposes the same global inflight settings |
-| Packet and Application Message size policy | Mosquitto-style global `max_packet_size` defaults to 2,000,000 bytes, caps complete inbound MQTT Control Packets across TCP/TLS/WS/WSS, and is advertised in MQTT 5 CONNACK. The independent `message_size_limit` payload-byte cap covers live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 returns Packet Too Large while MQTT 3.1.1 completes representable acknowledgements | Mosquitto exposes both `max_packet_size` and `message_size_limit`; rumqttd exposes `max_payload_size` |
+| Packet and Application Message size policy | Mosquitto-style global `max_packet_size` defaults to 2,000,000 bytes, caps complete inbound MQTT Control Packets across TCP/TLS/WS/WSS, and is advertised in MQTT 5 CONNACK. The independent `message_size_limit` payload-byte cap covers live QoS 0/1/2 PUBLISH and Will acceptance; MQTT 5 uses Implementation Specific Error for PUBACK/PUBREC and Packet Too Large for CONNACK/DISCONNECT, while MQTT 3.1.1 completes representable acknowledgements | Mosquitto exposes both `max_packet_size` and `message_size_limit`; rumqttd exposes `max_payload_size` |
 | Retain availability policy | Mosquitto-style global `retain_available` defaults true. When disabled, MQTT 5 CONNACK advertises Retain Available 0 and retained PUBLISH or Will use receives reason 0x9A; MQTT 3.1.1 closes because it cannot represent that reason. The policy is shared by TCP/TLS/WS/WSS listeners | Mosquitto exposes global `retain_available`; rumqttd has retained-message storage but no equivalent audited configuration switch |
 | Outgoing QoS policy | MQTT-compliant min(source, subscription) by default; explicit `upgrade_outgoing_qos` compatibility mode covers live, retained and durable Session delivery | Mosquitto exposes the same non-standard opt-in; rumqttd follows its configured routing policy |
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
@@ -165,6 +165,21 @@ ordinary Session implementation. A failed event allocation returns the
 transmission to that Session; every returned event crosses the commit-log
 boundary, including a PUBREL following a failed PUBREC-state write. Retried
 PUBLISH events preserve the original DUP flag.
+
+The Session API validates each ACK reason before changing transaction state,
+Receive Maximum credit, or persistent generation. Codecs and the direct API
+share the packet-specific MQTT 5 policy: PUBACK/PUBREC accept nine reason
+codes, PUBREL/PUBCOMP accept Success and Packet Identifier Not Found, and
+Packet Too Large (`0x95`) is rejected for every QoS ACK. Exhaustive tests cover
+all 256 byte values and compare Session statistics and encoded snapshots after
+invalid ACKs; valid negative PUBREC still terminates the delivery and releases
+its credit.
+
+Single-event Session drains retain only a genuinely unsent inflight suffix.
+After PUBREC, selecting one PUBREL no longer advertises already-sent later
+PUBLISH packets as pending work. The regression combines multiple QoS 2
+transactions, the inflight payload-byte cap, one-event drains, and PUBCOMP
+credit release, matching the production broker's delivery loop.
 
 `src/mqtt/broker/local_consumer_tests.zig` covers all QoS levels, retained
 replay, stale handles, close/reopen, flow control, negative PUBREC, offline
@@ -3273,8 +3288,14 @@ QoS 2 case.
 The example broker exposes an
 independent `--max-payload-size`; a payload exactly at the boundary is routed,
 oversized QoS 0 is discarded while both connections stay usable, and oversized
-QoS 1/2 receives MQTT 5 PUBACK/PUBREC `0x95` (or completes the property-free
-MQTT 3.1.1 acknowledgement handshake) without downstream delivery. Oversized Wills are refused before Session/Will
+QoS 1/2 receives MQTT 5 PUBACK/PUBREC `0x83` (Implementation Specific Error,
+as documented by Mosquitto) or completes the property-free
+MQTT 3.1.1 acknowledgement handshake without downstream delivery.
+The pinned Mosquitto checkout and its payload-limit fixture still use `0x95`
+in PUBACK despite the packet-specific MQTT 5 reason-code table. This replay
+preserves the source payload boundary and delivery checks while requiring
+the legal `0x83` acknowledgement instead.
+Oversized Wills are refused before Session/Will
 registration with MQTT 5 CONNACK `0x95` or legacy v3 CONNACK `0x05`, while a
 boundary-sized Will is installed and published after an ungraceful close.
 Five more raw cases verify exact `0x94`, `0x93`, `0x9e`, `0xa1`, and `0xa2`

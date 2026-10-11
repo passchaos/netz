@@ -144,6 +144,15 @@ test "broker local consumer receive maximum and negative ACK release credit" {
     var first = (try broker.pollLocalConsumer(&consumer)).?;
     defer first.deinit();
     try std.testing.expect((try broker.pollLocalConsumer(&consumer)) == null);
+    const generation = broker.persistent_generation;
+    try std.testing.expectError(error.InvalidReasonCode, broker.acknowledgeLocalConsumer(
+        &consumer,
+        .pubrec,
+        first.publish.value.packet_id.?,
+        0x95,
+    ));
+    try std.testing.expectEqual(generation, broker.persistent_generation);
+    try std.testing.expect((try broker.pollLocalConsumer(&consumer)) == null);
     try std.testing.expectEqual(LocalConsumerAckAction.completed, try broker.acknowledgeLocalConsumer(
         &consumer,
         .pubrec,

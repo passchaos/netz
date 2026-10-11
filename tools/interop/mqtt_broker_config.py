@@ -1134,7 +1134,7 @@ def run_packet_and_message_size_case(broker: Path, directory: Path) -> None:
                     proto_ver=proto_ver,
                 )
             )
-            expected_reason = 0x95 if proto_ver == 5 else 0
+            expected_reason = 0x83 if proto_ver == 5 else 0
             if puback_reason(read_mqtt_packet(publisher), 2) != expected_reason:
                 raise AssertionError("oversized QoS 1 PUBACK reason mismatch")
             publisher.sendall(

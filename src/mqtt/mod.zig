@@ -1,5 +1,8 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
+const ack_reason = @import("ack_reason.zig");
+
+pub const validateAckReasonCode = ack_reason.validate;
 
 pub const runtime = @import("runtime.zig");
 pub const reconnect = @import("reconnect.zig");
@@ -21,6 +24,7 @@ pub const will_scheduler = @import("will/mod.zig");
 pub const testing = @import("testing/mod.zig");
 
 test {
+    _ = ack_reason;
     _ = listener_namespace;
     _ = broker_config;
     _ = password_file;
@@ -1874,32 +1878,6 @@ pub const AckPacket = struct {
         return self.reason_code < 0x80;
     }
 };
-
-fn validateAckReasonCode(packet_type: PacketType, reason_code: u8) Error!void {
-    switch (packet_type) {
-        .puback, .pubrec => switch (reason_code) {
-            0x00, // Success.
-            0x10, // No matching subscribers.
-            0x80, // Unspecified error.
-            0x83, // Implementation specific error.
-            0x87, // Not authorized.
-            0x90, // Topic Name invalid.
-            0x91, // Packet Identifier in use.
-            0x95, // Packet too large.
-            0x97, // Quota exceeded.
-            0x99, // Payload format invalid.
-            => {},
-            else => return error.InvalidReasonCode,
-        },
-        .pubrel, .pubcomp => switch (reason_code) {
-            0x00, // Success.
-            0x92, // Packet Identifier not found.
-            => {},
-            else => return error.InvalidReasonCode,
-        },
-        else => return error.InvalidPacketType,
-    }
-}
 
 fn validateAckProperties(packet_type: PacketType, properties: []const Property) Error!void {
     switch (packet_type) {

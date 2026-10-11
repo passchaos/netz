@@ -2292,7 +2292,6 @@ pub const Store = struct {
             session.inflight.items[session.inflight_order_head].order_previous;
         session.next_inflight_send = no_inflight_send;
         while (send_index != no_inflight_send) {
-            if (written == out.len) break;
             std.debug.assert(send_index < session.inflight.items.len);
             const inflight = &session.inflight.items[send_index];
             std.debug.assert(inflight.packet_id != 0);
@@ -2304,6 +2303,10 @@ pub const Store = struct {
                 send_index = next_send_index;
                 continue;
             }
+            // Even a full output must skip already-sent slots before retaining
+            // its cursor. A one-slot PUBREL drain otherwise advertises phantom
+            // work when its remaining suffix contains only sent PUBLISHes.
+            if (written == out.len) break;
             if (inflight.state == .await_pubcomp and
                 inflight.pubrel_blocked)
             {
@@ -2504,6 +2507,9 @@ pub const Store = struct {
         noteInflightNeedsSend(target, index, inflight);
     }
 
+    /// Apply a QoS acknowledgement after validating its MQTT 5 reason code.
+    /// MQTT 3.1.1 callers pass zero. Invalid codes leave all delivery state,
+    /// Receive Maximum credit, and persistence data unchanged.
     pub fn handleAck(
         self: *Store,
         handle: Handle,
@@ -2516,6 +2522,10 @@ pub const Store = struct {
             return error.InvalidAcknowledgement;
         const inflight = &session.inflight.items[index];
         std.debug.assert(inflight.packet_id != 0);
+        switch (packet_type) {
+            .puback, .pubrec, .pubcomp => try mqtt.validateAckReasonCode(packet_type, reason_code),
+            else => return error.InvalidAcknowledgement,
+        }
         switch (packet_type) {
             .puback => {
                 if (inflight.state != .await_puback) {
@@ -3966,4 +3976,5 @@ test "Session unselected transmission tracks the QoS 2 handshake" {
 
 test {
     _ = @import("tests.zig");
+    _ = @import("ack_tests.zig");
 }

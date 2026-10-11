@@ -2151,6 +2151,9 @@ def application_message_payload_limit(
     # 02-subpub-qos1-oversize-payload.py, and 07-will-oversize-payload.py.
     # This limit applies to Application Message payload bytes, independently
     # from the complete encoded-packet limit advertised in CONNACK.
+    # The pinned QoS 1 fixture uses 0x95 in PUBACK, outside MQTT 5's allowed
+    # ACK reasons. Preserve its payload policy but require the documented,
+    # standards-valid Implementation Specific Error (0x83) for QoS 1/2.
     topic = "message/size/limit"
     for proto_ver in (4, 5):
         with NetzBroker(
@@ -2219,7 +2222,7 @@ def application_message_payload_limit(
                     mqtt_packets.gen_puback(
                         2, proto_ver=proto_ver,
                         reason_code=(
-                            mqtt5_rc.PACKET_TOO_LARGE
+                            mqtt5_rc.IMPLEMENTATION_SPECIFIC
                             if proto_ver == 5 else -1
                         ),
                     ),
@@ -2239,7 +2242,7 @@ def application_message_payload_limit(
                     mqtt_packets.gen_pubrec(
                         3, proto_ver=proto_ver,
                         reason_code=(
-                            mqtt5_rc.PACKET_TOO_LARGE
+                            mqtt5_rc.IMPLEMENTATION_SPECIFIC
                             if proto_ver == 5 else -1
                         ),
                     ),

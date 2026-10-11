@@ -635,7 +635,8 @@ test "broker enforces Application Message payload limit by QoS" {
     defer publisher.close();
 
     // A one-byte payload is accepted and delivered normally. Two-byte QoS 0
-    // is discarded, while QoS 1/2 return Packet Too Large and never route.
+    // is discarded, while QoS 1/2 return Implementation Specific Error and
+    // never route. Packet Too Large is not a valid PUBACK/PUBREC reason code.
     try publisher.publish("payload/limit", "A", .{});
     var delivered = try subscriber.readPublish();
     defer delivered.deinit(allocator);
@@ -647,14 +648,14 @@ test "broker enforces Application Message payload limit by QoS" {
     });
     var puback = try publisher.readPubAck();
     defer puback.deinit(allocator);
-    try std.testing.expectEqual(@as(u8, 0x95), puback.ack.reason_code);
+    try std.testing.expectEqual(@as(u8, 0x83), puback.ack.reason_code);
 
     _ = try publisher.writePublish("payload/limit", "AB", .{
         .qos = .exactly_once,
     });
     var pubrec = try publisher.readPubRec();
     defer pubrec.deinit(allocator);
-    try std.testing.expectEqual(@as(u8, 0x95), pubrec.ack.reason_code);
+    try std.testing.expectEqual(@as(u8, 0x83), pubrec.ack.reason_code);
     try std.testing.expectError(
         error.PublishRefused,
         publisher.applyPubRec(pubrec.ack),
