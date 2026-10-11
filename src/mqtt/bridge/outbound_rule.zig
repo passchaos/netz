@@ -32,6 +32,17 @@ pub const Rule = struct {
         return namespace.mapFilterAlloc(allocator, self.filter);
     }
 
+    pub fn targetFilterAlloc(
+        self: Rule,
+        allocator: std.mem.Allocator,
+    ) Error![]u8 {
+        try self.validate();
+        const namespace = try listener_namespace.Namespace.init(
+            self.remote_prefix,
+        );
+        return namespace.mapFilterAlloc(allocator, self.filter);
+    }
+
     pub fn mapTopicAlloc(
         self: Rule,
         allocator: std.mem.Allocator,

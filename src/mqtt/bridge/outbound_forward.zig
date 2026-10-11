@@ -134,7 +134,7 @@ pub fn Operations(comptime Self: type) type {
                     defer target_event.deinit(self.allocator);
                     switch (target_event) {
                         .connected => |connected| {
-                            self.target_session_present = connected.session_present;
+                            try self.noteTargetConnected(connected);
                             if (!connected.session_present) {
                                 target_result = try publishTarget(
                                     self,
@@ -181,8 +181,9 @@ pub fn Operations(comptime Self: type) type {
                             return;
                         },
                         .disconnect => self.target.disconnectTransport(),
+                        .publish, .pubrel => {},
                         .pingreq, .pingresp, .auth => {},
-                        .publish, .pubrec, .pubrel, .pubcomp => {
+                        .pubrec, .pubcomp => {
                             self.target.disconnectTransport();
                             return error.UnexpectedPacket;
                         },

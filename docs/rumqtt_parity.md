@@ -242,7 +242,13 @@ CONNACK value. The outgoing complete-packet limit treats zero as unlimited and
 uses the smaller non-zero configured or negotiated value; an oversized
 forwarded PUBLISH is retired for that destination without terminating the
 bridge. Disabling outgoing RETAIN strips it from forwarded publications and
-remote state notifications in both MQTT 3.1.1 and MQTT 5.
+remote state notifications in both MQTT 3.1.1 and MQTT 5. The default-on
+`bridge_attempt_unsubscribe` sends the mapped remote filters after every
+outbound connection and waits for a successful UNSUBACK before forwarding,
+preventing a persistent Session from replaying subscriptions left by an older
+inbound configuration. Legal PUBLISH traffic interleaved before that UNSUBACK
+is retained in wire order, acknowledged, and deliberately discarded; disabling
+the option omits the cleanup packet.
 
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use

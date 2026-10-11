@@ -111,6 +111,7 @@ pub const Bridge = struct {
     max_topic_alias: u16 = default_max_topic_alias,
     max_packet_size: u32 = 0,
     outgoing_retain: bool = true,
+    attempt_unsubscribe: bool = true,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -220,6 +221,7 @@ const Seen = struct {
     bridge_max_topic_alias: bool = false,
     bridge_max_packet_size: bool = false,
     bridge_outgoing_retain: bool = false,
+    bridge_attempt_unsubscribe: bool = false,
     remote_client_id: bool = false,
     remote_username: bool = false,
     remote_password: bool = false,
@@ -256,6 +258,7 @@ pub const Builder = struct {
     max_topic_alias: u16 = default_max_topic_alias,
     max_packet_size: u32 = 0,
     outgoing_retain: bool = true,
+    attempt_unsubscribe: bool = true,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -375,6 +378,9 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "bridge_outgoing_retain")) {
             try markOnce(&self.seen.bridge_outgoing_retain);
             self.outgoing_retain = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "bridge_attempt_unsubscribe")) {
+            try markOnce(&self.seen.bridge_attempt_unsubscribe);
+            self.attempt_unsubscribe = try parseOneBool(words);
         } else if (std.mem.eql(u8, directive, "remote_clientid")) {
             try markOnce(&self.seen.remote_client_id);
             self.remote_client_id = try parseOwnedUtf8(allocator, words);
@@ -566,6 +572,7 @@ pub const Builder = struct {
             .max_topic_alias = self.max_topic_alias,
             .max_packet_size = self.max_packet_size,
             .outgoing_retain = self.outgoing_retain,
+            .attempt_unsubscribe = self.attempt_unsubscribe,
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
@@ -688,6 +695,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_max_topic_alias") or
         std.mem.eql(u8, value, "bridge_max_packet_size") or
         std.mem.eql(u8, value, "bridge_outgoing_retain") or
+        std.mem.eql(u8, value, "bridge_attempt_unsubscribe") or
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
         std.mem.eql(u8, value, "remote_password") or

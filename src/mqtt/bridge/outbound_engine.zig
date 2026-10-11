@@ -51,6 +51,7 @@ pub const Error = reconnect.Error || local_source.Error || listener_namespace.Er
     EmptyMappedTopic,
     InvalidBridgeQoS,
     TargetAcknowledgementMismatch,
+    TargetUnsubscribeRefused,
 };
 
 pub const Rule = @import("outbound_rule.zig").Rule;
@@ -62,6 +63,7 @@ pub const Options = struct {
     target_reconnect_policy: reconnect.ReconnectPolicy = .{},
     rule: Rule,
     preserve_retain: bool = true,
+    attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
     notifications: ?NotificationOptions = null,
 };
@@ -73,6 +75,7 @@ pub const MultiOptions = struct {
     target_reconnect_policy: reconnect.ReconnectPolicy = .{},
     rules: []const Rule,
     preserve_retain: bool = true,
+    attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
     notifications: ?NotificationOptions = null,
 };
@@ -153,6 +156,7 @@ pub fn Engine(comptime Source: type) type {
         target_delivery: *TargetDeliveryState,
         rules: OwnedRules,
         preserve_retain: bool,
+        attempt_target_unsubscribe: bool,
         source_session_present: bool = false,
         target_session_present: bool = false,
         source_session_epoch: u64 = 0,
@@ -185,6 +189,7 @@ pub fn Engine(comptime Source: type) type {
                     .target_reconnect_policy = options.target_reconnect_policy,
                     .rules = &.{options.rule},
                     .preserve_retain = options.preserve_retain,
+                    .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
                     .notifications = options.notifications,
                 },
@@ -234,6 +239,7 @@ pub fn Engine(comptime Source: type) type {
                     .target_reconnect_policy = options.target_reconnect_policy,
                     .rules = &.{options.rule},
                     .preserve_retain = options.preserve_retain,
+                    .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
                     .notifications = options.notifications,
                 },
@@ -281,6 +287,7 @@ pub fn Engine(comptime Source: type) type {
                     .target_reconnect_policy = options.target_reconnect_policy,
                     .rules = &.{options.rule},
                     .preserve_retain = options.preserve_retain,
+                    .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
                     .notifications = options.notifications,
                 },
@@ -433,6 +440,7 @@ pub fn Engine(comptime Source: type) type {
                 .target_delivery = target_delivery,
                 .rules = rules,
                 .preserve_retain = options.preserve_retain,
+                .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                 .source_session_epoch = if (coordinator) |*store|
                     store.source_session_epoch
                 else
@@ -591,8 +599,13 @@ pub fn Engine(comptime Source: type) type {
                     self.target.disconnectTransport();
                     try self.notifyLocal(false);
                 },
+                // An outbound-only remote Session may replay publications from
+                // a stale subscription before its cleanup UNSUBACK. The
+                // reconnect client has already completed their automatic QoS
+                // acknowledgement, so deliberately discard them here.
+                .publish, .pubrel => {},
                 .pingreq, .pingresp, .auth => {},
-                .publish, .puback, .pubrec, .pubrel, .pubcomp => {
+                .puback, .pubrec, .pubcomp => {
                     self.target.disconnectTransport();
                     return error.UnexpectedPacket;
                 },
@@ -938,8 +951,9 @@ pub fn Engine(comptime Source: type) type {
                     _ = try self.completeDurableSourceIfReady();
                 },
                 .disconnect => self.target.disconnectTransport(),
+                .publish, .pubrel => {},
                 .pingreq, .pingresp, .auth => {},
-                .publish, .puback, .pubrel => {
+                .puback => {
                     self.target.disconnectTransport();
                     return error.UnexpectedPacket;
                 },
@@ -1108,12 +1122,11 @@ pub fn Engine(comptime Source: type) type {
             }
         }
 
-        fn noteTargetConnected(
+        pub fn noteTargetConnected(
             self: *Self,
             connected: reconnect.ConnectEvent,
         ) Error!void {
             self.target_session_present = connected.session_present;
-            try self.notify(true);
             if (self.target_session_epoch == 0 and self.coordinator != null and connected.session_present) {
                 self.target_session_epoch = 1;
             }
@@ -1121,14 +1134,44 @@ pub fn Engine(comptime Source: type) type {
                 self.target_session_epoch +%= 1;
                 if (self.target_session_epoch == 0) self.target_session_epoch = 1;
             }
-            const transaction = self.durableTransaction() orelse return;
-            if (transaction.phase != .target_complete and
-                transaction.phase != .target_rejected and
-                (!connected.session_present or
-                    transaction.target_session_epoch !=
-                        self.target_session_epoch))
-            {
-                return error.TargetSessionLost;
+            if (self.durableTransaction()) |transaction| {
+                if (transaction.phase != .target_complete and
+                    transaction.phase != .target_rejected and
+                    (!connected.session_present or
+                        transaction.target_session_epoch !=
+                            self.target_session_epoch))
+                {
+                    return error.TargetSessionLost;
+                }
+            }
+            try self.cleanupTargetSubscriptions();
+            try self.notify(true);
+        }
+
+        fn cleanupTargetSubscriptions(self: *Self) Error!void {
+            if (!self.attempt_target_unsubscribe) return;
+            try self.unsubscribeTargetFilters(self.rules.target_filters);
+        }
+
+        fn unsubscribeTargetFilters(
+            self: *Self,
+            filters: []const []const u8,
+        ) Error!void {
+            var unsuback = self.target.unsubscribe(filters, .{}) catch |err|
+                switch (err) {
+                    error.OutgoingPacketTooLarge => {
+                        if (filters.len == 1) return err;
+                        const middle = filters.len / 2;
+                        try self.unsubscribeTargetFilters(filters[0..middle]);
+                        return self.unsubscribeTargetFilters(filters[middle..]);
+                    },
+                    else => return err,
+                };
+            defer unsuback.deinit(self.allocator);
+            for (unsuback.unsuback.reason_codes) |reason_code| {
+                if (reason_code >= 0x80) {
+                    return error.TargetUnsubscribeRefused;
+                }
             }
         }
 

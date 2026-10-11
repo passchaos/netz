@@ -58,11 +58,11 @@ pub const disconnectReasonForProtocolViolation =
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
-    /// Maximum non-PINGRESP Control Packets retained while a synchronous
-    /// client PING waits for its response. MQTT permits the broker to send
-    /// ordinary traffic at any time, so `pingWithTimeout` preserves those
-    /// packets for the next typed reader instead of consuming or rejecting
-    /// them. Reaching the bound fails the probe, with one already-consumed
+    /// Maximum interleaved Control Packets retained while a synchronous client
+    /// operation waits for its correlated response. MQTT permits the broker to
+    /// send ordinary traffic at any time, so PING and UNSUBSCRIBE preserve
+    /// those packets for the next typed reader instead of consuming them.
+    /// Reaching the bound fails the operation, with one already-consumed
     /// overflow packet retained separately so wire order remains recoverable.
     max_pending_ping_packets: usize = 256,
     /// MQTT exchanges many small PUBLISH/PUBACK packets. Disable Nagle by
@@ -2522,9 +2522,9 @@ fn problemInformationProperty(property: mqtt.Property) bool {
     };
 }
 
-/// Queue state used only by the blocking `ping*` helpers while they preserve
-/// interleaved application packets for the next ordinary read.
-const PendingPingState = struct {
+/// Queue state used by blocking correlated-response helpers while they
+/// preserve interleaved application packets for the next ordinary read.
+const PendingPacketState = struct {
     packets: std.ArrayList(OwnedPacket) = .empty,
     head: usize = 0,
     /// One packet already removed from the wire is retained after a queue-cap
@@ -2583,7 +2583,7 @@ pub const Connection = struct {
     write_property_overflow: ?[]mqtt.Property = null,
     /// Allocated before the first synchronous PINGREQ. Broker connections and
     /// event-loop clients therefore do not pay for blocking-ping queue state.
-    pending_ping: ?*PendingPingState = null,
+    pending_packets: ?*PendingPacketState = null,
     /// Owned metadata from an explicitly trusted PROXY protocol listener.
     /// Keeping it beside rather than inside the transport allows the same
     /// identity model to span raw TCP, TLS, WS, and WSS adapters.
@@ -2698,7 +2698,7 @@ pub const Connection = struct {
         self.authentication.deinit(self.allocator);
         self.write_scratch.deinit(self.allocator);
         self.clearWritePropertyOverflow();
-        self.clearPendingPingState();
+        self.clearPendingPacketState();
         self.clearProxyMetadata();
         self.clearTopicNamespace();
         self.transport.close(self.allocator);
@@ -4655,12 +4655,41 @@ pub const Connection = struct {
         const packet_id = self.nextPacketId();
         self.write_scratch.clearRetainingCapacity();
         try mqtt.Unsubscribe.write(&self.write_scratch, self.allocator, self.protocol, packet_id, options.properties, topic_filters);
+        try self.ensurePendingPacketQueueAvailable();
         try self.writeGeneratedPacket(self.write_scratch.items, .unsubscribe);
 
-        var unsuback = try self.readUnsubAck();
-        errdefer unsuback.deinit(self.allocator);
-        try validateUnsubAckResponse(self.protocol, unsuback.unsuback, packet_id, topic_filters.len);
-        return unsuback;
+        while (true) {
+            // As with PINGRESP, MQTT permits ordinary server traffic between
+            // the request and its correlated acknowledgement. Read only from
+            // the transport here so packets queued by an earlier operation
+            // retain their original position ahead of this UNSUBSCRIBE.
+            var packet = try self.readTransportPacket();
+            var packet_owned = true;
+            defer if (packet_owned) packet.deinit(self.allocator);
+            if (packet.fixed.packet_type == .unsuback) {
+                packet_owned = false;
+                var unsuback = try self.finishReadUnsubAck(packet);
+                errdefer unsuback.deinit(self.allocator);
+                try validateUnsubAckResponse(
+                    self.protocol,
+                    unsuback.unsuback,
+                    packet_id,
+                    topic_filters.len,
+                );
+                return unsuback;
+            }
+            self.queuePendingPacket(packet) catch |err| {
+                // The packet has already left the transport. Preserve it in
+                // the emergency slot so the next reader can recover the exact
+                // wire order even when the configured bound is exhausted.
+                const pending = self.pending_packets.?;
+                std.debug.assert(pending.overflow == null);
+                pending.overflow = packet;
+                packet_owned = false;
+                return err;
+            };
+            packet_owned = false;
+        }
     }
 
     pub fn readUnsubscribe(self: *Connection) Error!OwnedUnsubscribe {
@@ -4714,7 +4743,14 @@ pub const Connection = struct {
     }
 
     pub fn readUnsubAck(self: *Connection) Error!OwnedUnsubAck {
-        var packet = try self.readPacket();
+        return self.finishReadUnsubAck(try self.readPacket());
+    }
+
+    fn finishReadUnsubAck(
+        self: *Connection,
+        packet_value: OwnedPacket,
+    ) Error!OwnedUnsubAck {
+        var packet = packet_value;
         errdefer packet.deinit(self.allocator);
         if (packet.fixed.packet_type != .unsuback) return error.UnexpectedPacket;
         var unsuback = try mqtt.UnsubAck.parse(self.allocator, self.protocol, packet.bytes);
@@ -4724,7 +4760,7 @@ pub const Connection = struct {
     }
 
     pub fn ping(self: *Connection) Error!void {
-        try self.ensurePingQueueAvailable();
+        try self.ensurePendingPacketQueueAvailable();
         return self.pingInternal(null);
     }
 
@@ -4739,7 +4775,7 @@ pub const Connection = struct {
         timeout: std.Io.Duration,
     ) Error!void {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        try self.ensurePingQueueAvailable();
+        try self.ensurePendingPacketQueueAvailable();
         return self.pingInternal(self.transport.deadlineFromNow(timeout));
     }
 
@@ -4753,7 +4789,7 @@ pub const Connection = struct {
             self.transport.ioHandle(),
             deadline,
         );
-        try self.ensurePingQueueAvailable();
+        try self.ensurePendingPacketQueueAvailable();
         return self.pingInternal(deadline);
     }
 
@@ -4779,11 +4815,11 @@ pub const Connection = struct {
                 try mqtt.validatePing(packet.bytes, true);
                 return;
             }
-            self.queuePendingPingPacket(packet) catch |err| {
+            self.queuePendingPacket(packet) catch |err| {
                 // The packet has already left the transport. Retain it even
                 // when the configured cap or allocator rejects a queue slot,
                 // so the caller can drain the exact wire sequence afterward.
-                const pending = self.pending_ping.?;
+                const pending = self.pending_packets.?;
                 std.debug.assert(pending.overflow == null);
                 pending.overflow = packet;
                 packet_owned = false;
@@ -5382,7 +5418,7 @@ pub const Connection = struct {
     ) Error!ClientPacketEvent {
         if (timeout.nanoseconds <= 0) return error.Timeout;
         const deadline = self.transport.deadlineFromNow(timeout);
-        const packet = if (self.popPendingPingPacket()) |pending|
+        const packet = if (self.popPendingPacket()) |pending|
             pending
         else
             try self.readTransportPacketWithDeadline(deadline);
@@ -5399,7 +5435,7 @@ pub const Connection = struct {
             self.transport.ioHandle(),
             deadline,
         );
-        const packet = if (self.popPendingPingPacket()) |pending|
+        const packet = if (self.popPendingPacket()) |pending|
             pending
         else
             try self.readTransportPacketWithDeadline(deadline);
@@ -6116,7 +6152,7 @@ pub const Connection = struct {
 
     fn readPacket(self: *Connection) Error!OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
-        if (self.popPendingPingPacket()) |packet| return packet;
+        if (self.popPendingPacket()) |packet| return packet;
         return self.readTransportPacket();
     }
 
@@ -6125,7 +6161,7 @@ pub const Connection = struct {
         storage: []u8,
     ) Error!OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
-        if (self.popPendingPingPacket()) |packet| return packet;
+        if (self.popPendingPacket()) |packet| return packet;
         const packet = try self.transport.readPacketInto(
             self.allocator,
             self.limits.max_packet_size,
@@ -6157,7 +6193,7 @@ pub const Connection = struct {
         timeout: std.Io.Clock.Duration,
     ) Error!OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
-        if (self.popPendingPingPacket()) |packet| return packet;
+        if (self.popPendingPacket()) |packet| return packet;
         const packet = try self.transport.readPacketWithInactivityTimeout(
             self.allocator,
             self.limits.max_packet_size,
@@ -6173,7 +6209,7 @@ pub const Connection = struct {
         storage: []u8,
     ) Error!OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
-        if (self.popPendingPingPacket()) |packet| return packet;
+        if (self.popPendingPacket()) |packet| return packet;
         const packet = try self.transport
             .readPacketWithInactivityTimeoutInto(
             self.allocator,
@@ -6190,7 +6226,7 @@ pub const Connection = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!OwnedPacket {
         if (!self.isUsable()) return error.ConnectionClosed;
-        if (self.popPendingPingPacket()) |packet| return packet;
+        if (self.popPendingPacket()) |packet| return packet;
         return self.readTransportPacketWithDeadline(deadline);
     }
 
@@ -6228,49 +6264,49 @@ pub const Connection = struct {
         if (self.traffic_sink) |counters| counters.recordSent(bytes);
     }
 
-    fn pendingPingPacketCount(self: *const Connection) usize {
-        const pending = self.pending_ping orelse return 0;
+    fn pendingPacketCount(self: *const Connection) usize {
+        const pending = self.pending_packets orelse return 0;
         return pending.packets.items.len - pending.head +
             @intFromBool(pending.overflow != null);
     }
 
-    fn ensurePingQueueAvailable(self: *Connection) Error!void {
+    fn ensurePendingPacketQueueAvailable(self: *Connection) Error!void {
         if (self.limits.max_pending_ping_packets == 0) {
             return error.TooManyPendingPackets;
         }
-        if (self.pending_ping) |pending| {
+        if (self.pending_packets) |pending| {
             if (pending.overflow != null or
-                self.pendingPingPacketCount() >=
+                self.pendingPacketCount() >=
                     self.limits.max_pending_ping_packets)
             {
                 return error.TooManyPendingPackets;
             }
             return;
         }
-        const pending = try self.allocator.create(PendingPingState);
+        const pending = try self.allocator.create(PendingPacketState);
         pending.* = .{};
-        self.pending_ping = pending;
+        self.pending_packets = pending;
     }
 
-    fn clearPendingPingState(self: *Connection) void {
-        const pending = self.pending_ping orelse return;
+    fn clearPendingPacketState(self: *Connection) void {
+        const pending = self.pending_packets orelse return;
         for (pending.packets.items[pending.head..]) |*packet| {
             packet.deinit(self.allocator);
         }
         pending.packets.deinit(self.allocator);
         if (pending.overflow) |*packet| packet.deinit(self.allocator);
         self.allocator.destroy(pending);
-        self.pending_ping = null;
+        self.pending_packets = null;
     }
 
-    fn queuePendingPingPacket(
+    fn queuePendingPacket(
         self: *Connection,
         packet: OwnedPacket,
     ) Error!void {
-        const pending = self.pending_ping.?;
+        const pending = self.pending_packets.?;
         // Check the semantic bound before append. The caller handles either a
         // full queue or allocator failure by using the emergency slot.
-        if (self.pendingPingPacketCount() >=
+        if (self.pendingPacketCount() >=
             self.limits.max_pending_ping_packets)
         {
             return error.TooManyPendingPackets;
@@ -6278,13 +6314,13 @@ pub const Connection = struct {
         if (pending.head != 0 and
             pending.packets.items.len == pending.packets.capacity)
         {
-            self.compactPendingPingPackets();
+            self.compactPendingPackets();
         }
         try pending.packets.append(self.allocator, packet);
     }
 
-    fn compactPendingPingPackets(self: *Connection) void {
-        const pending = self.pending_ping.?;
+    fn compactPendingPackets(self: *Connection) void {
+        const pending = self.pending_packets.?;
         if (pending.head == 0) return;
         const remaining = pending.packets.items.len - pending.head;
         if (remaining != 0) {
@@ -6297,8 +6333,8 @@ pub const Connection = struct {
         pending.head = 0;
     }
 
-    fn popPendingPingPacket(self: *Connection) ?OwnedPacket {
-        const pending = self.pending_ping orelse return null;
+    fn popPendingPacket(self: *Connection) ?OwnedPacket {
+        const pending = self.pending_packets orelse return null;
         if (pending.head < pending.packets.items.len) {
             const packet = pending.packets.items[pending.head];
             pending.head += 1;
@@ -6934,9 +6970,11 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqualStrings("sensors/+", unsubscribe.unsubscribe.topic_filters[0]);
             try std.testing.expectEqualStrings("alerts/#", unsubscribe.unsubscribe.topic_filters[1]);
             const unsub_reasons = [_]u8{ 0x00, 0x11 };
-            try accepted.connection.writeUnsubAck(unsubscribe.unsubscribe.packet_id, &unsub_reasons, &.{});
-
+            // A broker may deliver ordinary traffic before the correlated
+            // UNSUBACK. The client must preserve that packet for its next
+            // reader instead of rejecting the valid interleaving.
             try accepted.connection.publish("alerts/system", "online", .{});
+            try accepted.connection.writeUnsubAck(unsubscribe.unsubscribe.packet_id, &unsub_reasons, &.{});
 
             var exact = try accepted.connection.readPublish();
             defer exact.deinit(server_ptr.allocator);
@@ -7735,26 +7773,26 @@ test "MQTT Connection allocates blocking PING state on demand" {
         .transport = undefined,
     };
 
-    try std.testing.expect(connection.pending_ping == null);
-    try std.testing.expectEqual(@as(usize, 0), connection.pendingPingPacketCount());
+    try std.testing.expect(connection.pending_packets == null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingPacketCount());
     try std.testing.expectError(
         error.OutOfMemory,
-        connection.ensurePingQueueAvailable(),
+        connection.ensurePendingPacketQueueAvailable(),
     );
-    try std.testing.expect(connection.pending_ping == null);
+    try std.testing.expect(connection.pending_packets == null);
 
     connection.allocator = std.testing.allocator;
-    try connection.ensurePingQueueAvailable();
-    try std.testing.expect(connection.pending_ping != null);
-    try std.testing.expectEqual(@as(usize, 0), connection.pendingPingPacketCount());
-    connection.clearPendingPingState();
-    try std.testing.expect(connection.pending_ping == null);
+    try connection.ensurePendingPacketQueueAvailable();
+    try std.testing.expect(connection.pending_packets != null);
+    try std.testing.expectEqual(@as(usize, 0), connection.pendingPacketCount());
+    connection.clearPendingPacketState();
+    try std.testing.expect(connection.pending_packets == null);
 
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 88), @sizeOf(PendingPingState));
+        try std.testing.expectEqual(@as(usize, 88), @sizeOf(PendingPacketState));
         try std.testing.expectEqual(
-            @sizeOf(?*PendingPingState),
-            @sizeOf(@FieldType(Connection, "pending_ping")),
+            @sizeOf(?*PendingPacketState),
+            @sizeOf(@FieldType(Connection, "pending_packets")),
         );
     }
 }

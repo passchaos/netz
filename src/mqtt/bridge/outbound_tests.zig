@@ -679,6 +679,28 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
         fn runFallible(self: *@This()) !void {
             var accepted = try self.server.accept(.{ .protocol = .v5 });
             defer accepted.deinit(self.server.allocator);
+            var unsubscribe = try accepted.connection.readUnsubscribe();
+            defer unsubscribe.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                unsubscribe.unsubscribe.topic_filters.len,
+            );
+            try std.testing.expectEqualStrings(
+                "remote/fire/#",
+                unsubscribe.unsubscribe.topic_filters[0],
+            );
+            // Exercise the legal CONNACK-to-UNSUBACK race: a stale Session may
+            // begin delivery before the cleanup request takes effect.
+            try accepted.connection.publish(
+                "remote/fire/stale",
+                "ignored",
+                .{},
+            );
+            try accepted.connection.writeUnsubAck(
+                unsubscribe.unsubscribe.packet_id,
+                &.{0x11},
+                &.{},
+            );
             var publish = try accepted.connection.readPublish();
             defer publish.deinit(self.server.allocator);
             try std.testing.expectEqual(mqtt.QoS.at_most_once, publish.publish.qos);
@@ -727,6 +749,7 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
                 .remote_prefix = "remote/",
             },
             .preserve_retain = false,
+            .attempt_target_unsubscribe = true,
         },
         &shutdown,
     );
@@ -736,7 +759,7 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
         .timeout = .fromSeconds(2),
         .cancellation_check_interval = .fromMilliseconds(5),
     }));
-    try std.testing.expect(!try bridge.step(.{
+    try std.testing.expect(try bridge.step(.{
         .timeout = .fromMilliseconds(50),
         .cancellation_check_interval = .fromMilliseconds(5),
     }));
@@ -751,6 +774,102 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
     target_thread.join();
     target_joined = true;
     if (source_peer.err) |err| return err;
+    if (target_peer.err) |err| return err;
+}
+
+test "outbound bridge fails closed when target rejects subscription cleanup" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var source = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer source.deinit();
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 64 },
+    );
+    defer target.deinit();
+
+    const TargetPeer = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var unsubscribe = try accepted.connection.readUnsubscribe();
+            defer unsubscribe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "remote/rejected/abcdefghijkl/#",
+                unsubscribe.unsubscribe.topic_filters[0],
+            );
+            try accepted.connection.writeUnsubAck(
+                unsubscribe.unsubscribe.packet_id,
+                &.{0x87},
+                &.{},
+            );
+        }
+    };
+
+    var target_peer = TargetPeer{ .server = &target };
+    const target_thread = try std.Thread.spawn(
+        .{},
+        TargetPeer.run,
+        .{&target_peer},
+    );
+    var target_joined = false;
+    defer if (!target_joined) target_thread.join();
+
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try outbound.Bridge.initMany(
+        allocator,
+        io,
+        source.address(),
+        target.address(),
+        .{
+            .source_connect = .{
+                .protocol = .v5,
+                .client_id = "cleanup-rejected-source",
+            },
+            .target_connect = .{
+                .protocol = .v5,
+                .client_id = "cleanup-rejected-target",
+            },
+            .rules = &.{
+                .{
+                    .filter = "rejected/abcdefghijkl/#",
+                    .remote_prefix = "remote/",
+                },
+                .{
+                    .filter = "other/abcdefghijkl/#",
+                    .remote_prefix = "remote/",
+                },
+            },
+            .attempt_target_unsubscribe = true,
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    try std.testing.expectError(
+        error.TargetUnsubscribeRefused,
+        bridge.connect(),
+    );
+
+    target_thread.join();
+    target_joined = true;
     if (target_peer.err) |err| return err;
 }
 
@@ -2563,6 +2682,12 @@ test "outbound bridge validates persistence and rule intersections" {
     try std.testing.expectEqualStrings(
         "$share/workers/local/sensors/+",
         source_filter,
+    );
+    const target_filter = try mapped_rule.targetFilterAlloc(allocator);
+    defer allocator.free(target_filter);
+    try std.testing.expectEqualStrings(
+        "$share/workers/remote/sensors/+",
+        target_filter,
     );
     const target_topic = try mapped_rule.mapTopicAlloc(
         allocator,

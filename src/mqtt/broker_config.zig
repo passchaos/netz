@@ -1175,6 +1175,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_max_topic_alias 3
         \\bridge_max_packet_size 2048
         \\bridge_outgoing_retain false
+        \\bridge_attempt_unsubscribe false
         \\remote_clientid edge-bridge
         \\remote_username bridge-user
         \\remote_password bridge-secret
@@ -1235,6 +1236,7 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(@as(u16, 3), upstream.max_topic_alias);
     try std.testing.expectEqual(@as(u32, 2048), upstream.max_packet_size);
     try std.testing.expect(!upstream.outgoing_retain);
+    try std.testing.expect(!upstream.attempt_unsubscribe);
     try std.testing.expectEqualStrings("edge-bridge", upstream.clientId());
     try std.testing.expectEqualStrings("bridge-user", upstream.remote_username);
     try std.testing.expectEqualStrings("bridge-secret", upstream.remote_password);
@@ -1302,6 +1304,7 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqual(@as(u16, 10), bridge.max_topic_alias);
     try std.testing.expectEqual(@as(u32, 0), bridge.max_packet_size);
     try std.testing.expect(bridge.outgoing_retain);
+    try std.testing.expect(bridge.attempt_unsubscribe);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
@@ -1502,11 +1505,24 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "topic # in 0\nbridge_outgoing_retain maybe\n"),
     );
     try std.testing.expectError(
+        error.InvalidBoolean,
+        parse(allocator, listener ++
+            "connection invalid-unsubscribe\naddress localhost\n" ++
+            "topic # out 0\nbridge_attempt_unsubscribe maybe\n"),
+    );
+    try std.testing.expectError(
         error.DuplicateDirective,
         parse(allocator, listener ++
             "connection duplicate-limit\naddress localhost\n" ++
             "topic # in 0\nbridge_receive_maximum 1\n" ++
             "bridge_receive_maximum 2\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-unsubscribe\naddress localhost\n" ++
+            "topic # out 0\nbridge_attempt_unsubscribe true\n" ++
+            "bridge_attempt_unsubscribe false\n"),
     );
     try std.testing.expectError(
         error.UnsupportedBridgeStartType,

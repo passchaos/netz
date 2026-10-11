@@ -21,6 +21,7 @@ pub const OwnedRule = struct {
 
 pub const OwnedRules = struct {
     values: []OwnedRule,
+    target_filters: [][]const u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -70,10 +71,27 @@ pub const OwnedRules = struct {
             }
             initialized += 1;
         }
-        return .{ .values = values };
+        const target_filters = try allocator.alloc([]const u8, values.len);
+        var initialized_target_filters: usize = 0;
+        errdefer {
+            for (target_filters[0..initialized_target_filters]) |filter| {
+                allocator.free(filter);
+            }
+            allocator.free(target_filters);
+        }
+        for (values, target_filters) |value, *target_filter| {
+            target_filter.* = try value.value.targetFilterAlloc(allocator);
+            initialized_target_filters += 1;
+        }
+        return .{
+            .values = values,
+            .target_filters = target_filters,
+        };
     }
 
     pub fn deinit(self: *OwnedRules, allocator: std.mem.Allocator) void {
+        for (self.target_filters) |filter| allocator.free(filter);
+        allocator.free(self.target_filters);
         for (self.values) |*value| value.deinit(allocator);
         allocator.free(self.values);
         self.* = undefined;

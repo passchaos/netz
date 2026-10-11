@@ -5252,6 +5252,7 @@ def main() -> None:
         "policy, ordered include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, mTLS, "
         "MQTT 3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "
+        "persistent remote-subscription cleanup with interleaved delivery, "
         "QoS 1/2, lazy threshold/idle lifecycle with restart recovery, "
         "decorrelated-jitter reconnect with stable-period reset, "
         "round-robin failover, primary failback, reconnect, and "

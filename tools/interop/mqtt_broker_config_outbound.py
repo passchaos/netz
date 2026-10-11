@@ -66,6 +66,29 @@ def _publish_contents(packet: bytes, protocol_level: int) -> tuple[str, bytes]:
     return topic, packet[cursor:end]
 
 
+def _unsubscribe_filters(
+    packet: bytes, protocol_level: int
+) -> tuple[int, list[str]]:
+    if packet[0] != 0xA2:
+        raise AssertionError(f"expected bridge UNSUBSCRIBE: {packet.hex()}")
+    remaining, cursor = _decode_varint(packet, 1)
+    end = cursor + remaining
+    packet_id = int.from_bytes(packet[cursor:cursor + 2], "big")
+    cursor += 2
+    if protocol_level == 5:
+        property_size, cursor = _decode_varint(packet, cursor)
+        cursor += property_size
+    filters: list[str] = []
+    while cursor < end:
+        size = int.from_bytes(packet[cursor:cursor + 2], "big")
+        cursor += 2
+        filters.append(packet[cursor:cursor + size].decode())
+        cursor += size
+    if cursor != end:
+        raise AssertionError(f"malformed bridge UNSUBSCRIBE: {packet.hex()}")
+    return packet_id, filters
+
+
 def run_outbound_bridge_protocol_limits_case(
     broker: Path, directory: Path
 ) -> None:
@@ -88,6 +111,7 @@ def run_outbound_bridge_protocol_limits_case(
                 if protocol_level == 5
                 else ""
             )
+            attempt_unsubscribe = outgoing_retain
             config = directory / f"{case_name}.conf"
             config.write_text(
                 f"persistence true\npersistence_location {directory}\n"
@@ -95,12 +119,14 @@ def run_outbound_bridge_protocol_limits_case(
                 f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
                 "max_connections 3\n"
                 f"connection {case_name}\naddress 127.0.0.1:{remote_port}\n"
-                "topic bridge/# out 2\ncleansession false\n"
+                "topic sensors/# out 2 local/ remote/\ncleansession false\n"
                 f"bridge_protocol_version {protocol_name}\n"
                 f"{session_expiry}"
                 "bridge_receive_maximum 7\nbridge_max_topic_alias 3\n"
                 "bridge_max_packet_size 96\n"
                 f"bridge_outgoing_retain {str(outgoing_retain).lower()}\n"
+                "bridge_attempt_unsubscribe "
+                f"{str(attempt_unsubscribe).lower()}\n"
                 "notifications false\nrestart_timeout 1\n"
             )
             log = directory / f"{case_name}.log"
@@ -138,13 +164,40 @@ def run_outbound_bridge_protocol_limits_case(
                 else:
                     bridge.sendall(_packet(0x20, b"\x00\x00"))
 
+                if attempt_unsubscribe:
+                    unsubscribe = _read_packet(bridge)
+                    packet_id, filters = _unsubscribe_filters(
+                        unsubscribe, protocol_level
+                    )
+                    if filters != ["remote/sensors/#"]:
+                        raise AssertionError(
+                            f"bridge cleanup filters mismatch: {filters!r}"
+                        )
+                    bridge.sendall(
+                        _packet(
+                            0x30,
+                            _utf8("remote/sensors/stale")
+                            + (b"\x00" if protocol_level == 5 else b"")
+                            + b"ignored",
+                        )
+                    )
+                    bridge.sendall(
+                        _packet(
+                            0xB0,
+                            packet_id.to_bytes(2, "big")
+                            + (b"\x00\x11" if protocol_level == 5 else b""),
+                        )
+                    )
+
                 _wait_for_log(process, log, f"bridge {case_name} remote=")
                 publisher = _connect_client(local_port, f"publisher-{case_name}")
                 payload = b"retain-policy"
                 publisher.sendall(
                     _packet(
                         0x31,
-                        _utf8("bridge/retain/test") + b"\x00" + payload,
+                        _utf8("local/sensors/retain/test")
+                        + b"\x00"
+                        + payload,
                     )
                 )
                 forwarded = _read_packet(bridge)
@@ -157,7 +210,7 @@ def run_outbound_bridge_protocol_limits_case(
                         f"bridge exceeded negotiated packet limit: {len(forwarded)}"
                     )
                 topic, actual = _publish_contents(forwarded, protocol_level)
-                if (topic, actual) != ("bridge/retain/test", payload):
+                if (topic, actual) != ("remote/sensors/retain/test", payload):
                     raise AssertionError(
                         f"bridge protocol-limit publish mismatch: {(topic, actual)!r}"
                     )
@@ -166,7 +219,7 @@ def run_outbound_bridge_protocol_limits_case(
                 publisher.sendall(
                     _packet(
                         0x34,
-                        _utf8("bridge/oversize")
+                        _utf8("local/sensors/oversize")
                         + b"\x00\x01"
                         + b"\x00"
                         + oversized_payload,
@@ -186,12 +239,14 @@ def run_outbound_bridge_protocol_limits_case(
                 publisher.sendall(
                     _packet(
                         0x30,
-                        _utf8("bridge/after-limit") + b"\x00" + b"alive",
+                        _utf8("local/sensors/after-limit")
+                        + b"\x00"
+                        + b"alive",
                     )
                 )
                 after_limit = _read_packet(bridge)
                 topic, actual = _publish_contents(after_limit, protocol_level)
-                if (topic, actual) != ("bridge/after-limit", b"alive"):
+                if (topic, actual) != ("remote/sensors/after-limit", b"alive"):
                     raise AssertionError(
                         "oversized bridge PUBLISH was not dropped before "
                         f"the next message: {(topic, actual)!r}"

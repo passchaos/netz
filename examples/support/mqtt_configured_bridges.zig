@@ -466,6 +466,7 @@ fn initOutbound(
         },
         .rules = rules,
         .preserve_retain = source.outgoing_retain,
+        .attempt_target_unsubscribe = source.attempt_unsubscribe,
         .coordinator = if (journal_path) |path| .{ .bridge_id = id, .dir = std.Io.Dir.cwd(), .sub_path = path, .mode = mode } else null,
         .notifications = if (notification_topic) |topic| .{ .topic = topic, .publish_remote = !source.notifications_local_only } else null,
     };
