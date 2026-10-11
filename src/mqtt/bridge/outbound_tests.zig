@@ -628,7 +628,12 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
     const io = threaded.io();
     var source = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
     defer source.deinit();
-    var target = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    var target = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 64 },
+    );
     defer target.deinit();
 
     const SourcePeer = struct {
@@ -648,6 +653,11 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
                 subscribe.subscribe.packet_id,
                 &.{0x00},
                 &.{},
+            );
+            try accepted.connection.publish(
+                "local/fire/oversize",
+                "x" ** 80,
+                .{},
             );
             try accepted.connection.publish(
                 "local/fire/forget",
@@ -722,6 +732,14 @@ test "outbound bridge forwards QoS0 without inventing acknowledgements" {
     );
     defer bridge.deinit();
     _ = try bridge.connect();
+    try std.testing.expect(try bridge.step(.{
+        .timeout = .fromSeconds(2),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
+    try std.testing.expect(!try bridge.step(.{
+        .timeout = .fromMilliseconds(50),
+        .cancellation_check_interval = .fromMilliseconds(5),
+    }));
     try std.testing.expect(try bridge.step(.{
         .timeout = .fromSeconds(2),
         .cancellation_check_interval = .fromMilliseconds(5),

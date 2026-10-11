@@ -2268,9 +2268,7 @@ fn connectWebSocketAttemptMaybeBefore(
         options.max_outgoing_inflight,
         options.topic_alias_maximum,
     );
-    connection.max_incoming_inflight =
-        mqtt.receiveMaximum(options.properties) orelse
-        options.max_outgoing_inflight;
+    connection.max_incoming_inflight = options.effectiveReceiveMaximum();
     connection.setPeerPublishCapabilities(
         options.peer_maximum_qos,
         options.peer_retain_available,

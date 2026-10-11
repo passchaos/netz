@@ -18,7 +18,8 @@ pub const default_max_connections: usize = 16;
 pub const default_global_max_clients: usize = 16_384;
 pub const default_global_max_connections: usize = std.math.maxInt(u31);
 pub const default_max_packet_size: usize = 2_000_000;
-pub const default_max_inflight_messages: u16 = 20;
+pub const default_max_inflight_messages: u16 =
+    bridge_config.default_receive_maximum;
 pub const default_max_queued_messages: usize = 1_000;
 pub const default_max_topic_aliases: u16 = 10;
 pub const default_websocket_headers_size: u16 = 4096;
@@ -794,6 +795,7 @@ fn parseSources(
                 allocator,
                 config.persistence,
                 config.max_queued_messages,
+                config.effectiveMaxInflightMessages(),
             );
             initialized_bridges += 1;
         }
@@ -1169,6 +1171,10 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_protocol_version mqttv50
         \\bridge_session_expiry_interval 0xFFFFFFFF
         \\keepalive_interval 45
+        \\bridge_receive_maximum 7
+        \\bridge_max_topic_alias 3
+        \\bridge_max_packet_size 2048
+        \\bridge_outgoing_retain false
         \\remote_clientid edge-bridge
         \\remote_username bridge-user
         \\remote_password bridge-secret
@@ -1225,6 +1231,10 @@ test "MQTT broker config parses owned inbound bridges" {
         upstream.session_expiry_interval,
     );
     try std.testing.expectEqual(@as(u16, 45), upstream.keep_alive_seconds);
+    try std.testing.expectEqual(@as(u16, 7), upstream.receive_maximum);
+    try std.testing.expectEqual(@as(u16, 3), upstream.max_topic_alias);
+    try std.testing.expectEqual(@as(u32, 2048), upstream.max_packet_size);
+    try std.testing.expect(!upstream.outgoing_retain);
     try std.testing.expectEqualStrings("edge-bridge", upstream.clientId());
     try std.testing.expectEqualStrings("bridge-user", upstream.remote_username);
     try std.testing.expectEqualStrings("bridge-secret", upstream.remote_password);
@@ -1272,6 +1282,7 @@ test "MQTT broker config parses owned inbound bridges" {
 
 test "MQTT broker config applies inbound bridge defaults" {
     var config = try parse(std.testing.allocator,
+        \\max_inflight_messages 9
         \\listener 1883
         \\allow_anonymous true
         \\connection defaulted
@@ -1287,6 +1298,10 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, bridge.protocol);
     try std.testing.expect(!bridge.clean_session);
     try std.testing.expectEqual(@as(u16, 60), bridge.keep_alive_seconds);
+    try std.testing.expectEqual(@as(u16, 9), bridge.receive_maximum);
+    try std.testing.expectEqual(@as(u16, 10), bridge.max_topic_alias);
+    try std.testing.expectEqual(@as(u32, 0), bridge.max_packet_size);
+    try std.testing.expect(bridge.outgoing_retain);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
@@ -1320,6 +1335,20 @@ test "MQTT broker config applies inbound bridge defaults" {
     );
     defer disabled.deinit(std.testing.allocator);
     try std.testing.expect(!disabled.bridges[0].notifications);
+
+    var unlimited = try parse(std.testing.allocator,
+        \\max_inflight_messages 0
+        \\listener 1885
+        \\allow_anonymous true
+        \\connection unlimited
+        \\address localhost
+        \\topic # in 0
+    );
+    defer unlimited.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        std.math.maxInt(u16),
+        unlimited.bridges[0].receive_maximum,
+    );
 }
 
 test "MQTT broker config rejects incomplete or unsupported bridges" {
@@ -1445,6 +1474,39 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         parse(allocator, listener ++
             "connection negative-stable\naddress localhost\ntopic # in 0\n" ++
             "restart_timeout 5 30 -1\n"),
+    );
+    for ([_][]const u8{
+        "bridge_receive_maximum 0\n",
+        "bridge_receive_maximum 65536\n",
+        "bridge_max_topic_alias -1\n",
+        "bridge_max_topic_alias 65536\n",
+        "bridge_max_packet_size -1\n",
+        "bridge_max_packet_size 4294967296\n",
+    }) |invalid| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "{s}connection invalid-limit\naddress localhost\n" ++
+                "topic # in 0\n{s}",
+            .{ listener, invalid },
+        );
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.InvalidInteger,
+            parse(allocator, source),
+        );
+    }
+    try std.testing.expectError(
+        error.InvalidBoolean,
+        parse(allocator, listener ++
+            "connection invalid-retain\naddress localhost\n" ++
+            "topic # in 0\nbridge_outgoing_retain maybe\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-limit\naddress localhost\n" ++
+            "topic # in 0\nbridge_receive_maximum 1\n" ++
+            "bridge_receive_maximum 2\n"),
     );
     try std.testing.expectError(
         error.UnsupportedBridgeStartType,

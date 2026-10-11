@@ -207,8 +207,12 @@ must be retained together.
 Tests cover all QoS levels, five QoS 2 restart boundaries, and the production
 configuration process through cleartext and native TLS/mTLS, an unavailable
 primary address, topic-prefix mapping, retained connection state, and process
-kill/restart. Network-source outbound tests are explicitly imported into the
-library gate as well.
+kill/restart. A Mosquitto-derived MQTT 3.1.1/5 process matrix additionally
+checks configured Receive Maximum and Topic Alias Maximum on CONNECT, keeps the
+local receive and remote outgoing packet limits independent, applies the
+smaller configured/CONNACK outgoing packet size, and verifies both values of
+the outgoing RETAIN policy on forwarded PUBLISH packets. Network-source
+outbound tests are explicitly imported into the library gate as well.
 
 Native MQTT TLS listeners advertise `mqtt` ALPN when the peer offers it while
 accepting legacy clients with no ALPN extension. An offered list without
@@ -227,6 +231,18 @@ transaction are both empty for the complete idle interval. Configuration
 rejects zero durations/counts, inbound-only lazy bridges, and thresholds above
 a finite `max_queued_messages`, which would otherwise make activation
 unreachable.
+
+Configured remote connections also expose Mosquitto's
+`bridge_receive_maximum`, `bridge_max_topic_alias`,
+`bridge_max_packet_size`, and `bridge_outgoing_retain`. Receive Maximum is
+independent from the local outgoing inflight window and inherits the effective
+global `max_inflight_messages` when omitted. The Topic Alias setting controls
+both the CONNECT advertisement and the local ceiling applied to the remote
+CONNACK value. The outgoing complete-packet limit treats zero as unlimited and
+uses the smaller non-zero configured or negotiated value; an oversized
+forwarded PUBLISH is retired for that destination without terminating the
+bridge. Disabling outgoing RETAIN strips it from forwarded publications and
+remote state notifications in both MQTT 3.1.1 and MQTT 5.
 
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use

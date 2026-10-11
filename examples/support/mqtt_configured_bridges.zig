@@ -277,21 +277,7 @@ pub const Set = struct {
                 null;
             defer if (notification_topic) |topic| allocator.free(topic);
             const options = mqtt.bridge.MultiOptions{
-                .connect = .{
-                    .protocol = source.protocol,
-                    .client_id = source.clientId(),
-                    .clean_start = source.clean_session,
-                    .keep_alive_seconds = source.keep_alive_seconds,
-                    .properties = property_slice,
-                    .username = if (source.remote_username.len == 0)
-                        null
-                    else
-                        source.remote_username,
-                    .password = if (source.remote_password.len == 0)
-                        null
-                    else
-                        source.remote_password,
-                },
+                .connect = remoteConnectOptions(source, property_slice),
                 .reconnect_policy = .{
                     .initial_delay = .fromSeconds(
                         source.restart.base_seconds,
@@ -459,15 +445,14 @@ fn initOutbound(
     defer if (notification_topic) |topic| allocator.free(topic);
     const options = mqtt.bridge.outbound.MultiOptions{
         .source_connect = .{ .protocol = .v5, .client_id = source.name, .clean_start = false, .properties = &.{.{ .four_byte = .{ .id = .session_expiry_interval, .value = std.math.maxInt(u32) } }} },
-        .target_connect = .{
-            .protocol = source.protocol,
-            .client_id = source.clientId(),
-            .clean_start = source.clean_session,
-            .keep_alive_seconds = source.keep_alive_seconds,
-            .properties = if (source.protocol == .v5 and source.session_expiry_interval != 0) &properties else &.{},
-            .username = if (source.remote_username.len != 0) source.remote_username else null,
-            .password = if (source.remote_password.len != 0) source.remote_password else null,
-        },
+        .target_connect = remoteConnectOptions(
+            source,
+            if (source.protocol == .v5 and
+                source.session_expiry_interval != 0)
+                &properties
+            else
+                &.{},
+        ),
         .target_reconnect_policy = .{
             .initial_delay = .fromSeconds(source.restart.base_seconds),
             .max_delay = .fromSeconds(source.restart.cap_seconds),
@@ -480,6 +465,7 @@ fn initOutbound(
             .max_attempts = if (source.start_type == .once) source.addressCount() else 0,
         },
         .rules = rules,
+        .preserve_retain = source.outgoing_retain,
         .coordinator = if (journal_path) |path| .{ .bridge_id = id, .dir = std.Io.Dir.cwd(), .sub_path = path, .mode = mode } else null,
         .notifications = if (notification_topic) |topic| .{ .topic = topic, .publish_remote = !source.notifications_local_only } else null,
     };
@@ -488,6 +474,35 @@ fn initOutbound(
         resources.connector_configured = true;
     }
     return mqtt.bridge.outbound.LocalBridge.initEndpoints(allocator, io, .{ .broker = local, .id = id }, .{ .connector = resources.connector.connector() }, options, shutdown);
+}
+
+fn remoteConnectOptions(
+    source: *const mqtt.broker_config.Bridge,
+    properties: []const mqtt.Property,
+) mqtt.runtime.ConnectOptions {
+    return .{
+        .protocol = source.protocol,
+        .client_id = source.clientId(),
+        .clean_start = source.clean_session,
+        .keep_alive_seconds = source.keep_alive_seconds,
+        .properties = properties,
+        .username = if (source.remote_username.len != 0)
+            source.remote_username
+        else
+            null,
+        .password = if (source.remote_password.len != 0)
+            source.remote_password
+        else
+            null,
+        .max_outgoing_packet_size = if (source.max_packet_size == 0)
+            std.math.maxInt(usize)
+        else
+            source.max_packet_size,
+        .receive_maximum = source.receive_maximum,
+        .topic_alias_maximum = source.max_topic_alias,
+        .max_outgoing_topic_aliases = source.max_topic_alias,
+        .outgoing_retain = source.outgoing_retain,
+    };
 }
 
 fn stableOutboundId(source: mqtt.broker_config.Bridge) [16]u8 {
@@ -655,6 +670,35 @@ test "configured bridge identifiers bind identity and mappings" {
         &original,
         &stableBridgeId(source),
     ));
+}
+
+test "configured bridge maps Mosquitto remote protocol limits" {
+    var name = "limited".*;
+    var host = "localhost".*;
+    const source = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .rules = &.{},
+        .protocol = .v3_1_1,
+        .receive_maximum = 7,
+        .max_topic_alias = 3,
+        .max_packet_size = 2048,
+        .outgoing_retain = false,
+    };
+    const options = remoteConnectOptions(&source, &.{});
+    try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, options.protocol);
+    try std.testing.expectEqual(@as(?u16, 7), options.receive_maximum);
+    try std.testing.expectEqual(@as(u16, 3), options.topic_alias_maximum);
+    try std.testing.expectEqual(@as(u16, 3), options.max_outgoing_topic_aliases);
+    try std.testing.expectEqual(@as(usize, 2048), options.max_outgoing_packet_size);
+    try std.testing.expect(!options.outgoing_retain);
+
+    var unlimited = source;
+    unlimited.max_packet_size = 0;
+    try std.testing.expectEqual(
+        std.math.maxInt(usize),
+        remoteConnectOptions(&unlimited, &.{}).max_outgoing_packet_size,
+    );
 }
 
 test "configured bridge rejects an empty explicit CA file" {

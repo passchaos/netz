@@ -707,7 +707,8 @@ pub fn Engine(comptime Source: type) type {
                         "0",
                         .{
                             .qos = .at_most_once,
-                            .retain = active.peerRetainAvailable(),
+                            .retain = self.preserve_retain and
+                                active.peerRetainAvailable(),
                         },
                     ) catch {};
                 };
@@ -747,7 +748,11 @@ pub fn Engine(comptime Source: type) type {
         fn notify(self: *Self, online: bool) Error!void {
             if (self.notifications) |value| {
                 if (value.publish_remote) if (self.target.connection()) |active| {
-                    _ = try self.target.publishOneAttempt(value.topic, if (online) "1" else "0", .{ .qos = .at_most_once, .retain = active.peerRetainAvailable() });
+                    _ = try self.target.publishOneAttempt(value.topic, if (online) "1" else "0", .{
+                        .qos = .at_most_once,
+                        .retain = self.preserve_retain and
+                            active.peerRetainAvailable(),
+                    });
                 };
                 try self.notifyLocal(online);
             }
@@ -764,11 +769,11 @@ pub fn Engine(comptime Source: type) type {
             properties: []mqtt.Property,
             poll_options: reconnect.PollOptions,
         ) (Error || std.Io.Cancelable)!void {
-            try self.stageDurableQoS2(
+            if (!try self.stageDurableQoS2(
                 source_publish,
                 target_topic,
                 properties,
-            );
+            )) return;
             try self.target.flushPending();
             try self.driveDurableQoS2(poll_options);
         }
@@ -778,7 +783,7 @@ pub fn Engine(comptime Source: type) type {
             source_publish: *const mqtt.Publish,
             target_topic: []const u8,
             properties: []mqtt.Property,
-        ) Error!void {
+        ) Error!bool {
             const coordinator = &(self.coordinator orelse
                 return error.QoS2RequiresDurableCoordinator);
             const source_packet_id = source_publish.packet_id.?;
@@ -798,9 +803,25 @@ pub fn Engine(comptime Source: type) type {
                     .retain = self.preserve_retain and source_publish.retain,
                     .properties = properties,
                 },
-            ) catch |err| {
-                try self.source.discardStagedIncomingQoS2(source_packet_id);
-                return err;
+            ) catch |err| switch (err) {
+                error.OutgoingPacketTooLarge => {
+                    // A negative MQTT 5 PUBREC completes the source QoS 2
+                    // transaction without creating a target transaction.
+                    // MQTT 3.1.1 cannot represent a negative PUBREC, so retain
+                    // the previous fail-closed behavior for network sources.
+                    if (self.sourceProtocol() != .v5) return err;
+                    try self.source.flushStagedIncomingQoS2(
+                        source_packet_id,
+                        .{ .reason_code = 0x97 },
+                    );
+                    return false;
+                },
+                else => {
+                    try self.source.discardStagedIncomingQoS2(
+                        source_packet_id,
+                    );
+                    return err;
+                },
             };
             errdefer if (!committed) {
                 self.target.discardStagedPublish(target_packet_id) catch {};
@@ -826,6 +847,7 @@ pub fn Engine(comptime Source: type) type {
                 transaction,
             );
             committed = true;
+            return true;
         }
 
         fn driveDurableQoS2(
@@ -1474,7 +1496,7 @@ pub const testing = if (builtin.is_test) struct {
             }
             properties.appendAssumeCapacity(property);
         }
-        try bridge.stageDurableQoS2(
+        _ = try bridge.stageDurableQoS2(
             publish,
             target_topic,
             properties.items,

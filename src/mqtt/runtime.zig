@@ -114,7 +114,8 @@ const ConnectionCapabilities = packed struct(u16) {
     local_subscription_identifier_available: bool = true,
     local_shared_subscription_available: bool = true,
     has_incoming_connect_level: bool = false,
-    _padding: u2 = 0,
+    outgoing_retain_enabled: bool = true,
+    _padding: u1 = 0,
 };
 
 pub fn proxyHeaderDeadline(
@@ -2216,9 +2217,7 @@ fn connectStreamAttemptBefore(
         .limits = .from(limits),
         .proxy_v2_require_client_certificate = limits.proxy_v2_require_client_certificate,
         .max_outgoing_inflight = options.max_outgoing_inflight,
-        .max_incoming_inflight = mqtt.receiveMaximum(
-            options.properties,
-        ) orelse options.max_outgoing_inflight,
+        .max_incoming_inflight = options.effectiveReceiveMaximum(),
         .incoming_topic_alias_maximum = options.topic_alias_maximum,
         .capabilities = .{
             .peer_maximum_qos = options.peer_maximum_qos,
@@ -2292,11 +2291,29 @@ pub const ConnectOptions = struct {
     username: ?[]const u8 = null,
     password: ?[]const u8 = null,
     limits: Limits = .{},
+    /// Local upper bound for complete MQTT packets sent to the peer. The
+    /// effective limit is the smaller of this value and an MQTT 5 CONNACK
+    /// Maximum Packet Size. `maxInt(usize)` is unlimited.
+    max_outgoing_packet_size: usize = std.math.maxInt(usize),
     max_outgoing_inflight: u16 = 16,
+    /// MQTT 5 Receive Maximum advertised to the broker. Null preserves the
+    /// historical behavior of using `max_outgoing_inflight` for both sides.
+    receive_maximum: ?u16 = null,
     topic_alias_maximum: u16 = 16,
+    /// Local ceiling for Topic Aliases used toward the broker. The effective
+    /// limit is also bounded by the peer's CONNACK value.
+    max_outgoing_topic_aliases: u16 = std.math.maxInt(u16),
+    /// Hard local policy for RETAIN on client-originated PUBLISH packets.
+    outgoing_retain: bool = true,
     /// Required when CONNECT requests MQTT 5 Enhanced Authentication and the
     /// broker may send one or more AUTH challenges before CONNACK.
     authentication: ?ClientAuthHandler = null,
+
+    pub fn effectiveReceiveMaximum(self: ConnectOptions) u16 {
+        return mqtt.receiveMaximum(self.properties) orelse
+            self.receive_maximum orelse
+            self.max_outgoing_inflight;
+    }
 };
 
 /// One client step for initial MQTT 5 enhanced authentication.
@@ -2367,6 +2384,7 @@ pub const ClientConnector = struct {
 fn applyConnAckNegotiation(
     connection: *Connection,
     connack: mqtt.ConnAck,
+    options: ConnectOptions,
 ) void {
     if (mqtt.receiveMaximum(connack.properties)) |receive_maximum| {
         connection.max_outgoing_inflight = negotiatedOutgoingInflightLimit(
@@ -2374,11 +2392,21 @@ fn applyConnAckNegotiation(
             receive_maximum,
         );
     }
-    if (mqtt.maximumPacketSize(connack.properties)) |maximum_packet_size| {
-        connection.peer_max_packet_size = maximum_packet_size;
-    }
+    const peer_max_packet_size: usize = if (mqtt.maximumPacketSize(
+        connack.properties,
+    )) |maximum_packet_size|
+        maximum_packet_size
+    else
+        std.math.maxInt(usize);
+    connection.peer_max_packet_size = @min(
+        options.max_outgoing_packet_size,
+        peer_max_packet_size,
+    );
     if (mqtt.topicAliasMaximum(connack.properties)) |topic_alias_maximum| {
-        connection.peer_topic_alias_maximum = topic_alias_maximum;
+        connection.peer_topic_alias_maximum = @min(
+            topic_alias_maximum,
+            options.max_outgoing_topic_aliases,
+        );
     }
     if (mqtt.serverKeepAlive(connack.properties)) |server_keep_alive| {
         connection.keep_alive_seconds = server_keep_alive;
@@ -2389,6 +2417,7 @@ fn applyConnAckNegotiation(
     if (mqtt.retainAvailable(connack.properties)) |retain_available| {
         connection.capabilities.peer_retain_available = retain_available;
     }
+    connection.capabilities.outgoing_retain_enabled = options.outgoing_retain;
     if (mqtt.wildcardSubscriptionAvailable(connack.properties)) |available| {
         connection.capabilities.peer_wildcard_subscription_available = available;
     }
@@ -2616,8 +2645,7 @@ pub const Connection = struct {
             .limits = .from(options.limits),
             .proxy_v2_require_client_certificate = options.limits.proxy_v2_require_client_certificate,
             .max_outgoing_inflight = options.max_outgoing_inflight,
-            .max_incoming_inflight = mqtt.receiveMaximum(options.properties) orelse
-                options.max_outgoing_inflight,
+            .max_incoming_inflight = options.effectiveReceiveMaximum(),
             .incoming_topic_alias_maximum = options.topic_alias_maximum,
             .capabilities = .{
                 .peer_maximum_qos = options.peer_maximum_qos,
@@ -2985,7 +3013,8 @@ pub const Connection = struct {
     }
 
     pub fn peerRetainAvailable(self: *const Connection) bool {
-        return self.capabilities.peer_retain_available;
+        return self.capabilities.peer_retain_available and
+            self.capabilities.outgoing_retain_enabled;
     }
 
     pub fn setPeerPublishCapabilities(
@@ -3248,6 +3277,12 @@ pub const Connection = struct {
         options: ConnectOptions,
         connect_deadline: ?std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
+        if (options.max_outgoing_packet_size == 0 or
+            options.max_outgoing_inflight == 0 or
+            options.receive_maximum == 0)
+        {
+            return error.InvalidProperty;
+        }
         try self.validateOutgoingPacketType(.connect);
         // This method transfers `self` into the returned attempt. Capture the
         // allocator before that move so deferred temporary cleanup never reads
@@ -3263,6 +3298,7 @@ pub const Connection = struct {
             options.properties,
         ) orelse 0;
         self.write_scratch.clearRetainingCapacity();
+        const receive_maximum = options.effectiveReceiveMaximum();
         const add_receive_maximum = options.protocol == .v5 and
             mqtt.receiveMaximum(options.properties) == null;
         const add_maximum_packet_size = options.protocol == .v5 and
@@ -3290,7 +3326,7 @@ pub const Connection = struct {
         if (add_receive_maximum) {
             properties.appendAssumeCapacity(.{ .two_byte = .{
                 .id = .receive_maximum,
-                .value = options.max_outgoing_inflight,
+                .value = receive_maximum,
             } });
         }
         if (add_maximum_packet_size) {
@@ -3308,7 +3344,7 @@ pub const Connection = struct {
         if (options.protocol == .v5) {
             self.max_incoming_inflight =
                 mqtt.receiveMaximum(properties.items) orelse
-                self.max_incoming_inflight;
+                receive_maximum;
             self.incoming_topic_alias_maximum =
                 mqtt.topicAliasMaximum(properties.items) orelse
                 self.incoming_topic_alias_maximum;
@@ -3433,7 +3469,7 @@ pub const Connection = struct {
             self.close();
             return .{ .connection = null, .connack = connack };
         }
-        applyConnAckNegotiation(self, connack.connack);
+        applyConnAckNegotiation(self, connack.connack, options);
         if (mqtt.assignedClientIdentifier(
             connack.connack.properties,
         )) |client_id| {
@@ -3978,7 +4014,7 @@ pub const Connection = struct {
                     return error.InvalidQoS;
                 }
                 if (publish_value.retain and
-                    !self.capabilities.peer_retain_available)
+                    !self.peerRetainAvailable())
                 {
                     return error.InvalidProperty;
                 }
@@ -4145,7 +4181,7 @@ pub const Connection = struct {
         {
             return error.InvalidQoS;
         }
-        if (retain and !self.capabilities.peer_retain_available) {
+        if (retain and !self.peerRetainAvailable()) {
             return error.InvalidProperty;
         }
         try self.validateOutgoingTopicAlias(topic, properties);
@@ -6864,7 +6900,7 @@ test "MQTT runtime client and server exchange over TCP" {
             try std.testing.expectEqual(mqtt.QoS.at_least_once, accepted.connect.connect.will.?.qos);
             try std.testing.expectEqualStrings("rumq", accepted.connect.connect.username.?);
             try std.testing.expectEqualStrings("mq", accepted.connect.connect.password.?);
-            try std.testing.expectEqual(@as(?u16, 3), mqtt.receiveMaximum(accepted.connect.connect.properties));
+            try std.testing.expectEqual(@as(?u16, 5), mqtt.receiveMaximum(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(?u32, 4096), mqtt.maximumPacketSize(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(?u16, 4), mqtt.topicAliasMaximum(accepted.connect.connect.properties));
             try std.testing.expectEqual(@as(u16, 2), accepted.connection.max_outgoing_inflight);
@@ -6957,16 +6993,22 @@ test "MQTT runtime client and server exchange over TCP" {
         .username = "rumq",
         .password = "mq",
         .limits = .{ .max_packet_size = 4096 },
+        .max_outgoing_packet_size = 2048,
         .max_outgoing_inflight = 3,
+        .receive_maximum = 5,
         .topic_alias_maximum = 4,
+        .max_outgoing_topic_aliases = 3,
+        .outgoing_retain = false,
     });
     defer client.close();
     try std.testing.expectEqual(@as(u16, 2), client.max_outgoing_inflight);
-    try std.testing.expectEqual(@as(usize, 4096), client.peer_max_packet_size);
-    try std.testing.expectEqual(@as(u16, 4), client.peer_topic_alias_maximum);
+    try std.testing.expectEqual(@as(u16, 5), client.max_incoming_inflight);
+    try std.testing.expectEqual(@as(usize, 2048), client.peer_max_packet_size);
+    try std.testing.expectEqual(@as(u16, 3), client.peer_topic_alias_maximum);
     try std.testing.expectEqual(@as(u16, 7), client.keep_alive_seconds);
     try std.testing.expectEqual(mqtt.QoS.exactly_once, client.peerMaximumQoS());
     try std.testing.expect(!client.peerRetainAvailable());
+    try std.testing.expect(!client.capabilities.outgoing_retain_enabled);
 
     try client.writeAuth(0x19, &.{
         .{ .utf8 = .{ .id = .authentication_method, .value = "SCRAM-SHA-256" } },
@@ -8668,6 +8710,34 @@ test "MQTT Receive Maximum cannot raise local outgoing inflight cap" {
     try std.testing.expectEqual(@as(u16, 1), negotiatedOutgoingInflightLimit(1, 1));
 }
 
+test "MQTT client Receive Maximum has an independent compatibility fallback" {
+    try std.testing.expectEqual(
+        @as(u16, 16),
+        (ConnectOptions{ .client_id = "default" }).effectiveReceiveMaximum(),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 7),
+        (ConnectOptions{
+            .client_id = "configured",
+            .max_outgoing_inflight = 3,
+            .receive_maximum = 7,
+        }).effectiveReceiveMaximum(),
+    );
+    const properties = [_]mqtt.Property{.{ .two_byte = .{
+        .id = .receive_maximum,
+        .value = 11,
+    } }};
+    try std.testing.expectEqual(
+        @as(u16, 11),
+        (ConnectOptions{
+            .client_id = "property",
+            .max_outgoing_inflight = 3,
+            .receive_maximum = 7,
+            .properties = &properties,
+        }).effectiveReceiveMaximum(),
+    );
+}
+
 test "MQTT v3 UNSUBACK validates packet id without per-filter reasons" {
     var v3_reasons = [_]u8{0x00};
     const v3_ack = mqtt.UnsubAck{
@@ -10318,6 +10388,26 @@ test "MQTT connection enforces peer publish capabilities" {
 
     try std.testing.expectError(error.InvalidQoS, connection.publish("topic", "payload", .{ .qos = .at_least_once }));
     try std.testing.expectError(error.InvalidProperty, connection.publish("topic", "payload", .{ .retain = true }));
+
+    connection.capabilities.peer_retain_available = true;
+    connection.capabilities.outgoing_retain_enabled = false;
+    try std.testing.expectError(
+        error.InvalidProperty,
+        connection.publish("topic", "locally blocked", .{ .retain = true }),
+    );
+    try std.testing.expectError(
+        error.InvalidProperty,
+        connection.writeClientSessionTransmission(.{ .publish = .{
+            .topic = "topic",
+            .payload = "locally blocked",
+            .qos = .at_most_once,
+            .retain = true,
+            .dup = false,
+            .packet_id = 1,
+            .properties = &.{},
+            .message_expiry_interval = null,
+        } }),
+    );
 
     connection.capabilities.local_maximum_qos = .at_most_once;
     try std.testing.expectError(error.QoSNotSupported, connection.validateIncomingPublishCapabilities(.{

@@ -136,6 +136,10 @@ round_robin true
 topic sensors/# in 1 local/ remote/
 cleansession false
 remote_clientid netz-upstream
+bridge_receive_maximum 20
+bridge_max_topic_alias 10
+bridge_max_packet_size 0
+bridge_outgoing_retain true
 restart_timeout 5 30 120
 bridge_cafile upstream-ca.pem
 bridge_certfile bridge-client-chain.pem
@@ -166,7 +170,9 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `persistence_location`, `persistence_file`,
 `autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
 `cleansession`, `bridge_protocol_version`,
-`bridge_session_expiry_interval`, `keepalive_interval`, `remote_clientid`,
+`bridge_session_expiry_interval`, `keepalive_interval`,
+`bridge_receive_maximum`, `bridge_max_topic_alias`,
+`bridge_max_packet_size`, `bridge_outgoing_retain`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`,
@@ -212,7 +218,18 @@ attempt remains immediate. MQTT 3.1.1 is the bridge default;
 `bridge_protocol_version mqttv50` enables MQTT 5. `remote_username` and
 `remote_password` configure upstream authentication, with a password requiring
 a username. When `remote_clientid` is omitted, the unique connection name is
-used as the stable Client ID. QoS 2 additionally requires `persistence true`, a non-clean remote
+used as the stable Client ID. `bridge_receive_maximum` is the non-zero MQTT 5
+Receive Maximum and defaults to the effective global `max_inflight_messages`
+(including its zero-as-65,535 spelling). `bridge_max_topic_alias` defaults to
+10, may be zero to disable aliases, and bounds both the CONNECT advertisement
+and aliases accepted from the remote CONNACK. `bridge_max_packet_size` bounds
+complete MQTT packets sent to the remote; zero is unlimited, and MQTT 5 uses
+the smaller of this value and the remote CONNACK Maximum Packet Size. An
+oversized forwarded PUBLISH is dropped for that destination without tearing
+down the bridge.
+`bridge_outgoing_retain false` clears RETAIN from all remote PUBLISH packets in
+both MQTT 3.1.1 and MQTT 5, including remote state notifications. QoS 2
+additionally requires `persistence true`, a non-clean remote
 Session, and for MQTT 5 a non-zero `bridge_session_expiry_interval`; the runner
 derives a stable bridge identity from the connection identity and mappings and opens a
 crash-safe broker journal beside the configured snapshot. A process gate runs
@@ -387,8 +404,8 @@ files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. Other curves, legacy PEM encryption, plugins, bridge
-CA directories, outbound or bidirectional configured bridges, and full
+filesystem expansion. Other curves, legacy PEM encryption, plugins,
+bidirectional configured bridges, and full
 Mosquitto configuration remain outside this subset and fail
 closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the

@@ -7,10 +7,203 @@ import time
 from mqtt_broker_config_bridge import (
     _distinct_ports, _start_broker, _stop, _wait_for_log,
     _connect_client, _subscribe_client, _expect_bridge_state,
-    _read_publish_and_ack, _packet, _utf8, _read_packet,
+    _read_publish_and_ack, _packet, _utf8, _read_packet, _decode_varint,
     _create_tls_material, _connect_tls_client, _expect_startup_rejection,
     _openssl,
 )
+
+
+def _connect_limits(packet: bytes, protocol_level: int) -> dict[int, int]:
+    if packet[0] != 0x10:
+        raise AssertionError(f"expected bridge CONNECT: {packet.hex()}")
+    _, cursor = _decode_varint(packet, 1)
+    protocol_name_size = int.from_bytes(packet[cursor:cursor + 2], "big")
+    cursor += 2
+    protocol_name = packet[cursor:cursor + protocol_name_size]
+    cursor += protocol_name_size
+    if protocol_name != b"MQTT" or packet[cursor] != protocol_level:
+        raise AssertionError(f"unexpected bridge protocol: {packet.hex()}")
+    cursor += 4  # protocol level, flags, and Keep Alive
+    if protocol_level == 4:
+        return {}
+
+    property_size, cursor = _decode_varint(packet, cursor)
+    property_end = cursor + property_size
+    properties: dict[int, int] = {}
+    widths = {0x11: 4, 0x21: 2, 0x22: 2, 0x27: 4}
+    while cursor < property_end:
+        identifier = packet[cursor]
+        cursor += 1
+        width = widths.get(identifier)
+        if width is None or cursor + width > property_end:
+            raise AssertionError(
+                f"unexpected bridge CONNECT property: {packet.hex()}"
+            )
+        properties[identifier] = int.from_bytes(
+            packet[cursor:cursor + width], "big"
+        )
+        cursor += width
+    if cursor != property_end:
+        raise AssertionError(f"malformed bridge CONNECT properties: {packet.hex()}")
+    return properties
+
+
+def _publish_contents(packet: bytes, protocol_level: int) -> tuple[str, bytes]:
+    if packet[0] >> 4 != 3:
+        raise AssertionError(f"expected bridge PUBLISH: {packet.hex()}")
+    remaining, cursor = _decode_varint(packet, 1)
+    end = cursor + remaining
+    topic_size = int.from_bytes(packet[cursor:cursor + 2], "big")
+    cursor += 2
+    topic = packet[cursor:cursor + topic_size].decode()
+    cursor += topic_size
+    qos = (packet[0] >> 1) & 0x03
+    if qos:
+        cursor += 2
+    if protocol_level == 5:
+        property_size, cursor = _decode_varint(packet, cursor)
+        cursor += property_size
+    return topic, packet[cursor:end]
+
+
+def run_outbound_bridge_protocol_limits_case(
+    broker: Path, directory: Path
+) -> None:
+    # The retain matrix is ported from Mosquitto 5cd254651159's
+    # 06-bridge-outgoing-retain.py and extended with MQTT 5 bridge limits.
+    for protocol_level, protocol_name in ((4, "mqttv311"), (5, "mqttv50")):
+        for outgoing_retain in (True, False):
+            remote_port, local_port = _distinct_ports(2)
+            listener = socket.socket()
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", remote_port))
+            listener.listen(1)
+            listener.settimeout(10)
+            case_name = (
+                f"limits-{protocol_level}-"
+                f"{'retain' if outgoing_retain else 'no-retain'}"
+            )
+            session_expiry = (
+                "bridge_session_expiry_interval 0xFFFFFFFF\n"
+                if protocol_level == 5
+                else ""
+            )
+            config = directory / f"{case_name}.conf"
+            config.write_text(
+                f"persistence true\npersistence_location {directory}\n"
+                f"persistence_file {case_name}.db\n"
+                f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+                "max_connections 3\n"
+                f"connection {case_name}\naddress 127.0.0.1:{remote_port}\n"
+                "topic bridge/# out 2\ncleansession false\n"
+                f"bridge_protocol_version {protocol_name}\n"
+                f"{session_expiry}"
+                "bridge_receive_maximum 7\nbridge_max_topic_alias 3\n"
+                "bridge_max_packet_size 96\n"
+                f"bridge_outgoing_retain {str(outgoing_retain).lower()}\n"
+                "notifications false\nrestart_timeout 1\n"
+            )
+            log = directory / f"{case_name}.log"
+            process = output = bridge = publisher = None
+            try:
+                process, output = _start_broker(broker, config, log)
+                bridge, _ = listener.accept()
+                bridge.settimeout(10)
+                connect = _read_packet(bridge)
+                limits = _connect_limits(connect, protocol_level)
+                if protocol_level == 5:
+                    if limits.get(0x21) != 7 or limits.get(0x22) != 3:
+                        raise AssertionError(
+                            f"configured bridge CONNECT limits mismatch: {limits!r}"
+                        )
+                    if limits.get(0x27, 0) <= 96:
+                        raise AssertionError(
+                            "bridge_max_packet_size was incorrectly advertised "
+                            "as the local receive limit"
+                        )
+                    connack_properties = (
+                        b"\x21\x00\x05"  # Receive Maximum
+                        b"\x22\x00\x02"  # Topic Alias Maximum
+                        b"\x27\x00\x00\x00\x50"  # Maximum Packet Size 80
+                        b"\x25\x01"  # Retain Available
+                    )
+                    bridge.sendall(
+                        _packet(
+                            0x20,
+                            b"\x00\x00"
+                            + bytes((len(connack_properties),))
+                            + connack_properties,
+                        )
+                    )
+                else:
+                    bridge.sendall(_packet(0x20, b"\x00\x00"))
+
+                _wait_for_log(process, log, f"bridge {case_name} remote=")
+                publisher = _connect_client(local_port, f"publisher-{case_name}")
+                payload = b"retain-policy"
+                publisher.sendall(
+                    _packet(
+                        0x31,
+                        _utf8("bridge/retain/test") + b"\x00" + payload,
+                    )
+                )
+                forwarded = _read_packet(bridge)
+                if bool(forwarded[0] & 0x01) != outgoing_retain:
+                    raise AssertionError(
+                        "bridge_outgoing_retain mismatch: " + forwarded.hex()
+                    )
+                if len(forwarded) > 80:
+                    raise AssertionError(
+                        f"bridge exceeded negotiated packet limit: {len(forwarded)}"
+                    )
+                topic, actual = _publish_contents(forwarded, protocol_level)
+                if (topic, actual) != ("bridge/retain/test", payload):
+                    raise AssertionError(
+                        f"bridge protocol-limit publish mismatch: {(topic, actual)!r}"
+                    )
+
+                oversized_payload = b"x" * (61 if protocol_level == 5 else 80)
+                publisher.sendall(
+                    _packet(
+                        0x34,
+                        _utf8("bridge/oversize")
+                        + b"\x00\x01"
+                        + b"\x00"
+                        + oversized_payload,
+                    )
+                )
+                pubrec = _read_packet(publisher)
+                if pubrec[0] != 0x50 or pubrec[2:4] != b"\x00\x01":
+                    raise AssertionError(
+                        f"local oversized QoS 2 PUBREC mismatch: {pubrec.hex()}"
+                    )
+                publisher.sendall(_packet(0x62, b"\x00\x01"))
+                pubcomp = _read_packet(publisher)
+                if pubcomp[0] != 0x70 or pubcomp[2:4] != b"\x00\x01":
+                    raise AssertionError(
+                        f"local oversized QoS 2 PUBCOMP mismatch: {pubcomp.hex()}"
+                    )
+                publisher.sendall(
+                    _packet(
+                        0x30,
+                        _utf8("bridge/after-limit") + b"\x00" + b"alive",
+                    )
+                )
+                after_limit = _read_packet(bridge)
+                topic, actual = _publish_contents(after_limit, protocol_level)
+                if (topic, actual) != ("bridge/after-limit", b"alive"):
+                    raise AssertionError(
+                        "oversized bridge PUBLISH was not dropped before "
+                        f"the next message: {(topic, actual)!r}"
+                    )
+            finally:
+                if publisher is not None:
+                    publisher.close()
+                if bridge is not None:
+                    bridge.close()
+                listener.close()
+                if process is not None:
+                    _stop(process, output)
 
 
 def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False) -> None:

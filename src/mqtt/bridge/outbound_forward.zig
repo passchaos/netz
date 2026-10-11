@@ -80,6 +80,14 @@ pub fn Operations(comptime Self: type) type {
                 expiry_interval,
                 received_at_ns,
             ) catch |err| {
+                if (err == error.OutgoingPacketTooLarge) {
+                    // Match broker delivery semantics: a per-peer packet cap
+                    // drops this destination without poisoning either
+                    // connection. MQTT 5 sources get Quota Exceeded; MQTT
+                    // 3.1.1 sources receive their version's success-only ACK.
+                    _ = self.acknowledgeSource(source_publish, 0x97);
+                    return;
+                }
                 if (source_publish.qos == .at_least_once) {
                     self.source.disconnectTransport();
                 }

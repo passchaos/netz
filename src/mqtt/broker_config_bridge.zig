@@ -14,6 +14,8 @@ pub const default_restart_base_seconds: u16 = 5;
 pub const default_restart_cap_seconds: u16 = 30;
 pub const default_lazy_idle_timeout_seconds: u32 = 60;
 pub const default_lazy_threshold: usize = 10;
+pub const default_receive_maximum: u16 = 20;
+pub const default_max_topic_alias: u16 = 10;
 pub const maximum_restart_seconds: u16 = 3600;
 pub const maximum_restart_cap_seconds: u16 = 7200;
 pub const maximum_host_bytes: usize = 255;
@@ -105,6 +107,10 @@ pub const Bridge = struct {
     clean_session: bool = false,
     session_expiry_interval: u32 = 0,
     keep_alive_seconds: u16 = default_keep_alive_seconds,
+    receive_maximum: u16 = default_receive_maximum,
+    max_topic_alias: u16 = default_max_topic_alias,
+    max_packet_size: u32 = 0,
+    outgoing_retain: bool = true,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -210,6 +216,10 @@ const Seen = struct {
     bridge_protocol_version: bool = false,
     bridge_session_expiry_interval: bool = false,
     keepalive_interval: bool = false,
+    bridge_receive_maximum: bool = false,
+    bridge_max_topic_alias: bool = false,
+    bridge_max_packet_size: bool = false,
+    bridge_outgoing_retain: bool = false,
     remote_client_id: bool = false,
     remote_username: bool = false,
     remote_password: bool = false,
@@ -242,6 +252,10 @@ pub const Builder = struct {
     clean_session: bool = false,
     session_expiry_interval: u32 = 0,
     keep_alive_seconds: u16 = default_keep_alive_seconds,
+    receive_maximum: ?u16 = null,
+    max_topic_alias: u16 = default_max_topic_alias,
+    max_packet_size: u32 = 0,
+    outgoing_retain: bool = true,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -349,6 +363,18 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "keepalive_interval")) {
             try markOnce(&self.seen.keepalive_interval);
             self.keep_alive_seconds = try parsePositive(u16, words);
+        } else if (std.mem.eql(u8, directive, "bridge_receive_maximum")) {
+            try markOnce(&self.seen.bridge_receive_maximum);
+            self.receive_maximum = try parsePositive(u16, words);
+        } else if (std.mem.eql(u8, directive, "bridge_max_topic_alias")) {
+            try markOnce(&self.seen.bridge_max_topic_alias);
+            self.max_topic_alias = try parseOneInteger(u16, words);
+        } else if (std.mem.eql(u8, directive, "bridge_max_packet_size")) {
+            try markOnce(&self.seen.bridge_max_packet_size);
+            self.max_packet_size = try parseOneInteger(u32, words);
+        } else if (std.mem.eql(u8, directive, "bridge_outgoing_retain")) {
+            try markOnce(&self.seen.bridge_outgoing_retain);
+            self.outgoing_retain = try parseOneBool(words);
         } else if (std.mem.eql(u8, directive, "remote_clientid")) {
             try markOnce(&self.seen.remote_client_id);
             self.remote_client_id = try parseOwnedUtf8(allocator, words);
@@ -447,6 +473,7 @@ pub const Builder = struct {
         allocator: std.mem.Allocator,
         persistence: bool,
         max_queued_messages: usize,
+        inherited_receive_maximum: u16,
     ) Error!Bridge {
         if (!self.seen.address) return error.BridgeAddressRequired;
         if (self.rules.items.len == 0) return error.BridgeTopicRequired;
@@ -534,6 +561,11 @@ pub const Builder = struct {
             .clean_session = self.clean_session,
             .session_expiry_interval = self.session_expiry_interval,
             .keep_alive_seconds = self.keep_alive_seconds,
+            .receive_maximum = self.receive_maximum orelse
+                inherited_receive_maximum,
+            .max_topic_alias = self.max_topic_alias,
+            .max_packet_size = self.max_packet_size,
+            .outgoing_retain = self.outgoing_retain,
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
@@ -652,6 +684,10 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_protocol_version") or
         std.mem.eql(u8, value, "bridge_session_expiry_interval") or
         std.mem.eql(u8, value, "keepalive_interval") or
+        std.mem.eql(u8, value, "bridge_receive_maximum") or
+        std.mem.eql(u8, value, "bridge_max_topic_alias") or
+        std.mem.eql(u8, value, "bridge_max_packet_size") or
+        std.mem.eql(u8, value, "bridge_outgoing_retain") or
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
         std.mem.eql(u8, value, "remote_password") or
@@ -859,6 +895,10 @@ fn parsePositive(comptime T: type, words: anytype) Error!T {
     const parsed = try parseInteger(T, value);
     if (parsed == 0) return error.InvalidInteger;
     return parsed;
+}
+
+fn parseOneInteger(comptime T: type, words: anytype) Error!T {
+    return parseInteger(T, try parseOne(words));
 }
 
 fn parseInteger(comptime T: type, value: []const u8) Error!T {
