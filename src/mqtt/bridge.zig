@@ -501,6 +501,12 @@ pub const Bridge = struct {
         try self.client.disconnect(reason_code);
     }
 
+    /// Ask the owning run loop to reconnect without touching its transport
+    /// from the calling thread. This is safe to call concurrently with `run`.
+    pub fn requestReconnect(self: *Bridge) void {
+        self.client.requestReconnect();
+    }
+
     /// Establish the remote connection and install all inbound rules.
     pub fn connect(
         self: *Bridge,

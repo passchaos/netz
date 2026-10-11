@@ -1189,8 +1189,9 @@ const OwnedSubscription = owned_subscription.Owned;
 /// Methods are single-owner: an application must serialize `connect`,
 /// `publish`, acknowledgement reads and `deinit`. Cancellation may be signaled
 /// concurrently and interrupts retry backoff; call `connection().shutdown()`
-/// as well when an application needs to interrupt an already-established
-/// blocking read.
+/// as well when an application needs immediate interruption of an already-
+/// established blocking read. `requestReconnect` provides a data-race-free
+/// bounded-latency alternative when its poll loop is active.
 pub const Client = struct {
     const Target = reconnect_target.Target;
 
@@ -1208,6 +1209,7 @@ pub const Client = struct {
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
+    reconnect_requested: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1442,6 +1444,13 @@ pub const Client = struct {
 
     pub fn connection(self: *Client) ?*runtime.Connection {
         return if (self.connection_state) |*active| active else null;
+    }
+
+    /// Ask the single-owner poll loop to retire its current transport and
+    /// reconnect. This method is thread-safe; the request is observed within
+    /// `PollOptions.cancellation_check_interval` while a read is blocked.
+    pub fn requestReconnect(self: *Client) void {
+        self.reconnect_requested.store(true, .release);
     }
 
     /// Connect immediately, then retry failures after the configured delay.
@@ -2531,6 +2540,9 @@ pub const Client = struct {
 
         while (true) {
             if (self.shutdown.isSet()) return error.Canceled;
+            if (self.reconnect_requested.swap(false, .acq_rel)) {
+                self.disconnectTransport();
+            }
             if (self.connection_state == null) {
                 return try self.connectEventBefore(call_deadline);
             }

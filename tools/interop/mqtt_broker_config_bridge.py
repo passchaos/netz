@@ -484,6 +484,102 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
             _stop(upstream, upstream_output)
 
 
+def run_primary_failback_case(broker: Path, directory: Path) -> None:
+    primary_port, secondary_port, local_port = _distinct_ports(3)
+    primary_config = directory / "bridge-primary.conf"
+    secondary_config = directory / "bridge-secondary.conf"
+    for config, port in (
+        (primary_config, primary_port),
+        (secondary_config, secondary_port),
+    ):
+        config.write_text(
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 2\n"
+        )
+    local_config = directory / "bridge-primary-failback-local.conf"
+    local_config.write_text(
+        f"listener {local_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+        "connection primary-preferred\n"
+        f"address 127.0.0.1:{primary_port} 127.0.0.1:{secondary_port}\n"
+        "topic sensors/# in 1 local/ remote/\n"
+        "cleansession false\n"
+        "remote_clientid configured-primary-failback\n"
+        "restart_timeout 1\n"
+    )
+    primary_log = directory / "bridge-primary.log"
+    secondary_log = directory / "bridge-secondary.log"
+    local_log = directory / "bridge-primary-failback-local.log"
+    secondary, secondary_output = _start_broker(
+        broker, secondary_config, secondary_log
+    )
+    primary = None
+    primary_output = None
+    local = None
+    local_output = None
+    subscriber = None
+    publisher = None
+    try:
+        _wait_for_log(secondary, secondary_log, "configured 1 listeners")
+        local, local_output = _start_broker(broker, local_config, local_log)
+        _wait_for_log(local, local_log, "bridge primary-preferred remote=")
+        subscriber = _connect_client(local_port, "primary-failback-subscriber")
+        subscriber.sendall(_subscribe(1, "local/#", 1))
+        suback = _read_packet(subscriber)
+        if suback[0] != 0x90 or suback[-1] != 1:
+            raise AssertionError(
+                f"primary failback subscriber expected SUBACK: {suback.hex()}"
+            )
+
+        publisher = _connect_client(secondary_port, "secondary-publisher")
+        _publish_message(publisher, 1, b"from-secondary", 1)
+        _expect_mapped_publish(subscriber, b"from-secondary")
+        publisher.sendall(b"\xe0\x00")
+        publisher.close()
+        publisher = None
+
+        primary, primary_output = _start_broker(
+            broker, primary_config, primary_log
+        )
+        _wait_for_log(primary, primary_log, "configured 1 listeners")
+        publisher = _connect_client(primary_port, "primary-publisher")
+        _publish_message(publisher, 2, b"from-primary", 1)
+        _expect_mapped_publish(subscriber, b"from-primary")
+        publisher.sendall(b"\xe0\x00")
+        publisher.close()
+        publisher = None
+
+        subscriber.sendall(b"\xe0\x00")
+        subscriber.close()
+        subscriber = None
+        _wait_clean(local, local_output, local_log, "primary failback broker")
+        local = None
+        local_output = None
+        _wait_clean(primary, primary_output, primary_log, "primary broker")
+        primary = None
+        primary_output = None
+        _wait_clean(
+            secondary,
+            secondary_output,
+            secondary_log,
+            "secondary broker",
+        )
+        secondary_output = None
+    finally:
+        if publisher is not None:
+            publisher.close()
+        if subscriber is not None:
+            subscriber.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        if primary is not None and primary_output is not None:
+            _stop(primary, primary_output)
+        if secondary_output is not None:
+            _stop(secondary, secondary_output)
+
+
 def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
     (
         ca_certificate,

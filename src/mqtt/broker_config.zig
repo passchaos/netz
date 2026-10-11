@@ -1380,12 +1380,15 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection restart\naddress localhost\ntopic # in 0\n" ++
             "restart_timeout 5 30 30\n"),
     );
-    try std.testing.expectError(
-        error.MultiAddressRequiresRoundRobin,
-        parse(allocator, listener ++
-            "connection addresses\naddress one.example two.example\n" ++
-            "topic # in 0\n"),
+    var primary_preferred = try parse(allocator, listener ++
+        "connection addresses\naddress one.example two.example\n" ++
+        "topic # in 0\n");
+    defer primary_preferred.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        primary_preferred.bridges[0].addressCount(),
     );
+    try std.testing.expect(!primary_preferred.bridges[0].round_robin);
     try std.testing.expectError(
         error.DuplicateBridgeAddress,
         parse(allocator, listener ++

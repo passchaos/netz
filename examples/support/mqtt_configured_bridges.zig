@@ -11,7 +11,9 @@ const max_bridge_ca_file_bytes: usize = 4 * 1024 * 1024;
 const ConfiguredConnector = struct {
     source: *const mqtt.broker_config.Bridge,
     tls_options: ?mqtt.tls_runtime.ConnectOptions = null,
-    next_address: usize = 0,
+    next_address: std.atomic.Value(usize) = .init(0),
+    current_address: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
+    connected_at_ns: std.atomic.Value(i64) = .init(0),
 
     fn connector(self: *ConfiguredConnector) mqtt.runtime.ClientConnector {
         return .{
@@ -28,26 +30,33 @@ const ConfiguredConnector = struct {
         mqtt_options: mqtt.runtime.ConnectOptions,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
-        const endpoint = self.takeEndpoint();
-        if (self.tls_options) |options| {
+        const index, const endpoint = self.takeEndpoint();
+        var attempt = if (self.tls_options) |options| blk: {
             var tls_connector = mqtt.tls_runtime.HostReconnectConnector{
                 .host = endpoint.host,
                 .port = endpoint.port,
                 .options = options,
             };
-            return tls_connector.connector().connectAttempt(
+            break :blk tls_connector.connector().connectAttempt(
                 allocator,
                 io,
                 mqtt_options,
-            );
-        }
-        return mqtt.runtime.Client.connectHostAttempt(
+            ) catch |err| {
+                self.noteAttempt(index, false, io);
+                return err;
+            };
+        } else mqtt.runtime.Client.connectHostAttempt(
             allocator,
             io,
             endpoint.host,
             endpoint.port,
             mqtt_options,
-        );
+        ) catch |err| {
+            self.noteAttempt(index, false, io);
+            return err;
+        };
+        self.noteAttempt(index, attempt.accepted(), io);
+        return attempt;
     }
 
     fn connectAttemptWithDeadline(
@@ -58,34 +67,92 @@ const ConfiguredConnector = struct {
         deadline: std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
-        const endpoint = self.takeEndpoint();
-        if (self.tls_options) |options| {
+        const index, const endpoint = self.takeEndpoint();
+        var attempt = if (self.tls_options) |options| blk: {
             var tls_connector = mqtt.tls_runtime.HostReconnectConnector{
                 .host = endpoint.host,
                 .port = endpoint.port,
                 .options = options,
             };
-            return tls_connector.connector().connectAttemptWithDeadline(
+            break :blk tls_connector.connector().connectAttemptWithDeadline(
                 allocator,
                 io,
                 mqtt_options,
                 deadline,
-            );
-        }
-        return mqtt.runtime.Client.connectHostAttemptWithDeadline(
+            ) catch |err| {
+                self.noteAttempt(index, false, io);
+                return err;
+            };
+        } else mqtt.runtime.Client.connectHostAttemptWithDeadline(
             allocator,
             io,
             endpoint.host,
             endpoint.port,
             mqtt_options,
             deadline,
+        ) catch |err| {
+            self.noteAttempt(index, false, io);
+            return err;
+        };
+        self.noteAttempt(index, attempt.accepted(), io);
+        return attempt;
+    }
+
+    fn takeEndpoint(
+        self: *ConfiguredConnector,
+    ) struct { usize, mqtt.broker_config.BridgeEndpoint } {
+        const index = self.next_address.load(.acquire);
+        return .{ index, self.source.addressAt(index) };
+    }
+
+    fn noteAttempt(
+        self: *ConfiguredConnector,
+        index: usize,
+        accepted: bool,
+        io: std.Io,
+    ) void {
+        if (accepted) {
+            self.next_address.store(
+                if (self.source.round_robin)
+                    (index + 1) % self.source.addressCount()
+                else
+                    0,
+                .release,
+            );
+            self.connected_at_ns.store(
+                @intCast(std.Io.Clock.awake.now(io).nanoseconds),
+                .release,
+            );
+            self.current_address.store(index, .release);
+            return;
+        }
+        self.current_address.store(std.math.maxInt(usize), .release);
+        self.next_address.store(
+            (index + 1) % self.source.addressCount(),
+            .release,
         );
     }
 
-    fn takeEndpoint(self: *ConfiguredConnector) mqtt.broker_config.BridgeEndpoint {
-        const index = self.next_address;
-        self.next_address = (index + 1) % self.source.addressCount();
-        return self.source.addressAt(index);
+    fn shouldFailBack(self: *ConfiguredConnector, now_ns: i64) bool {
+        if (self.source.round_robin or self.source.addressCount() == 1) {
+            return false;
+        }
+        const current = self.current_address.load(.acquire);
+        if (current == 0 or current == std.math.maxInt(usize)) return false;
+        const connected_at = self.connected_at_ns.load(.acquire);
+        const interval_ns = @as(i64, self.source.restart.cap_seconds) *
+            std.time.ns_per_s;
+        if (now_ns < connected_at or now_ns - connected_at < interval_ns) {
+            return false;
+        }
+        if (self.current_address.cmpxchgStrong(
+            current,
+            std.math.maxInt(usize),
+            .acq_rel,
+            .acquire,
+        ) != null) return false;
+        self.next_address.store(0, .release);
+        return true;
     }
 };
 
@@ -95,6 +162,7 @@ const ConnectorResources = struct {
     identity: ?netz.tls.server_identity_file.Identity = null,
     alpn_protocols: [1][]const u8 = undefined,
     connector: ConfiguredConnector = undefined,
+    connector_configured: bool = false,
 
     fn deinit(self: *ConnectorResources, allocator: std.mem.Allocator) void {
         if (self.identity) |*identity| identity.deinit();
@@ -198,6 +266,7 @@ pub const Set = struct {
                     );
                 } else {
                     resources.connector = .{ .source = source };
+                    resources.connector_configured = true;
                 }
                 break :blk try mqtt.bridge.Bridge.initConnectorMany(
                     allocator,
@@ -237,6 +306,47 @@ pub const Set = struct {
         self.allocator.free(self.connector_resources);
         self.allocator.free(self.values);
         self.* = undefined;
+    }
+
+    pub fn needsPrimaryFailback(self: *const Set) bool {
+        for (self.connector_resources) |*resources| {
+            if (resources.connector_configured and
+                resources.connector.source.addressCount() > 1 and
+                !resources.connector.source.round_robin)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn runPrimaryFailback(
+        self: *Set,
+        io: std.Io,
+        shutdown: *std.Io.Event,
+    ) std.Io.Cancelable!void {
+        while (!shutdown.isSet()) {
+            shutdown.waitTimeout(io, .{
+                .duration = .{
+                    .raw = .fromMilliseconds(100),
+                    .clock = .awake,
+                },
+            }) catch |err| switch (err) {
+                error.Timeout => {},
+                error.Canceled => return error.Canceled,
+            };
+            if (shutdown.isSet()) return;
+            const now_ns: i64 = @intCast(
+                std.Io.Clock.awake.now(io).nanoseconds,
+            );
+            for (self.connector_resources, self.values) |*resources, *bridge| {
+                if (resources.connector_configured and
+                    resources.connector.shouldFailBack(now_ns))
+                {
+                    bridge.requestReconnect();
+                }
+            }
+        }
     }
 };
 
@@ -324,6 +434,7 @@ fn loadTlsResources(
                 resources.alpn_protocols[0..1],
         },
     };
+    resources.connector_configured = true;
 }
 
 fn stableBridgeId(source: mqtt.broker_config.Bridge) [16]u8 {

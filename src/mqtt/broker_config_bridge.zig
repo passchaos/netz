@@ -27,7 +27,6 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     BridgePersistentSessionRequired,
     BridgeTlsIdentityIncomplete,
     BridgeTlsTrustRequired,
-    MultiAddressRequiresRoundRobin,
     DuplicateBridgeAddress,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
@@ -358,9 +357,6 @@ pub const Builder = struct {
             self.ca_file.len == 0 and !self.use_os_ca_certificates)
         {
             return error.BridgeTlsTrustRequired;
-        }
-        if (self.secondary_addresses.items.len != 0 and !self.round_robin) {
-            return error.MultiAddressRequiresRoundRobin;
         }
         var uses_qos2 = false;
         for (self.rules.items) |rule| {

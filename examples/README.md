@@ -192,10 +192,12 @@ bracketed IPv6 targets with required ports) and one or more explicit
 `REMOTE_PREFIX + FILTER`, strips `REMOTE_PREFIX` from each delivered Topic
 Name, then prepends `LOCAL_PREFIX` before local broker routing. Empty prefixes
 may be omitted or written as `""`. Rules must be pairwise disjoint after remote
-prefix expansion. Multiple targets require `round_robin true`; initial failure
-and later disconnects rotate to the next target and a successful target remains
-active until it fails. Mosquitto's primary-priority periodic failback mode is
-not silently approximated. `out`, `both`, multi-address `round_robin false`, MQTT 3.1, and the
+prefix expansion. With the default `round_robin false`, connection attempts
+fall through the ordered targets, but the first target remains primary: a
+secondary connection is retired after the configured restart cap so the next
+attempt probes the primary again. `round_robin true` instead rotates after each
+failure or disconnect and leaves a successful target active until it fails.
+`out`, `both`, MQTT 3.1, and the
 three-argument `restart_timeout` stable-period form fail explicitly instead of
 being silently downgraded. One timeout value selects a fixed delay; two select
 bounded exponential full-jitter retries. MQTT 3.1.1 is the bridge default;
@@ -206,10 +208,11 @@ used as the stable Client ID. QoS 2 additionally requires `persistence true`, a 
 Session, and for MQTT 5 a non-zero `bridge_session_expiry_interval`; the runner
 derives a stable bridge identity from the connection identity and mappings and opens a
 crash-safe broker journal beside the configured snapshot. A process gate runs
-two real broker instances, begins through an unavailable first address,
-verifies round-robin failover plus prefix mapping and QoS 1/2 delivery, kills
-and restarts the upstream broker, then verifies automatic resubscription and
-delivery without restarting the local broker.
+real broker instances, begins through an unavailable first address, verifies
+round-robin failover plus prefix mapping and QoS 1/2 delivery, kills and
+restarts the upstream broker, then verifies automatic resubscription without
+restarting the local broker. A separate three-broker case verifies secondary
+takeover followed by active failback when the primary becomes available.
 
 Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
 Trust comes from a bounded explicit `bridge_cafile`, operating-system roots

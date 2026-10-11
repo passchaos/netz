@@ -586,7 +586,7 @@ pub fn run(
             service,
             io,
             &shutdown,
-            bridges.values,
+            &bridges,
             persistence_path,
             if (!config.autosave_on_changes and
                 config.autosave_interval != 0)
@@ -610,7 +610,7 @@ fn serveWithManagement(
     service: Service,
     io: std.Io,
     shutdown: *std.Io.Event,
-    bridges: []mqtt.bridge.Bridge,
+    bridges: *configured_bridges.Set,
     persistence_path: ?[]const u8,
     interval_seconds: ?u32,
     security: ?*reloadable_security.Security,
@@ -619,17 +619,25 @@ fn serveWithManagement(
     const Result = union(enum) {
         serve: ?anyerror,
         bridge: BridgeResult,
+        bridge_failback: std.Io.Cancelable!void,
         periodic_timer: std.Io.Cancelable!void,
         signal_poll: std.Io.Cancelable!void,
     };
-    const result_buffer = try allocator.alloc(Result, 3 + bridges.len);
+    const result_buffer = try allocator.alloc(Result, 4 + bridges.values.len);
     defer allocator.free(result_buffer);
     var select: std.Io.Select(Result) = .init(io, result_buffer);
     defer select.cancelDiscard();
     defer shutdown.set(io);
     try select.concurrent(.serve, serveResult, .{ broker, service });
-    for (bridges, 0..) |*bridge, index| {
+    for (bridges.values, 0..) |*bridge, index| {
         try select.concurrent(.bridge, bridgeResult, .{ bridge, index });
+    }
+    if (bridges.needsPrimaryFailback()) {
+        try select.concurrent(
+            .bridge_failback,
+            configured_bridges.Set.runPrimaryFailback,
+            .{ bridges, io, shutdown },
+        );
     }
     if (interval_seconds) |seconds| {
         try select.concurrent(
@@ -668,6 +676,10 @@ fn serveWithManagement(
                     );
                     return err;
                 }
+                return error.UnexpectedBridgeExit;
+            },
+            .bridge_failback => |result| {
+                try result;
                 return error.UnexpectedBridgeExit;
             },
             .periodic_timer => |result| {
