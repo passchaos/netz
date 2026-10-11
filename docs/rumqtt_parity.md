@@ -284,6 +284,14 @@ silently discarding it. The process gate traces successful cleartext and TLS
 bridge sockets and checks the actual keepalive and `TCP_USER_TIMEOUT` syscall
 values.
 
+`bridge_ciphers_tls1.3` accepts an ordered colon-separated list of the TLS 1.3
+cipher suites implemented by vail. The list is parsed and owned with the rest
+of the bridge configuration, then reused by every TLS connection and reconnect.
+Unknown names, empty elements, duplicates, and a configured cipher list without
+a trust source fail before listeners start. The process gate constrains a live
+bridge ClientHello to ChaCha20-Poly1305 and checks the negotiated suite from an
+OpenSSL TLS server.
+
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use
 Mosquitto's mapping order: subscribe to `local_prefix + filter`, strip the

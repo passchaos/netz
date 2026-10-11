@@ -5,6 +5,7 @@ pub const server_identity_file = @import("server_identity_file.zig");
 pub const client_ca_file = @import("client_ca_file.zig");
 pub const client_ca_dir = @import("client_ca_dir.zig");
 pub const client_crl_file = @import("client_crl_file.zig");
+pub const cipher_suites = @import("cipher_suites.zig");
 pub const encrypted_private_key = @import("encrypted_private_key.zig");
 pub const testing = @import("testing.zig");
 pub const trust = @import("vail").x509.trust;
@@ -17,6 +18,7 @@ test {
     _ = client_ca_file;
     _ = client_ca_dir;
     _ = client_crl_file;
+    _ = cipher_suites;
     _ = encrypted_private_key;
     _ = testing;
     _ = trust;

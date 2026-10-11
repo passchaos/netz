@@ -1191,6 +1191,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_keyfile client-key.pem
         \\bridge_keyfile_password_file client-key.password
         \\bridge_alpn mqtt
+        \\bridge_ciphers_tls1.3 TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
         \\bridge_insecure false
         \\bridge_tls_version tlsv1.3
         \\round_robin true
@@ -1289,6 +1290,11 @@ test "MQTT broker config parses owned inbound bridges" {
         upstream.private_key_password_file,
     );
     try std.testing.expectEqualStrings("mqtt", upstream.alpn);
+    try std.testing.expectEqualSlices(
+        mqtt.tls_runtime.CipherSuite,
+        &.{ .chacha20_poly1305_sha256, .aes_256_gcm_sha384 },
+        upstream.cipher_suites,
+    );
     try std.testing.expectEqual(@as(usize, 2), upstream.rules.len);
     try std.testing.expectEqualStrings(
         "remote/sensors/#",
@@ -1344,6 +1350,7 @@ test "MQTT broker config applies inbound bridge defaults" {
         @as(?mqtt.runtime.TcpKeepAlive, null),
         bridge.tcp_keepalive,
     );
+    try std.testing.expectEqual(@as(usize, 0), bridge.cipher_suites.len);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
@@ -1527,6 +1534,33 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "bridge_tls_version tlsv1.3\n"),
     );
     try std.testing.expectError(
+        error.BridgeTlsTrustRequired,
+        parse(allocator, listener ++
+            "connection cipher-no-trust\naddress localhost\ntopic # in 0\n" ++
+            "bridge_ciphers_tls1.3 TLS_AES_128_GCM_SHA256\n"),
+    );
+    for ([_][]const u8{
+        "bridge_ciphers_tls1.3 DEFAULT\n",
+        "bridge_ciphers_tls1.3 TLS_AES_128_GCM_SHA256:\n",
+        "bridge_ciphers_tls1.3 TLS_AES_128_GCM_SHA256:" ++
+            "TLS_AES_128_GCM_SHA256\n",
+    }) |invalid| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "{s}connection invalid-cipher\naddress localhost\n" ++
+                "topic # in 0\nbridge_cafile ca.pem\n{s}",
+            .{ listener, invalid },
+        );
+        defer allocator.free(source);
+        const expected = if (std.mem.eql(
+            u8,
+            invalid,
+            "bridge_ciphers_tls1.3 TLS_AES_128_GCM_SHA256:" ++
+                "TLS_AES_128_GCM_SHA256\n",
+        )) error.DuplicateCipherSuite else error.UnsupportedCipherSuite;
+        try std.testing.expectError(expected, parse(allocator, source));
+    }
+    try std.testing.expectError(
         error.BridgeTlsIdentityIncomplete,
         parse(allocator, listener ++
             "connection tls-identity\naddress localhost\ntopic # in 0\n" ++
@@ -1537,6 +1571,14 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         parse(allocator, listener ++
             "connection duplicate-capath\naddress localhost\ntopic # in 0\n" ++
             "bridge_capath roots-a\nbridge_capath roots-b\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-ciphers\naddress localhost\ntopic # in 0\n" ++
+            "bridge_cafile ca.pem\n" ++
+            "bridge_ciphers_tls1.3 TLS_AES_128_GCM_SHA256\n" ++
+            "bridge_ciphers_tls1.3 TLS_AES_256_GCM_SHA384\n"),
     );
     try std.testing.expectError(
         error.InsecureBridgeTlsUnsupported,

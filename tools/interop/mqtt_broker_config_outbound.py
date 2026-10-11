@@ -3,6 +3,7 @@
 from pathlib import Path
 import shutil
 import socket
+import ssl
 import sys
 import time
 
@@ -197,6 +198,61 @@ def run_private_bridge_server_case(broker: Path, directory: Path) -> None:
         if private is not None:
             private.close()
         _stop(process, output)
+
+
+def run_bridge_cipher_suite_case(broker: Path, directory: Path) -> None:
+    remote_port, local_port = _distinct_ports(2)
+    ca, certificate, key, _, _ = _create_tls_material(directory)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.maximum_version = ssl.TLSVersion.TLSv1_3
+    context.load_cert_chain(certificate, key)
+    context.set_alpn_protocols(["mqtt"])
+    required_cipher = "TLS_CHACHA20_POLY1305_SHA256"
+    if required_cipher not in {
+        cipher["name"] for cipher in context.get_ciphers()
+    }:
+        raise AssertionError(f"OpenSSL does not support {required_cipher}")
+
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", remote_port))
+    listener.listen(1)
+    listener.settimeout(10)
+    config = directory / "bridge-cipher-suite.conf"
+    config.write_text(
+        f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+        "max_connections 1\nconnection cipher-suite\n"
+        f"address localhost:{remote_port}\ntopic # in 0\n"
+        "bridge_protocol_version mqttv50\nnotifications false\n"
+        f"bridge_cafile {ca}\nbridge_alpn mqtt\n"
+        f"bridge_ciphers_tls1.3 {required_cipher}\n"
+    )
+    log = directory / "bridge-cipher-suite.log"
+    process = output = raw = peer = None
+    try:
+        process, output = _start_broker(broker, config, log)
+        raw, _ = listener.accept()
+        raw.settimeout(10)
+        peer = context.wrap_socket(raw, server_side=True)
+        raw = None
+        if peer.selected_alpn_protocol() != "mqtt":
+            raise AssertionError("bridge cipher test did not negotiate mqtt ALPN")
+        if peer.cipher()[0] != required_cipher:
+            raise AssertionError(
+                f"bridge negotiated {peer.cipher()[0]}, expected {required_cipher}"
+            )
+        _connect_limits(_read_packet(peer), 5)
+        peer.sendall(_packet(0x20, b"\x00\x00\x00"))
+        _wait_for_log(process, log, "bridge cipher-suite remote=")
+    finally:
+        if peer is not None:
+            peer.close()
+        if raw is not None:
+            raw.close()
+        listener.close()
+        if process is not None:
+            _stop(process, output)
 
 
 def run_outbound_bridge_protocol_limits_case(
@@ -417,7 +473,9 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         remote_tls = f"certfile {cert}\nkeyfile {key}\ncafile {ca}\nrequire_certificate true\n"
         local_tls = (f"bridge_capath {server_ca_path}\nbridge_certfile {client_cert}\n"
                      f"bridge_keyfile {encrypted_key}\nbridge_keyfile_password_file {key_password}\n"
-                     "bridge_alpn mqtt\nbridge_tls_version tlsv1.3\n")
+                     "bridge_alpn mqtt\n"
+                     "bridge_ciphers_tls1.3 TLS_AES_256_GCM_SHA384\n"
+                     "bridge_tls_version tlsv1.3\n")
     remote_config = directory / "outbound-remote.conf"
     remote_config.write_text(
         f"listener {remote_port} 127.0.0.1\n{remote_tls}allow_anonymous true\n"

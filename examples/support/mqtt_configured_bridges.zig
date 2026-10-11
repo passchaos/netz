@@ -688,29 +688,33 @@ fn loadTlsResources(
         identity.serverIdentity()
     else
         null;
+    var connect_options = mqtt.tls_runtime.ConnectOptions{
+        .mqtt = .{ .client_id = source.clientId() },
+        .tls = .{
+            .ca_bundle = if (source.ca_file.len != 0 or
+                source.ca_path.len != 0 or
+                source.use_os_ca_certificates) .{
+                .bundle = &resources.ca_bundle,
+                .lock = &resources.ca_lock,
+            } else null,
+        },
+        .use_vail = true,
+        .client_identity = if (server_identity) |identity| .{
+            .certificate_chain = identity.certificate_chain,
+            .signer = identity.signer,
+            .certificate_type = identity.certificate_type,
+        } else null,
+        .alpn_protocols = if (source.alpn.len == 0)
+            &.{}
+        else
+            resources.alpn_protocols[0..1],
+    };
+    if (source.cipher_suites.len != 0) {
+        connect_options.cipher_suites = source.cipher_suites;
+    }
     resources.connector = .{
         .source = source,
-        .tls_options = .{
-            .mqtt = .{ .client_id = source.clientId() },
-            .tls = .{
-                .ca_bundle = if (source.ca_file.len != 0 or
-                    source.ca_path.len != 0 or
-                    source.use_os_ca_certificates) .{
-                    .bundle = &resources.ca_bundle,
-                    .lock = &resources.ca_lock,
-                } else null,
-            },
-            .use_vail = true,
-            .client_identity = if (server_identity) |identity| .{
-                .certificate_chain = identity.certificate_chain,
-                .signer = identity.signer,
-                .certificate_type = identity.certificate_type,
-            } else null,
-            .alpn_protocols = if (source.alpn.len == 0)
-                &.{}
-            else
-                resources.alpn_protocols[0..1],
-        },
+        .tls_options = connect_options,
     };
     resources.connector_configured = true;
 }
@@ -881,11 +885,16 @@ test "configured bridge passes operating-system roots without a CA file" {
     const io = std.testing.io;
     var name = "tls-system-roots".*;
     var host = "localhost".*;
+    var suites = [_]mqtt.tls_runtime.CipherSuite{
+        .chacha20_poly1305_sha256,
+        .aes_256_gcm_sha384,
+    };
     const source = mqtt.broker_config.Bridge{
         .name = &name,
         .host = &host,
         .rules = &.{},
         .use_os_ca_certificates = true,
+        .cipher_suites = &suites,
     };
     var resources: ConnectorResources = .{};
     defer resources.deinit(allocator);
@@ -898,6 +907,11 @@ test "configured bridge passes operating-system roots without a CA file" {
     );
     try std.testing.expect(
         resources.connector.tls_options.?.tls.ca_bundle != null,
+    );
+    try std.testing.expectEqualSlices(
+        mqtt.tls_runtime.CipherSuite,
+        &suites,
+        resources.connector.tls_options.?.cipher_suites,
     );
 }
 

@@ -1000,8 +1000,9 @@ Current protocol coverage includes:
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
   supervised inbound `connection` bridges with strict `topic ... in ...`
   QoS/prefix mapping, upstream Session/authentication settings, bounded
-  reconnect policy, vail-backed TLS 1.3 with CA/hostname verification and
-  optional encrypted-key mTLS, primary-preferred and round-robin multi-address
+  reconnect policy, vail-backed TLS 1.3 with CA/hostname verification,
+  ordered per-bridge cipher-suite policy, and optional encrypted-key mTLS,
+  primary-preferred and round-robin multi-address
   failover, retained local/remote connection-state notifications,
   automatic/one-shot lifecycles, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
