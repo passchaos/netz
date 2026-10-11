@@ -175,11 +175,7 @@ def _publish_message(
             )
 
 
-def _expect_mapped_publish(
-    client: socket.socket,
-    payload: bytes,
-    expected_topic: str = "local/sensors/temperature",
-) -> None:
+def _read_publish_and_ack(client: socket.socket) -> tuple[str, bytes]:
     packet = _read_packet(client)
     if packet[0] >> 4 != 3:
         raise AssertionError(f"expected bridged PUBLISH: {packet.hex()}")
@@ -196,10 +192,7 @@ def _expect_mapped_publish(
         cursor += 2
     property_length, cursor = _decode_varint(packet, cursor)
     cursor += property_length
-    if topic != expected_topic or packet[cursor:end] != payload:
-        raise AssertionError(
-            f"unexpected bridge mapping topic={topic!r} payload={packet[cursor:end]!r}"
-        )
+    payload = packet[cursor:end]
     if packet_id is not None:
         if qos == 1:
             client.sendall(_packet(0x40, packet_id.to_bytes(2, "big")))
@@ -213,6 +206,44 @@ def _expect_mapped_publish(
             client.sendall(_packet(0x70, packet_id.to_bytes(2, "big")))
         else:
             raise AssertionError(f"invalid bridged PUBLISH QoS {qos}")
+    return topic, payload
+
+
+def _expect_mapped_publish(
+    client: socket.socket,
+    payload: bytes,
+    expected_topic: str = "local/sensors/temperature",
+) -> None:
+    topic, actual_payload = _read_publish_and_ack(client)
+    if topic != expected_topic or actual_payload != payload:
+        raise AssertionError(
+            f"unexpected bridge mapping topic={topic!r} payload={actual_payload!r}"
+        )
+
+
+def _subscribe_client(
+    client: socket.socket, packet_id: int, topic: str, qos: int
+) -> None:
+    client.sendall(_subscribe(packet_id, topic, qos))
+    suback = _read_packet(client)
+    if suback[0] != 0x90 or suback[-1] != qos:
+        raise AssertionError(f"bridge subscriber expected SUBACK: {suback.hex()}")
+
+
+def _expect_bridge_state(
+    client: socket.socket, topic: str, expected: bytes
+) -> None:
+    for _ in range(3):
+        actual_topic, payload = _read_publish_and_ack(client)
+        if actual_topic != topic:
+            raise AssertionError(
+                f"unexpected notification topic {actual_topic!r}, expected {topic!r}"
+            )
+        if payload == expected:
+            return
+        if payload != b"0":
+            raise AssertionError(f"unexpected bridge state payload {payload!r}")
+    raise AssertionError(f"bridge state did not reach {expected!r}")
 
 
 def _wait_for_log(process: subprocess.Popen[bytes], log: Path, marker: str) -> None:
@@ -432,12 +463,16 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         _wait_for_log(local, local_log, "bridge upstream remote=")
 
         subscriber = _connect_client(local_port, "configured-bridge-subscriber")
-        subscriber.sendall(_subscribe(1, "local/#", 2))
-        suback = _read_packet(subscriber)
-        if suback[0] != 0x90 or suback[-1] != 2:
-            raise AssertionError(f"bridge subscriber expected SUBACK: {suback.hex()}")
+        notification_topic = (
+            "$SYS/broker/connection/configured-inbound-bridge/state"
+        )
+        _subscribe_client(subscriber, 1, notification_topic, 1)
+        _expect_bridge_state(subscriber, notification_topic, b"1")
+        _subscribe_client(subscriber, 2, "local/#", 2)
 
         publisher = _connect_client(upstream_port, "configured-bridge-publisher-1")
+        _subscribe_client(publisher, 1, notification_topic, 1)
+        _expect_bridge_state(publisher, notification_topic, b"1")
         _publish_message(publisher, 1, b"before-restart", 1)
         _expect_mapped_publish(subscriber, b"before-restart")
         publisher.sendall(b"\xe0\x00")
@@ -448,6 +483,7 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         upstream.wait(timeout=5)
         upstream_output.close()
         upstream_output = None
+        _expect_bridge_state(subscriber, notification_topic, b"0")
         if local.poll() is not None:
             raise RuntimeError(
                 "configured bridge stopped its local broker after upstream loss: "
@@ -459,11 +495,11 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         )
         _wait_for_log(upstream, upstream_log, "configured 1 listeners")
         publisher = _connect_client(upstream_port, "configured-bridge-publisher-2")
+        _expect_bridge_state(subscriber, notification_topic, b"1")
+        _subscribe_client(publisher, 1, notification_topic, 1)
+        _expect_bridge_state(publisher, notification_topic, b"1")
         _publish_message(publisher, 2, b"after-restart", 2)
         _expect_mapped_publish(subscriber, b"after-restart")
-        publisher.sendall(b"\xe0\x00")
-        publisher.close()
-        publisher = None
 
         subscriber.sendall(b"\xe0\x00")
         subscriber.close()
@@ -471,6 +507,10 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         _wait_clean(local, local_output, local_log, "local bridge broker")
         local = None
         local_output = None
+        _expect_bridge_state(publisher, notification_topic, b"0")
+        publisher.sendall(b"\xe0\x00")
+        publisher.close()
+        publisher = None
         _wait_clean(upstream, upstream_output, upstream_log, "upstream broker")
         upstream_output = None
     finally:
@@ -603,6 +643,7 @@ def run_once_bridge_case(broker: Path, directory: Path) -> None:
         f"address 127.0.0.1:{upstream_port}\n"
         "topic sensors/# in 1 local/ remote/\n"
         "start_type once\n"
+        "notifications false\n"
     )
     upstream_log = directory / "bridge-once-upstream.log"
     restart_log = directory / "bridge-once-upstream-restart.log"

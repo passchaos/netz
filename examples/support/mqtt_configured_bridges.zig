@@ -223,6 +223,11 @@ pub const Set = struct {
                 } };
                 break :blk &properties;
             } else &.{};
+            const notification_topic = if (source.notifications)
+                try source.notificationTopicAlloc(allocator)
+            else
+                null;
+            defer if (notification_topic) |topic| allocator.free(topic);
             const options = mqtt.bridge.MultiOptions{
                 .connect = .{
                     .protocol = source.protocol,
@@ -259,6 +264,11 @@ pub const Set = struct {
                     stableBridgeId(source.*)
                 else
                     null,
+                .notifications = if (notification_topic) |topic| .{
+                    .topic = topic,
+                    .publish_local = true,
+                    .publish_remote = !source.notifications_local_only,
+                } else null,
             };
             bridge.* = if (source.usesTls() or source.addressCount() > 1) blk: {
                 if (source.usesTls()) {

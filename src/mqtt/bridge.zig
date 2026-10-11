@@ -42,6 +42,16 @@ pub const Error = broker_mod.Error || reconnect.Error || error{
     QoS2RequiresCommitLog,
     TopicOutsideBridgeRule,
     EmptyMappedTopic,
+    BridgeNotificationWillConflict,
+};
+
+/// Optional retained bridge-state publication on the local and/or remote
+/// broker. The topic is copied during construction. Remote notifications use
+/// a retained QoS 1 `"0"` Will and publish retained `"1"` after setup.
+pub const NotificationOptions = struct {
+    topic: []const u8,
+    publish_local: bool = true,
+    publish_remote: bool = true,
 };
 
 /// One effective remote subscription mapped between literal topic prefixes.
@@ -148,6 +158,7 @@ pub const Options = struct {
     /// when `rule.qos` is QoS 2 and must remain unchanged with the Client ID
     /// and rule mapping across restarts.
     bridge_id: ?[16]u8 = null,
+    notifications: ?NotificationOptions = null,
 };
 
 pub const MultiOptions = struct {
@@ -157,6 +168,7 @@ pub const MultiOptions = struct {
     /// Stable deployment identity shared by every QoS 2 rule; it, the Client
     /// ID, and all rule mappings must remain unchanged across restarts.
     bridge_id: ?[16]u8 = null,
+    notifications: ?NotificationOptions = null,
 };
 
 /// Deep-owned backing for every public Rule view retained by a Bridge.
@@ -200,6 +212,32 @@ const OwnedRules = struct {
             allocator.free(value.filter);
         }
         allocator.free(self.values);
+        self.* = undefined;
+    }
+};
+
+const OwnedNotifications = struct {
+    topic: []u8,
+    publish_local: bool,
+    publish_remote: bool,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        options: NotificationOptions,
+    ) Error!OwnedNotifications {
+        try mqtt.validateTopicName(options.topic);
+        if (!options.publish_local and !options.publish_remote) {
+            return error.InvalidProperty;
+        }
+        return .{
+            .topic = try allocator.dupe(u8, options.topic),
+            .publish_local = options.publish_local,
+            .publish_remote = options.publish_remote,
+        };
+    }
+
+    fn deinit(self: *OwnedNotifications, allocator: std.mem.Allocator) void {
+        allocator.free(self.topic);
         self.* = undefined;
     }
 };
@@ -261,6 +299,9 @@ pub const Bridge = struct {
     bridge_id: ?[16]u8,
     session_epoch: u64,
     qos2_enabled: bool,
+    notifications: ?OwnedNotifications,
+    notification_packet_id: ?u16 = null,
+    local_notification_online: bool = false,
 
     /// Construct a fixed-address cleartext bridge. Configuration slices are
     /// copied, so they may be released immediately after this call.
@@ -282,6 +323,7 @@ pub const Bridge = struct {
                 .reconnect_policy = options.reconnect_policy,
                 .rules = &.{options.rule},
                 .bridge_id = options.bridge_id,
+                .notifications = options.notifications,
             },
             shutdown,
         );
@@ -330,6 +372,7 @@ pub const Bridge = struct {
                 .reconnect_policy = options.reconnect_policy,
                 .rules = &.{options.rule},
                 .bridge_id = options.bridge_id,
+                .notifications = options.notifications,
             },
             shutdown,
         );
@@ -377,6 +420,7 @@ pub const Bridge = struct {
                 .reconnect_policy = options.reconnect_policy,
                 .rules = &.{options.rule},
                 .bridge_id = options.bridge_id,
+                .notifications = options.notifications,
             },
             shutdown,
         );
@@ -412,6 +456,11 @@ pub const Bridge = struct {
     ) Error!Bridge {
         var owned_rules = try OwnedRules.init(allocator, options.rules);
         errdefer owned_rules.deinit(allocator);
+        var notifications = if (options.notifications) |configured|
+            try OwnedNotifications.init(allocator, configured)
+        else
+            null;
+        errdefer if (notifications) |*owned| owned.deinit(allocator);
         const qos2 = rulesUseQoS2(owned_rules.values);
         if (qos2 and options.bridge_id == null) {
             return error.MissingBridgeIdentifier;
@@ -431,12 +480,26 @@ pub const Bridge = struct {
                 .automatic,
             .surface_incoming_qos2_retransmissions = qos2,
         };
+        var connect_options = options.connect;
+        if (notifications) |owned| {
+            if (owned.publish_remote) {
+                if (connect_options.will != null) {
+                    return error.BridgeNotificationWillConflict;
+                }
+                connect_options.will = .{
+                    .topic = owned.topic,
+                    .payload = "0",
+                    .qos = .at_least_once,
+                    .retain = true,
+                };
+            }
+        }
         var client = switch (remote) {
             .address => |address| try reconnect.Client.initWithOptions(
                 allocator,
                 io,
                 address,
-                options.connect,
+                connect_options,
                 options.reconnect_policy,
                 shutdown,
                 client_options,
@@ -446,7 +509,7 @@ pub const Bridge = struct {
                 io,
                 host.name,
                 host.port,
-                options.connect,
+                connect_options,
                 options.reconnect_policy,
                 shutdown,
                 client_options,
@@ -455,7 +518,7 @@ pub const Bridge = struct {
                 allocator,
                 io,
                 connector,
-                options.connect,
+                connect_options,
                 options.reconnect_policy,
                 shutdown,
                 client_options,
@@ -475,7 +538,7 @@ pub const Bridge = struct {
             local.latestBridgeQoS2SessionEpoch(options.bridge_id.?)
         else
             null;
-        return .{
+        var result = Bridge{
             .allocator = allocator,
             .local = local,
             .client = client,
@@ -485,11 +548,22 @@ pub const Bridge = struct {
             .bridge_id = options.bridge_id,
             .session_epoch = restored_epoch orelse 0,
             .qos2_enabled = qos2,
+            .notifications = notifications,
         };
+        notifications = null;
+        result.publishLocalNotification(false, true) catch |err| {
+            result.deinit();
+            return err;
+        };
+        return result;
     }
 
     pub fn deinit(self: *Bridge) void {
+        self.publishLocalNotification(false, false) catch {};
         self.client.deinit();
+        if (self.notifications) |*notifications| {
+            notifications.deinit(self.allocator);
+        }
         self.rule_storage.deinit(self.allocator);
         self.* = undefined;
     }
@@ -498,6 +572,8 @@ pub const Bridge = struct {
     /// tombstones remain durable until the upstream broker reports a fresh
     /// Session, preserving duplicate suppression across process restarts.
     pub fn disconnect(self: *Bridge, reason_code: u8) Error!void {
+        _ = try self.publishRemoteNotification(false);
+        try self.publishLocalNotification(false, false);
         try self.client.disconnect(reason_code);
     }
 
@@ -534,15 +610,29 @@ pub const Bridge = struct {
         self: *Bridge,
         poll_options: reconnect.PollOptions,
     ) (Error || std.Io.Cancelable)!bool {
-        var event = try self.client.pollWithOptions(poll_options) orelse
+        const was_connected = self.client.connection() != null;
+        var event = self.client.pollWithOptions(poll_options) catch |err| {
+            if (was_connected and self.client.connection() == null) {
+                self.publishLocalNotification(false, false) catch {};
+            }
+            return err;
+        } orelse {
+            if (was_connected and self.client.connection() == null) {
+                try self.publishLocalNotification(false, false);
+            }
             return false;
+        };
         defer event.deinit(self.allocator);
         switch (event) {
-            .connected => |connected| self.handleConnected(connected) catch |err|
-                {
+            .connected => |connected| {
+                if (was_connected) {
+                    try self.publishLocalNotification(false, false);
+                }
+                self.handleConnected(connected) catch |err| {
                     self.client.disconnectTransport();
                     return err;
-                },
+                };
+            },
             .publish => |owned| try self.inject(&owned.publish),
             .pubrel => |owned| try self.releaseQoS2(owned.ack.packet_id),
             .disconnect => {
@@ -550,8 +640,15 @@ pub const Bridge = struct {
                 // transport is retired. A clean server DISCONNECT otherwise
                 // leaves a non-null connection that has already gone away.
                 self.client.disconnectTransport();
+                try self.publishLocalNotification(false, false);
             },
-            .puback, .pubrec, .pubcomp => return error.UnexpectedPacket,
+            .puback => |owned| {
+                if (self.notification_packet_id != owned.ack.packet_id) {
+                    return error.UnexpectedPacket;
+                }
+                self.notification_packet_id = null;
+            },
+            .pubrec, .pubcomp => return error.UnexpectedPacket,
             .pingreq, .pingresp, .auth => {},
         }
         return true;
@@ -562,8 +659,13 @@ pub const Bridge = struct {
         self: *Bridge,
         poll_options: reconnect.PollOptions,
     ) (Error || std.Io.Cancelable)!void {
+        defer self.publishLocalNotification(false, false) catch {};
+        var bounded = poll_options;
+        // Give the Bridge an explicit disconnected boundary before retrying so
+        // local state observers see `0` before the next `1` generation.
+        bounded.reconnect_after_transport_error = false;
         while (true) {
-            _ = self.step(poll_options) catch |err| switch (err) {
+            _ = self.step(bounded) catch |err| switch (err) {
                 error.Canceled => return,
                 else => return err,
             };
@@ -577,6 +679,7 @@ pub const Bridge = struct {
         self: *Bridge,
         poll_options: reconnect.PollOptions,
     ) (Error || std.Io.Cancelable)!void {
+        defer self.publishLocalNotification(false, false) catch {};
         _ = try self.connect();
         var bounded = poll_options;
         bounded.reconnect_after_transport_error = false;
@@ -660,9 +763,67 @@ pub const Bridge = struct {
                     );
                 }
             }
-            return;
+        } else {
+            try self.ensureSubscription(event);
         }
-        try self.ensureSubscription(event);
+        if (try self.publishRemoteNotification(true)) {
+            try self.publishLocalNotification(true, false);
+        }
+    }
+
+    fn publishRemoteNotification(
+        self: *Bridge,
+        online: bool,
+    ) Error!bool {
+        const notifications = self.notifications orelse return true;
+        if (!notifications.publish_remote or self.client.connection() == null) {
+            return true;
+        }
+        if (online) if (self.notification_packet_id) |packet_id| {
+            if ((try self.client.outgoingQoSState(packet_id)) != null) {
+                return true;
+            }
+            self.notification_packet_id = null;
+        };
+        const active = self.client.connection().?;
+        const qos: mqtt.QoS = if (online and
+            active.peerMaximumQoS() != .at_most_once)
+            .at_least_once
+        else
+            .at_most_once;
+        const attempt = self.client.publishOneAttempt(
+            notifications.topic,
+            if (online) "1" else "0",
+            .{
+                .qos = qos,
+                .retain = active.peerRetainAvailable(),
+            },
+        ) catch |err| {
+            if (self.client.connection() == null) return false;
+            return err;
+        };
+        self.notification_packet_id = attempt.packet_id;
+        return !attempt.transport_interrupted;
+    }
+
+    fn publishLocalNotification(
+        self: *Bridge,
+        online: bool,
+        force: bool,
+    ) Error!void {
+        const notifications = self.notifications orelse return;
+        if (!notifications.publish_local or
+            (!force and self.local_notification_online == online)) return;
+        try self.local.publishLocal(.{
+            .dup = false,
+            .qos = .at_least_once,
+            .retain = true,
+            .topic = notifications.topic,
+            .packet_id = null,
+            .properties = &.{},
+            .payload = if (online) "1" else "0",
+        });
+        self.local_notification_online = online;
     }
 
     fn inject(self: *Bridge, remote: *const mqtt.Publish) Error!void {

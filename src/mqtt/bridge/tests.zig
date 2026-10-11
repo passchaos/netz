@@ -638,6 +638,74 @@ test "bridge multi-rule constructor owns every filter and prefix" {
     try std.testing.expectEqualStrings("two/", bridge.rules[1].local_prefix);
 }
 
+test "bridge owns notifications and publishes initial local offline state" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var remote = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer remote.deinit();
+    var topic = "$SYS/broker/connection/unit/state".*;
+    var shutdown: std.Io.Event = .unset;
+    var bridge = try bridge_mod.Bridge.init(
+        allocator,
+        io,
+        &local,
+        remote.address(),
+        .{
+            .connect = .{ .client_id = "notification-unit" },
+            .rule = .{ .filter = "source/#" },
+            .notifications = .{
+                .topic = &topic,
+                .publish_remote = false,
+            },
+        },
+        &shutdown,
+    );
+    defer bridge.deinit();
+    @memset(&topic, 'x');
+    try std.testing.expectEqualStrings(
+        "$SYS/broker/connection/unit/state",
+        bridge.notifications.?.topic,
+    );
+    try std.testing.expectEqual(@as(usize, 1), local.stats().retained_messages);
+}
+
+test "bridge remote notifications reject a caller Will" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var local = try broker_mod.Broker.init(allocator, io, .{});
+    defer local.deinit();
+    var shutdown: std.Io.Event = .unset;
+    try std.testing.expectError(
+        error.BridgeNotificationWillConflict,
+        bridge_mod.Bridge.init(
+            allocator,
+            io,
+            &local,
+            .{ .ip4 = .loopback(1883) },
+            .{
+                .connect = .{
+                    .client_id = "notification-conflict",
+                    .will = .{ .topic = "caller/will", .payload = "value" },
+                },
+                .rule = .{ .filter = "source/#" },
+                .notifications = .{ .topic = "bridge/state" },
+            },
+            &shutdown,
+        ),
+    );
+}
+
 test "inbound bridge subscribes once and maps two disjoint rules" {
     const allocator = std.testing.allocator;
     const operation_timeout = std.Io.Duration.fromSeconds(2);

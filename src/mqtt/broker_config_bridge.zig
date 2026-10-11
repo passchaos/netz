@@ -27,6 +27,7 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     BridgePersistentSessionRequired,
     BridgeTlsIdentityIncomplete,
     BridgeTlsTrustRequired,
+    BridgeNotificationsDisabled,
     DuplicateBridgeAddress,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
@@ -95,6 +96,9 @@ pub const Bridge = struct {
     alpn: []u8 = &.{},
     round_robin: bool = false,
     start_type: StartType = .automatic,
+    notifications: bool = true,
+    notifications_local_only: bool = false,
+    notification_topic: []u8 = &.{},
     restart: RestartPolicy = .{},
 
     pub fn deinit(self: *Bridge, allocator: std.mem.Allocator) void {
@@ -113,6 +117,9 @@ pub const Bridge = struct {
             allocator.free(self.private_key_password_file);
         }
         if (self.alpn.len != 0) allocator.free(self.alpn);
+        if (self.notification_topic.len != 0) {
+            allocator.free(self.notification_topic);
+        }
         for (self.secondary_addresses) |*endpoint| endpoint.deinit(allocator);
         if (self.secondary_addresses.len != 0) {
             allocator.free(self.secondary_addresses);
@@ -148,6 +155,23 @@ pub const Bridge = struct {
         if (index == 0) return .{ .host = self.host, .port = self.port };
         return self.secondary_addresses[index - 1];
     }
+
+    pub fn notificationTopicAlloc(
+        self: Bridge,
+        allocator: std.mem.Allocator,
+    ) Error![]u8 {
+        if (self.notification_topic.len != 0) {
+            return allocator.dupe(u8, self.notification_topic);
+        }
+        const topic = try std.fmt.allocPrint(
+            allocator,
+            "$SYS/broker/connection/{s}/state",
+            .{self.clientId()},
+        );
+        errdefer allocator.free(topic);
+        try mqtt.validateTopicName(topic);
+        return topic;
+    }
 };
 
 const Seen = struct {
@@ -170,6 +194,9 @@ const Seen = struct {
     bridge_tls_version: bool = false,
     round_robin: bool = false,
     start_type: bool = false,
+    notifications: bool = false,
+    notifications_local_only: bool = false,
+    notification_topic: bool = false,
 };
 
 pub const Builder = struct {
@@ -193,6 +220,9 @@ pub const Builder = struct {
     alpn: []u8 = &.{},
     round_robin: bool = false,
     start_type: StartType = .automatic,
+    notifications: bool = true,
+    notifications_local_only: bool = false,
+    notification_topic: []u8 = &.{},
     restart: RestartPolicy = .{},
     seen: Seen = .{},
     moved: bool = false,
@@ -225,6 +255,9 @@ pub const Builder = struct {
             allocator.free(self.private_key_password_file);
         }
         if (self.alpn.len != 0) allocator.free(self.alpn);
+        if (self.notification_topic.len != 0) {
+            allocator.free(self.notification_topic);
+        }
         for (self.secondary_addresses.items) |*endpoint| {
             endpoint.deinit(allocator);
         }
@@ -232,6 +265,13 @@ pub const Builder = struct {
         if (self.host.len != 0) allocator.free(self.host);
         allocator.free(self.name);
         self.* = undefined;
+    }
+
+    fn clientId(self: Builder) []const u8 {
+        return if (self.remote_client_id.len != 0)
+            self.remote_client_id
+        else
+            self.name;
     }
 
     pub fn apply(
@@ -338,6 +378,17 @@ pub const Builder = struct {
                 .once
             else
                 return error.UnsupportedBridgeStartType;
+        } else if (std.mem.eql(u8, directive, "notifications")) {
+            try markOnce(&self.seen.notifications);
+            self.notifications = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "notifications_local_only")) {
+            try markOnce(&self.seen.notifications_local_only);
+            self.notifications_local_only = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "notification_topic")) {
+            try markOnce(&self.seen.notification_topic);
+            const topic = try parseOne(words);
+            try mqtt.validateTopicName(topic);
+            self.notification_topic = try allocator.dupe(u8, topic);
         } else {
             return error.InvalidDirective;
         }
@@ -375,6 +426,24 @@ pub const Builder = struct {
             self.ca_file.len == 0 and !self.use_os_ca_certificates)
         {
             return error.BridgeTlsTrustRequired;
+        }
+        if (!self.notifications and
+            (self.notifications_local_only or
+                self.notification_topic.len != 0))
+        {
+            return error.BridgeNotificationsDisabled;
+        }
+        if (self.notifications and self.notification_topic.len == 0) {
+            const default_topic_len = std.math.add(
+                usize,
+                "$SYS/broker/connection//state".len,
+                self.clientId().len,
+            ) catch return error.InvalidTopic;
+            if (default_topic_len > std.math.maxInt(u16) or
+                mqtt.hasWildcards(self.clientId()))
+            {
+                return error.InvalidTopic;
+            }
         }
         var uses_qos2 = false;
         for (self.rules.items) |rule| {
@@ -416,6 +485,9 @@ pub const Builder = struct {
             .alpn = self.alpn,
             .round_robin = self.round_robin,
             .start_type = self.start_type,
+            .notifications = self.notifications,
+            .notifications_local_only = self.notifications_local_only,
+            .notification_topic = self.notification_topic,
             .restart = self.restart,
         };
         self.moved = true;
@@ -530,7 +602,10 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_insecure") or
         std.mem.eql(u8, value, "bridge_tls_version") or
         std.mem.eql(u8, value, "round_robin") or
-        std.mem.eql(u8, value, "start_type");
+        std.mem.eql(u8, value, "start_type") or
+        std.mem.eql(u8, value, "notifications") or
+        std.mem.eql(u8, value, "notifications_local_only") or
+        std.mem.eql(u8, value, "notification_topic");
 }
 
 fn parseEndpoint(value: []const u8) Error!Endpoint {

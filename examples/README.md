@@ -169,9 +169,11 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `bridge_session_expiry_interval`, `keepalive_interval`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
-`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`, and
-`bridge_tls_version`, `round_robin`, and `start_type`. Unknown directives, duplicates,
-bad values, and listener options before the first listener are errors. In
+`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`,
+`bridge_tls_version`, `round_robin`, `start_type`, `notifications`,
+`notifications_local_only`, and `notification_topic`. Unknown directives,
+duplicates, bad values, and listener or bridge options before their owning
+declaration are errors. In
 production config mode, each listener's `max_connections` is its simultaneous
 admitted-client limit and the broker keeps accepting after clients disconnect.
 The repository's process gate sets `NETZ_MQTT_CONFIG_FINITE_TEST=1` to use the
@@ -223,6 +225,13 @@ server and supports PBES2-encrypted PKCS#8 through
 `bridge_insecure true` and `bridge_tls_version tlsv1.2` are rejected rather
 than weakening authentication or silently selecting a different TLS stack.
 Every configured CA and client identity is loaded before any listener binds.
+Bridge notifications default on. The configured or
+`$SYS/broker/connection/<remote-client-id>/state` topic starts as retained
+`0`, changes to retained `1` only after connection and subscription setup, and
+returns to `0` before reconnect. Unless `notifications_local_only true` is
+set, the remote CONNECT also carries a retained QoS 1 `0` Will and publishes
+retained `1` after setup. Notification acknowledgements share the reconnect
+client state machine without being confused with inbound bridge traffic.
 `start_type automatic` is the default and keeps reconnecting. `start_type once`
 makes the configured address sequence only once, then leaves that Bridge
 stopped after initial failure or after its first established connection ends;

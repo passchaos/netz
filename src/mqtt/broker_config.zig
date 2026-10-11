@@ -1179,6 +1179,9 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_tls_version tlsv1.3
         \\round_robin true
         \\start_type automatic
+        \\notifications true
+        \\notifications_local_only false
+        \\notification_topic bridge/upstream/state
         \\connection backup
         \\address [::1]:3883
         \\topic backup/# in 2 mirror/ source/
@@ -1203,6 +1206,12 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(
         BridgeStartType.automatic,
         upstream.start_type,
+    );
+    try std.testing.expect(upstream.notifications);
+    try std.testing.expect(!upstream.notifications_local_only);
+    try std.testing.expectEqualStrings(
+        "bridge/upstream/state",
+        upstream.notification_topic,
     );
     try std.testing.expectEqual(mqtt.ProtocolVersion.v5, upstream.protocol);
     try std.testing.expect(!upstream.clean_session);
@@ -1276,6 +1285,27 @@ test "MQTT broker config applies inbound bridge defaults" {
         bridge.start_type,
     );
     try std.testing.expectEqualStrings("#", bridge.rules[0].filter);
+    try std.testing.expect(bridge.notifications);
+    try std.testing.expect(!bridge.notifications_local_only);
+    const notification_topic = try bridge.notificationTopicAlloc(
+        std.testing.allocator,
+    );
+    defer std.testing.allocator.free(notification_topic);
+    try std.testing.expectEqualStrings(
+        "$SYS/broker/connection/defaulted/state",
+        notification_topic,
+    );
+
+    var disabled = try parse(std.testing.allocator,
+        \\listener 1884
+        \\allow_anonymous true
+        \\connection silent
+        \\address localhost
+        \\topic # in 0
+        \\notifications false
+    );
+    defer disabled.deinit(std.testing.allocator);
+    try std.testing.expect(!disabled.bridges[0].notifications);
 }
 
 test "MQTT broker config rejects incomplete or unsupported bridges" {
@@ -1396,6 +1426,19 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection lazy\naddress localhost\ntopic # in 0\n" ++
             "start_type lazy\n"),
     );
+    try std.testing.expectError(
+        error.BridgeNotificationsDisabled,
+        parse(allocator, listener ++
+            "connection notifications-off\naddress localhost\n" ++
+            "topic # in 0\nnotifications false\n" ++
+            "notifications_local_only true\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidTopic,
+        parse(allocator, listener ++
+            "connection notifications-topic\naddress localhost\n" ++
+            "topic # in 0\nnotification_topic bad/+\n"),
+    );
     var primary_preferred = try parse(allocator, listener ++
         "connection addresses\naddress one.example two.example\n" ++
         "topic # in 0\n");
@@ -1429,6 +1472,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\allow_anonymous true
         \\connection allocation-test
         \\address broker.example:2883 backup.example:3883
+        \\round_robin true
         \\topic sensors/# in 1 local/ remote/
         \\topic commands/# in 2 command/ upstream/
         \\remote_clientid allocation-bridge
@@ -1440,7 +1484,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
         \\bridge_keyfile_password_file client.password
         \\bridge_alpn mqtt
         \\bridge_tls_version tlsv1.3
-        \\round_robin true
+        \\notification_topic bridge/allocation/state
     );
     defer config.deinit(allocator);
 }
