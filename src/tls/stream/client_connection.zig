@@ -37,6 +37,8 @@ pub const Error = std.mem.Allocator.Error ||
         MissingKeyShare,
         UnexpectedTlsContent,
         UnsupportedCipherSuite,
+        ConflictingOcspVerifier,
+        OcspPolicyRequiresRequest,
     };
 
 pub const Options = struct {
@@ -48,6 +50,9 @@ pub const Options = struct {
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
+    /// Request an RFC 6066 stapled OCSP response. This defaults on so an RFC
+    /// 7633 Must-Staple leaf can satisfy the verifier automatically.
+    request_ocsp: bool = true,
     max_server_handshake_size: usize = 256 * 1024,
     /// Optional absolute receive budget for the complete TLS handshake. It is
     /// not renewed between ServerHello and the encrypted server flight.
@@ -70,6 +75,11 @@ pub const VerifiedOptions = struct {
     verify_host: bool = true,
     ca_bundle: ?CaBundle = null,
     server_verifier: ?vail.tls.auth.ClientVerifier = null,
+    /// Stapled OCSP policy applied by the built-in system/caller-bundle
+    /// verifier. A custom `server_verifier` must own its OCSP policy and
+    /// therefore cannot be combined with a non-default value here.
+    stapled_ocsp: vail.x509.trust.StapledOcspPolicy = .ignore,
+    request_ocsp: bool = true,
     client_identity: ?vail.tls.client_auth.ClientIdentity = null,
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
@@ -169,6 +179,7 @@ pub const Connection = struct {
                 .x25519_public_key = x25519_public,
                 .cipher_suites = options.cipher_suites,
                 .alpn_protocols = options.alpn_protocols,
+                .request_ocsp = options.request_ocsp,
             },
         );
         try writeCleartextHandshake(
@@ -372,6 +383,7 @@ pub const Connection = struct {
         options: VerifiedOptions,
         outer_deadline: ?std.Io.Clock.Timestamp,
     ) Error!*Connection {
+        try validateVerifiedOptions(options);
         var system_store: ?vail.x509.trust.SystemStore = null;
         defer if (system_store) |*store| store.deinit();
         var caller_bundle_locked = false;
@@ -398,6 +410,7 @@ pub const Connection = struct {
                 bundle_verifier =
                     system_store.?.verifier(now.toSeconds());
             }
+            bundle_verifier.stapled_ocsp = options.stapled_ocsp;
             break :blk bundle_verifier.clientVerifier();
         };
 
@@ -407,6 +420,7 @@ pub const Connection = struct {
             .client_identity = options.client_identity,
             .alpn_protocols = options.alpn_protocols,
             .cipher_suites = options.cipher_suites,
+            .request_ocsp = options.request_ocsp,
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.handshake_timeout,
         };
@@ -585,6 +599,42 @@ pub const Connection = struct {
         );
     }
 };
+
+fn validateVerifiedOptions(options: VerifiedOptions) Error!void {
+    if (options.stapled_ocsp != .ignore and !options.request_ocsp) {
+        return error.OcspPolicyRequiresRequest;
+    }
+    if (options.server_verifier != null and
+        options.stapled_ocsp != .ignore)
+    {
+        return error.ConflictingOcspVerifier;
+    }
+}
+
+test "verified client rejects a built-in OCSP policy with a custom verifier" {
+    const Callback = struct {
+        fn verify(
+            _: ?*anyopaque,
+            _: vail.tls.auth.TrustContext,
+        ) anyerror!void {}
+    };
+    try std.testing.expectError(
+        error.OcspPolicyRequiresRequest,
+        validateVerifiedOptions(.{
+            .server_name = "localhost",
+            .stapled_ocsp = .require,
+            .request_ocsp = false,
+        }),
+    );
+    try std.testing.expectError(
+        error.ConflictingOcspVerifier,
+        validateVerifiedOptions(.{
+            .server_name = "localhost",
+            .server_verifier = .{ .verify_trust = Callback.verify },
+            .stapled_ocsp = .require,
+        }),
+    );
+}
 
 fn writeCleartextHandshake(
     io: std.Io,

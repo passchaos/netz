@@ -30,6 +30,7 @@ from mqtt_broker_config_outbound import (
     run_outbound_bridge_protocol_limits_case,
     run_private_bridge_server_case,
 )
+from mqtt_broker_config_ocsp import run_bridge_ocsp_case
 from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_proxy import run_proxy_protocol_case
 from mqtt_broker_config_queue import run_queued_limits_case
@@ -5204,6 +5205,7 @@ def main() -> None:
         run_outbound_bridge_protocol_limits_case(args.broker, directory)
         run_private_bridge_server_case(args.broker, directory)
         run_bridge_cipher_suite_case(args.broker, directory)
+        run_bridge_ocsp_case(args.broker, directory)
         run_lazy_outbound_bridge_case(args.broker, directory)
         run_primary_failback_case(args.broker, directory)
         run_once_bridge_case(args.broker, directory)
@@ -5259,6 +5261,7 @@ def main() -> None:
         "persistent remote-subscription cleanup with interleaved delivery, "
         "private-bridge negotiation with standard MQTT 3.1.1 fallback, "
         "TLS 1.3 bridge cipher-suite selection, "
+        "required TLS 1.3 bridge OCSP stapling, "
         "cleartext/TLS bridge source-address binding and traced TCP keepalive/"
         "TCP_USER_TIMEOUT, "
         "QoS 1/2, lazy threshold/idle lifecycle with restart recovery, "

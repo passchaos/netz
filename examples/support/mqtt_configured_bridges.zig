@@ -708,6 +708,7 @@ fn loadTlsResources(
             &.{}
         else
             resources.alpn_protocols[0..1],
+        .stapled_ocsp = if (source.require_ocsp) .require else .ignore,
     };
     if (source.cipher_suites.len != 0) {
         connect_options.cipher_suites = source.cipher_suites;
@@ -895,6 +896,7 @@ test "configured bridge passes operating-system roots without a CA file" {
         .rules = &.{},
         .use_os_ca_certificates = true,
         .cipher_suites = &suites,
+        .require_ocsp = true,
     };
     var resources: ConnectorResources = .{};
     defer resources.deinit(allocator);
@@ -912,6 +914,10 @@ test "configured bridge passes operating-system roots without a CA file" {
         mqtt.tls_runtime.CipherSuite,
         &suites,
         resources.connector.tls_options.?.cipher_suites,
+    );
+    try std.testing.expectEqual(
+        mqtt.tls_runtime.StapledOcspPolicy.require,
+        resources.connector.tls_options.?.stapled_ocsp,
     );
 }
 

@@ -1001,7 +1001,8 @@ Current protocol coverage includes:
   supervised inbound `connection` bridges with strict `topic ... in ...`
   QoS/prefix mapping, upstream Session/authentication settings, bounded
   reconnect policy, vail-backed TLS 1.3 with CA/hostname verification,
-  ordered per-bridge cipher-suite policy, and optional encrypted-key mTLS,
+  ordered per-bridge cipher-suite policy, required stapled-OCSP validation,
+  and optional encrypted-key mTLS,
   primary-preferred and round-robin multi-address
   failover, retained local/remote connection-state notifications,
   automatic/one-shot lifecycles, per-bridge Receive Maximum, Topic Alias,

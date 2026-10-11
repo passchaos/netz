@@ -1,12 +1,12 @@
 //! Bounded cache for repeated X.509 bundle verification.
 //!
 //! Cache hits skip certificate-path parsing and issuer-signature checks for an
-//! exact server-name and leaf-first DER chain. TLS CertificateVerify remains a
-//! separate mandatory handshake step, so every connection still proves
-//! possession of the certified private key. The trust bundle and verification
-//! time snapshot must remain unchanged for the lifetime of the cache. Replace
-//! the cache whenever either changes, so successful entries cannot outlive a
-//! trust-policy or time update.
+//! exact server-name, leaf-first DER chain, and stapled OCSP state. TLS
+//! CertificateVerify remains a separate mandatory handshake step, so every
+//! connection still proves possession of the certified private key. The trust
+//! bundle and verification time snapshot must remain unchanged for the
+//! lifetime of the cache. Replace the cache whenever either changes, so
+//! successful entries cannot outlive a trust-policy or time update.
 
 const std = @import("std");
 const vail = @import("vail");
@@ -105,6 +105,17 @@ fn fingerprint(trust: vail.tls.auth.TrustContext) [digest_len]u8 {
     hashField(&hasher, trust.server_name orelse &.{});
     hashLength(&hasher, trust.chain.len);
     for (trust.chain) |certificate| hashField(&hasher, certificate);
+    if (trust.ocsp_responses) |responses| {
+        hasher.update(&.{1});
+        hashLength(&hasher, responses.len);
+        for (responses) |response| {
+            hasher.update(&.{@intFromBool(response != null)});
+            hashField(&hasher, response orelse &.{});
+        }
+    } else {
+        hasher.update(&.{ 0, @intFromBool(trust.ocsp_response != null) });
+        hashField(&hasher, trust.ocsp_response orelse &.{});
+    }
     var digest: [digest_len]u8 = undefined;
     hasher.final(&digest);
     return digest;
@@ -231,4 +242,27 @@ test "bundle verifier cache misses when any DER byte changes" {
     try std.testing.expectEqual(Stats{ .hits = 0, .misses = 2 }, cache.stats());
     try verifier.verifyTrust("localhost", &.{&certificate_der});
     try std.testing.expectEqual(Stats{ .hits = 0, .misses = 3 }, cache.stats());
+}
+
+test "bundle verifier cache fingerprint includes stapled OCSP state" {
+    const chain = [_][]const u8{"leaf"};
+    const missing = fingerprint(.{
+        .server_name = "localhost",
+        .chain = &chain,
+        .ocsp_responses = &.{null},
+    });
+    const good = fingerprint(.{
+        .server_name = "localhost",
+        .chain = &chain,
+        .ocsp_response = "good",
+        .ocsp_responses = &.{"good"},
+    });
+    const revoked = fingerprint(.{
+        .server_name = "localhost",
+        .chain = &chain,
+        .ocsp_response = "revoked",
+        .ocsp_responses = &.{"revoked"},
+    });
+    try std.testing.expect(!std.mem.eql(u8, &missing, &good));
+    try std.testing.expect(!std.mem.eql(u8, &good, &revoked));
 }

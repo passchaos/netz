@@ -152,6 +152,7 @@ bridge_keyfile bridge-client-key.pem
 bridge_keyfile_password_file bridge-client-key.password
 bridge_alpn mqtt
 bridge_ciphers_tls1.3 TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
+bridge_require_ocsp true
 bridge_tls_version tlsv1.3
 ```
 
@@ -183,7 +184,8 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `bridge_tcp_keepalive`, `bridge_tcp_user_timeout`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
-`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_ciphers_tls1.3`, `bridge_insecure`,
+`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_ciphers_tls1.3`,
+`bridge_require_ocsp`, `bridge_insecure`,
 `bridge_tls_version`, `round_robin`, `start_type`, `threshold`, `idle_timeout`, `notifications`,
 `notifications_local_only`, and `notification_topic`. Unknown directives,
 duplicates, bad values, and listener or bridge options before their owning
@@ -296,6 +298,12 @@ IANA TLS 1.3 suite names and applies it to every initial and reconnect
 ClientHello. Empty components, duplicates, aliases such as `DEFAULT`, and
 unknown names fail during configuration rather than falling back to another
 cipher policy.
+`bridge_require_ocsp true` requires every initial and reconnect TLS handshake
+to carry a current, correctly signed `good` OCSP staple bound to the presented
+leaf and issuer. Missing, expired, malformed, unknown, and revoked responses
+fail the TLS handshake before MQTT CONNECT is sent. Vail clients request OCSP
+by default so RFC 7633 Must-Staple certificates remain usable even when this
+explicit Mosquitto policy is left false.
 `bridge_insecure true` and `bridge_tls_version tlsv1.2` are rejected rather
 than weakening authentication or silently selecting a different TLS stack.
 Every configured CA and client identity is loaded before any listener binds.

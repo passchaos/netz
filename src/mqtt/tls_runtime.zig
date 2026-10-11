@@ -16,6 +16,7 @@ pub const ServerIdentity = vail.tls.auth.ServerIdentity;
 pub const ServerIdentityProvider = tls_stream.ServerIdentityProvider;
 pub const ServerSigner = vail.tls.auth.Signer;
 pub const CipherSuite = vail.tls.cipher_suite.Suite;
+pub const StapledOcspPolicy = tls_stream.StapledOcspPolicy;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
 pub const ClientAuthPolicy = vail.tls.client_auth.ServerPolicy;
 pub const ClientAuthRequirement = vail.tls.client_auth.Requirement;
@@ -1035,6 +1036,12 @@ pub const ConnectOptions = struct {
     /// `tls.ca_bundle`/system roots and hostname verification to vail's X.509
     /// verifier, preserving the ordinary client defaults.
     server_verifier: ?ClientCertificateVerifier = null,
+    /// Stapled OCSP verification for the built-in system/caller-bundle trust
+    /// path. Reconnects reuse this policy and revalidate each new staple.
+    stapled_ocsp: StapledOcspPolicy = .ignore,
+    /// Emit RFC 6066 status_request on the vail path. Defaults on for
+    /// Must-Staple compatibility and may not be disabled with an OCSP policy.
+    request_ocsp: bool = true,
     /// Ordered TLS ALPN offers. Supplying any offer selects the vail-backed
     /// client even without a client certificate because Zig's standard TLS
     /// client does not expose ALPN configuration.
@@ -1278,7 +1285,8 @@ fn connectStreamAttemptMaybeBefore(
     if (options.use_vail or
         options.client_identity != null or
         options.server_verifier != null or
-        options.alpn_protocols.len != 0)
+        options.alpn_protocols.len != 0 or
+        options.stapled_ocsp != .ignore)
     {
         // The vail helper owns teardown from this point, including handshake
         // failures before a Connection object exists.
@@ -1354,6 +1362,8 @@ fn connectVailStreamAttempt(
         else
             null,
         .server_verifier = options.server_verifier,
+        .stapled_ocsp = options.stapled_ocsp,
+        .request_ocsp = options.request_ocsp,
         .client_identity = client_identity,
         .alpn_protocols = options.alpn_protocols,
         .cipher_suites = options.cipher_suites,

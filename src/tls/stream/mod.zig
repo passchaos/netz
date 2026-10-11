@@ -5,6 +5,7 @@ pub const ClientOptions = @import("client_connection.zig").Options;
 pub const ClientVerifiedOptions =
     @import("client_connection.zig").VerifiedOptions;
 pub const ClientCaBundle = @import("client_connection.zig").CaBundle;
+pub const StapledOcspPolicy = @import("vail").x509.trust.StapledOcspPolicy;
 pub const ServerConnection = @import("server_connection.zig").Connection;
 pub const ServerOptions = @import("server_connection.zig").Options;
 pub const ServerIdentityLease =

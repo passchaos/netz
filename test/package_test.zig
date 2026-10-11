@@ -298,6 +298,22 @@ test "public modules are reachable" {
         netz.tls.stream,
         "ServerConnection",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream,
+        "StapledOcspPolicy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.tls.stream.ClientOptions,
+        "request_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.tls.stream.ClientVerifiedOptions,
+        "stapled_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.tls.stream.ClientVerifiedOptions,
+        "request_ocsp",
+    ));
     try std.testing.expect(@hasDecl(netz.tls.stream, "CipherSuite"));
     try std.testing.expect(@hasDecl(netz.tls.stream, "TranscriptHash"));
     try std.testing.expect(@hasDecl(netz.tls.stream, "KeyUpdateCounts"));
@@ -6196,6 +6212,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ConnectOptions,
         "server_verifier",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "stapled_ocsp",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "request_ocsp",
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ConnectOptions,

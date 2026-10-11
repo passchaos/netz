@@ -107,6 +107,47 @@ def _decode_varint(data: bytes, offset: int) -> tuple[int, int]:
     raise AssertionError("overlong MQTT variable integer")
 
 
+def _connect_limits(
+    packet: bytes,
+    protocol_level: int,
+    *,
+    private_bridge: bool = False,
+) -> dict[int, int]:
+    if packet[0] != 0x10:
+        raise AssertionError(f"expected bridge CONNECT: {packet.hex()}")
+    _, cursor = _decode_varint(packet, 1)
+    protocol_name_size = int.from_bytes(packet[cursor:cursor + 2], "big")
+    cursor += 2
+    protocol_name = packet[cursor:cursor + protocol_name_size]
+    cursor += protocol_name_size
+    expected_level = protocol_level | (0x80 if private_bridge else 0)
+    if protocol_name != b"MQTT" or packet[cursor] != expected_level:
+        raise AssertionError(f"unexpected bridge protocol: {packet.hex()}")
+    cursor += 4  # protocol level, flags, and Keep Alive
+    if protocol_level == 4:
+        return {}
+
+    property_size, cursor = _decode_varint(packet, cursor)
+    property_end = cursor + property_size
+    properties: dict[int, int] = {}
+    widths = {0x11: 4, 0x21: 2, 0x22: 2, 0x27: 4}
+    while cursor < property_end:
+        identifier = packet[cursor]
+        cursor += 1
+        width = widths.get(identifier)
+        if width is None or cursor + width > property_end:
+            raise AssertionError(
+                f"unexpected bridge CONNECT property: {packet.hex()}"
+            )
+        properties[identifier] = int.from_bytes(
+            packet[cursor:cursor + width], "big"
+        )
+        cursor += width
+    if cursor != property_end:
+        raise AssertionError(f"malformed bridge CONNECT properties: {packet.hex()}")
+    return properties
+
+
 def _finish_connect(client: socket.socket, client_id: str) -> socket.socket:
     client.settimeout(10)
     client.sendall(_connect(client_id))

@@ -135,6 +135,7 @@ pub const Bridge = struct {
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
     cipher_suites: []tls_cipher_suites.Suite = &.{},
+    require_ocsp: bool = false,
     round_robin: bool = false,
     start_type: StartType = .automatic,
     idle_timeout_seconds: u32 = default_lazy_idle_timeout_seconds,
@@ -195,7 +196,8 @@ pub const Bridge = struct {
 
     pub fn usesTls(self: Bridge) bool {
         return self.ca_file.len != 0 or self.ca_path.len != 0 or
-            self.use_os_ca_certificates or self.cipher_suites.len != 0;
+            self.use_os_ca_certificates or self.cipher_suites.len != 0 or
+            self.require_ocsp;
     }
 
     pub fn usesPrivateBridgeMode(self: Bridge) bool {
@@ -256,6 +258,7 @@ const Seen = struct {
     bridge_keyfile_password_file: bool = false,
     bridge_alpn: bool = false,
     bridge_ciphers_tls13: bool = false,
+    bridge_require_ocsp: bool = false,
     bridge_insecure: bool = false,
     bridge_tls_version: bool = false,
     round_robin: bool = false,
@@ -297,6 +300,7 @@ pub const Builder = struct {
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
     cipher_suites: []tls_cipher_suites.Suite = &.{},
+    require_ocsp: bool = false,
     round_robin: bool = false,
     start_type: StartType = .automatic,
     idle_timeout_seconds: u32 = default_lazy_idle_timeout_seconds,
@@ -487,6 +491,9 @@ pub const Builder = struct {
                 allocator,
                 try parseOne(words),
             );
+        } else if (std.mem.eql(u8, directive, "bridge_require_ocsp")) {
+            try markOnce(&self.seen.bridge_require_ocsp);
+            self.require_ocsp = try parseOneBool(words);
         } else if (std.mem.eql(u8, directive, "bridge_insecure")) {
             try markOnce(&self.seen.bridge_insecure);
             if (try parseOneBool(words)) {
@@ -568,6 +575,7 @@ pub const Builder = struct {
         }
         const tls_option_configured = self.certificate_file.len != 0 or
             self.alpn.len != 0 or self.cipher_suites.len != 0 or
+            self.seen.bridge_require_ocsp or
             self.seen.bridge_insecure or
             self.seen.bridge_tls_version;
         if (tls_option_configured and
@@ -654,6 +662,7 @@ pub const Builder = struct {
             .private_key_password_file = self.private_key_password_file,
             .alpn = self.alpn,
             .cipher_suites = self.cipher_suites,
+            .require_ocsp = self.require_ocsp,
             .round_robin = self.round_robin,
             .start_type = self.start_type,
             .idle_timeout_seconds = self.idle_timeout_seconds,
@@ -783,6 +792,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_keyfile_password_file") or
         std.mem.eql(u8, value, "bridge_alpn") or
         std.mem.eql(u8, value, "bridge_ciphers_tls1.3") or
+        std.mem.eql(u8, value, "bridge_require_ocsp") or
         std.mem.eql(u8, value, "bridge_insecure") or
         std.mem.eql(u8, value, "bridge_tls_version") or
         std.mem.eql(u8, value, "round_robin") or

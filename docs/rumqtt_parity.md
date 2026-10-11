@@ -292,6 +292,16 @@ a trust source fail before listeners start. The process gate constrains a live
 bridge ClientHello to ChaCha20-Poly1305 and checks the negotiated suite from an
 OpenSSL TLS server.
 
+`bridge_require_ocsp true` promotes stapled OCSP from opportunistic input to a
+mandatory trust condition on every TLS connection and reconnect. Netz's vail
+ClientHello requests the RFC 6066 status response by default, preserving RFC
+7633 Must-Staple behavior even without the explicit bridge option. Missing,
+expired, malformed, unknown, revoked, or incorrectly signed responses fail
+before MQTT CONNECT. The bounded trust cache fingerprints the complete
+leaf-aligned staple state, so a prior successful response cannot authorize a
+later missing or revoked one. The process gate creates signed good and revoked
+responses, serves them through OpenSSL TLS 1.3, and also covers no staple.
+
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use
 Mosquitto's mapping order: subscribe to `local_prefix + filter`, strip the
