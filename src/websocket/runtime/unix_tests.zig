@@ -2,7 +2,7 @@ const std = @import("std");
 const runtime = @import("../runtime.zig");
 const websocket = @import("../mod.zig");
 
-test "WebSocket Unix sockets reject TCP user timeout policy" {
+test "WebSocket Unix sockets reject TCP-only socket policy" {
     if (comptime @import("builtin").os.tag == .windows) {
         return error.SkipZigTest;
     }
@@ -20,6 +20,19 @@ test "WebSocket Unix sockets reject TCP user timeout policy" {
     );
     try std.testing.expectError(
         error.SocketOptionUnsupported,
+        runtime.UnixServer.listen(
+            std.testing.allocator,
+            std.testing.io,
+            address,
+            .{ .tcp_keepalive = .{
+                .idle_seconds = 1,
+                .interval_seconds = 1,
+                .probe_count = 1,
+            } },
+        ),
+    );
+    try std.testing.expectError(
+        error.SocketOptionUnsupported,
         runtime.Client.connectUnixAttempt(
             std.testing.allocator,
             std.testing.io,
@@ -27,6 +40,22 @@ test "WebSocket Unix sockets reject TCP user timeout policy" {
             .{
                 .host = "localhost",
                 .tcp_user_timeout_ms = 1,
+            },
+        ),
+    );
+    try std.testing.expectError(
+        error.SocketOptionUnsupported,
+        runtime.Client.connectUnixAttempt(
+            std.testing.allocator,
+            std.testing.io,
+            address,
+            .{
+                .host = "localhost",
+                .tcp_keepalive = .{
+                    .idle_seconds = 1,
+                    .interval_seconds = 1,
+                    .probe_count = 1,
+                },
             },
         ),
     );

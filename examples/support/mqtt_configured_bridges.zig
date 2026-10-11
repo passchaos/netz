@@ -549,6 +549,7 @@ fn remoteConnectOptions(
         else
             null,
         .limits = .{
+            .tcp_keepalive = source.tcp_keepalive,
             .tcp_user_timeout_ms = source.tcp_user_timeout_ms,
         },
         .max_outgoing_packet_size = if (source.max_packet_size == 0)
@@ -741,6 +742,11 @@ test "configured bridge maps Mosquitto remote protocol limits" {
         .max_topic_alias = 3,
         .max_packet_size = 2048,
         .outgoing_retain = false,
+        .tcp_keepalive = .{
+            .idle_seconds = 31,
+            .interval_seconds = 11,
+            .probe_count = 7,
+        },
         .tcp_user_timeout_ms = 12_345,
     };
     const options = remoteConnectOptions(&source, &.{});
@@ -750,6 +756,14 @@ test "configured bridge maps Mosquitto remote protocol limits" {
     try std.testing.expectEqual(@as(u16, 3), options.max_outgoing_topic_aliases);
     try std.testing.expectEqual(@as(usize, 2048), options.max_outgoing_packet_size);
     try std.testing.expect(!options.outgoing_retain);
+    try std.testing.expectEqual(
+        mqtt.runtime.TcpKeepAlive{
+            .idle_seconds = 31,
+            .interval_seconds = 11,
+            .probe_count = 7,
+        },
+        options.limits.tcp_keepalive.?,
+    );
     try std.testing.expectEqual(
         @as(?u32, 12_345),
         options.limits.tcp_user_timeout_ms,

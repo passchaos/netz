@@ -104,6 +104,26 @@ def _expect_tcp_user_timeout_trace(trace: Path, expected_ms: int) -> None:
         )
 
 
+def _expect_tcp_keepalive_trace(
+    trace: Path,
+    idle_seconds: int,
+    interval_seconds: int,
+    probe_count: int,
+) -> None:
+    content = trace.read_text(errors="replace")
+    expected = (
+        "SO_KEEPALIVE, [1], 4) = 0",
+        f"TCP_KEEPIDLE, [{idle_seconds}], 4) = 0",
+        f"TCP_KEEPINTVL, [{interval_seconds}], 4) = 0",
+        f"TCP_KEEPCNT, [{probe_count}], 4) = 0",
+    )
+    missing = [fragment for fragment in expected if fragment not in content]
+    if missing:
+        raise AssertionError(
+            f"bridge did not apply complete TCP keepalive policy: {missing!r}"
+        )
+
+
 def run_outbound_bridge_protocol_limits_case(
     broker: Path, directory: Path
 ) -> None:
@@ -284,6 +304,7 @@ def run_outbound_bridge_protocol_limits_case(
 def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False) -> None:
     remote_port, local_port, unavailable_port = _distinct_ports(3)
     tcp_user_timeout_ms = 4321
+    tcp_keepalive = (31, 11, 7)
     remote_tls = local_tls = ""
     if tls:
         ca, cert, key, client_cert, client_key = _create_tls_material(directory)
@@ -319,6 +340,7 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         "cleansession false\nbridge_protocol_version mqttv50\n"
         "bridge_session_expiry_interval 0xFFFFFFFF\n"
         "bridge_bind_address 127.0.0.2\n"
+        f"bridge_tcp_keepalive {' '.join(map(str, tcp_keepalive))}\n"
         f"bridge_tcp_user_timeout {tcp_user_timeout_ms}\n"
         f"remote_clientid configured-outbound\nrestart_timeout 1\n{local_tls}"
     )
@@ -404,6 +426,7 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         if local is not None: _stop(local, local_output)
         _stop(remote, remote_output)
     if trace_socket_options is not None:
+        _expect_tcp_keepalive_trace(socket_trace, *tcp_keepalive)
         _expect_tcp_user_timeout_trace(socket_trace, tcp_user_timeout_ms)
     if tls:
         empty_ca_path = directory / "empty-outbound-server-capath"

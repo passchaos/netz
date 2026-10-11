@@ -7,6 +7,7 @@
 const std = @import("std");
 const mqtt = @import("mod.zig");
 const rule_helpers = @import("bridge/rules.zig");
+const socket_options = @import("../internal/socket_options.zig");
 
 const net = std.Io.net;
 
@@ -118,6 +119,7 @@ pub const Bridge = struct {
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
     bind_address: ?net.IpAddress = null,
+    tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     tcp_user_timeout_ms: ?u32 = null,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
@@ -230,6 +232,7 @@ const Seen = struct {
     bridge_outgoing_retain: bool = false,
     bridge_attempt_unsubscribe: bool = false,
     bridge_bind_address: bool = false,
+    bridge_tcp_keepalive: bool = false,
     bridge_tcp_user_timeout: bool = false,
     remote_client_id: bool = false,
     remote_username: bool = false,
@@ -269,6 +272,7 @@ pub const Builder = struct {
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
     bind_address: ?net.IpAddress = null,
+    tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     tcp_user_timeout_ms: ?u32 = null,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
@@ -398,6 +402,14 @@ pub const Builder = struct {
                 try parseOne(words),
                 0,
             ) catch return error.InvalidDirective;
+        } else if (std.mem.eql(u8, directive, "bridge_tcp_keepalive")) {
+            try markOnce(&self.seen.bridge_tcp_keepalive);
+            self.tcp_keepalive = .{
+                .idle_seconds = try parsePositiveCInt(words),
+                .interval_seconds = try parsePositiveCInt(words),
+                .probe_count = try parsePositiveCInt(words),
+            };
+            if (words.next() != null) return error.InvalidDirective;
         } else if (std.mem.eql(u8, directive, "bridge_tcp_user_timeout")) {
             try markOnce(&self.seen.bridge_tcp_user_timeout);
             const milliseconds = try parseOneInteger(u32, words);
@@ -604,6 +616,7 @@ pub const Builder = struct {
             .outgoing_retain = self.outgoing_retain,
             .attempt_unsubscribe = self.attempt_unsubscribe,
             .bind_address = self.bind_address,
+            .tcp_keepalive = self.tcp_keepalive,
             .tcp_user_timeout_ms = self.tcp_user_timeout_ms,
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
@@ -729,6 +742,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_outgoing_retain") or
         std.mem.eql(u8, value, "bridge_attempt_unsubscribe") or
         std.mem.eql(u8, value, "bridge_bind_address") or
+        std.mem.eql(u8, value, "bridge_tcp_keepalive") or
         std.mem.eql(u8, value, "bridge_tcp_user_timeout") or
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
@@ -947,6 +961,15 @@ fn parsePositive(comptime T: type, words: anytype) Error!T {
     const parsed = try parseInteger(T, value);
     if (parsed == 0) return error.InvalidInteger;
     return parsed;
+}
+
+fn parsePositiveCInt(words: anytype) Error!u32 {
+    const value = try parseInteger(u32, words.next() orelse
+        return error.InvalidDirective);
+    if (value == 0 or value > std.math.maxInt(i32)) {
+        return error.InvalidInteger;
+    }
+    return value;
 }
 
 fn parseOneInteger(comptime T: type, words: anytype) Error!T {

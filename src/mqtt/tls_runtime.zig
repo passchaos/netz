@@ -168,6 +168,7 @@ pub const Server = struct {
         errdefer if (proxy_metadata) |*metadata| metadata.deinit();
         try socket_options.applyTcp(stream, .{
             .no_delay = self.tcp_nodelay,
+            .keep_alive = self.limits.tcp_keepalive,
             .user_timeout_ms = self.limits.tcp_user_timeout_ms,
         });
         const tls_connection = if (deadline) |absolute|
@@ -1271,6 +1272,7 @@ fn connectStreamAttemptMaybeBefore(
     errdefer if (stream_owned) stream.close(io);
     try socket_options.applyTcp(stream, .{
         .no_delay = options.tcp_nodelay,
+        .keep_alive = options.mqtt.limits.tcp_keepalive,
         .user_timeout_ms = options.mqtt.limits.tcp_user_timeout_ms,
     });
     if (options.use_vail or

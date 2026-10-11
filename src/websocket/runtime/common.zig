@@ -1,5 +1,6 @@
 const std = @import("std");
 const websocket = @import("../mod.zig");
+const socket_options = @import("../../internal/socket_options.zig");
 
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
@@ -30,6 +31,8 @@ pub const Limits = struct {
     /// messages are already application-framed and control replies should not
     /// wait behind delayed ACK merely because a peer uses split writes.
     tcp_nodelay: bool = true,
+    /// Optional TCP keepalive idle, retry interval, and probe-count policy.
+    tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     /// Linux TCP_USER_TIMEOUT in milliseconds. Null leaves the kernel default
     /// untouched; zero is an explicit request to restore that default.
     tcp_user_timeout_ms: ?u32 = null,

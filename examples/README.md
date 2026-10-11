@@ -142,6 +142,7 @@ bridge_max_packet_size 0
 bridge_outgoing_retain true
 bridge_attempt_unsubscribe true
 bridge_bind_address 192.0.2.10
+bridge_tcp_keepalive 60 10 3
 bridge_tcp_user_timeout 30000
 restart_timeout 5 30 120
 bridge_cafile upstream-ca.pem
@@ -177,7 +178,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
 `bridge_max_packet_size`, `bridge_outgoing_retain`,
 `bridge_attempt_unsubscribe`, `bridge_bind_address`,
-`bridge_tcp_user_timeout`, `remote_clientid`,
+`bridge_tcp_keepalive`, `bridge_tcp_user_timeout`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`,
@@ -247,6 +248,12 @@ numeric remote address from the other family is rejected during configuration.
 This operation requires the production zio backend; lower-level callers using
 another `std.Io` backend receive `OptionUnsupported` rather than an unbound
 connection.
+`bridge_tcp_keepalive IDLE INTERVAL COUNT` enables TCP keepalive and configures
+the positive idle and retry intervals in seconds plus the positive failed-probe
+count. All three values are required and bounded by the non-negative C `int`
+range. The complete policy is applied before every cleartext or TLS handshake;
+platforms missing any required socket option and Unix-domain transports fail
+with `SocketOptionUnsupported` rather than using a partial policy.
 `bridge_tcp_user_timeout` is an optional non-negative millisecond value up to
 2,147,483,647. When omitted, every bridge socket retains the operating-system
 default; an explicit zero is passed to the kernel rather than treated as

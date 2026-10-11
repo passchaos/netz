@@ -46,6 +46,7 @@ pub const Error = packet_transport.Error || error{
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
     ConnectorDeadlineUnsupported,
+    InvalidSocketOption,
     SocketOptionFailed,
     SocketOptionUnsupported,
 } || auth_runtime.Error || proxy_protocol.Error || websocket_runtime.Error ||
@@ -57,6 +58,7 @@ pub const Error = packet_transport.Error || error{
 
 pub const disconnectReasonForProtocolViolation =
     protocol_error.disconnectReason;
+pub const TcpKeepAlive = socket_options.TcpKeepAlive;
 
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
@@ -72,6 +74,9 @@ pub const Limits = struct {
     /// delayed-ACK cliff; callers can opt back into coalescing for WAN bulk
     /// transports.
     tcp_nodelay: bool = true,
+    /// Optional TCP keepalive idle, retry interval, and probe-count policy.
+    /// Each value is non-zero and expressed in seconds except probe_count.
+    tcp_keepalive: ?TcpKeepAlive = null,
     /// Linux TCP_USER_TIMEOUT in milliseconds. Null leaves the kernel default
     /// untouched; zero explicitly restores it. Unsupported transports and
     /// platforms fail rather than silently dropping a configured policy.
@@ -348,6 +353,7 @@ pub const Server = struct {
         );
         try socket_options.applyTcp(stream, .{
             .no_delay = self.limits.tcp_nodelay,
+            .keep_alive = self.limits.tcp_keepalive,
             .user_timeout_ms = self.limits.tcp_user_timeout_ms,
         });
         var proxy_metadata = try readProxyMetadata(
@@ -449,7 +455,9 @@ pub const UnixServer = struct {
         address: net.UnixAddress,
         limits: Limits,
     ) Error!UnixServer {
-        if (limits.tcp_user_timeout_ms != null) {
+        if (limits.tcp_keepalive != null or
+            limits.tcp_user_timeout_ms != null)
+        {
             return error.SocketOptionUnsupported;
         }
         if (limits.proxy_protocol != null or
@@ -2122,7 +2130,9 @@ pub const Client = struct {
         address: net.UnixAddress,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
-        if (options.limits.tcp_user_timeout_ms != null) {
+        if (options.limits.tcp_keepalive != null or
+            options.limits.tcp_user_timeout_ms != null)
+        {
             return error.SocketOptionUnsupported;
         }
         const stream = try tcp_connect.unix(
@@ -2142,7 +2152,9 @@ pub const Client = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        if (options.limits.tcp_user_timeout_ms != null) {
+        if (options.limits.tcp_keepalive != null or
+            options.limits.tcp_user_timeout_ms != null)
+        {
             return error.SocketOptionUnsupported;
         }
         const network_deadline = try cappedConnectDeadline(
@@ -2271,12 +2283,16 @@ fn connectStreamAttemptBefore(
     var stream_owned = true;
     errdefer if (stream_owned) stream.close(io);
     var limits = options.limits;
-    if (!tcp_nodelay_available and limits.tcp_user_timeout_ms != null) {
+    if (!tcp_nodelay_available and
+        (limits.tcp_keepalive != null or
+            limits.tcp_user_timeout_ms != null))
+    {
         return error.SocketOptionUnsupported;
     }
     limits.tcp_nodelay = tcp_nodelay_available and limits.tcp_nodelay;
     try socket_options.applyTcp(stream, .{
         .no_delay = limits.tcp_nodelay,
+        .keep_alive = limits.tcp_keepalive,
         .user_timeout_ms = limits.tcp_user_timeout_ms,
     });
 

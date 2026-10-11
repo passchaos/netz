@@ -59,11 +59,13 @@ pub const Error = websocket.Error || http1_runtime.Error ||
     InvalidServeOptions,
     ExporterUnavailable,
     TlsKeyUpdateUnavailable,
+    InvalidSocketOption,
     SocketOptionFailed,
     SocketOptionUnsupported,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 pub const Limits = common.Limits;
+pub const TcpKeepAlive = socket_options.TcpKeepAlive;
 pub const Role = common.Role;
 
 const IncomingDataKind = enum {
@@ -686,6 +688,7 @@ pub const Server = struct {
         errdefer http_conn.close();
         try socket_options.applyTcp(http_conn.stream, .{
             .no_delay = self.limits.tcp_nodelay,
+            .keep_alive = self.limits.tcp_keepalive,
             .user_timeout_ms = self.limits.tcp_user_timeout_ms,
         });
 
@@ -761,7 +764,9 @@ pub const UnixServer = struct {
         address: net.UnixAddress,
         limits: Limits,
     ) Error!UnixServer {
-        if (limits.tcp_user_timeout_ms != null) {
+        if (limits.tcp_keepalive != null or
+            limits.tcp_user_timeout_ms != null)
+        {
             return error.SocketOptionUnsupported;
         }
         return .{
@@ -913,6 +918,7 @@ pub const UnixServer = struct {
         errdefer if (http_owned) http_connection_owned.close();
         var limits = self.limits;
         limits.tcp_nodelay = false;
+        limits.tcp_keepalive = null;
         limits.tcp_user_timeout_ms = null;
         const pending = try receiveUpgradeRequestFromTransport(
             self.http.allocator,
@@ -1198,6 +1204,7 @@ pub const TlsServer = struct {
         errdefer if (stream_owned) stream.close(self.io);
         try socket_options.applyTcp(stream, .{
             .no_delay = self.tcp_nodelay,
+            .keep_alive = self.limits.tcp_keepalive,
             .user_timeout_ms = self.limits.tcp_user_timeout_ms,
         });
         const tls_connection = if (deadline) |absolute|
@@ -2298,7 +2305,9 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        if (options.tcp_user_timeout_ms != null) {
+        if (options.tcp_keepalive != null or
+            options.tcp_user_timeout_ms != null)
+        {
             return error.SocketOptionUnsupported;
         }
         if (options.host.len == 0) return error.InvalidUri;
@@ -2346,7 +2355,9 @@ pub const Client = struct {
         if (options.tls_identity != null or options.vail_tls != null) {
             return error.UnsupportedScheme;
         }
-        if (options.tcp_user_timeout_ms != null) {
+        if (options.tcp_keepalive != null or
+            options.tcp_user_timeout_ms != null)
+        {
             return error.SocketOptionUnsupported;
         }
         if (options.host.len == 0) return error.InvalidUri;
@@ -2907,6 +2918,7 @@ pub const Client = struct {
         errdefer if (stream_owned) stream.close(io);
         try socket_options.applyTcp(stream, .{
             .no_delay = options.tcp_nodelay,
+            .keep_alive = options.tcp_keepalive,
             .user_timeout_ms = options.tcp_user_timeout_ms,
         });
         const default_host = try std.fmt.allocPrint(
@@ -3258,6 +3270,7 @@ pub const Client = struct {
         errdefer if (stream_owned) stream.close(io);
         try socket_options.applyTcp(stream, .{
             .no_delay = options.tcp_nodelay,
+            .keep_alive = options.tcp_keepalive,
             .user_timeout_ms = options.tcp_user_timeout_ms,
         });
         if (is_wss) {
@@ -3380,6 +3393,7 @@ pub const Client = struct {
     ) Error!ConnectAttempt {
         try socket_options.applyTcp(stream, .{
             .no_delay = options.tcp_nodelay,
+            .keep_alive = options.tcp_keepalive,
             .user_timeout_ms = options.tcp_user_timeout_ms,
         });
         const transport: RuntimeTransport = if (tls_conn) |conn| .{ .tls = conn } else .{ .tcp = .{ .io = io, .stream = stream } };
@@ -3631,6 +3645,8 @@ pub const ConnectOptions = struct {
     /// Set to zero to attempt every data message or maxInt to receive-only.
     compression_threshold: usize = default_compression_threshold,
     tcp_nodelay: bool = true,
+    /// Optional TCP keepalive idle, retry interval, and probe-count policy.
+    tcp_keepalive: ?TcpKeepAlive = null,
     /// Linux TCP_USER_TIMEOUT in milliseconds. Null preserves the kernel
     /// default; requesting a value on an unsupported platform fails.
     tcp_user_timeout_ms: ?u32 = null,
