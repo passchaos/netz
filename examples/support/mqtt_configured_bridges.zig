@@ -37,21 +37,41 @@ const ConfiguredConnector = struct {
                 .port = endpoint.port,
                 .options = options,
             };
-            break :blk tls_connector.connector().connectAttempt(
-                allocator,
-                io,
-                mqtt_options,
-            ) catch |err| {
+            break :blk (if (self.source.bind_address) |local_address|
+                mqtt.tls_runtime.Client.connectHostAttemptBound(
+                    allocator,
+                    io,
+                    endpoint.host,
+                    endpoint.port,
+                    local_address,
+                    reconnectTlsOptions(options, mqtt_options),
+                )
+            else
+                tls_connector.connector().connectAttempt(
+                    allocator,
+                    io,
+                    mqtt_options,
+                )) catch |err| {
                 self.noteAttempt(index, false, io);
                 return err;
             };
-        } else mqtt.runtime.Client.connectHostAttempt(
-            allocator,
-            io,
-            endpoint.host,
-            endpoint.port,
-            mqtt_options,
-        ) catch |err| {
+        } else (if (self.source.bind_address) |local_address|
+            mqtt.runtime.Client.connectHostAttemptBound(
+                allocator,
+                io,
+                endpoint.host,
+                endpoint.port,
+                local_address,
+                mqtt_options,
+            )
+        else
+            mqtt.runtime.Client.connectHostAttempt(
+                allocator,
+                io,
+                endpoint.host,
+                endpoint.port,
+                mqtt_options,
+            )) catch |err| {
             self.noteAttempt(index, false, io);
             return err;
         };
@@ -74,23 +94,45 @@ const ConfiguredConnector = struct {
                 .port = endpoint.port,
                 .options = options,
             };
-            break :blk tls_connector.connector().connectAttemptWithDeadline(
-                allocator,
-                io,
-                mqtt_options,
-                deadline,
-            ) catch |err| {
+            break :blk (if (self.source.bind_address) |local_address|
+                mqtt.tls_runtime.Client.connectHostAttemptBoundWithDeadline(
+                    allocator,
+                    io,
+                    endpoint.host,
+                    endpoint.port,
+                    local_address,
+                    reconnectTlsOptions(options, mqtt_options),
+                    deadline,
+                )
+            else
+                tls_connector.connector().connectAttemptWithDeadline(
+                    allocator,
+                    io,
+                    mqtt_options,
+                    deadline,
+                )) catch |err| {
                 self.noteAttempt(index, false, io);
                 return err;
             };
-        } else mqtt.runtime.Client.connectHostAttemptWithDeadline(
-            allocator,
-            io,
-            endpoint.host,
-            endpoint.port,
-            mqtt_options,
-            deadline,
-        ) catch |err| {
+        } else (if (self.source.bind_address) |local_address|
+            mqtt.runtime.Client.connectHostAttemptBoundWithDeadline(
+                allocator,
+                io,
+                endpoint.host,
+                endpoint.port,
+                local_address,
+                mqtt_options,
+                deadline,
+            )
+        else
+            mqtt.runtime.Client.connectHostAttemptWithDeadline(
+                allocator,
+                io,
+                endpoint.host,
+                endpoint.port,
+                mqtt_options,
+                deadline,
+            )) catch |err| {
             self.noteAttempt(index, false, io);
             return err;
         };
@@ -155,6 +197,17 @@ const ConfiguredConnector = struct {
         return true;
     }
 };
+
+fn reconnectTlsOptions(
+    configured: mqtt.tls_runtime.ConnectOptions,
+    mqtt_options: mqtt.runtime.ConnectOptions,
+) mqtt.tls_runtime.ConnectOptions {
+    var options = configured;
+    const network_connect_timeout = options.mqtt.network_connect_timeout;
+    options.mqtt = mqtt_options;
+    options.mqtt.network_connect_timeout = network_connect_timeout;
+    return options;
+}
 
 const ConnectorResources = struct {
     ca_bundle: CertificateBundle = .empty,

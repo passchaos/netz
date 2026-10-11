@@ -402,6 +402,32 @@ pub const Client = struct {
         );
     }
 
+    /// Resolve a TLS peer and connect from one explicit local IP address.
+    /// The bind applies to the TCP socket before the TLS handshake begins.
+    pub fn connectHostAttemptBound(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        local_address: net.IpAddress,
+        options: ConnectOptions,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const stream = try network_endpoint.connectHostBound(
+            io,
+            host,
+            port,
+            local_address,
+            options.mqtt.network_connect_timeout,
+        );
+        return connectStreamAttempt(
+            allocator,
+            io,
+            stream,
+            host,
+            options,
+        );
+    }
+
     pub fn connectHostWithDeadline(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -501,6 +527,37 @@ pub const Client = struct {
             io,
             host_name,
             port,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            host,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn connectHostAttemptBoundWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        local_address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt_runtime.Error!mqtt_runtime.ConnectAttempt {
+        const network_deadline = try deadline_policy.capTimeout(
+            io,
+            deadline,
+            options.mqtt.network_connect_timeout,
+        );
+        const stream = try network_endpoint.connectHostBoundWithDeadline(
+            io,
+            host,
+            port,
+            local_address,
             network_deadline,
         );
         return connectStreamAttemptBefore(

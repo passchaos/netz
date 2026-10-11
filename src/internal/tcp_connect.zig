@@ -5,11 +5,21 @@
 //! deadline also gives hostname lookup and all address attempts one shared
 //! budget. If timeout wins concurrently with a successful connect, deferred
 //! select draining closes that unselected socket.
+//! Explicit local-address binds use zio's native socket API because Zig 0.16's
+//! generic `std.Io` connect operation cannot accept a pre-bound socket.
 
 const std = @import("std");
+const zio = @import("zio");
 const deadline_policy = @import("deadline.zig");
 
 const net = std.Io.net;
+
+pub const BoundConnectError = net.IpAddress.ConnectError || error{
+    AddressInUse,
+};
+
+pub const BoundHostConnectError = net.HostName.LookupError ||
+    BoundConnectError;
 
 pub fn ip(
     io: std.Io,
@@ -32,6 +42,45 @@ pub fn ipWithDeadline(
         try deadline_policy.usableAwake(io, deadline),
         connectIp,
         .{ io, address },
+    );
+}
+
+/// Establish a TCP stream after binding its socket to `local_address`.
+///
+/// Zig 0.16's generic `std.Io` connect operation cannot bind an existing
+/// socket. Netz's production zio backend exposes that operation directly; a
+/// foreign backend is rejected rather than silently ignoring the requested
+/// source address.
+pub fn ipBound(
+    io: std.Io,
+    address: net.IpAddress,
+    local_address: net.IpAddress,
+    timeout: ?std.Io.Duration,
+) BoundConnectError!net.Stream {
+    return connectBoundZio(
+        io,
+        address,
+        local_address,
+        if (timeout) |duration| zio.Timeout.fromNanoseconds(
+            durationNanoseconds(duration),
+        ) else .none,
+    );
+}
+
+pub fn ipBoundWithDeadline(
+    io: std.Io,
+    address: net.IpAddress,
+    local_address: net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+) BoundConnectError!net.Stream {
+    const usable = try deadline_policy.usableAwake(io, deadline);
+    return connectBoundZio(
+        io,
+        address,
+        local_address,
+        zio.Timeout.fromNanoseconds(durationNanoseconds(
+            usable.durationFromNow(io).raw,
+        )),
     );
 }
 
@@ -59,6 +108,200 @@ pub fn hostWithDeadline(
         connectHost,
         .{ io, host_name, port },
     );
+}
+
+pub fn hostBound(
+    io: std.Io,
+    host_name: net.HostName,
+    port: u16,
+    local_address: net.IpAddress,
+    timeout: ?std.Io.Duration,
+) BoundHostConnectError!net.Stream {
+    const deadline = if (timeout) |duration|
+        (try deadline_policy.fromTimeout(io, duration)).?
+    else
+        null;
+    return connectHostBoundBefore(
+        io,
+        host_name,
+        port,
+        local_address,
+        deadline,
+    );
+}
+
+pub fn hostBoundWithDeadline(
+    io: std.Io,
+    host_name: net.HostName,
+    port: u16,
+    local_address: net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+) BoundHostConnectError!net.Stream {
+    return connectHostBoundBefore(
+        io,
+        host_name,
+        port,
+        local_address,
+        try deadline_policy.usableAwake(io, deadline),
+    );
+}
+
+fn connectHostBoundBefore(
+    io: std.Io,
+    host_name: net.HostName,
+    port: u16,
+    local_address: net.IpAddress,
+    deadline: ?std.Io.Clock.Timestamp,
+) BoundHostConnectError!net.Stream {
+    _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
+    var lookup_buffer: [32]net.HostName.LookupResult = undefined;
+    var lookup_queue: std.Io.Queue(net.HostName.LookupResult) =
+        .init(&lookup_buffer);
+    var lookup = io.async(net.HostName.lookup, .{
+        host_name,
+        io,
+        &lookup_queue,
+        .{
+            .port = port,
+            .family = std.meta.activeTag(local_address),
+        },
+    });
+    defer {
+        lookup.cancel(io) catch {};
+        while (lookup_queue.getOneUncancelable(io)) |_| {} else |err| switch (err) {
+            error.Closed => {},
+        }
+    }
+
+    var last_error: ?BoundConnectError = null;
+    while (lookup_queue.getOne(io)) |result| switch (result) {
+        .canonical_name => {},
+        .address => |address| {
+            const stream = if (deadline) |absolute|
+                ipBoundWithDeadline(
+                    io,
+                    address,
+                    local_address,
+                    absolute,
+                )
+            else
+                ipBound(io, address, local_address, null);
+            return stream catch |err| switch (err) {
+                error.Canceled,
+                error.OptionUnsupported,
+                error.SystemResources,
+                error.ProcessFdQuotaExceeded,
+                error.SystemFdQuotaExceeded,
+                error.AddressInUse,
+                => |fatal| return fatal,
+                else => |connect_error| {
+                    last_error = connect_error;
+                    continue;
+                },
+            };
+        },
+    } else |err| switch (err) {
+        error.Canceled => |cancelled| return cancelled,
+        error.Closed => {
+            try lookup.await(io);
+            return last_error orelse error.UnknownHostName;
+        },
+    }
+}
+
+fn connectBoundZio(
+    io: std.Io,
+    address: net.IpAddress,
+    local_address: net.IpAddress,
+    timeout: zio.Timeout,
+) BoundConnectError!net.Stream {
+    _ = zio.Runtime.fromIo(io) orelse return error.OptionUnsupported;
+    if (std.meta.activeTag(address) != std.meta.activeTag(local_address)) {
+        return error.AddressFamilyUnsupported;
+    }
+    const domain: zio.os.net.Domain = switch (local_address) {
+        .ip4 => .ipv4,
+        .ip6 => .ipv6,
+    };
+    var socket = zio.net.Socket.open(.stream, domain, .tcp) catch |err|
+        return mapBoundConnectError(err);
+    errdefer socket.close();
+    socket.bind(.{ .ip = zioIpAddress(local_address) }) catch |err|
+        return mapBoundConnectError(err);
+    const bound_address = stdIpAddress(socket.address.ip);
+    socket.connect(.{ .ip = zioIpAddress(address) }, .{
+        .timeout = timeout,
+    }) catch |err| return mapBoundConnectError(err);
+    return .{ .socket = .{
+        .handle = stdIoSocketHandle(socket.handle),
+        .address = bound_address,
+    } };
+}
+
+fn zioIpAddress(address: net.IpAddress) zio.net.IpAddress {
+    return switch (address) {
+        .ip4 => |ip4| .initIp4(ip4.bytes, ip4.port),
+        .ip6 => |ip6| .initIp6(
+            ip6.bytes,
+            ip6.port,
+            ip6.flow,
+            ip6.interface.index,
+        ),
+    };
+}
+
+fn stdIpAddress(address: zio.net.IpAddress) net.IpAddress {
+    return switch (address.getFamily()) {
+        .ipv4 => .{ .ip4 = .{
+            .bytes = @bitCast(address.in.addr),
+            .port = std.mem.bigToNative(u16, address.in.port),
+        } },
+        .ipv6 => .{ .ip6 = .{
+            .bytes = address.in6.addr,
+            .port = std.mem.bigToNative(u16, address.in6.port),
+            .flow = address.in6.flowinfo,
+            .interface = .{ .index = address.in6.scope_id },
+        } },
+    };
+}
+
+fn stdIoSocketHandle(
+    handle: @FieldType(zio.net.Socket, "handle"),
+) net.Socket.Handle {
+    return if (@typeInfo(net.Socket.Handle) == .pointer)
+        @ptrCast(handle)
+    else
+        @intCast(handle);
+}
+
+fn durationNanoseconds(duration: std.Io.Duration) u64 {
+    if (duration.nanoseconds <= 0) return 0;
+    return @intCast(@min(duration.nanoseconds, std.math.maxInt(u64)));
+}
+
+fn mapBoundConnectError(err: anyerror) BoundConnectError {
+    return switch (err) {
+        error.AccessDenied => error.AccessDenied,
+        error.AddressInUse => error.AddressInUse,
+        error.AddressUnavailable => error.AddressUnavailable,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.Canceled => error.Canceled,
+        error.ConnectionPending => error.ConnectionPending,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.HostUnreachable => error.HostUnreachable,
+        error.NetworkDown => error.NetworkDown,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.ProcessFdQuotaExceeded => error.ProcessFdQuotaExceeded,
+        error.ProtocolUnsupportedByAddressFamily => error.ProtocolUnsupportedByAddressFamily,
+        error.ProtocolUnsupportedBySystem => error.ProtocolUnsupportedBySystem,
+        error.SocketModeUnsupported => error.SocketModeUnsupported,
+        error.SystemFdQuotaExceeded => error.SystemFdQuotaExceeded,
+        error.SystemResources => error.SystemResources,
+        error.Timeout => error.Timeout,
+        error.WouldBlock => error.WouldBlock,
+        else => error.Unexpected,
+    };
 }
 
 pub fn unix(
@@ -161,6 +404,105 @@ test "TCP connect deadline accepts a ready endpoint" {
     defer stream.close(io);
     const accepted = try listener.accept(io);
     accepted.close(io);
+}
+
+test "TCP bound connect uses the requested IPv4 source" {
+    var backend = try zio.Runtime.init(std.testing.allocator, .{});
+    defer backend.deinit();
+    const io = backend.io();
+    var listener = try (net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const local = net.IpAddress{ .ip4 = .{
+        .bytes = .{ 127, 0, 0, 2 },
+        .port = 0,
+    } };
+    var stream = try ipBound(
+        io,
+        listener.socket.address,
+        local,
+        .fromSeconds(1),
+    );
+    defer stream.close(io);
+    const accepted = try listener.accept(io);
+    defer accepted.close(io);
+    try std.testing.expectEqualSlices(
+        u8,
+        &local.ip4.bytes,
+        &accepted.socket.address.ip4.bytes,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &local.ip4.bytes,
+        &stream.socket.address.ip4.bytes,
+    );
+    try std.testing.expect(stream.socket.address.ip4.port != 0);
+}
+
+test "TCP bound connect uses the requested IPv6 source" {
+    var backend = try zio.Runtime.init(std.testing.allocator, .{});
+    defer backend.deinit();
+    const io = backend.io();
+    var listener = (net.IpAddress{ .ip6 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    ) catch |err| switch (err) {
+        error.AddressFamilyUnsupported, error.AddressUnavailable => return error.SkipZigTest,
+        else => |other| return other,
+    };
+    defer listener.deinit(io);
+
+    const local = net.IpAddress{ .ip6 = .loopback(0) };
+    var stream = try ipBoundWithDeadline(
+        io,
+        listener.socket.address,
+        local,
+        .fromNow(io, .{ .raw = .fromSeconds(1), .clock = .awake }),
+    );
+    defer stream.close(io);
+    const accepted = try listener.accept(io);
+    defer accepted.close(io);
+    try std.testing.expectEqualSlices(
+        u8,
+        &local.ip6.bytes,
+        &accepted.socket.address.ip6.bytes,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &local.ip6.bytes,
+        &stream.socket.address.ip6.bytes,
+    );
+    try std.testing.expect(stream.socket.address.ip6.port != 0);
+}
+
+test "TCP bound connect rejects foreign backends and address families" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const threaded_io = threaded.io();
+    try std.testing.expectError(
+        error.OptionUnsupported,
+        ipBound(
+            threaded_io,
+            .{ .ip4 = .loopback(1) },
+            .{ .ip4 = .loopback(0) },
+            null,
+        ),
+    );
+
+    var backend = try zio.Runtime.init(std.testing.allocator, .{});
+    defer backend.deinit();
+    try std.testing.expectError(
+        error.AddressFamilyUnsupported,
+        ipBound(
+            backend.io(),
+            .{ .ip4 = .loopback(1) },
+            .{ .ip6 = .loopback(0) },
+            null,
+        ),
+    );
 }
 
 test "TCP connect deadline includes hostname resolution" {

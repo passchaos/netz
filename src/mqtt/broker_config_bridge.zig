@@ -8,6 +8,8 @@ const std = @import("std");
 const mqtt = @import("mod.zig");
 const rule_helpers = @import("bridge/rules.zig");
 
+const net = std.Io.net;
+
 pub const default_port: u16 = 1883;
 pub const default_keep_alive_seconds: u16 = 60;
 pub const default_restart_base_seconds: u16 = 5;
@@ -34,6 +36,7 @@ pub const Error = mqtt.Error || std.mem.Allocator.Error || error{
     BridgeTlsTrustRequired,
     BridgeNotificationsDisabled,
     BridgeLazyThresholdExceedsQueueLimit,
+    BridgeAddressFamilyMismatch,
     DuplicateBridgeAddress,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
@@ -112,6 +115,7 @@ pub const Bridge = struct {
     max_packet_size: u32 = 0,
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
+    bind_address: ?net.IpAddress = null,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -222,6 +226,7 @@ const Seen = struct {
     bridge_max_packet_size: bool = false,
     bridge_outgoing_retain: bool = false,
     bridge_attempt_unsubscribe: bool = false,
+    bridge_bind_address: bool = false,
     remote_client_id: bool = false,
     remote_username: bool = false,
     remote_password: bool = false,
@@ -259,6 +264,7 @@ pub const Builder = struct {
     max_packet_size: u32 = 0,
     outgoing_retain: bool = true,
     attempt_unsubscribe: bool = true,
+    bind_address: ?net.IpAddress = null,
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -381,6 +387,12 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "bridge_attempt_unsubscribe")) {
             try markOnce(&self.seen.bridge_attempt_unsubscribe);
             self.attempt_unsubscribe = try parseOneBool(words);
+        } else if (std.mem.eql(u8, directive, "bridge_bind_address")) {
+            try markOnce(&self.seen.bridge_bind_address);
+            self.bind_address = net.IpAddress.parse(
+                try parseOne(words),
+                0,
+            ) catch return error.InvalidDirective;
         } else if (std.mem.eql(u8, directive, "remote_clientid")) {
             try markOnce(&self.seen.remote_client_id);
             self.remote_client_id = try parseOwnedUtf8(allocator, words);
@@ -483,6 +495,12 @@ pub const Builder = struct {
     ) Error!Bridge {
         if (!self.seen.address) return error.BridgeAddressRequired;
         if (self.rules.items.len == 0) return error.BridgeTopicRequired;
+        if (self.bind_address) |local_address| {
+            try validateEndpointFamily(self.host, local_address);
+            for (self.secondary_addresses.items) |endpoint| {
+                try validateEndpointFamily(endpoint.host, local_address);
+            }
+        }
         if (self.remote_password.len != 0 and self.remote_username.len == 0) {
             return error.BridgeAuthenticationIncomplete;
         }
@@ -573,6 +591,7 @@ pub const Builder = struct {
             .max_packet_size = self.max_packet_size,
             .outgoing_retain = self.outgoing_retain,
             .attempt_unsubscribe = self.attempt_unsubscribe,
+            .bind_address = self.bind_address,
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
@@ -696,6 +715,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_max_packet_size") or
         std.mem.eql(u8, value, "bridge_outgoing_retain") or
         std.mem.eql(u8, value, "bridge_attempt_unsubscribe") or
+        std.mem.eql(u8, value, "bridge_bind_address") or
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
         std.mem.eql(u8, value, "remote_password") or
@@ -753,6 +773,16 @@ fn parseEndpoint(value: []const u8) Error!Endpoint {
     }
     try validateHost(value);
     return .{ .host = value, .port = default_port };
+}
+
+fn validateEndpointFamily(
+    host: []const u8,
+    local_address: net.IpAddress,
+) Error!void {
+    const remote = net.IpAddress.parse(host, 0) catch return;
+    if (std.meta.activeTag(remote) != std.meta.activeTag(local_address)) {
+        return error.BridgeAddressFamilyMismatch;
+    }
 }
 
 fn validateHost(value: []const u8) Error!void {

@@ -1176,6 +1176,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_max_packet_size 2048
         \\bridge_outgoing_retain false
         \\bridge_attempt_unsubscribe false
+        \\bridge_bind_address 127.0.0.2
         \\remote_clientid edge-bridge
         \\remote_username bridge-user
         \\remote_password bridge-secret
@@ -1237,6 +1238,13 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(@as(u32, 2048), upstream.max_packet_size);
     try std.testing.expect(!upstream.outgoing_retain);
     try std.testing.expect(!upstream.attempt_unsubscribe);
+    const expected_bind_address = try std.Io.net.IpAddress.parseIp4(
+        "127.0.0.2",
+        0,
+    );
+    try std.testing.expect(upstream.bind_address.?.eql(
+        &expected_bind_address,
+    ));
     try std.testing.expectEqualStrings("edge-bridge", upstream.clientId());
     try std.testing.expectEqualStrings("bridge-user", upstream.remote_username);
     try std.testing.expectEqualStrings("bridge-secret", upstream.remote_password);
@@ -1305,6 +1313,10 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqual(@as(u32, 0), bridge.max_packet_size);
     try std.testing.expect(bridge.outgoing_retain);
     try std.testing.expect(bridge.attempt_unsubscribe);
+    try std.testing.expectEqual(
+        @as(?std.Io.net.IpAddress, null),
+        bridge.bind_address,
+    );
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.base_seconds);
     try std.testing.expectEqual(@as(u16, 20), bridge.restart.cap_seconds);
     try std.testing.expect(!bridge.restart.jitter);
@@ -1352,6 +1364,20 @@ test "MQTT broker config applies inbound bridge defaults" {
         std.math.maxInt(u16),
         unlimited.bridges[0].receive_maximum,
     );
+
+    var ipv6 = try parse(std.testing.allocator,
+        \\listener 1886
+        \\allow_anonymous true
+        \\connection ipv6-bind
+        \\address [::1]:2883
+        \\topic # out 0
+        \\bridge_bind_address ::1
+    );
+    defer ipv6.deinit(std.testing.allocator);
+    const expected_ipv6_bind = try std.Io.net.IpAddress.parseIp6("::1", 0);
+    try std.testing.expect(ipv6.bridges[0].bind_address.?.eql(
+        &expected_ipv6_bind,
+    ));
 }
 
 test "MQTT broker config rejects incomplete or unsupported bridges" {
@@ -1523,6 +1549,25 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection duplicate-unsubscribe\naddress localhost\n" ++
             "topic # out 0\nbridge_attempt_unsubscribe true\n" ++
             "bridge_attempt_unsubscribe false\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator, listener ++
+            "connection invalid-bind\naddress localhost\n" ++
+            "topic # out 0\nbridge_bind_address localhost\n"),
+    );
+    try std.testing.expectError(
+        error.BridgeAddressFamilyMismatch,
+        parse(allocator, listener ++
+            "connection mismatched-bind\naddress 127.0.0.1\n" ++
+            "topic # out 0\nbridge_bind_address ::1\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-bind\naddress localhost\n" ++
+            "topic # out 0\nbridge_bind_address 127.0.0.1\n" ++
+            "bridge_bind_address 127.0.0.2\n"),
     );
     try std.testing.expectError(
         error.UnsupportedBridgeStartType,

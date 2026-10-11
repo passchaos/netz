@@ -1005,7 +1005,8 @@ Current protocol coverage includes:
   failover, retained local/remote connection-state notifications,
   automatic/one-shot lifecycles, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
-  and crash-safe QoS 2 state,
+  explicit local IPv4/IPv6 source-address binding across cleartext and TLS
+  reconnects, and crash-safe QoS 2 state,
   listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
   PBES2-encrypted PKCS#8 keys with file-backed passwords, and
   optional/required

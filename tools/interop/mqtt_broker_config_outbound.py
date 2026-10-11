@@ -127,14 +127,19 @@ def run_outbound_bridge_protocol_limits_case(
                 f"bridge_outgoing_retain {str(outgoing_retain).lower()}\n"
                 "bridge_attempt_unsubscribe "
                 f"{str(attempt_unsubscribe).lower()}\n"
+                "bridge_bind_address 127.0.0.2\n"
                 "notifications false\nrestart_timeout 1\n"
             )
             log = directory / f"{case_name}.log"
             process = output = bridge = publisher = None
             try:
                 process, output = _start_broker(broker, config, log)
-                bridge, _ = listener.accept()
+                bridge, peer = listener.accept()
                 bridge.settimeout(10)
+                if peer[0] != "127.0.0.2":
+                    raise AssertionError(
+                        f"bridge_bind_address mismatch: {peer!r}"
+                    )
                 connect = _read_packet(bridge)
                 limits = _connect_limits(connect, protocol_level)
                 if protocol_level == 5:
@@ -297,6 +302,7 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         "topic sensors/# out 2 local/ remote/\n"
         "cleansession false\nbridge_protocol_version mqttv50\n"
         "bridge_session_expiry_interval 0xFFFFFFFF\n"
+        "bridge_bind_address 127.0.0.2\n"
         f"remote_clientid configured-outbound\nrestart_timeout 1\n{local_tls}"
     )
     remote_log = directory / "outbound-remote.log"

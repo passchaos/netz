@@ -37,6 +37,40 @@ pub fn connectHostWithDeadline(
     return tcp_connect.hostWithDeadline(io, host_name, port, deadline);
 }
 
+pub fn connectHostBound(
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    local_address: net.IpAddress,
+    timeout: ?std.Io.Duration,
+) Error!net.Stream {
+    const host_name = try net.HostName.init(host);
+    return tcp_connect.hostBound(
+        io,
+        host_name,
+        port,
+        local_address,
+        timeout,
+    );
+}
+
+pub fn connectHostBoundWithDeadline(
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    local_address: net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+) Error!net.Stream {
+    const host_name = try net.HostName.init(host);
+    return tcp_connect.hostBoundWithDeadline(
+        io,
+        host_name,
+        port,
+        local_address,
+        deadline,
+    );
+}
+
 pub fn connectTarget(
     io: std.Io,
     target: *const redirect.Target,

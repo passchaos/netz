@@ -141,6 +141,7 @@ bridge_max_topic_alias 10
 bridge_max_packet_size 0
 bridge_outgoing_retain true
 bridge_attempt_unsubscribe true
+bridge_bind_address 192.0.2.10
 restart_timeout 5 30 120
 bridge_cafile upstream-ca.pem
 bridge_certfile bridge-client-chain.pem
@@ -174,7 +175,7 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `bridge_session_expiry_interval`, `keepalive_interval`,
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
 `bridge_max_packet_size`, `bridge_outgoing_retain`,
-`bridge_attempt_unsubscribe`, `remote_clientid`,
+`bridge_attempt_unsubscribe`, `bridge_bind_address`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
 `bridge_keyfile_password_file`, `bridge_alpn`, `bridge_insecure`,
@@ -236,7 +237,14 @@ remote CONNECT it sends one mapped-filter UNSUBSCRIBE before publishing, so a
 persistent Session cannot retain a subscription left by an earlier inbound
 configuration. Set it false only when that cleanup is intentionally unwanted.
 Interleaved stale deliveries remain ordered, are protocol-acknowledged, and are
-dropped rather than terminating the bridge. QoS 2 additionally requires
+dropped rather than terminating the bridge. `bridge_bind_address` accepts one
+numeric IPv4 or IPv6 address and binds an ephemeral local port before every
+cleartext or TLS connection attempt, including fallback and reconnect attempts.
+DNS results are restricted to the configured local address family, while a
+numeric remote address from the other family is rejected during configuration.
+This operation requires the production zio backend; lower-level callers using
+another `std.Io` backend receive `OptionUnsupported` rather than an unbound
+connection. QoS 2 additionally requires
 `persistence true`, a non-clean remote
 Session, and for MQTT 5 a non-zero `bridge_session_expiry_interval`; the runner
 derives a stable bridge identity from the connection identity and mappings and opens a

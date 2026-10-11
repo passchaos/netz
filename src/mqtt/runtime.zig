@@ -1664,6 +1664,27 @@ pub const Client = struct {
         return connectStreamAttempt(allocator, io, stream, options, true);
     }
 
+    /// Resolve a hostname and connect from one explicit local IP address.
+    /// Zig 0.16 does not expose bound connects through generic `std.Io`, so
+    /// this operation currently requires netz's zio runtime backend.
+    pub fn connectHostAttemptBound(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        local_address: net.IpAddress,
+        options: ConnectOptions,
+    ) Error!ConnectAttempt {
+        const stream = try network_endpoint.connectHostBound(
+            io,
+            host,
+            port,
+            local_address,
+            options.network_connect_timeout,
+        );
+        return connectStreamAttempt(allocator, io, stream, options, true);
+    }
+
     /// Resolve `host` and negotiate MQTT under one caller-owned deadline.
     /// DNS and all address attempts also retain `network_connect_timeout` as
     /// a stricter phase limit when it expires first.
@@ -1684,6 +1705,37 @@ pub const Client = struct {
             io,
             host,
             port,
+            network_deadline,
+        );
+        return connectStreamAttemptBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            true,
+            deadline,
+        );
+    }
+
+    pub fn connectHostAttemptBoundWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        host: []const u8,
+        port: u16,
+        local_address: net.IpAddress,
+        options: ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        const network_deadline = try cappedConnectDeadline(
+            io,
+            deadline,
+            options.network_connect_timeout,
+        );
+        const stream = try network_endpoint.connectHostBoundWithDeadline(
+            io,
+            host,
+            port,
+            local_address,
             network_deadline,
         );
         return connectStreamAttemptBefore(

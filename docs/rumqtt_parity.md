@@ -250,6 +250,14 @@ inbound configuration. Legal PUBLISH traffic interleaved before that UNSUBACK
 is retained in wire order, acknowledged, and deliberately discarded; disabling
 the option omits the cleanup packet.
 
+`bridge_bind_address` accepts a numeric IPv4 or IPv6 source address and binds
+an ephemeral local port before every cleartext or TLS connection attempt.
+Hostname lookup is restricted to the selected address family, numeric family
+mismatches fail during configuration, and fallback/reconnect attempts preserve
+the bind. The implementation uses zio's native cancelable bind/connect path;
+foreign `std.Io` backends receive `OptionUnsupported` instead of silently
+ignoring the requested source address.
+
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use
 Mosquitto's mapping order: subscribe to `local_prefix + filter`, strip the
