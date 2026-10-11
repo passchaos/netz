@@ -5264,7 +5264,7 @@ def main() -> None:
         "private-bridge negotiation with standard MQTT 3.1.1 fallback, "
         "TLS 1.3 bridge cipher-suite selection, "
         "required TLS 1.3 bridge OCSP stapling, "
-        "local clean-Session restart isolation, "
+        "local Client ID and clean-Session restart isolation, "
         "cleartext/TLS bridge source-address binding and traced TCP keepalive/"
         "TCP_USER_TIMEOUT, "
         "QoS 1/2, lazy threshold/idle lifecycle with restart recovery, "

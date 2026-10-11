@@ -136,6 +136,7 @@ round_robin true
 topic sensors/# in 1 local/ remote/
 cleansession false
 local_cleansession false
+local_clientid local.netz-upstream
 remote_clientid netz-upstream
 bridge_receive_maximum 20
 bridge_max_topic_alias 10
@@ -177,7 +178,8 @@ The accepted directives are exactly `listener`, `protocol`, `certfile`,
 `global_max_clients`, `global_max_connections`, `password_file`, `acl_file`, `persistence`,
 `persistence_location`, `persistence_file`,
 `autosave_interval`, `autosave_on_changes`, `connection`, `address`, `topic`,
-`cleansession`, `local_cleansession`, `bridge_protocol_version`,
+`cleansession`, `local_cleansession`, `local_clientid`,
+`bridge_protocol_version`,
 `bridge_session_expiry_interval`, `keepalive_interval`,
 `bridge_receive_maximum`, `bridge_max_topic_alias`,
 `bridge_max_packet_size`, `bridge_outgoing_retain`,
@@ -292,6 +294,11 @@ restart gate verifies that an offline queued QoS 0 message is not replayed
 while a newly published message is still forwarded. Outbound QoS 1/2 requires
 a persistent local Session to preserve its delivery contract, so those rules
 combined with `local_cleansession true` fail before listeners open.
+`local_clientid` selects the stable identity of the broker-internal source
+Session and its outbound journal. It defaults to `local.<remote_clientid>`;
+duplicate outbound local IDs are rejected before listeners open. Changing an
+explicit local ID deliberately starts a different source Session, while
+renaming a bridge with the same explicit ID keeps its persistence identity.
 
 Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
 Trust comes from a bounded explicit `bridge_cafile`, a non-recursive

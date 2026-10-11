@@ -39,6 +39,7 @@ def run_local_clean_session_case(broker: Path, directory: Path) -> None:
         f"address 127.0.0.1:{remote_port}\n"
         "topic session/# out 0 local/ remote/\n"
         "cleansession false\nlocal_cleansession true\n"
+        "local_clientid configured-local-source\n"
         "bridge_protocol_version mqttv50\n"
         "bridge_session_expiry_interval 0xFFFFFFFF\n"
         "remote_clientid configured-local-clean\n"

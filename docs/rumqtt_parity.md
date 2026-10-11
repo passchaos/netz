@@ -325,6 +325,12 @@ the stale message is absent, and then forwards a fresh message. Because the
 bridge's QoS 1/2 contract depends on a recoverable source Session, combining
 outbound QoS 1/2 with a clean local Session is rejected during configuration
 instead of silently weakening delivery guarantees.
+`local_clientid` is deep-owned and selects both the broker-internal source
+Session and the outbound journal identity. Its default is
+`local.<remote_clientid>`, and duplicate identities across outbound bridges are
+rejected before listeners open. An explicit identity therefore survives a
+connection-block rename while an intentional identity change starts a distinct
+local Session.
 
 QoS 0 is forwarded after the target socket write, with the expected
 fire-and-forget loss window. QoS 1 requires a persistent source Session. The

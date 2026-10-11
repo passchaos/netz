@@ -125,6 +125,7 @@ pub const Bridge = struct {
     bind_address: ?net.IpAddress = null,
     tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     tcp_user_timeout_ms: ?u32 = null,
+    local_client_id: []u8 = &.{},
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -154,6 +155,7 @@ pub const Bridge = struct {
             allocator.free(self.remote_password);
         }
         if (self.remote_username.len != 0) allocator.free(self.remote_username);
+        if (self.local_client_id.len != 0) allocator.free(self.local_client_id);
         if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
         if (self.ca_file.len != 0) allocator.free(self.ca_file);
         if (self.ca_path.len != 0) allocator.free(self.ca_path);
@@ -179,6 +181,13 @@ pub const Bridge = struct {
     pub fn clientId(self: Bridge) []const u8 {
         return if (self.remote_client_id.len != 0)
             self.remote_client_id
+        else
+            self.name;
+    }
+
+    pub fn localClientId(self: Bridge) []const u8 {
+        return if (self.local_client_id.len != 0)
+            self.local_client_id
         else
             self.name;
     }
@@ -248,6 +257,7 @@ const Seen = struct {
     bridge_bind_address: bool = false,
     bridge_tcp_keepalive: bool = false,
     bridge_tcp_user_timeout: bool = false,
+    local_client_id: bool = false,
     remote_client_id: bool = false,
     remote_username: bool = false,
     remote_password: bool = false,
@@ -292,6 +302,7 @@ pub const Builder = struct {
     bind_address: ?net.IpAddress = null,
     tcp_keepalive: ?socket_options.TcpKeepAlive = null,
     tcp_user_timeout_ms: ?u32 = null,
+    local_client_id: []u8 = &.{},
     remote_client_id: []u8 = &.{},
     remote_username: []u8 = &.{},
     remote_password: []u8 = &.{},
@@ -335,6 +346,7 @@ pub const Builder = struct {
             allocator.free(self.remote_password);
         }
         if (self.remote_username.len != 0) allocator.free(self.remote_username);
+        if (self.local_client_id.len != 0) allocator.free(self.local_client_id);
         if (self.remote_client_id.len != 0) allocator.free(self.remote_client_id);
         if (self.ca_file.len != 0) allocator.free(self.ca_file);
         if (self.ca_path.len != 0) allocator.free(self.ca_path);
@@ -444,6 +456,9 @@ pub const Builder = struct {
                 return error.InvalidInteger;
             }
             self.tcp_user_timeout_ms = milliseconds;
+        } else if (std.mem.eql(u8, directive, "local_clientid")) {
+            try markOnce(&self.seen.local_client_id);
+            self.local_client_id = try parseOwnedUtf8(allocator, words);
         } else if (std.mem.eql(u8, directive, "remote_clientid")) {
             try markOnce(&self.seen.remote_client_id);
             self.remote_client_id = try parseOwnedUtf8(allocator, words);
@@ -564,6 +579,22 @@ pub const Builder = struct {
         if (self.remote_password.len != 0 and self.remote_username.len == 0) {
             return error.BridgeAuthenticationIncomplete;
         }
+        if (self.local_client_id.len == 0) {
+            const prefix = "local.";
+            const local_id_len = std.math.add(
+                usize,
+                prefix.len,
+                self.clientId().len,
+            ) catch return error.InvalidDirective;
+            if (local_id_len > std.math.maxInt(u16)) {
+                return error.InvalidDirective;
+            }
+            self.local_client_id = try std.mem.concat(
+                allocator,
+                u8,
+                &.{ prefix, self.clientId() },
+            );
+        }
         if (self.seen.bridge_session_expiry_interval and
             self.protocol != .v5)
         {
@@ -667,6 +698,7 @@ pub const Builder = struct {
             .bind_address = self.bind_address,
             .tcp_keepalive = self.tcp_keepalive,
             .tcp_user_timeout_ms = self.tcp_user_timeout_ms,
+            .local_client_id = self.local_client_id,
             .remote_client_id = self.remote_client_id,
             .remote_username = self.remote_username,
             .remote_password = self.remote_password,
@@ -797,6 +829,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_bind_address") or
         std.mem.eql(u8, value, "bridge_tcp_keepalive") or
         std.mem.eql(u8, value, "bridge_tcp_user_timeout") or
+        std.mem.eql(u8, value, "local_clientid") or
         std.mem.eql(u8, value, "remote_clientid") or
         std.mem.eql(u8, value, "remote_username") or
         std.mem.eql(u8, value, "remote_password") or

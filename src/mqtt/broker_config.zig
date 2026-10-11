@@ -222,6 +222,7 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     CapathUnsupportedForWebSockets,
     DirectiveRequiresBridge,
     DuplicateBridge,
+    DuplicateBridgeLocalClientId,
     IntegerOverflow,
 } || bridge_config.Error || std.mem.Allocator.Error;
 
@@ -798,6 +799,15 @@ fn parseSources(
                 config.effectiveMaxInflightMessages(),
             );
             initialized_bridges += 1;
+            if (bridge.hasOutbound()) {
+                for (config.bridges[0 .. initialized_bridges - 1]) |previous| {
+                    if (previous.hasOutbound() and std.mem.eql(
+                        u8,
+                        previous.localClientId(),
+                        bridge.localClientId(),
+                    )) return error.DuplicateBridgeLocalClientId;
+                }
+            }
         }
     }
     return config;
@@ -1181,6 +1191,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_bind_address 127.0.0.2
         \\bridge_tcp_keepalive 30 10 5
         \\bridge_tcp_user_timeout 30000
+        \\local_clientid local-edge-bridge
         \\remote_clientid edge-bridge
         \\remote_username bridge-user
         \\remote_password bridge-secret
@@ -1267,6 +1278,10 @@ test "MQTT broker config parses owned inbound bridges" {
         upstream.tcp_user_timeout_ms,
     );
     try std.testing.expectEqualStrings("edge-bridge", upstream.clientId());
+    try std.testing.expectEqualStrings(
+        "local-edge-bridge",
+        upstream.localClientId(),
+    );
     try std.testing.expectEqualStrings("bridge-user", upstream.remote_username);
     try std.testing.expectEqualStrings("bridge-secret", upstream.remote_password);
     try std.testing.expectEqual(@as(u16, 10), upstream.restart.base_seconds);
@@ -1313,6 +1328,7 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqualStrings("::1", backup.host);
     try std.testing.expectEqual(@as(u16, 3883), backup.port);
     try std.testing.expectEqualStrings("backup", backup.clientId());
+    try std.testing.expectEqualStrings("local.backup", backup.localClientId());
     try std.testing.expect(backup.usesQoS2());
     try std.testing.expectEqualStrings("source/backup/#", backup.rules[0].filter);
 }
@@ -1332,6 +1348,10 @@ test "MQTT broker config applies inbound bridge defaults" {
     try std.testing.expectEqualStrings("localhost", bridge.host);
     try std.testing.expectEqual(@as(u16, 1883), bridge.port);
     try std.testing.expectEqualStrings("defaulted", bridge.clientId());
+    try std.testing.expectEqualStrings(
+        "local.defaulted",
+        bridge.localClientId(),
+    );
     try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, bridge.protocol);
     try std.testing.expect(!bridge.clean_session);
     try std.testing.expect(!bridge.local_clean_session);
@@ -1644,10 +1664,32 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "local_cleansession false\n"),
     );
     try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-local-id\naddress localhost\n" ++
+            "topic # out 0\nlocal_clientid one\nlocal_clientid two\n"),
+    );
+    try std.testing.expectError(
         error.InvalidBoolean,
         parse(allocator, listener ++
             "connection invalid-local-clean\naddress localhost\n" ++
             "topic # out 0\nlocal_cleansession sometimes\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateBridgeLocalClientId,
+        parse(allocator, listener ++
+            "connection first-local-id\naddress localhost\n" ++
+            "topic first/# out 0\nlocal_clientid shared-local\n" ++
+            "connection second-local-id\naddress localhost\n" ++
+            "topic second/# out 0\nlocal_clientid shared-local\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateBridgeLocalClientId,
+        parse(allocator, listener ++
+            "connection default-local-id\naddress localhost\n" ++
+            "topic first/# out 0\nremote_clientid shared\n" ++
+            "connection explicit-local-id\naddress localhost\n" ++
+            "topic second/# out 0\nlocal_clientid local.shared\n"),
     );
     try std.testing.expectError(
         error.InvalidBoolean,

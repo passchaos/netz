@@ -560,7 +560,7 @@ fn initOutbound(
     const options = mqtt.bridge.outbound.MultiOptions{
         .source_connect = .{
             .protocol = .v5,
-            .client_id = source.name,
+            .client_id = source.localClientId(),
             .clean_start = source.local_clean_session,
             .properties = local_properties,
         },
@@ -633,7 +633,7 @@ fn remoteConnectOptions(
 fn stableOutboundId(source: mqtt.broker_config.Bridge) [16]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("netz mqtt outbound consumer v1\x00");
-    hashField(&hasher, source.name);
+    hashField(&hasher, source.localClientId());
     return hasher.finalResult()[0..16].*;
 }
 
@@ -799,6 +799,24 @@ test "configured bridge identifiers bind identity and mappings" {
         u8,
         &original,
         &stableBridgeId(source),
+    ));
+
+    var outbound_name = "outbound-a".*;
+    var local_client_id = "stable-local".*;
+    const outbound = mqtt.broker_config.Bridge{
+        .name = &outbound_name,
+        .host = &host,
+        .rules = &rules,
+        .local_client_id = &local_client_id,
+    };
+    const outbound_id = stableOutboundId(outbound);
+    outbound_name[outbound_name.len - 1] = 'b';
+    try std.testing.expectEqual(outbound_id, stableOutboundId(outbound));
+    local_client_id[local_client_id.len - 1] = 'x';
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &outbound_id,
+        &stableOutboundId(outbound),
     ));
 }
 
@@ -993,6 +1011,7 @@ test "configured outbound bridge maps local clean Session policy" {
     defer broker.deinit();
     var shutdown: std.Io.Event = .unset;
     var name = "local-clean".*;
+    var local_client_id = "configured-local-clean".*;
     var host = "localhost".*;
     var filter = "out/#".*;
     var rules = [_]mqtt.broker_config.BridgeRule{.{
@@ -1005,6 +1024,7 @@ test "configured outbound bridge maps local clean Session policy" {
         .host = &host,
         .rules = &rules,
         .local_clean_session = true,
+        .local_client_id = &local_client_id,
     }};
     var bridges = try Set.init(
         allocator,
@@ -1017,6 +1037,10 @@ test "configured outbound bridge maps local clean Session policy" {
     defer bridges.deinit();
     const bridge = &bridges.values[0].outbound;
     try std.testing.expect(bridge.source.clean_session);
+    try std.testing.expectEqualStrings(
+        "configured-local-clean",
+        bridge.source.client_id,
+    );
     try std.testing.expect(bridge.source.isConnected());
     bridges.disconnectLocalSources();
     try std.testing.expect(!bridge.source.isConnected());

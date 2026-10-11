@@ -1008,7 +1008,7 @@ Current protocol coverage includes:
   primary-preferred and round-robin multi-address
   failover, retained local/remote connection-state notifications,
   automatic/one-shot lifecycles, independently configurable remote/local
-  clean Sessions, per-bridge Receive Maximum, Topic Alias,
+  Client IDs and clean Sessions, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
   Mosquitto private-bridge negotiation with same-endpoint MQTT 3.1.1 fallback,
   explicit local IPv4/IPv6 source-address binding across cleartext and TLS
