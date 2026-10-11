@@ -1038,6 +1038,9 @@ Current protocol coverage includes:
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and
+  exposes a broker-internal persistent consumer with collision-proof identity,
+  owned PUBLISH/PUBREL events, retained replay, explicit QoS completion, and
+  journal-backed restart recovery for in-process subscription sources, and
   performs version-correct property/ACK downgrades, including securely
   generated anonymous Client IDs, MQTT 5 Assigned Client Identifier reporting
   and reconnect reuse, generation-safe duplicate-ClientID takeover that

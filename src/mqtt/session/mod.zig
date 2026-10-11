@@ -2480,7 +2480,28 @@ pub const Store = struct {
             return error.InvalidAcknowledgement;
         }
         noteInflightNeedsSend(session, index, inflight);
-        inflight.retransmission = false;
+        // Selection does not change retransmission. A never-sent PUBLISH
+        // stays fresh, but a failed retry of an earlier connection's PUBLISH
+        // must keep DUP on its next local attempt.
+    }
+
+    /// Make a PUBREL selected by `drainInto` eligible for a later retry when
+    /// the caller could not transfer it to its transport.
+    pub fn retryUnsentPubRel(
+        self: *Store,
+        handle: Handle,
+        packet_id: u16,
+    ) Error!void {
+        const target = try self.getSession(handle);
+        const index = target.packet_index.get(packet_id) orelse
+            return error.InvalidAcknowledgement;
+        const inflight = &target.inflight.items[index];
+        if (inflight.packet_id == 0 or inflight.state != .await_pubcomp or
+            inflight.needs_send)
+        {
+            return error.InvalidAcknowledgement;
+        }
+        noteInflightNeedsSend(target, index, inflight);
     }
 
     pub fn handleAck(

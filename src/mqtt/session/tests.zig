@@ -1758,6 +1758,52 @@ test "session unsent publish retry remains first delivery" {
     try std.testing.expect(after_reconnect[0].publish.dup);
 }
 
+test "session unsent retry preserves DUP after reconnect" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    const first = try store.open("retry-dup", false, 60, .zero);
+    _ = try store.enqueuePublish(first.handle, "retry", "payload", .{
+        .qos = .at_least_once,
+        .now = .zero,
+    });
+    var output: [1]Transmission = undefined;
+    const selected = try store.drainInto(first.handle, .zero, 1, &output);
+    const packet_id = selected[0].publish.packet_id;
+    try store.disconnect(first.handle, null, .zero);
+    const resumed = try store.open("retry-dup", false, 60, .zero);
+    const replay = try store.drainInto(resumed.handle, .zero, 1, &output);
+    try std.testing.expect(replay[0].publish.dup);
+    try store.retryUnsentPublish(resumed.handle, packet_id);
+    const retry = try store.drainInto(resumed.handle, .zero, 1, &output);
+    try std.testing.expect(retry[0].publish.dup);
+    try std.testing.expectEqual(packet_id, retry[0].publish.packet_id);
+    try expectPublishWindow(&store, resumed.handle, 1);
+}
+
+test "session unsent PUBREL retry validates transaction phase" {
+    var store = Store.init(std.testing.allocator, .{});
+    defer store.deinit();
+    const opened = try store.open("retry-pubrel", false, 60, .zero);
+    _ = try store.enqueuePublish(opened.handle, "retry", "payload", .{
+        .qos = .exactly_once,
+        .now = .zero,
+    });
+    var output: [1]Transmission = undefined;
+    const selected = try store.drainInto(opened.handle, .zero, 1, &output);
+    const packet_id = selected[0].publish.packet_id;
+    try std.testing.expectError(error.InvalidAcknowledgement, store.retryUnsentPubRel(opened.handle, packet_id));
+    _ = try store.handleAck(opened.handle, .pubrec, packet_id, 0);
+    try std.testing.expectError(error.InvalidAcknowledgement, store.retryUnsentPubRel(opened.handle, packet_id));
+    _ = try store.drainInto(opened.handle, .zero, 1, &output);
+    try store.retryUnsentPubRel(opened.handle, packet_id);
+    try std.testing.expectError(error.InvalidAcknowledgement, store.retryUnsentPubRel(opened.handle, packet_id));
+    const retry = try store.drainInto(opened.handle, .zero, 1, &output);
+    try std.testing.expectEqual(packet_id, retry[0].pubrel.packet_id);
+    try expectPublishWindow(&store, opened.handle, 0);
+    _ = try store.handleAck(opened.handle, .pubcomp, packet_id, 0);
+    try std.testing.expectError(error.InvalidAcknowledgement, store.retryUnsentPubRel(opened.handle, packet_id));
+}
+
 test "session immediate publish preserves caller identity transactionally" {
     const allocator = std.testing.allocator;
     var store = Store.init(allocator, .{ .max_inflight_per_session = 2 });

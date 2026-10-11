@@ -142,6 +142,37 @@ after the journaled local release.
 
 ## One-way outbound broker bridge
 
+`Broker.openLocalConsumer` provides an in-process subscription source without
+connecting back through a listener. A
+stable 128-bit identity maps to a Session key that cannot be represented by an
+MQTT UTF-8 Client ID, preventing network-client takeover. The consumer's rules
+use the ordinary Router, retained replay, bounded Session queues, message
+expiry, and commit-log persistence. `pollLocalConsumer` returns deep-owned
+PUBLISH or PUBREL events outside the Broker lock; QoS 0 completion, QoS 1/2
+acknowledgement, and pre-transfer retry are explicit. Unacknowledged QoS 1 and
+QoS 2 stages resume after journal restore with their Packet Identifier and DUP
+semantics intact.
+
+Each handle has one serialized owner. Closing it preserves durable
+subscriptions and restores a selected, incomplete QoS 0 event to the queue;
+reopening issues a fresh generation, so stale handles cannot poll, acknowledge,
+retry, or close the replacement. QoS 1/2 messages continue to queue while the
+consumer is closed, and newly arriving offline QoS 0 follows the broker's
+`queue_qos0_messages` setting. This is a trusted internal API: network-client
+read ACLs do not apply, while retained-source authorization still does.
+Queue, payload-byte, inflight, expiry, and Receive Maximum limits use the
+ordinary Session implementation. A failed event allocation returns the
+transmission to that Session; every returned event crosses the commit-log
+boundary, including a PUBREL following a failed PUBREC-state write. Retried
+PUBLISH events preserve the original DUP flag.
+
+`src/mqtt/broker/local_consumer_tests.zig` covers all QoS levels, retained
+replay, stale handles, close/reopen, flow control, negative PUBREC, offline
+authorization, registration and poll allocation failures, failed journal
+writes, and restart from each QoS 2 phase. This API supplies the source-side
+building block for configured outbound bridges; the production configuration
+runner still supports inbound rules only.
+
 `mqtt.bridge.OutboundBridge` treats both ends as ordinary MQTT peers: it owns a
 reconnecting source subscriber and a reconnecting target publisher. Rules use
 Mosquitto's mapping order: subscribe to `local_prefix + filter`, strip the

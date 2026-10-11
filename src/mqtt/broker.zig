@@ -15,6 +15,7 @@ const runtime = @import("runtime.zig");
 const listener_namespace = @import("listener_namespace.zig");
 const client_id_mod = @import("broker/client_id.zig");
 const load_metrics = @import("broker/load_metrics.zig");
+const local_consumer_mod = @import("broker/local_consumer.zig");
 const publish_counters = @import("broker/publish_counters.zig");
 const persistence_mod = @import("persistence/mod.zig");
 const commit_log_mod = persistence_mod.commit_log;
@@ -67,7 +68,30 @@ pub const Error = runtime.Error || router_mod.Error ||
     ClientNotRegistered,
     ClientOffline,
     CommitLogAlreadyEnabled,
+    LocalConsumerAlreadyOpen,
+    LocalConsumerClosed,
+    LocalConsumerIdentityMismatch,
+    OwnedPropertyLimitExceeded,
 };
+
+const LocalConsumerContext = struct {
+    pub const BrokerType = Broker;
+    pub const ErrorType = Error;
+    pub const pruneExpiredSessionRoutesLocked = Broker.pruneExpiredSessionRoutesLocked;
+    pub const recordPersistentChangeLocked = Broker.recordPersistentChangeLocked;
+    pub const finishPartialPersistentChange = Broker.finishPartialPersistentChange;
+    pub const retainedSourceAuthorized = Broker.retainedSourceAuthorized;
+    pub const enqueueSessionDeliveryLocked = Broker.enqueueSessionDeliveryLocked;
+    pub const finalizePersistentChange = Broker.finalizePersistentChange;
+    pub const prepareRetainedDeliveryProperties = prepareLocalConsumerProperties;
+};
+
+const prepareLocalConsumerProperties = prepareRetainedDeliveryProperties;
+
+pub const LocalConsumer = local_consumer_mod.Handle;
+pub const LocalConsumerOptions = local_consumer_mod.Options;
+pub const LocalConsumerEvent = local_consumer_mod.Event;
+pub const LocalConsumerAckAction = local_consumer_mod.AckAction;
 
 pub const PendingQoS2Store = qos2_mod.Store;
 
@@ -1955,6 +1979,7 @@ pub const Broker = struct {
         u64,
         router_mod.SubscriberId,
     ) = .empty,
+    local_consumer_routes: std.AutoHashMapUnmanaged(u64, session_mod.Handle) = .empty,
     will_publishers: will_mod.PublisherMap = .empty,
     slots: []ClientSlot,
     session_delivery_writers: session_writer.Pool,
@@ -2193,6 +2218,7 @@ pub const Broker = struct {
             @constCast(self.options.problem_information),
         );
         self.session_owners.deinit(self.allocator);
+        self.local_consumer_routes.deinit(self.allocator);
         self.will_publishers.deinit(self.allocator);
         self.wills.deinit();
         self.sessions.deinit();
@@ -2284,6 +2310,14 @@ pub const Broker = struct {
         state_locked = false;
         try self.finalizePersistentChange(true, persistent_changed);
     }
+
+    const local_consumer_api = local_consumer_mod.Operations(LocalConsumerContext);
+    pub const openLocalConsumer = local_consumer_api.openLocalConsumer;
+    pub const closeLocalConsumer = local_consumer_api.closeLocalConsumer;
+    pub const pollLocalConsumer = local_consumer_api.pollLocalConsumer;
+    pub const acknowledgeLocalConsumer = local_consumer_api.acknowledgeLocalConsumer;
+    pub const completeLocalConsumerQoS0 = local_consumer_api.completeLocalConsumerQoS0;
+    pub const retryLocalConsumerEvent = local_consumer_api.retryLocalConsumerEvent;
 
     /// Publish a trusted, transport-independent Application Message.
     ///
@@ -3226,6 +3260,7 @@ pub const Broker = struct {
             self.bridge_qos2.stats().entries != 0 or
             self.bridge_qos2.stats().bridges != 0 or
             self.session_owners.count() != 0 or
+            self.local_consumer_routes.count() != 0 or
             self.will_publishers.count() != 0)
         {
             return error.SnapshotBusy;
@@ -5816,6 +5851,13 @@ pub const Broker = struct {
                 )
             else
                 false;
+            // Internal consumers remain trusted while closed, so durable
+            // bridge queues do not acquire network-client ACL semantics.
+            const internal_consumer = local_consumer_mod.isInternalClientId(
+                try self.sessions.clientId(handle),
+            );
+            const internal_online = internal_consumer and
+                self.local_consumer_routes.contains(route.route_id);
             // Live Sessions use the current destination listener policy. An
             // offline Session has no listener until it reconnects, so retain
             // its granted QoS and cap it immediately before a later write.
@@ -5829,7 +5871,7 @@ pub const Broker = struct {
                 destination.?.accessControl()
             else
                 null);
-            if (authorizers.configured() and
+            if (!internal_consumer and authorizers.configured() and
                 !authorizers.authorize(.{
                     .client_id = try self.sessions.clientId(handle),
                     .username = if (online) destination.?.username() else null,
@@ -5849,7 +5891,7 @@ pub const Broker = struct {
             }
             has_matching_subscriber = true;
             if ((route.qos == .at_most_once and
-                (!self.options.queue_qos0_messages or online)) or
+                (!internal_online and (!self.options.queue_qos0_messages or online))) or
                 (online and !destination.?.state.session_persistent))
             {
                 // Mosquitto always delivers QoS 0 directly to an online
@@ -9390,6 +9432,7 @@ test {
     _ = load_metrics;
     _ = @import("broker_tests.zig");
     _ = @import("broker/persistence_tests.zig");
+    _ = @import("broker/local_consumer_tests.zig");
 }
 
 test "broker retained expiry scan persists physical removal" {
