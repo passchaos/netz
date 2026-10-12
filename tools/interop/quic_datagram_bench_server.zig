@@ -33,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             .max_datagram_size = benchmark.mtu,
             .enable_gso_send = config.window > 1,
-            .enable_gro_receive = false,
+            .enable_gro_receive = config.window > 1,
         },
     );
     defer endpoint.deinit();

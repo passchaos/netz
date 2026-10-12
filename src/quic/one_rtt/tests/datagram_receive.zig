@@ -478,6 +478,136 @@ test "QUIC caller-buffer DATAGRAM batch accepts GRO segments" {
     }
 }
 
+test "QUIC connection single receive preserves mixed GRO suffix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver_traffic: quic.runtime.SocketTrafficCounters = .{};
+    var sender_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 1200 },
+    );
+    defer sender_endpoint.deinit();
+    var receiver_endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 1200,
+            .enable_gro_receive = true,
+            .socket_traffic_counters = &receiver_traffic,
+        },
+    );
+    defer receiver_endpoint.deinit();
+    if (!sender_endpoint.gsoSendEnabled() or
+        !receiver_endpoint.groReceiveEnabled())
+    {
+        return error.SkipZigTest;
+    }
+
+    const sender_cid = [_]u8{ 0xa1, 0xa2, 0xa3, 0xa4 };
+    const receiver_cid = [_]u8{ 0xa5, 0xa6, 0xa7, 0xa8 };
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa0} ** quic.protection.secret_len,
+    );
+    var sender = try one_rtt.Connection.init(&sender_endpoint, .{
+        .peer = receiver_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &sender_cid,
+        .peer_connection_id = &receiver_cid,
+        .peer_max_datagram_frame_size = 1200,
+        .enable_pacing = false,
+    });
+    defer sender.deinit();
+    var receiver = try one_rtt.Connection.init(&receiver_endpoint, .{
+        .peer = sender_endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = &receiver_cid,
+        .peer_connection_id = &sender_cid,
+        .local_endpoint = .server,
+        .local_max_datagram_frame_size = 1200,
+        .max_datagram_queue_items = 2,
+        .enable_pacing = false,
+    });
+    defer receiver.deinit();
+
+    // STREAM has one more byte of framing than DATAGRAM. These payload sizes
+    // make all three protected packets equal-sized so sendMany uses one GSO
+    // super-packet and the receiver observes one three-segment GRO batch.
+    const stream_packet = [_]quic.Frame{.{ .stream = .{
+        .stream_id = 0,
+        .data = "str",
+        .fin = true,
+    } }};
+    const first_datagram = [_]quic.Frame{.{ .datagram = .{
+        .data = "aaaa",
+        .length_present = true,
+    } }};
+    const second_datagram = [_]quic.Frame{.{ .datagram = .{
+        .data = "bbbb",
+        .length_present = true,
+    } }};
+    try std.testing.expectEqual(
+        try stream_packet[0].wireLen(),
+        try first_datagram[0].wireLen(),
+    );
+    const packets = [_][]const quic.Frame{
+        &stream_packet,
+        &first_datagram,
+        &second_datagram,
+    };
+    try sender.sendMany(&packets);
+
+    var stream_storage: [8]u8 = undefined;
+    const stream = try receiver.receiveStreamWithTimeout(
+        &stream_storage,
+        .fromSeconds(1),
+    );
+    try std.testing.expect(stream == .data);
+    try std.testing.expectEqual(@as(u62, 0), stream.data.stream_id);
+    try std.testing.expectEqualStrings(
+        "str",
+        stream_storage[0..stream.data.bytes],
+    );
+    try std.testing.expect(stream.data.fin);
+    try std.testing.expectEqual(
+        @as(u64, packets.len),
+        receiver_traffic.stats().received_datagrams,
+    );
+
+    var datagram_storage: [2][8]u8 = undefined;
+    var outputs: [2][]u8 = undefined;
+    for (&datagram_storage, &outputs) |*storage, *output| output.* = storage;
+    var received_count: usize = 0;
+    try receiver.receiveDatagramsWithTimeout(
+        &outputs,
+        &received_count,
+        .fromSeconds(1),
+    );
+    try std.testing.expectEqual(outputs.len, received_count);
+    try std.testing.expectEqualStrings("aaaa", outputs[0]);
+    try std.testing.expectEqualStrings("bbbb", outputs[1]);
+
+    const ping = [_]quic.Frame{.{ .ping = {} }};
+    const ping_packets = [_][]const quic.Frame{ &ping, &ping };
+    try sender.sendMany(&ping_packets);
+    try receiver.servicePacket();
+    try std.testing.expectEqual(
+        @as(u64, packets.len + ping_packets.len),
+        receiver_traffic.stats().received_datagrams,
+    );
+    try receiver.servicePacket();
+    try std.testing.expectEqual(
+        @as(u64, packets.len + ping_packets.len),
+        receiver.stats().packets_received,
+    );
+}
+
 test "QUIC 1-RTT caller-buffer DATAGRAM waits for whole-packet validation" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

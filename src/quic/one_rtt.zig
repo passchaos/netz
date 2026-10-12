@@ -11351,7 +11351,7 @@ pub const Connection = struct {
             }
         }
         while (true) {
-            const datagram = try self.endpoint.receiveBytesInto(
+            const datagram = try self.receiveBytesIntoConnectionStorage(
                 self.scratch.receive_packet.allocatedSlice(),
             );
             if (isDiscardedLongHeaderPacket(datagram.bytes)) continue;
@@ -11809,6 +11809,49 @@ pub const Connection = struct {
             };
     }
 
+    /// Receive one UDP datagram into connection-owned scratch while preserving
+    /// any suffix segments produced by UDP GRO. Endpoint caller-buffer APIs
+    /// intentionally reject GRO because they cannot retain those suffixes;
+    /// the owning endpoint path already splits and queues them safely.
+    fn receiveBytesIntoConnectionStorage(
+        self: *Connection,
+        storage: []u8,
+    ) Error!quic.runtime.ReceivedBytesView {
+        if (!self.endpoint.groReceiveEnabled()) {
+            return self.endpoint.receiveBytesInto(storage);
+        }
+        var datagram = try self.endpoint.receiveBytes();
+        defer datagram.deinit(self.endpoint.allocator);
+        return copyOwnedBytesIntoStorage(datagram, storage);
+    }
+
+    fn receiveBytesIntoConnectionStorageTimeout(
+        self: *Connection,
+        storage: []u8,
+        timeout: std.Io.Timeout,
+    ) quic.runtime.ReceiveTimeoutError!quic.runtime.ReceivedBytesView {
+        if (!self.endpoint.groReceiveEnabled()) {
+            return self.endpoint.receiveBytesIntoTimeout(storage, timeout);
+        }
+        var datagram = try self.endpoint.receiveBytesTimeout(timeout);
+        defer datagram.deinit(self.endpoint.allocator);
+        return copyOwnedBytesIntoStorage(datagram, storage);
+    }
+
+    fn copyOwnedBytesIntoStorage(
+        datagram: quic.runtime.OwnedBytes,
+        storage: []u8,
+    ) error{BufferTooShort}!quic.runtime.ReceivedBytesView {
+        if (datagram.bytes.len > storage.len) return error.BufferTooShort;
+        @memcpy(storage[0..datagram.bytes.len], datagram.bytes);
+        return .{
+            .from = datagram.from,
+            .received_on = datagram.received_on,
+            .bytes = storage[0..datagram.bytes.len],
+            .ecn = datagram.ecn,
+        };
+    }
+
     fn receiveBytesIntoServicingTimersUntil(
         self: *Connection,
         caller_deadline: ?std.Io.Clock.Timestamp,
@@ -11850,9 +11893,9 @@ pub const Connection = struct {
                 caller_deadline,
             );
             const datagram = if (receive_timeout == .none)
-                try self.endpoint.receiveBytesInto(storage)
+                try self.receiveBytesIntoConnectionStorage(storage)
             else
-                self.endpoint.receiveBytesIntoTimeout(
+                self.receiveBytesIntoConnectionStorageTimeout(
                     storage,
                     receive_timeout,
                 ) catch |err| switch (err) {
@@ -11886,7 +11929,7 @@ pub const Connection = struct {
                         if (caller_deadline != null) {
                             return error.ConcurrencyUnavailable;
                         }
-                        const fallback = try self.endpoint.receiveBytesInto(
+                        const fallback = try self.receiveBytesIntoConnectionStorage(
                             storage,
                         );
                         if (isDiscardedLongHeaderPacket(fallback.bytes) or
@@ -11921,7 +11964,7 @@ pub const Connection = struct {
             .{ .kind = .loss_time, .deadline_ns = deadline_ns },
             caller_deadline,
         );
-        const datagram = self.endpoint.receiveBytesIntoTimeout(
+        const datagram = self.receiveBytesIntoConnectionStorageTimeout(
             storage,
             timeout,
         ) catch |err| switch (err) {
@@ -11936,7 +11979,7 @@ pub const Connection = struct {
                 if (caller_deadline != null) {
                     return error.ConcurrencyUnavailable;
                 }
-                return try self.endpoint.receiveBytesInto(storage);
+                return try self.receiveBytesIntoConnectionStorage(storage);
             },
             else => |other| return @errorCast(other),
         };
