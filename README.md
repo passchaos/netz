@@ -239,7 +239,9 @@ Current protocol coverage includes:
   client caches, rotating server keyrings, unique per-connection nonces, and
   authenticated invalid-ticket fallback to a full handshake; MQTT reconnect
   clients retain the newest ticket, renew it across native TLS or WSS
-  connections, and discard it locally when its advertised lifetime expires,
+  connections, and discard it locally when its advertised lifetime expires;
+  a bidirectional OpenSSL process gate verifies ticket resumption with netz in
+  both the TLS client and server roles,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation

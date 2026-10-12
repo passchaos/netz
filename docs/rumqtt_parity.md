@@ -2429,7 +2429,10 @@ Network Connection and supplies it only through ticket-aware native TLS/WSS
 connectors. A renewed ticket replaces and securely destroys the prior cache;
 an expired cache is destroyed before dialing, while an unauthentic ticket is
 replaced after the server's full-handshake fallback, so neither stale form can
-poison later reconnect attempts.
+poison later reconnect attempts. The shared stream's bidirectional
+`interop-tls12-ticket-openssl` process gate independently proves both netz
+client and netz server resumption against OpenSSL rather than relying only on
+self-interoperability.
 
 `mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the

@@ -2166,6 +2166,40 @@ pub fn build(b: *std.Build) void {
     http1_ocsp_interop_step.dependOn(&http1_ocsp_interop.step);
     test_step.dependOn(&http1_ocsp_interop.step);
 
+    const tls12_ticket_server = b.addExecutable(.{
+        .name = "netz-tls12-ticket-server",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/tls12_ticket_server.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const tls12_ticket_client = b.addExecutable(.{
+        .name = "netz-tls12-ticket-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/tls12_ticket_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const tls12_ticket_openssl = b.addSystemCommand(
+        &.{"tools/interop/tls12_ticket_openssl.sh"},
+    );
+    tls12_ticket_openssl.addArtifactArg(tls12_ticket_server);
+    tls12_ticket_openssl.addArtifactArg(tls12_ticket_client);
+    const tls12_ticket_openssl_step = b.step(
+        "interop-tls12-ticket-openssl",
+        "Verify bidirectional TLS 1.2 RFC 5077 resumption with OpenSSL",
+    );
+    tls12_ticket_openssl_step.dependOn(&tls12_ticket_openssl.step);
+    test_step.dependOn(&tls12_ticket_openssl.step);
+
     const quic_peer_client = b.addExecutable(.{
         .name = "netz-quic-peer-client",
         .root_module = b.createModule(.{

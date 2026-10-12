@@ -1025,6 +1025,10 @@ Master Secret and secure-renegotiation signaling, and is covered by HTTP/1 and
 HTTP/2 application round trips; QUIC/HTTP/3 remains TLS 1.3-only by protocol.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets, explicit
 resumption status, and caller-owned ticket transfer for HTTP connection pools.
+`zig build interop-tls12-ticket-openssl -Doptimize=ReleaseSafe` verifies both
+directions at a process boundary: OpenSSL resumes a ticket issued by the netz
+server, and the netz HTTP/1 client resumes a ticket issued by `openssl
+s_server` before completing another request.
 
 | Area | netz | hyper |
 | --- | --- | --- |
