@@ -42,7 +42,9 @@ type benchConfig struct {
 	bodyBytes     uint64
 	chunkBytes    uint64
 	streamWindow  uint64
-	timeout       time.Duration
+	// Metadata for the paired netz endpoint; quic-go pacing is unchanged.
+	netzMaxPacingRateBytesPerSecond uint64
+	timeout                         time.Duration
 }
 
 type memorySnapshot struct {
@@ -128,6 +130,7 @@ func main() {
 	bodyBytes := flag.Uint64("body-bytes", 4*1024*1024, "logical body bytes per request")
 	chunkBytes := flag.Uint64("chunk-bytes", 16*1024, "application read/write chunk bytes")
 	streamWindow := flag.Uint64("stream-window", 1024*1024, "fixed QUIC stream receive window")
+	netzMaxPacingRateBytesPerSecond := flag.Uint64("netz-max-pacing-rate-bytes-per-second", 0, "paired netz endpoint pacing ceiling in bytes per second (0 = unlimited)")
 	timeoutMS := flag.Uint("timeout-ms", 30000, "per-operation timeout milliseconds")
 	stats := flag.Bool("stats", false, "report Go runtime heap telemetry")
 	capture := flag.Bool("capture", false, "require capture-safe UDP packetization")
@@ -137,7 +140,9 @@ func main() {
 		mode: *mode, version: 1, capture: *capture, socketTraffic: *socketTraffic,
 		streams: *streams, warmup: *warmup, iterations: *iterations,
 		bodyBytes: *bodyBytes, chunkBytes: *chunkBytes,
-		streamWindow: *streamWindow, timeout: time.Duration(*timeoutMS) * time.Millisecond,
+		streamWindow:                    *streamWindow,
+		netzMaxPacingRateBytesPerSecond: *netzMaxPacingRateBytesPerSecond,
+		timeout:                         time.Duration(*timeoutMS) * time.Millisecond,
 	}
 	if *v2Only {
 		config.version = 2
@@ -1012,7 +1017,7 @@ func printConfig(implementation, rolePair, endpointRole string, config benchConf
 	if config.capture || config.socketTraffic {
 		gso = "false"
 	}
-	fmt.Printf("record=config implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=%s timing_usable=%t body_deadline_scope=sample warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d timeout_ms=%d steady_state_mtu=1280 quic_version=%d cipher=negotiated-unexposed cert_verify=true gso=%s gro=implementation-default pacing=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), benchmarkScope(config), timingUsable(config), config.warmup, config.iterations, config.streams, config.bodyBytes, config.chunkBytes, config.effectiveChunk(), config.streamWindow, config.connectionWindow(), config.timeout/time.Millisecond, config.version, gso)
+	fmt.Printf("record=config implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=%s timing_usable=%t body_deadline_scope=sample warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_requested=%d application_chunk_effective=%d stream_window=%d connection_window=%d timeout_ms=%d steady_state_mtu=1280 quic_version=%d cipher=negotiated-unexposed cert_verify=true gso=%s gro=implementation-default pacing=true netz_max_pacing_rate_bytes_per_second=%d\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), benchmarkScope(config), timingUsable(config), config.warmup, config.iterations, config.streams, config.bodyBytes, config.chunkBytes, config.effectiveChunk(), config.streamWindow, config.connectionWindow(), config.timeout/time.Millisecond, config.version, gso, config.netzMaxPacingRateBytesPerSecond)
 }
 func printSample(implementation, rolePair, endpointRole string, config benchConfig, sample uint, elapsed time.Duration, checksum uint64) {
 	mib := float64(config.totalBytes()) * 1e9 / float64(elapsed.Nanoseconds()) / (1024 * 1024)
@@ -1030,11 +1035,11 @@ func printServerComplete(implementation, rolePair string, config benchConfig, sa
 }
 
 func printSocketTraffic(implementation, rolePair, endpointRole string, config benchConfig, traffic sockettraffic.Stats) {
-	fmt.Printf("record=socket-traffic implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_effective=%d stream_window=%d quic_version=%d traffic_scope=all-rounds socket_boundary=userspace-udp-payload benchmark_scope=socket-traffic-same-application-shape udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, config.effectiveChunk(), config.streamWindow, config.version, traffic.SentDatagrams, traffic.SentBytes, traffic.ReceivedDatagrams, traffic.ReceivedBytes)
+	fmt.Printf("record=socket-traffic implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_effective=%d stream_window=%d quic_version=%d netz_max_pacing_rate_bytes_per_second=%d traffic_scope=all-rounds socket_boundary=userspace-udp-payload benchmark_scope=socket-traffic-same-application-shape udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, config.effectiveChunk(), config.streamWindow, config.version, config.netzMaxPacingRateBytesPerSecond, traffic.SentDatagrams, traffic.SentBytes, traffic.ReceivedDatagrams, traffic.ReceivedBytes)
 }
 
 func printPacketDrops(rolePair, endpointRole string, config benchConfig, drops packetDropStats) {
-	fmt.Printf("record=packet-drop-stats implementation=quic-go protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s warmup=%d iterations=%d streams=%d body_bytes=%d traffic_scope=all-rounds benchmark_scope=socket-traffic-same-application-shape dropped_total=%d dropped_dos_prevention=%d dropped_duplicate=%d dropped_payload_decrypt=%d dropped_other=%d complete=true\n", config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, drops.total, drops.dosPrevention, drops.duplicate, drops.payloadDecrypt, drops.other)
+	fmt.Printf("record=packet-drop-stats implementation=quic-go protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s warmup=%d iterations=%d streams=%d body_bytes=%d netz_max_pacing_rate_bytes_per_second=%d traffic_scope=all-rounds benchmark_scope=socket-traffic-same-application-shape dropped_total=%d dropped_dos_prevention=%d dropped_duplicate=%d dropped_payload_decrypt=%d dropped_other=%d complete=true\n", config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, config.netzMaxPacingRateBytesPerSecond, drops.total, drops.dosPrevention, drops.duplicate, drops.payloadDecrypt, drops.other)
 }
 
 func benchmarkScope(config benchConfig) string {

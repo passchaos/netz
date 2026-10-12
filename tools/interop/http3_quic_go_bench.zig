@@ -30,6 +30,8 @@ pub const Config = struct {
     chunk_bytes: u32 = 16 * 1024,
     stream_window: u64 = 1024 * 1024,
     timeout_ms: u32 = 30_000,
+    /// Applied only to netz endpoints. Null preserves the production default.
+    max_pacing_rate_bytes_per_second: ?u64 = null,
     capture: bool = false,
     socket_traffic: bool = false,
 
@@ -44,6 +46,7 @@ pub const Config = struct {
         config.chunk_bytes = 16 * 1024;
         config.stream_window = 1024 * 1024;
         config.timeout_ms = 30_000;
+        config.max_pacing_rate_bytes_per_second = null;
         config.capture = false;
         config.socket_traffic = false;
         for (args) |arg| {
@@ -66,6 +69,15 @@ pub const Config = struct {
                 config.stream_window = try parsePositive(u64, value);
             } else if (option(arg, "--timeout-ms=")) |value| {
                 config.timeout_ms = try parsePositive(u32, value);
+            } else if (option(
+                arg,
+                "--netz-max-pacing-rate-bytes-per-second=",
+            )) |value| {
+                if (config.max_pacing_rate_bytes_per_second != null) {
+                    return error.InvalidArgument;
+                }
+                config.max_pacing_rate_bytes_per_second =
+                    try parsePositive(u64, value);
             } else if (std.mem.eql(u8, arg, "--capture") and
                 !config.capture)
             {
@@ -161,6 +173,7 @@ pub const Config = struct {
             .stream_receive_window = self.stream_window,
             .max_stream_receive_window = self.stream_window,
             .max_datagram_size = mtu,
+            .max_pacing_rate_bytes_per_second = self.max_pacing_rate_bytes_per_second,
         };
     }
 
@@ -355,7 +368,8 @@ pub fn printConfig(
             "stream_window={d} connection_window={d} timeout_ms={d} " ++
             "steady_state_mtu=1280 " ++
             "quic_version={d} cipher=negotiated-unexposed cert_verify=true " ++
-            "gso=false gro=false pacing=true\n",
+            "gso=false gro=false pacing=true " ++
+            "netz_max_pacing_rate_bytes_per_second={d}\n",
         .{
             implementation,
             config.mode.name(),
@@ -376,6 +390,7 @@ pub fn printConfig(
             try config.connectionWindow(),
             config.timeout_ms,
             if (config.version == .version_2) @as(u8, 2) else 1,
+            config.max_pacing_rate_bytes_per_second orelse 0,
         },
     );
 }
@@ -445,6 +460,7 @@ pub fn printSocketTraffic(
             "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
             "warmup={d} iterations={d} streams={d} body_bytes={d} " ++
             "application_chunk_effective={d} stream_window={d} quic_version={d} " ++
+            "netz_max_pacing_rate_bytes_per_second={d} " ++
             "traffic_scope=all-rounds socket_boundary=userspace-udp-payload " ++
             "benchmark_scope=socket-traffic-same-application-shape " ++
             "udp_sent_datagrams={d} udp_sent_payload_bytes={d} " ++
@@ -465,6 +481,7 @@ pub fn printSocketTraffic(
             config.effectiveChunk(),
             config.stream_window,
             if (config.version == .version_2) @as(u8, 2) else 1,
+            config.max_pacing_rate_bytes_per_second orelse 0,
             traffic.sent_datagrams,
             traffic.sent_bytes,
             traffic.received_datagrams,
@@ -505,7 +522,8 @@ pub fn printTransportStats(
         "record=transport-stats implementation=netz protocol=http3 mode={s} " ++
             "role_pair={s} endpoint_role={s} sender_role={s} " ++
             "client_io={s} server_io={s} warmup={d} iterations={d} streams={d} " ++
-            "body_bytes={d} traffic_scope=all-rounds " ++
+            "body_bytes={d} netz_max_pacing_rate_bytes_per_second={d} " ++
+            "traffic_scope=all-rounds " ++
             "benchmark_scope=socket-traffic-same-application-shape packets_sent={d} " ++
             "packets_received={d} packets_lost={d} bytes_sent={d} " ++
             "bytes_received={d} authentication_failures={d} " ++
@@ -521,6 +539,7 @@ pub fn printTransportStats(
             config.iterations,
             config.streams,
             config.body_bytes,
+            config.max_pacing_rate_bytes_per_second orelse 0,
             stats.packets_sent,
             stats.packets_received,
             stats.packets_lost,
@@ -552,6 +571,10 @@ test "HTTP/3 external benchmark multi-stream checksum is index-aware" {
 test "HTTP/3 external benchmark version selects peer compatibility" {
     const v1 = try Config.parse(&.{ "--mode=upload", "--streams=4" });
     try std.testing.expect(!v1.capture);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        v1.max_pacing_rate_bytes_per_second,
+    );
     try std.testing.expectEqual(netz.quic.Version.version_1, v1.version);
     try std.testing.expectEqual(
         netz.quic.protection.KeyPhaseState.UpdateProfile.rfc,
@@ -571,6 +594,36 @@ test "HTTP/3 external benchmark version selects peer compatibility" {
     try std.testing.expectError(
         error.InvalidArgument,
         Config.parse(&.{ "--mode=upload", "--version=2", "--version=2" }),
+    );
+}
+
+test "HTTP/3 external benchmark propagates netz pacing rate limit" {
+    const config = try Config.parse(&.{
+        "--mode=download",
+        "--netz-max-pacing-rate-bytes-per-second=12500000",
+    });
+    try std.testing.expectEqual(
+        @as(?u64, 12_500_000),
+        config.max_pacing_rate_bytes_per_second,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 12_500_000),
+        (try config.oneRttConfig()).max_pacing_rate_bytes_per_second,
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{
+            "--mode=download",
+            "--netz-max-pacing-rate-bytes-per-second=0",
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{
+            "--mode=download",
+            "--netz-max-pacing-rate-bytes-per-second=1",
+            "--netz-max-pacing-rate-bytes-per-second=2",
+        }),
     );
 }
 

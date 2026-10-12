@@ -52,6 +52,7 @@ def verify(
     quic_version: int,
     client_log: Path,
     server_log: Path,
+    netz_max_pacing_rate_bytes_per_second: int = 0,
 ) -> None:
     endpoints = {
         "netz-client+quic-go-server": {"client": "netz", "server": "quic-go"},
@@ -64,6 +65,8 @@ def verify(
         raise ValueError("socket-traffic workload values must be positive")
     if quic_version not in (1, 2):
         raise ValueError("invalid QUIC version")
+    if not 0 <= netz_max_pacing_rate_bytes_per_second <= (1 << 64) - 1:
+        raise ValueError("invalid netz maximum pacing rate")
 
     endpoint_io = {
         role: "zio-std-io" if implementation == "netz" else "quic-go-netpoll"
@@ -99,6 +102,9 @@ def verify(
         "application_chunk_effective": str(min(chunk_bytes, 1152)),
         "stream_window": str(stream_window),
         "quic_version": str(quic_version),
+        "netz_max_pacing_rate_bytes_per_second": str(
+            netz_max_pacing_rate_bytes_per_second
+        ),
         "traffic_scope": "all-rounds",
         "socket_boundary": "userspace-udp-payload",
         "benchmark_scope": "socket-traffic-same-application-shape",
@@ -147,6 +153,9 @@ def verify(
             "iterations": str(iterations),
             "streams": str(streams),
             "body_bytes": str(body_bytes),
+            "netz_max_pacing_rate_bytes_per_second": str(
+                netz_max_pacing_rate_bytes_per_second
+            ),
             "traffic_scope": "all-rounds",
             "benchmark_scope": "socket-traffic-same-application-shape",
             "complete": "true",
@@ -190,6 +199,9 @@ def verify(
             "iterations": str(iterations),
             "streams": str(streams),
             "body_bytes": str(body_bytes),
+            "netz_max_pacing_rate_bytes_per_second": str(
+                netz_max_pacing_rate_bytes_per_second
+            ),
             "traffic_scope": "all-rounds",
             "benchmark_scope": "socket-traffic-same-application-shape",
             "complete": "true",
@@ -263,6 +275,8 @@ def verify(
                 f"quic_go_dropped_duplicate={drops['dropped_duplicate']}",
                 f"quic_go_dropped_payload_decrypt={drops['dropped_payload_decrypt']}",
                 f"quic_go_dropped_other={drops['dropped_other']}",
+                "netz_max_pacing_rate_bytes_per_second="
+                f"{netz_max_pacing_rate_bytes_per_second}",
                 f"client_to_server_observation_delta_datagrams={c2s_datagram_delta}",
                 f"client_to_server_observation_delta_bytes={c2s_byte_delta}",
                 f"server_to_client_observation_delta_datagrams={s2c_datagram_delta}",
@@ -286,6 +300,11 @@ def main() -> None:
     parser.add_argument("--chunk-bytes", type=int, required=True)
     parser.add_argument("--stream-window", type=int, required=True)
     parser.add_argument("--quic-version", type=int, required=True)
+    parser.add_argument(
+        "--netz-max-pacing-rate-bytes-per-second",
+        type=int,
+        default=0,
+    )
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     args = parser.parse_args()
@@ -301,6 +320,9 @@ def main() -> None:
         quic_version=args.quic_version,
         client_log=args.client_log,
         server_log=args.server_log,
+        netz_max_pacing_rate_bytes_per_second=(
+            args.netz_max_pacing_rate_bytes_per_second
+        ),
     )
 
 

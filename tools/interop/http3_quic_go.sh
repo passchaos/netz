@@ -156,6 +156,8 @@ PY
   chunk_bytes=16384
   stream_window=1048576
   timeout_ms=30000
+  netz_max_pacing_rate_bytes_per_second=0
+  netz_max_pacing_rate_set=false
   for arg in "$@"; do
     if [[ $arg == --mode=* ]]; then
       requested_modes=("${arg#--mode=}")
@@ -173,6 +175,18 @@ PY
         --chunk-bytes=*) chunk_bytes=${arg#--chunk-bytes=} ;;
         --stream-window=*) stream_window=${arg#--stream-window=} ;;
         --timeout-ms=*) timeout_ms=${arg#--timeout-ms=} ;;
+        --netz-max-pacing-rate-bytes-per-second=*)
+          if [[ $netz_max_pacing_rate_set == true ]]; then
+            echo 'duplicate --netz-max-pacing-rate-bytes-per-second option' >&2
+            exit 2
+          fi
+          netz_max_pacing_rate_bytes_per_second=${arg#--netz-max-pacing-rate-bytes-per-second=}
+          if [[ ! $netz_max_pacing_rate_bytes_per_second =~ ^[1-9][0-9]*$ ]]; then
+            echo '--netz-max-pacing-rate-bytes-per-second must be positive' >&2
+            exit 2
+          fi
+          netz_max_pacing_rate_set=true
+          ;;
       esac
     fi
   done
@@ -250,6 +264,7 @@ PY
       --warmup="$warmup" --iterations="$iterations" \
       --streams="$streams" --body-bytes="$body_bytes" \
       --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
+      --netz-max-pacing-rate-bytes-per-second="$netz_max_pacing_rate_bytes_per_second" \
       --quic-version="$version" --client-log="$2" --server-log="$3"
   }
 
@@ -324,6 +339,7 @@ PY
       --iterations="$iterations" --streams="$streams" \
       --body-bytes="$body_bytes" --quic-version="$version" \
       --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
+      --netz-max-pacing-rate-bytes-per-second="$netz_max_pacing_rate_bytes_per_second" \
       --timeout-ms="$timeout_ms" \
       --warmup="$warmup" --chunk-bytes="$chunk_bytes" \
       --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
@@ -415,6 +431,7 @@ PY
         --streams="$streams" --body-bytes="$body_bytes" \
         --quic-version="$version" --warmup="$warmup" \
         --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
+        --netz-max-pacing-rate-bytes-per-second="$netz_max_pacing_rate_bytes_per_second" \
         --timeout-ms="$timeout_ms" --client-log="$pair_dir/netz-client.log" \
         --server-log="$pair_dir/netz-server.log"
       check_socket_traffic netz-client+netz-server \
@@ -472,6 +489,7 @@ PY
       --streams="$streams" --body-bytes="$body_bytes" --quic-version="$version" \
       --warmup="$warmup" --chunk-bytes="$chunk_bytes" \
       --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
+      --netz-max-pacing-rate-bytes-per-second="$netz_max_pacing_rate_bytes_per_second" \
       --client-log="$pair_dir/netz-client.log" \
       --server-log="$pair_dir/quic-go-server.log"
     check_socket_traffic netz-client+quic-go-server \
@@ -525,6 +543,7 @@ PY
       --streams="$streams" --body-bytes="$body_bytes" --quic-version="$version" \
       --warmup="$warmup" --chunk-bytes="$chunk_bytes" \
       --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
+      --netz-max-pacing-rate-bytes-per-second="$netz_max_pacing_rate_bytes_per_second" \
       --client-log="$pair_dir/quic-go-client.log" \
       --server-log="$pair_dir/netz-server.log"
     check_socket_traffic quic-go-client+netz-server \

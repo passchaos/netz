@@ -37,7 +37,8 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
             "application_chunk_requested=512 application_chunk_effective=512 "
             "stream_window=1048576 connection_window=8388608 timeout_ms=30000 "
             "steady_state_mtu=1280 quic_version=2 cipher=negotiated-unexposed "
-            "cert_verify=true pacing=true"
+            "cert_verify=true pacing=true "
+            "netz_max_pacing_rate_bytes_per_second=0"
         )
         client.write_text(
             f"implementation=quic-go endpoint_role=client gso=implementation-default "
@@ -137,6 +138,18 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
                 )
             )
             with self.assertRaisesRegex(ValueError, "server_io"):
+                self.verify_pair(client, server)
+
+    def test_wrong_netz_pacing_rate_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            server.write_text(
+                server.read_text().replace(
+                    "netz_max_pacing_rate_bytes_per_second=0",
+                    "netz_max_pacing_rate_bytes_per_second=1",
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "pacing_rate"):
                 self.verify_pair(client, server)
 
     def test_accepts_netz_only_identity(self) -> None:

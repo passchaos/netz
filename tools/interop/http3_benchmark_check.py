@@ -58,6 +58,7 @@ def verify(
     timeout_ms: int,
     client_log: Path,
     server_log: Path,
+    netz_max_pacing_rate_bytes_per_second: int = 0,
     capture: bool = False,
     socket_traffic: bool = False,
 ) -> None:
@@ -88,6 +89,8 @@ def verify(
         or stream_window > 1024 * 1024 * 1024
         or timeout_ms <= 0
         or timeout_ms > 10 * 60 * 1000
+        or netz_max_pacing_rate_bytes_per_second < 0
+        or netz_max_pacing_rate_bytes_per_second > (1 << 64) - 1
         or quic_version not in (1, 2)
     ):
         raise ValueError("invalid benchmark validation configuration")
@@ -140,6 +143,9 @@ def verify(
             "cipher": "negotiated-unexposed",
             "cert_verify": "true",
             "pacing": "true",
+            "netz_max_pacing_rate_bytes_per_second": str(
+                netz_max_pacing_rate_bytes_per_second
+            ),
             "gso": (
                 "false"
                 if endpoints[role] == "netz" or capture or socket_traffic
@@ -223,6 +229,8 @@ def verify(
         f"protocol=http3 role_pair={role_pair} mode={mode} samples={iterations} "
         f"streams={streams} body_bytes={body_bytes} total_bytes={total_bytes} "
         f"checksum={checksum} per_stream_verified=true "
+        f"netz_max_pacing_rate_bytes_per_second="
+        f"{netz_max_pacing_rate_bytes_per_second} "
         f"quic_version={quic_version} client_io={endpoint_io['client']} "
         f"server_io={endpoint_io['server']} complete=true"
     )
@@ -240,6 +248,11 @@ def main() -> None:
     parser.add_argument("--chunk-bytes", type=int, required=True)
     parser.add_argument("--stream-window", type=int, required=True)
     parser.add_argument("--timeout-ms", type=int, required=True)
+    parser.add_argument(
+        "--netz-max-pacing-rate-bytes-per-second",
+        type=int,
+        default=0,
+    )
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     parser.add_argument("--capture", action="store_true")
@@ -252,6 +265,9 @@ def main() -> None:
         warmup=args.warmup, chunk_bytes=args.chunk_bytes,
         stream_window=args.stream_window, timeout_ms=args.timeout_ms,
         client_log=args.client_log, server_log=args.server_log,
+        netz_max_pacing_rate_bytes_per_second=(
+            args.netz_max_pacing_rate_bytes_per_second
+        ),
         capture=args.capture, socket_traffic=args.socket_traffic,
     )
 

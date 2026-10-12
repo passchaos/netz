@@ -25,6 +25,7 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
             "client_io=quic-go-netpoll server_io=zio-std-io "
             "warmup=1 iterations=2 streams=4 body_bytes=1024 "
             "application_chunk_effective=512 stream_window=1048576 quic_version=2 "
+            "netz_max_pacing_rate_bytes_per_second=0 "
             "traffic_scope=all-rounds socket_boundary=userspace-udp-payload "
             "benchmark_scope=socket-traffic-same-application-shape "
             "logical_udp_segments=true complete=true"
@@ -39,6 +40,7 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
             "mode=download role_pair=quic-go-client+netz-server endpoint_role=client "
             "sender_role=server client_io=quic-go-netpoll server_io=zio-std-io "
             "warmup=1 iterations=2 streams=4 body_bytes=1024 "
+            "netz_max_pacing_rate_bytes_per_second=0 "
             "traffic_scope=all-rounds "
             "benchmark_scope=socket-traffic-same-application-shape "
             "dropped_total=7 dropped_dos_prevention=5 dropped_duplicate=1 "
@@ -54,6 +56,7 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
             "role_pair=quic-go-client+netz-server endpoint_role=server "
             "sender_role=server client_io=quic-go-netpoll server_io=zio-std-io "
             "warmup=1 iterations=2 streams=4 body_bytes=1024 "
+            "netz_max_pacing_rate_bytes_per_second=0 "
             "traffic_scope=all-rounds "
             "benchmark_scope=socket-traffic-same-application-shape "
             "packets_sent=90 packets_received=39 packets_lost=4 bytes_sent=9900 "
@@ -87,6 +90,23 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
             self.assertIn("sender_mean_udp_payload_bytes=108.913", output.getvalue())
             self.assertIn("netz_packets_lost=4", output.getvalue())
             self.assertIn("quic_go_dropped_dos_prevention=5", output.getvalue())
+            self.assertIn(
+                "netz_max_pacing_rate_bytes_per_second=0",
+                output.getvalue(),
+            )
+
+    def test_wrong_netz_pacing_rate_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            server.write_text(
+                server.read_text(encoding="utf-8").replace(
+                    "netz_max_pacing_rate_bytes_per_second=0",
+                    "netz_max_pacing_rate_bytes_per_second=1",
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "pacing_rate"):
+                self.verify_pair(client, server)
 
     def test_missing_endpoint_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

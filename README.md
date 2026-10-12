@@ -1521,6 +1521,9 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --capture --mode=upload 
 # Without packet-capture privileges, compare complete userspace UDP payload
 # counts with GSO disabled. This mode is also separate from timing and memory.
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --socket-traffic --mode=download --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304
+# Apply a 64 MiB/s ceiling only to each netz endpoint. The paired quic-go
+# process records the setting as experiment metadata without applying it.
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --socket-traffic --mode=download --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304 --netz-max-pacing-rate-bytes-per-second=67108864
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-echo -Doptimize=ReleaseFast
@@ -1932,6 +1935,11 @@ both v1 and v2 by default. Results are labeled `same-application-shape`
 because quic-go's GSO/GRO and ACK/packetization policy are not all externally
 controllable. Add `--stats` for whole-process peak RSS plus separately scoped
 netz explicit-allocator and Go runtime-heap telemetry.
+`--netz-max-pacing-rate-bytes-per-second=N` applies the optional production
+pacing ceiling to netz endpoints only. Every config and socket-traffic record
+includes `netz_max_pacing_rate_bytes_per_second`; zero means the default
+unlimited ceiling. This keeps rate-controlled loss experiments explicit and
+does not change normal benchmark or library defaults.
 An independent `--capture` run uses a Linux `AF_PACKET/SOCK_DGRAM` socket on
 `lo` to capture both mixed role pairs by their unique server ports. It requires
 `CAP_NET_RAW`, a third CPU, and enough `net.core.rmem_max` for the requested

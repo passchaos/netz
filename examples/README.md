@@ -738,6 +738,10 @@ counter conservation, one record per endpoint, netz transport loss totals, and
 quic-go qlog packet-drop categories. These counters do not replace kernel PCAP
 evidence and their throughput samples are deliberately marked
 `timing_usable=false`.
+Add `--netz-max-pacing-rate-bytes-per-second=N` to apply an explicit positive
+rate ceiling to the netz endpoint in each role pair. The paired quic-go process
+does not apply that ceiling, but records it as experiment metadata; zero in an
+output record means the option was not set.
 
 The QUIC examples are preconfigured-key transport smoke tests that bypass TLS
 so individual 1-RTT features are easy to inspect:

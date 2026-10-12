@@ -2377,6 +2377,14 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --body-bytes=4194304 --chunk-bytes=16384 \
   --stream-window=1048576 --timeout-ms=30000
 
+# Apply a 64 MiB/s ceiling to netz endpoints for controlled receiver-queue
+# loss experiments; the normal default remains unlimited.
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --socket-traffic --mode=download --warmup=2 --iterations=5 --streams=4 \
+  --body-bytes=4194304 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=30000 \
+  --netz-max-pacing-rate-bytes-per-second=67108864
+
 NETZ_HTTP3_INTEROP_VERSION=2 \
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --mode=upload --warmup=2 --iterations=5 --streams=4 \
@@ -2389,6 +2397,23 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --streams=4 --body-bytes=65536 --chunk-bytes=16384 \
   --stream-window=1048576 --timeout-ms=30000
 ```
+
+`--netz-max-pacing-rate-bytes-per-second=N` is netz-specific and requires a
+positive value. It is applied to every netz endpoint participating in the
+selected role pair; quic-go keeps its own pacing policy and carries the value
+only as paired-run metadata. Config, socket-traffic, transport-stat, and
+packet-drop records store the exact value, with `0` meaning the option was not
+set. This makes capped and uncapped evidence distinguishable without changing
+the production or benchmark default.
+
+A ReleaseSafe v1 socket-traffic smoke with one warmup, one measured round,
+four 64-KiB streams, and a 1-MiB/s netz ceiling completed both mixed role
+pairs with exact bytes and checksums. When netz was the upload sender, the
+measured body rate was 1.010 MiB/s, transport loss was zero, and quic-go
+reported zero packet drops. The reverse pairing left the quic-go sender
+uncapped at 103.562 MiB/s while the netz receiver still recorded the paired
+setting. This is configuration/behavior evidence, not a recommended production
+rate or a general throughput comparison.
 
 The opt-in capture mode starts a dedicated Linux `AF_PACKET`/`SOCK_DGRAM`
 packet socket on a third pinned CPU before each server. It filters the loopback

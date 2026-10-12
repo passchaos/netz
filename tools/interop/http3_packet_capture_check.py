@@ -64,6 +64,9 @@ def verify(args: argparse.Namespace) -> None:
             timeout_ms=args.timeout_ms,
             client_log=args.client_log,
             server_log=args.server_log,
+            netz_max_pacing_rate_bytes_per_second=(
+                args.netz_max_pacing_rate_bytes_per_second
+            ),
             capture=True,
         )
     rows = BENCHMARK.records(args.capture_log, "kernel-capture", args.role_pair)
@@ -212,6 +215,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-bytes", type=int, required=True)
     parser.add_argument("--stream-window", type=int, required=True)
     parser.add_argument("--timeout-ms", type=int, required=True)
+    parser.add_argument(
+        "--netz-max-pacing-rate-bytes-per-second",
+        type=int,
+        default=0,
+    )
     parser.add_argument("--server-port", type=int, required=True)
     parser.add_argument("--client-cpu", type=int, required=True)
     parser.add_argument("--server-cpu", type=int, required=True)

@@ -76,7 +76,8 @@ class Http3PacketCaptureCheckTests(unittest.TestCase):
             "application_chunk_requested=4 application_chunk_effective=4 "
             "stream_window=1024 connection_window=8192 timeout_ms=30000 "
             "steady_state_mtu=1280 quic_version=1 cipher=negotiated-unexposed "
-            "cert_verify=true pacing=true gso=false"
+            "cert_verify=true pacing=true gso=false "
+            "netz_max_pacing_rate_bytes_per_second=0"
         )
         client_log.write_text(
             f"implementation=netz endpoint_role=client gro=false {config}\n"
@@ -180,6 +181,7 @@ class Http3PacketCaptureCheckTests(unittest.TestCase):
             chunk_bytes=4,
             stream_window=1024,
             timeout_ms=30000,
+            netz_max_pacing_rate_bytes_per_second=0,
             quic_version=1,
             warmup=1,
             server_port=4433,

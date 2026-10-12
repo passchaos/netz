@@ -2031,6 +2031,16 @@ were zero. The residual retransmission cost therefore comes from the peer's
 bounded unprocessed-packet queue under this zero-latency workload, not malformed
 netz packets; future pacing work must preserve normal-network throughput rather
 than hiding the receiver limit with a benchmark-only delay.
+Netz now exposes an optional production `max_pacing_rate_bytes_per_second` on
+both direct and handshake-created 1-RTT connections. The token bucket uses the
+lower of that ceiling and `1.25 * cwnd / RTT`, while the default remains
+unlimited. `bench-http3-quic-go` accepts the corresponding
+`--netz-max-pacing-rate-bytes-per-second` experiment parameter and records it
+in config and loss-attribution records. A 1-MiB/s, four-stream, 64-KiB-per-
+stream upload smoke held the netz sender at 1.010 MiB/s with zero transport
+loss and zero quic-go drops; the reverse pairing left quic-go uncapped. This
+validates the control path without promoting that artificial loopback rate to
+a production default.
 
 ## Next recommended work
 
