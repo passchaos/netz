@@ -1200,6 +1200,38 @@ comparisons. The 256-byte cases are within 5%; the 1024-byte cases still favor
 Quinn, leaving large-payload protection and event-loop work as the next target.
 These remain implementation-packetized, same-application-shape comparisons.
 
+The 2026-10-13 connection-level GRO follow-up removed a functional blocker in
+mixed STREAM/DATAGRAM sessions. Low-level caller-buffer endpoint receives still
+reject GRO because they cannot own queued suffixes, while `Connection` now uses
+the owning endpoint receive path on GRO sockets, copies only the current segment
+into its existing scratch, and leaves every later segment in the endpoint FIFO.
+A regression sends one equal-sized STREAM packet followed by two DATAGRAM
+packets in one GSO super-packet, verifies that the blocking STREAM API consumes
+the first segment, then drains both DATAGRAM suffixes in order; the untimed
+state-only path is covered by a second two-segment batch.
+
+The matching windowed benchmark now enables GRO on netz endpoints only when
+`--window` exceeds one. A post-rebase three-sample CPU-0/client, CPU-1/server
+run used 50 warmups, 500 measured windows, 1,024-byte payloads, and window 16.
+Its fixed binary hashes were
+`610f91708434a565756f3673df96ddb48b467a92423fb8d36a94d742cb156120`
+for the netz client,
+`17307fa8f68cfc7492f4140ace69e7085533f30774ca6deafbeec722356688c5`
+for the netz server, and
+`e7b1708c811ab0af02a0e426b61ad98f7e65ca8efc12ea89c6b4fdf312f18875`
+for Quinn revision `d9c8c4c695fc64292d9b117844ea6924ca0d0815`:
+
+| Fixed server | netz p50/p99 (us) | Quinn p50/p99 (us) | netz/Quinn p50 speed |
+|---|---:|---:|---:|
+| Quinn | 125.436 / 138.149 | 137.010 / 169.280 | 1.092x |
+| netz | 122.973 / 132.630 | 122.390 / 147.131 | 0.995x |
+
+This closes the previously recorded 1-KiB/window-16 p50 gap for this bounded
+same-application-shape run: netz is faster against the fixed Quinn server and
+within 0.5% against the fixed netz server. Three samples are sufficient for the
+compatibility/performance gate but not a universal latency claim; longer and
+lossy window distributions remain separate work.
+
 The bounded QUIC DATAGRAM receive queue now lives in
 `one_rtt/datagram_queue.zig`. Its first successful admission reserves exactly
 the configured ring bound, so later enqueue/overwrite operations allocate
