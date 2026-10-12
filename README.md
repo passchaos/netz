@@ -244,7 +244,9 @@ Current protocol coverage includes:
   versions send an empty Certificate when no configured identity is suitable;
   OpenSSL process gates verify matching-certificate and optional unmatched-CA
   handshakes, while TLS 1.2 servers reject CertificateVerify algorithms outside
-  the exact set they advertised;
+  the exact set they advertised. TLS 1.3 clients ignore unknown
+  CertificateRequest extensions for forward compatibility while still
+  rejecting duplicate or malformed known extensions;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in
