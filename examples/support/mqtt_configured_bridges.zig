@@ -15,6 +15,7 @@ const ConfiguredConnector = struct {
     current_address: std.atomic.Value(usize) = .init(std.math.maxInt(usize)),
     connected_at_ns: std.atomic.Value(i64) = .init(0),
     private_bridge_supported: std.atomic.Value(bool) = .init(true),
+    require_private_bridge: bool = false,
 
     fn connector(self: *ConfiguredConnector) mqtt.runtime.ClientConnector {
         return .{
@@ -74,6 +75,10 @@ const ConfiguredConnector = struct {
         if (options.bridge_mode and !attempt.accepted() and
             attempt.connack.connack.reason_code == 0x01)
         {
+            if (self.require_private_bridge) {
+                self.noteAttempt(index, false, io);
+                return attempt;
+            }
             attempt.deinit(allocator);
             self.private_bridge_supported.store(false, .release);
             options.bridge_mode = false;
@@ -522,16 +527,50 @@ fn initOutbound(
     shutdown: *std.Io.Event,
     persistence_path: ?[]const u8,
 ) !mqtt.bridge.outbound.LocalBridge {
-    const rules = try allocator.alloc(mqtt.bridge.OutboundRule, source.rules.len);
+    var outbound_count: usize = 0;
+    var inbound_count: usize = 0;
+    for (source.rules) |rule| switch (rule.direction) {
+        .in => inbound_count += 1,
+        .out => outbound_count += 1,
+        .both => {
+            inbound_count += 1;
+            outbound_count += 1;
+        },
+    };
+    const rules = try allocator.alloc(mqtt.bridge.OutboundRule, outbound_count);
     defer allocator.free(rules);
+    const inbound_rules = try allocator.alloc(
+        mqtt.bridge.outbound.InboundRule,
+        inbound_count,
+    );
+    defer allocator.free(inbound_rules);
     var initialized: usize = 0;
     defer for (rules[0..initialized]) |rule| allocator.free(rule.filter);
-    for (source.rules, rules) |rule, *value| {
-        // Config owns a remote-prefixed effective filter. OutboundRule owns
-        // the base filter and adds local_prefix to the subscription source.
-        const filter = try rule.outboundFilterAlloc(allocator);
-        value.* = .{ .filter = filter, .qos = rule.qos, .local_prefix = rule.local_prefix, .remote_prefix = rule.remote_prefix };
-        initialized += 1;
+    var inbound_index: usize = 0;
+    for (source.rules) |rule| {
+        if (rule.direction != .in) {
+            // Config owns a remote-prefixed effective filter. OutboundRule
+            // owns the base filter and adds local_prefix to the source.
+            const filter = try rule.outboundFilterAlloc(allocator);
+            rules[initialized] = .{
+                .filter = filter,
+                .qos = rule.qos,
+                .local_prefix = rule.local_prefix,
+                .remote_prefix = rule.remote_prefix,
+                .no_local = source.hasInbound(),
+            };
+            initialized += 1;
+        }
+        if (rule.direction != .out) {
+            inbound_rules[inbound_index] = .{
+                .filter = rule.filter,
+                .qos = rule.qos,
+                .local_prefix = rule.local_prefix,
+                .remote_prefix = rule.remote_prefix,
+                .no_local = source.hasOutbound() and source.protocol == .v5,
+            };
+            inbound_index += 1;
+        }
     }
     var properties: [1]mqtt.Property = .{.{ .four_byte = .{ .id = .session_expiry_interval, .value = source.session_expiry_interval } }};
     const local_properties: []const mqtt.Property = if (source.local_clean_session)
@@ -542,7 +581,7 @@ fn initOutbound(
             .value = std.math.maxInt(u32),
         } }};
     const id = stableOutboundId(source.*);
-    const journal_path = if (source.usesQoS2()) try std.fmt.allocPrint(allocator, "{s}.outbound-{s}.journal", .{
+    const journal_path = if (source.usesOutboundQoS2()) try std.fmt.allocPrint(allocator, "{s}.outbound-{s}.journal", .{
         persistence_path orelse return error.BridgePersistenceRequired,
         std.fmt.bytesToHex(id, .lower),
     }) else null;
@@ -584,13 +623,22 @@ fn initOutbound(
             .max_attempts = if (source.start_type == .once) source.addressCount() else 0,
         },
         .rules = rules,
+        .inbound_rules = inbound_rules,
+        .inbound_bridge_id = if (inbound_count != 0)
+            stableBridgeId(source.*)
+        else
+            null,
         .preserve_retain = source.outgoing_retain,
         .attempt_target_unsubscribe = source.attempt_unsubscribe,
         .coordinator = if (journal_path) |path| .{ .bridge_id = id, .dir = std.Io.Dir.cwd(), .sub_path = path, .mode = mode } else null,
         .notifications = if (notification_topic) |topic| .{ .topic = topic, .publish_remote = !source.notifications_local_only } else null,
     };
     if (source.usesTls()) try loadTlsResources(resources, allocator, io, std.Io.Dir.cwd(), source) else {
-        resources.connector = .{ .source = source };
+        resources.connector = .{
+            .source = source,
+            .require_private_bridge = source.hasInbound() and
+                source.hasOutbound() and source.protocol == .v3_1_1,
+        };
         resources.connector_configured = true;
     }
     return mqtt.bridge.outbound.LocalBridge.initEndpoints(allocator, io, .{ .broker = local, .id = id }, .{ .connector = resources.connector.connector() }, options, shutdown);
@@ -738,18 +786,29 @@ fn loadTlsResources(
     resources.connector = .{
         .source = source,
         .tls_options = connect_options,
+        .require_private_bridge = source.hasInbound() and
+            source.hasOutbound() and source.protocol == .v3_1_1,
     };
     resources.connector_configured = true;
 }
 
 fn stableBridgeId(source: mqtt.broker_config.Bridge) [16]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("netz mqtt inbound bridge v1\x00");
+    const mixed_directions = source.hasOutbound();
+    hasher.update(if (mixed_directions)
+        "netz mqtt mixed bridge inbound v1\x00"
+    else
+        "netz mqtt inbound bridge v1\x00");
     hashField(&hasher, source.name);
     hashField(&hasher, source.clientId());
     hasher.update(&.{@intFromEnum(source.protocol)});
-    hashInteger(&hasher, source.rules.len);
+    var inbound_count: usize = 0;
     for (source.rules) |rule| {
+        if (rule.direction != .out) inbound_count += 1;
+    }
+    hashInteger(&hasher, inbound_count);
+    for (source.rules) |rule| {
+        if (rule.direction == .out) continue;
         hashField(&hasher, rule.filter);
         hasher.update(&.{@intFromEnum(rule.qos)});
         hashField(&hasher, rule.local_prefix);
@@ -818,6 +877,106 @@ test "configured bridge identifiers bind identity and mappings" {
         &outbound_id,
         &stableOutboundId(outbound),
     ));
+
+    var inbound_rule = rules[0];
+    inbound_rule.direction = .in;
+    var outbound_rule = rules[0];
+    outbound_rule.direction = .out;
+    var mixed_rules = [_]mqtt.broker_config.BridgeRule{
+        inbound_rule,
+        outbound_rule,
+    };
+    const mixed = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .rules = &mixed_rules,
+        .remote_client_id = &client_id,
+    };
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &stableBridgeId(source),
+        &stableBridgeId(mixed),
+    ));
+}
+
+test "configured bidirectional bridge never falls back from private mode" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try mqtt.runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Peer = struct {
+        server: *mqtt.runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var rejected = try self.server.accept(.{
+                .protocol = .v3_1_1,
+                .reason_code = 0x01,
+            });
+            defer rejected.deinit(self.server.allocator);
+            try std.testing.expect(rejected.connect.connect.bridge_mode);
+            var fallback = self.server.acceptWithTimeout(
+                .{ .protocol = .v3_1_1 },
+                .fromMilliseconds(50),
+            ) catch |err| switch (err) {
+                error.Timeout => return,
+                else => return err,
+            };
+            defer fallback.deinit(self.server.allocator);
+            return error.TestUnexpectedResult;
+        }
+    };
+    var peer = Peer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var name = "required-private".*;
+    var host = "127.0.0.1".*;
+    const source = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .port = server.address().ip4.port,
+        .rules = &.{},
+    };
+    var connector = ConfiguredConnector{
+        .source = &source,
+        .require_private_bridge = true,
+    };
+    var attempt = try connector.connectAttemptMaybeBefore(
+        allocator,
+        io,
+        .{
+            .protocol = .v3_1_1,
+            .client_id = "required-private",
+            .bridge_mode = true,
+        },
+        null,
+    );
+    defer attempt.deinit(allocator);
+    try std.testing.expect(!attempt.accepted());
+    try std.testing.expectEqual(@as(u8, 0x01), attempt.connack.connack.reason_code);
+    try std.testing.expect(connector.private_bridge_supported.load(.acquire));
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
 }
 
 test "configured bridge maps Mosquitto remote protocol limits" {
@@ -1044,4 +1203,54 @@ test "configured outbound bridge maps local clean Session policy" {
     try std.testing.expect(bridge.source.isConnected());
     bridges.disconnectLocalSources();
     try std.testing.expect(!bridge.source.isConnected());
+}
+
+test "configured bidirectional bridge shares one private remote client" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var shutdown: std.Io.Event = .unset;
+    var name = "duplex".*;
+    var host = "localhost".*;
+    var filter = "remote/#".*;
+    var local_prefix = "local/".*;
+    var remote_prefix = "remote/".*;
+    var rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &filter,
+        .qos = .at_most_once,
+        .local_prefix = &local_prefix,
+        .remote_prefix = &remote_prefix,
+        .direction = .both,
+    }};
+    const configured = [_]mqtt.broker_config.Bridge{.{
+        .name = &name,
+        .host = &host,
+        .rules = &rules,
+        .clean_session = false,
+        .local_clean_session = false,
+        .try_private = true,
+    }};
+    var bridges = try Set.init(
+        allocator,
+        io,
+        &broker,
+        &configured,
+        &shutdown,
+        null,
+    );
+    defer bridges.deinit();
+
+    const bridge = &bridges.values[0].outbound;
+    try std.testing.expectEqual(@as(usize, 1), bridge.rules.values.len);
+    try std.testing.expect(bridge.rules.values[0].value.no_local);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        bridge.inbound_rules.values.len,
+    );
+    try std.testing.expect(!bridge.inbound_rules.values[0].no_local);
+    try std.testing.expect(bridge.target.options.value.bridge_mode);
+    try std.testing.expect(
+        bridges.connector_resources[0].connector.require_private_bridge,
+    );
 }

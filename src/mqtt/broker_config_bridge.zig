@@ -93,7 +93,7 @@ pub const Rule = struct {
     }
 };
 
-pub const Direction = enum { in, out };
+pub const Direction = enum { in, out, both };
 
 pub const Endpoint = struct {
     host: []const u8,
@@ -199,8 +199,22 @@ pub const Bridge = struct {
         return false;
     }
 
+    pub fn usesOutboundQoS2(self: Bridge) bool {
+        for (self.rules) |rule| {
+            if (rule.direction != .in and rule.qos == .exactly_once) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn hasOutbound(self: Bridge) bool {
         for (self.rules) |rule| if (rule.direction != .in) return true;
+        return false;
+    }
+
+    pub fn hasInbound(self: Bridge) bool {
+        for (self.rules) |rule| if (rule.direction != .out) return true;
         return false;
     }
 
@@ -640,13 +654,15 @@ pub const Builder = struct {
             }
         }
         var uses_qos2 = false;
+        var has_inbound = false;
         var has_outbound = false;
         var uses_persistent_outbound_qos = false;
         for (self.rules.items) |rule| {
             uses_qos2 = uses_qos2 or rule.qos == .exactly_once;
-            has_outbound = has_outbound or rule.direction == .out;
+            has_inbound = has_inbound or rule.direction != .out;
+            has_outbound = has_outbound or rule.direction != .in;
             uses_persistent_outbound_qos = uses_persistent_outbound_qos or
-                (rule.direction == .out and rule.qos != .at_most_once);
+                (rule.direction != .in and rule.qos != .at_most_once);
         }
         if (self.start_type == .lazy and !has_outbound) {
             return error.UnsupportedBridgeStartType;
@@ -668,6 +684,11 @@ pub const Builder = struct {
             (self.local_clean_session orelse self.clean_session))
         {
             return error.BridgePersistentSessionRequired;
+        }
+        if (has_outbound and has_inbound and
+            self.protocol == .v3_1_1 and !self.try_private)
+        {
+            return error.UnsupportedBridgeDirection;
         }
         const owned_rules = try self.rules.toOwnedSlice(allocator);
         errdefer {
@@ -786,15 +807,6 @@ pub const Builder = struct {
             remote_prefix_text,
         );
         errdefer allocator.free(filter);
-        for (self.rules.items) |previous| {
-            if (previous.direction != direction) return error.UnsupportedBridgeDirection;
-            if (std.mem.eql(u8, previous.filter, filter)) {
-                return error.DuplicateBridgeFilter;
-            }
-            if (rule_helpers.filtersOverlap(previous.filter, filter)) {
-                return error.OverlappingBridgeFilters;
-            }
-        }
         const local_prefix = try duplicateNonEmpty(allocator, local_prefix_text);
         errdefer if (local_prefix.len != 0) allocator.free(local_prefix);
         const remote_prefix = try duplicateNonEmpty(
@@ -802,6 +814,47 @@ pub const Builder = struct {
             remote_prefix_text,
         );
         errdefer if (remote_prefix.len != 0) allocator.free(remote_prefix);
+        const candidate = Rule{
+            .filter = filter,
+            .qos = qos,
+            .local_prefix = local_prefix,
+            .remote_prefix = remote_prefix,
+            .direction = direction,
+        };
+        const candidate_outbound_filter = if (direction != .in)
+            try candidate.outboundFilterAlloc(allocator)
+        else
+            null;
+        defer if (candidate_outbound_filter) |value| allocator.free(value);
+        for (self.rules.items) |previous| {
+            if (directionsShareInbound(previous.direction, direction) and
+                rule_helpers.filtersOverlap(previous.filter, filter))
+            {
+                return if (std.mem.eql(u8, previous.filter, filter))
+                    error.DuplicateBridgeFilter
+                else
+                    error.OverlappingBridgeFilters;
+            }
+            if (directionsShareOutbound(previous.direction, direction)) {
+                const previous_filter = try previous.outboundFilterAlloc(
+                    allocator,
+                );
+                defer allocator.free(previous_filter);
+                if (rule_helpers.filtersOverlap(
+                    previous_filter,
+                    candidate_outbound_filter.?,
+                )) {
+                    return if (std.mem.eql(
+                        u8,
+                        previous_filter,
+                        candidate_outbound_filter.?,
+                    ))
+                        error.DuplicateBridgeFilter
+                    else
+                        error.OverlappingBridgeFilters;
+                }
+            }
+        }
         try self.rules.append(allocator, .{
             .filter = filter,
             .qos = qos,
@@ -811,6 +864,14 @@ pub const Builder = struct {
         });
     }
 };
+
+fn directionsShareInbound(left: Direction, right: Direction) bool {
+    return left != .out and right != .out;
+}
+
+fn directionsShareOutbound(left: Direction, right: Direction) bool {
+    return left != .in and right != .in;
+}
 
 pub fn isDirective(value: []const u8) bool {
     return std.mem.eql(u8, value, "address") or

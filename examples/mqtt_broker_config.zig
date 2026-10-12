@@ -705,7 +705,12 @@ pub fn run(
                 bridge.addressCount(),
                 if (bridge.usesTls()) "tls-vail" else "tcp",
                 bridge.rules.len,
-                if (bridge.hasOutbound()) "out" else "in",
+                if (bridge.hasOutbound() and bridge.hasInbound())
+                    "both"
+                else if (bridge.hasOutbound())
+                    "out"
+                else
+                    "in",
                 @tagName(bridge.start_type),
             },
         );

@@ -35,6 +35,7 @@ pub const Bridge = bridge_config.Bridge;
 pub const BridgeRule = bridge_config.Rule;
 pub const BridgeEndpoint = bridge_config.Endpoint;
 pub const BridgeStartType = bridge_config.StartType;
+pub const BridgeDirection = bridge_config.Direction;
 
 pub const Listener = struct {
     address: net.IpAddress,
@@ -1729,7 +1730,7 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         error.BridgeTopicRequired,
         parse(allocator, listener ++ "connection missing\naddress localhost\n"),
     );
-    for ([_][]const u8{ "both", "sideways" }) |direction| {
+    for ([_][]const u8{"sideways"}) |direction| {
         const source = try std.fmt.allocPrint(
             allocator,
             "{s}connection wrong-way\naddress localhost\n" ++
@@ -2082,7 +2083,7 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
     );
 }
 
-test "MQTT broker config accepts outbound mappings and rejects mixed directions" {
+test "MQTT broker config accepts outbound and bidirectional mappings" {
     const allocator = std.testing.allocator;
     const listener = "listener 1883\nallow_anonymous true\n";
     var config = try parse(allocator, listener ++
@@ -2103,10 +2104,30 @@ test "MQTT broker config accepts outbound mappings and rejects mixed directions"
     const shared_base = try shared.bridges[0].rules[0].outboundFilterAlloc(allocator);
     defer allocator.free(shared_base);
     try std.testing.expectEqualStrings("$share/workers/sensors/#", shared_base);
-    try std.testing.expectError(error.UnsupportedBridgeDirection, parse(allocator, listener ++
+    var mixed = try parse(allocator, listener ++
         "connection mixed\naddress localhost\n" ++
         "topic sensors/# in 1 local/ remote/\n" ++
-        "topic data/# out 1 local/ remote/\n"));
+        "topic data/# out 1 local/ remote/\n");
+    defer mixed.deinit(allocator);
+    try std.testing.expect(mixed.bridges[0].hasInbound());
+    try std.testing.expect(mixed.bridges[0].hasOutbound());
+
+    var both = try parse(allocator, listener ++
+        "connection bidirectional\naddress localhost\n" ++
+        "bridge_protocol_version mqttv50\n" ++
+        "topic sensors/# both 1 local/ remote/\n");
+    defer both.deinit(allocator);
+    try std.testing.expectEqual(BridgeDirection.both, both.bridges[0].rules[0].direction);
+    try std.testing.expect(both.bridges[0].hasInbound());
+    try std.testing.expect(both.bridges[0].hasOutbound());
+
+    try std.testing.expectError(
+        error.UnsupportedBridgeDirection,
+        parse(allocator, listener ++
+            "connection unsafe-both\naddress localhost\n" ++
+            "topic sensors/# both 1 local/ remote/\n" ++
+            "try_private false\n"),
+    );
 }
 
 test "MQTT broker config validates lazy outbound lifecycle" {

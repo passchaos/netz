@@ -587,6 +587,140 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
             _stop(upstream, upstream_output)
 
 
+def run_bidirectional_bridge_case(
+    broker: Path,
+    directory: Path,
+    protocol_level: int,
+) -> None:
+    label = "v5" if protocol_level == 5 else "v311-private"
+    upstream_port, local_port = _distinct_ports(2)
+    upstream_config = directory / f"bridge-bidirectional-{label}-upstream.conf"
+    upstream_config.write_text(
+        f"listener {upstream_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        # One bridge Session plus the observer and publisher below. A fake
+        # two-connection bridge would exhaust this exact finite budget.
+        "max_connections 3\n"
+    )
+    local_config = directory / f"bridge-bidirectional-{label}-local.conf"
+    local_config.write_text(
+        f"listener {local_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 2\n"
+        "connection duplex\n"
+        f"address 127.0.0.1:{upstream_port}\n"
+        "topic # both 1 local/ remote/\n"
+        "cleansession false\n"
+        "local_cleansession false\n"
+        + (
+            "bridge_protocol_version mqttv50\n"
+            "bridge_session_expiry_interval 60\n"
+            if protocol_level == 5
+            else ""
+        )
+        + f"local_clientid configured-duplex-local-{label}\n"
+        f"remote_clientid configured-duplex-remote-{label}\n"
+        "notifications false\n"
+    )
+    upstream_log = directory / f"bridge-bidirectional-{label}-upstream.log"
+    local_log = directory / f"bridge-bidirectional-{label}-local.log"
+    upstream, upstream_output = _start_broker(
+        broker,
+        upstream_config,
+        upstream_log,
+    )
+    local = None
+    local_output = None
+    local_subscriber = None
+    local_publisher = None
+    upstream_subscriber = None
+    upstream_publisher = None
+    try:
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        local, local_output = _start_broker(broker, local_config, local_log)
+        _wait_for_log(local, local_log, "direction=both")
+
+        local_subscriber = _connect_client(
+            local_port,
+            f"duplex-local-subscriber-{label}",
+        )
+        _subscribe_client(local_subscriber, 1, "local/inbound", 1)
+        local_publisher = _connect_client(
+            local_port,
+            f"duplex-local-publisher-{label}",
+        )
+        upstream_subscriber = _connect_client(
+            upstream_port,
+            f"duplex-upstream-subscriber-{label}",
+        )
+        _subscribe_client(upstream_subscriber, 1, "remote/outbound", 1)
+        upstream_publisher = _connect_client(
+            upstream_port,
+            f"duplex-upstream-publisher-{label}",
+        )
+
+        _publish_message(
+            local_publisher,
+            1,
+            b"local-to-remote",
+            1,
+            topic="local/outbound",
+        )
+        _expect_mapped_publish(
+            upstream_subscriber,
+            b"local-to-remote",
+            expected_topic="remote/outbound",
+        )
+        _publish_message(
+            upstream_publisher,
+            1,
+            b"remote-to-local",
+            1,
+            topic="remote/inbound",
+        )
+        _expect_mapped_publish(
+            local_subscriber,
+            b"remote-to-local",
+            expected_topic="local/inbound",
+        )
+
+        for client in (
+            local_publisher,
+            local_subscriber,
+            upstream_publisher,
+            upstream_subscriber,
+        ):
+            client.sendall(b"\xe0\x00")
+            client.close()
+        local_publisher = None
+        local_subscriber = None
+        upstream_publisher = None
+        upstream_subscriber = None
+        _wait_clean(local, local_output, local_log, "bidirectional local broker")
+        local = None
+        local_output = None
+        _wait_clean(
+            upstream,
+            upstream_output,
+            upstream_log,
+            "bidirectional upstream broker",
+        )
+        upstream_output = None
+    finally:
+        for client in (
+            local_publisher,
+            local_subscriber,
+            upstream_publisher,
+            upstream_subscriber,
+        ):
+            if client is not None:
+                client.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        if upstream_output is not None:
+            _stop(upstream, upstream_output)
+
+
 def run_primary_failback_case(broker: Path, directory: Path) -> None:
     primary_port, secondary_port, local_port = _distinct_ports(3)
     primary_config = directory / "bridge-primary.conf"

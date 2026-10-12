@@ -58,6 +58,55 @@ test "broker local consumer reports pending messages and signals arrivals" {
     );
 }
 
+test "broker local publication honors source consumer No Local" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var source = try broker.openLocalConsumer(.{
+        .id = [_]u8{0x71} ** 16,
+        .subscriptions = &.{.{
+            .topic_filter = "duplex/#",
+            .qos = .at_least_once,
+            .no_local = true,
+        }},
+    });
+    defer broker.closeLocalConsumer(&source);
+    var observer = try broker.openLocalConsumer(.{
+        .id = [_]u8{0x72} ** 16,
+        .subscriptions = &.{.{
+            .topic_filter = "duplex/#",
+            .qos = .at_least_once,
+        }},
+    });
+    defer broker.closeLocalConsumer(&observer);
+
+    try broker.publishLocalFromConsumer(&source, .{
+        .dup = false,
+        .qos = .at_least_once,
+        .retain = false,
+        .topic = "duplex/value",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "one-way",
+    });
+    try std.testing.expect((try broker.pollLocalConsumer(&source)) == null);
+    var event = (try broker.pollLocalConsumer(&observer)).?;
+    defer event.deinit();
+    try std.testing.expectEqualStrings(
+        "one-way",
+        event.publish.value.payload,
+    );
+    _ = try broker.acknowledgeLocalConsumer(
+        &observer,
+        .puback,
+        event.publish.value.packet_id.?,
+        0,
+    );
+}
+
 fn publishValue(broker: *Broker, topic: []const u8, payload: []const u8, qos: mqtt.QoS) !void {
     try broker.publishLocal(.{
         .dup = false,

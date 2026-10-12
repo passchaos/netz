@@ -1,8 +1,9 @@
-//! Outbound broker bridges with network or in-process subscription sources.
+//! Outbound and single-remote-Session bidirectional broker bridges.
 const engine = @import("outbound_engine.zig");
 pub const Endpoint = engine.Endpoint;
 pub const Error = engine.Error;
 pub const Rule = engine.Rule;
+pub const InboundRule = engine.InboundRule;
 pub const Options = engine.Options;
 pub const MultiOptions = engine.MultiOptions;
 pub const NotificationOptions = engine.NotificationOptions;

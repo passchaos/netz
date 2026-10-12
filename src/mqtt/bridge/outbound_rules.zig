@@ -47,6 +47,7 @@ pub const OwnedRules = struct {
                 .qos = rule.qos,
                 .local_prefix = local_prefix,
                 .remote_prefix = remote_prefix,
+                .no_local = rule.no_local,
             };
             const source_filter = try value.sourceFilterAlloc(allocator);
             errdefer allocator.free(source_filter);

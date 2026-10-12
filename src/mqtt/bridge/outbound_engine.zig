@@ -1,9 +1,11 @@
-//! Outbound MQTT broker bridge built from two reconnecting MQTT Sessions.
+//! Outbound and bidirectional MQTT broker bridge built from a local source
+//! Session and one reconnecting remote Session.
 //!
 //! The source Session subscribes to local topics and acknowledges QoS 1 only
-//! after the target Session receives PUBACK. QoS 2 is available only with the
-//! explicit durable coordinator and persistent Sessions on both broker legs;
-//! every wire transition that transfers ownership follows its journal fsync.
+//! after the remote Session receives PUBACK. Optional inbound rules consume
+//! publications from that same remote Session and route them locally. Outbound
+//! QoS 2 uses an explicit durable coordinator; inbound QoS 2 uses the local
+//! broker's durable bridge store.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,6 +17,7 @@ const runtime = @import("../runtime.zig");
 const rule_helpers = @import("rules.zig");
 const coordinator_mod = @import("outbound_coordinator.zig");
 const local_source = @import("local_source.zig");
+const inbound_flow = @import("inbound_flow.zig");
 const rule_storage = @import("outbound_rules.zig");
 const delivery_values = @import("outbound_delivery.zig");
 const keepStableProperty = delivery_values.keepStableProperty;
@@ -36,7 +39,7 @@ pub const Endpoint = union(enum) {
 };
 
 pub const Error = reconnect.Error || local_source.Error || listener_namespace.Error ||
-    coordinator_mod.Error || error{
+    coordinator_mod.Error || inbound_flow.Error || error{
     NoBridgeRules,
     DuplicateBridgeFilter,
     OverlappingBridgeFilters,
@@ -52,9 +55,11 @@ pub const Error = reconnect.Error || local_source.Error || listener_namespace.Er
     InvalidBridgeQoS,
     TargetAcknowledgementMismatch,
     TargetUnsubscribeRefused,
+    UnsafeBidirectionalBridge,
 };
 
 pub const Rule = @import("outbound_rule.zig").Rule;
+pub const InboundRule = inbound_flow.Rule;
 
 pub const Options = struct {
     source_connect: runtime.ConnectOptions,
@@ -62,6 +67,10 @@ pub const Options = struct {
     source_reconnect_policy: reconnect.ReconnectPolicy = .{},
     target_reconnect_policy: reconnect.ReconnectPolicy = .{},
     rule: Rule,
+    /// Optional remote-to-local rules carried by the same target Client.
+    inbound_rules: []const InboundRule = &.{},
+    /// Stable identity for durable inbound QoS 2 state.
+    inbound_bridge_id: ?[16]u8 = null,
     preserve_retain: bool = true,
     attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
@@ -74,6 +83,10 @@ pub const MultiOptions = struct {
     source_reconnect_policy: reconnect.ReconnectPolicy = .{},
     target_reconnect_policy: reconnect.ReconnectPolicy = .{},
     rules: []const Rule,
+    /// Optional remote-to-local rules carried by the same target Client.
+    inbound_rules: []const InboundRule = &.{},
+    /// Stable identity for durable inbound QoS 2 state.
+    inbound_bridge_id: ?[16]u8 = null,
     preserve_retain: bool = true,
     attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
@@ -155,6 +168,10 @@ pub fn Engine(comptime Source: type) type {
         target: reconnect.Client,
         target_delivery: *TargetDeliveryState,
         rules: OwnedRules,
+        inbound_rules: inbound_flow.OwnedRules,
+        inbound_bridge_id: ?[16]u8,
+        inbound_session_epoch: u64,
+        inbound_qos2_enabled: bool,
         preserve_retain: bool,
         attempt_target_unsubscribe: bool,
         source_session_present: bool = false,
@@ -188,6 +205,8 @@ pub fn Engine(comptime Source: type) type {
                     .source_reconnect_policy = options.source_reconnect_policy,
                     .target_reconnect_policy = options.target_reconnect_policy,
                     .rules = &.{options.rule},
+                    .inbound_rules = options.inbound_rules,
+                    .inbound_bridge_id = options.inbound_bridge_id,
                     .preserve_retain = options.preserve_retain,
                     .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
@@ -238,6 +257,8 @@ pub fn Engine(comptime Source: type) type {
                     .source_reconnect_policy = options.source_reconnect_policy,
                     .target_reconnect_policy = options.target_reconnect_policy,
                     .rules = &.{options.rule},
+                    .inbound_rules = options.inbound_rules,
+                    .inbound_bridge_id = options.inbound_bridge_id,
                     .preserve_retain = options.preserve_retain,
                     .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
@@ -286,6 +307,8 @@ pub fn Engine(comptime Source: type) type {
                     .source_reconnect_policy = options.source_reconnect_policy,
                     .target_reconnect_policy = options.target_reconnect_policy,
                     .rules = &.{options.rule},
+                    .inbound_rules = options.inbound_rules,
+                    .inbound_bridge_id = options.inbound_bridge_id,
                     .preserve_retain = options.preserve_retain,
                     .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                     .coordinator = options.coordinator,
@@ -337,17 +360,62 @@ pub fn Engine(comptime Source: type) type {
             };
             var rules = try OwnedRules.init(allocator, options.rules);
             errdefer rules.deinit(allocator);
-            const qos2 = rulesUseQoS2(rules.values);
-            if (Source == local_source.Client and qos2 and !source_endpoint.broker.commitLogEnabled()) {
+            var inbound_rules = try inbound_flow.OwnedRules.initOptional(
+                allocator,
+                options.inbound_rules,
+            );
+            errdefer inbound_rules.deinit(allocator);
+            if (inbound_rules.values.len != 0 and
+                Source != local_source.Client)
+            {
+                return error.InvalidProperty;
+            }
+            if (inbound_rules.values.len != 0) {
+                for (rules.values) |rule| {
+                    if (!rule.value.no_local) {
+                        return error.UnsafeBidirectionalBridge;
+                    }
+                }
+                switch (options.target_connect.protocol) {
+                    .v5 => for (inbound_rules.values) |rule| {
+                        if (!rule.no_local) {
+                            return error.UnsafeBidirectionalBridge;
+                        }
+                    },
+                    .v3_1_1 => {
+                        if (!options.target_connect.bridge_mode) {
+                            return error.UnsafeBidirectionalBridge;
+                        }
+                        for (inbound_rules.values) |rule| {
+                            if (rule.no_local) return error.InvalidProperty;
+                        }
+                    },
+                }
+            }
+            const outbound_qos2 = rulesUseQoS2(rules.values);
+            const inbound_qos2 = inbound_flow.rulesUseQoS2(
+                inbound_rules.values,
+            );
+            if (Source == local_source.Client and outbound_qos2 and !source_endpoint.broker.commitLogEnabled()) {
                 return error.QoS2RequiresCommitLog;
             }
-            if (qos2 and options.coordinator == null) {
+            if (inbound_qos2) {
+                if (options.inbound_bridge_id == null) {
+                    return error.MissingBridgeIdentifier;
+                }
+                if (comptime Source == local_source.Client) {
+                    if (!source_endpoint.broker.commitLogEnabled()) {
+                        return error.QoS2RequiresCommitLog;
+                    }
+                }
+            }
+            if (outbound_qos2 and options.coordinator == null) {
                 return error.QoS2RequiresDurableCoordinator;
             }
-            if (qos2 and !persistentSession(options.source_connect)) {
+            if (outbound_qos2 and !persistentSession(options.source_connect)) {
                 return error.QoS2RequiresPersistentSourceSession;
             }
-            if (!qos2 and rulesUseQoS1(rules.values) and
+            if (!outbound_qos2 and rulesUseQoS1(rules.values) and
                 !persistentSession(options.source_connect))
             {
                 return error.QoS1RequiresPersistentSourceSession;
@@ -365,11 +433,11 @@ pub fn Engine(comptime Source: type) type {
                 .{
                     .max_subscriptions = rules.values.len,
                     .manual_acknowledgements = true,
-                    .inbound_qos2_release_policy = if (qos2)
+                    .inbound_qos2_release_policy = if (outbound_qos2)
                         .deferred
                     else
                         .automatic,
-                    .surface_incoming_qos2_retransmissions = qos2,
+                    .surface_incoming_qos2_retransmissions = outbound_qos2,
                 },
             );
             errdefer source.deinit();
@@ -377,10 +445,13 @@ pub fn Engine(comptime Source: type) type {
                 try source.seedSubscription(.{
                     .topic_filter = rule.source_filter,
                     .qos = rule.value.qos,
+                    .no_local = rule.value.no_local,
                     .retain_as_published = options.source_connect.protocol == .v5,
                 }, &.{});
             }
-            if (qos2 and !persistentSession(options.target_connect)) {
+            if ((outbound_qos2 or inbound_qos2) and
+                !persistentSession(options.target_connect))
+            {
                 return error.QoS2RequiresPersistentTargetSession;
             }
             var target = try initClient(
@@ -391,7 +462,14 @@ pub fn Engine(comptime Source: type) type {
                 options.target_reconnect_policy,
                 shutdown,
                 .{
-                    .outbound_qos2_release_policy = if (qos2)
+                    .max_subscriptions = inbound_rules.values.len,
+                    .manual_acknowledgements = inbound_rules.values.len != 0,
+                    .inbound_qos2_release_policy = if (inbound_qos2)
+                        .deferred
+                    else
+                        .automatic,
+                    .surface_incoming_qos2_retransmissions = inbound_qos2,
+                    .outbound_qos2_release_policy = if (outbound_qos2)
                         .deferred
                     else
                         .automatic,
@@ -408,6 +486,7 @@ pub fn Engine(comptime Source: type) type {
                     options.source_connect,
                     options.target_connect,
                     rules.values,
+                    inbound_rules.values,
                     options.preserve_retain,
                 );
                 break :blk switch (coordinator_options.mode) {
@@ -433,12 +512,35 @@ pub fn Engine(comptime Source: type) type {
                     ),
                 };
             } else null;
+            if (inbound_qos2) {
+                for (inbound_rules.values) |rule| {
+                    try target.seedSubscription(.{
+                        .topic_filter = rule.filter,
+                        .qos = rule.qos,
+                        .no_local = rule.no_local,
+                        .retain_as_published = options.target_connect.protocol == .v5,
+                    }, &.{});
+                }
+            }
+            const inbound_session_epoch = if (inbound_qos2)
+                if (comptime Source == local_source.Client)
+                    source_endpoint.broker.latestBridgeQoS2SessionEpoch(
+                        options.inbound_bridge_id.?,
+                    ) orelse 0
+                else
+                    unreachable
+            else
+                0;
             var result = Self{
                 .allocator = allocator,
                 .source = source,
                 .target = target,
                 .target_delivery = target_delivery,
                 .rules = rules,
+                .inbound_rules = inbound_rules,
+                .inbound_bridge_id = options.inbound_bridge_id,
+                .inbound_session_epoch = inbound_session_epoch,
+                .inbound_qos2_enabled = inbound_qos2,
                 .preserve_retain = options.preserve_retain,
                 .attempt_target_unsubscribe = options.attempt_target_unsubscribe,
                 .source_session_epoch = if (coordinator) |*store|
@@ -473,6 +575,7 @@ pub fn Engine(comptime Source: type) type {
             if (self.coordinator) |*coordinator| coordinator.deinit();
             self.target.deinit();
             self.source.deinit();
+            self.inbound_rules.deinit(self.allocator);
             self.rules.deinit(self.allocator);
             self.allocator.destroy(self.target_delivery);
             self.* = undefined;
@@ -522,8 +625,11 @@ pub fn Engine(comptime Source: type) type {
             try self.source.disconnect(reason_code);
         }
 
-        pub fn hasPendingDurableQoS2(self: *const Self) bool {
-            return self.durableTransaction() != null;
+        pub fn hasPendingDurableQoS2(self: *Self) bool {
+            if (self.durableTransaction() != null) return true;
+            if (!self.inbound_qos2_enabled) return false;
+            return (self.target.outgoingStats() catch return true)
+                .incoming_qos2_count != 0;
         }
 
         /// Process at most one event from alternating source and target polls.
@@ -599,11 +705,12 @@ pub fn Engine(comptime Source: type) type {
                     self.target.disconnectTransport();
                     try self.notifyLocal(false);
                 },
-                // An outbound-only remote Session may replay publications from
-                // a stale subscription before its cleanup UNSUBACK. The
-                // reconnect client has already completed their automatic QoS
-                // acknowledgement, so deliberately discard them here.
-                .publish, .pubrel => {},
+                .publish => |owned| try self.handleTargetPublish(
+                    &owned.publish,
+                ),
+                .pubrel => |owned| try self.handleTargetPubRel(
+                    owned.ack.packet_id,
+                ),
                 .pingreq, .pingresp, .auth => {},
                 .puback, .pubrec, .pubcomp => {
                     self.target.disconnectTransport();
@@ -669,7 +776,7 @@ pub fn Engine(comptime Source: type) type {
                     const pending = try self.source.pendingCount();
                     const generation = self.source.deliveryGeneration();
                     const has_work = pending != 0 or
-                        self.durableTransaction() != null;
+                        self.hasPendingDurableQoS2();
                     if (has_work) {
                         idle_deadline = null;
                     } else if (idle_deadline == null or
@@ -753,7 +860,17 @@ pub fn Engine(comptime Source: type) type {
             if (Source == local_source.Client) {
                 const value = self.notifications orelse return;
                 if (self.local_online == online) return;
-                try self.source.broker.publishLocal(.{ .dup = false, .qos = .at_least_once, .retain = true, .topic = value.topic, .packet_id = null, .properties = &.{}, .payload = if (online) "1" else "0" });
+                const publish = mqtt.Publish{ .dup = false, .qos = .at_least_once, .retain = true, .topic = value.topic, .packet_id = null, .properties = &.{}, .payload = if (online) "1" else "0" };
+                if (self.inbound_rules.values.len != 0 and
+                    self.source.consumer != null)
+                {
+                    try self.source.broker.publishLocalFromConsumer(
+                        &self.source.consumer.?,
+                        publish,
+                    );
+                } else {
+                    try self.source.broker.publishLocal(publish);
+                }
                 self.local_online = online;
             }
         }
@@ -951,7 +1068,12 @@ pub fn Engine(comptime Source: type) type {
                     _ = try self.completeDurableSourceIfReady();
                 },
                 .disconnect => self.target.disconnectTransport(),
-                .publish, .pubrel => {},
+                .publish => |owned| try self.handleTargetPublish(
+                    &owned.publish,
+                ),
+                .pubrel => |owned| try self.handleTargetPubRel(
+                    owned.ack.packet_id,
+                ),
                 .pingreq, .pingresp, .auth => {},
                 .puback => {
                     self.target.disconnectTransport();
@@ -1145,12 +1267,45 @@ pub fn Engine(comptime Source: type) type {
                 }
             }
             try self.cleanupTargetSubscriptions();
+            if (self.inbound_rules.values.len != 0) {
+                if (comptime Source != local_source.Client) unreachable;
+                try inbound_flow.noteConnected(
+                    self.allocator,
+                    self.source.broker,
+                    &self.target,
+                    self.inbound_rules.values,
+                    self.inbound_bridge_id,
+                    &self.inbound_session_epoch,
+                    self.inbound_qos2_enabled,
+                    connected,
+                );
+            }
             try self.notify(true);
         }
 
         fn cleanupTargetSubscriptions(self: *Self) Error!void {
             if (!self.attempt_target_unsubscribe) return;
-            try self.unsubscribeTargetFilters(self.rules.target_filters);
+            if (self.inbound_rules.values.len == 0) {
+                return self.unsubscribeTargetFilters(
+                    self.rules.target_filters,
+                );
+            }
+            var stale_filters: std.ArrayList([]const u8) = .empty;
+            defer stale_filters.deinit(self.allocator);
+            try stale_filters.ensureTotalCapacity(
+                self.allocator,
+                self.rules.target_filters.len,
+            );
+            for (self.rules.target_filters) |filter| {
+                if (containsInboundFilter(
+                    self.inbound_rules.values,
+                    filter,
+                )) continue;
+                stale_filters.appendAssumeCapacity(filter);
+            }
+            if (stale_filters.items.len != 0) {
+                try self.unsubscribeTargetFilters(stale_filters.items);
+            }
         }
 
         fn unsubscribeTargetFilters(
@@ -1220,13 +1375,68 @@ pub fn Engine(comptime Source: type) type {
                     ),
                     .disconnect => self.target.disconnectTransport(),
                     .pingreq, .pingresp, .auth => {},
-                    .publish, .puback, .pubrec, .pubrel, .pubcomp => {
+                    .publish => |owned| try self.handleTargetPublish(
+                        &owned.publish,
+                    ),
+                    .pubrel => |owned| try self.handleTargetPubRel(
+                        owned.ack.packet_id,
+                    ),
+                    .puback, .pubrec, .pubcomp => {
                         self.target.disconnectTransport();
                         return error.UnexpectedPacket;
                     },
                 }
                 try self.serviceSourceWhileWaiting(current, bounded);
             }
+        }
+
+        pub fn handleTargetPublish(
+            self: *Self,
+            publish: *const mqtt.Publish,
+        ) Error!void {
+            if (self.inbound_rules.values.len == 0) {
+                // An outbound-only remote Session can replay traffic from a
+                // stale subscription before cleanup. Its automatic receive
+                // policy has already acknowledged it, so discard it.
+                return;
+            }
+            if (comptime Source != local_source.Client) unreachable;
+            if (!self.source.isConnected()) {
+                const connected = try self.source.connect();
+                try self.noteSourceConnected(connected);
+            }
+            try inbound_flow.inject(
+                self.allocator,
+                self.source.broker,
+                &self.target,
+                &self.source.consumer.?,
+                self.inbound_rules.values,
+                self.inbound_bridge_id,
+                self.inbound_session_epoch,
+                self.inbound_qos2_enabled,
+                publish,
+            );
+        }
+
+        pub fn handleTargetPubRel(
+            self: *Self,
+            packet_id: u16,
+        ) Error!void {
+            if (self.inbound_rules.values.len == 0) return;
+            if (comptime Source != local_source.Client) unreachable;
+            if (!self.source.isConnected()) {
+                const connected = try self.source.connect();
+                try self.noteSourceConnected(connected);
+            }
+            try inbound_flow.releaseQoS2(
+                self.source.broker,
+                &self.target,
+                &self.source.consumer.?,
+                self.inbound_bridge_id,
+                self.inbound_session_epoch,
+                self.inbound_qos2_enabled,
+                packet_id,
+            );
         }
 
         pub fn acknowledgeSource(
@@ -1626,11 +1836,22 @@ fn rulesUseQoS2(rules: []const OwnedRule) bool {
     return false;
 }
 
+fn containsInboundFilter(
+    rules: []const InboundRule,
+    filter: []const u8,
+) bool {
+    for (rules) |rule| {
+        if (std.mem.eql(u8, rule.filter, filter)) return true;
+    }
+    return false;
+}
+
 fn coordinatorIdentity(
     bridge_id: [16]u8,
     source_connect: runtime.ConnectOptions,
     target_connect: runtime.ConnectOptions,
     rules: []const OwnedRule,
+    inbound_rules: []const InboundRule,
     preserve_retain: bool,
 ) coordinator_mod.Identity {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
@@ -1648,6 +1869,16 @@ fn coordinatorIdentity(
         hashIdentityByte(&hasher, @intFromEnum(rule.value.qos));
         hashIdentityField(&hasher, rule.value.local_prefix);
         hashIdentityField(&hasher, rule.value.remote_prefix);
+        hashIdentityByte(&hasher, @intFromBool(rule.value.no_local));
+    }
+    std.mem.writeInt(u64, &count, inbound_rules.len, .big);
+    hasher.update(&count);
+    for (inbound_rules) |rule| {
+        hashIdentityField(&hasher, rule.filter);
+        hashIdentityByte(&hasher, @intFromEnum(rule.qos));
+        hashIdentityField(&hasher, rule.local_prefix);
+        hashIdentityField(&hasher, rule.remote_prefix);
+        hashIdentityByte(&hasher, @intFromBool(rule.no_local));
     }
     var identity: coordinator_mod.Identity = undefined;
     hasher.final(&identity);

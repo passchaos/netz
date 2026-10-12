@@ -226,24 +226,29 @@ no usable address, unsupported platforms, and an unavailable explicitly
 selected family fail before serving; when no family is selected, an unavailable
 family is skipped in the same way as the default wildcard listener.
 
-Each `connection` creates an independently reconnecting one-way bridge.
+Each `connection` creates one independently reconnecting bridge.
 One `address` directive containing one or more `host[:port]` targets (or
 bracketed IPv6 targets with required ports) and one or more explicit
-`topic FILTER in|out QOS [LOCAL_PREFIX] [REMOTE_PREFIX]` rules are required.
+`topic FILTER in|out|both QOS [LOCAL_PREFIX] [REMOTE_PREFIX]` rules are required.
 Inbound bridges subscribe remotely to
 `REMOTE_PREFIX + FILTER`, strip `REMOTE_PREFIX` from each delivered Topic
 Name, then prepend `LOCAL_PREFIX` before local broker routing. Outbound bridges
 subscribe directly to the local broker's persistent Session at
 `LOCAL_PREFIX + FILTER`, remove `LOCAL_PREFIX`, and publish
 `REMOTE_PREFIX + Topic Name` without a loopback socket. Empty prefixes may be
-omitted or written as `""`. Rules must be pairwise disjoint after source-prefix
-expansion, and one connection may not mix directions. With the default
+omitted or written as `""`. A connection may mix `in`, `out`, and `both`
+rules; each direction must remain pairwise disjoint after its own source-prefix
+expansion. Both directions share exactly one remote Client and MQTT Session.
+The local source excludes bridge-injected publications, while MQTT 5 remote
+subscriptions use No Local. MQTT 3.1.1 bidirectional bridges require the
+private bridge protocol and fail instead of falling back when the peer rejects
+it, preventing an undetectable publication loop. With the default
 `round_robin false`, connection attempts
 fall through the ordered targets, but the first target remains primary: a
 secondary connection is retired after the configured restart cap so the next
 attempt probes the primary again. `round_robin true` instead rotates after each
 failure or disconnect and leaves a successful target active until it fails.
-`both` and MQTT 3.1 fail explicitly instead of being silently downgraded. One
+MQTT 3.1 fails explicitly instead of being silently downgraded. One
 `restart_timeout` value selects a fixed delay. Two values select bounded
 decorrelated jitter; an optional third value is the stable-connection period
 in seconds after which the delay resets to the base. Reconnects after an
@@ -264,9 +269,10 @@ down the bridge.
 `bridge_outgoing_retain false` clears RETAIN from all remote PUBLISH packets in
 both MQTT 3.1.1 and MQTT 5, including remote state notifications.
 `bridge_attempt_unsubscribe` defaults true for outbound rules: after every
-remote CONNECT it sends one mapped-filter UNSUBSCRIBE before publishing, so a
-persistent Session cannot retain a subscription left by an earlier inbound
-configuration. Set it false only when that cleanup is intentionally unwanted.
+remote CONNECT it sends mapped-filter UNSUBSCRIBE packets before publishing,
+except for filters still used by the same bidirectional bridge, so a persistent
+Session cannot retain subscriptions left by an earlier inbound configuration.
+Set it false only when that cleanup is intentionally unwanted.
 Interleaved stale deliveries remain ordered, are protocol-acknowledged, and are
 dropped rather than terminating the bridge. `try_private` defaults true for
 MQTT 3.1.1 and emits Mosquitto's private bridge protocol marker. A peer that
@@ -496,8 +502,7 @@ files in Mosquitto's case-sensitive alphabetical order (for example, `A.conf`,
 `a.conf`, `B.conf`, `b.conf`). Multiple directories retain declaration order;
 nesting, special `.conf` files, oversized files/sets, and excessive directory/
 file counts fail closed. The in-memory `parse` API deliberately has no
-filesystem expansion. Other curves, legacy PEM encryption, plugins,
-bidirectional configured bridges, and full
+filesystem expansion. Other curves, legacy PEM encryption, plugins, and full
 Mosquitto configuration remain outside this subset and fail
 closed. `cafile` and/or `capath` enable optional
 client certificates on a TLS listener; `require_certificate true` makes the

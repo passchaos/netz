@@ -181,7 +181,12 @@ pub fn Operations(comptime Self: type) type {
                             return;
                         },
                         .disconnect => self.target.disconnectTransport(),
-                        .publish, .pubrel => {},
+                        .publish => |owned| try self.handleTargetPublish(
+                            &owned.publish,
+                        ),
+                        .pubrel => |owned| try self.handleTargetPubRel(
+                            owned.ack.packet_id,
+                        ),
                         .pingreq, .pingresp, .auth => {},
                         .pubrec, .pubcomp => {
                             self.target.disconnectTransport();

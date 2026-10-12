@@ -14,6 +14,9 @@ pub const Rule = struct {
     qos: mqtt.QoS = .at_most_once,
     local_prefix: []const u8 = "",
     remote_prefix: []const u8 = "",
+    /// Suppress publications injected by this bridge's inbound half when the
+    /// source is a broker-local consumer.
+    no_local: bool = false,
 
     pub fn validate(self: Rule) Error!void {
         try mqtt.validateTopicFilter(self.filter);

@@ -1003,8 +1003,9 @@ Current protocol coverage includes:
   single-family socket domains and named-interface address binding enforced
   before bind,
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
-  supervised inbound `connection` bridges with strict `topic ... in ...`
-  QoS/prefix mapping, upstream Session/authentication settings, bounded
+  supervised single-Session inbound, outbound, mixed, and `topic ... both ...`
+  bridges with strict QoS/prefix mapping, local/remote loop suppression,
+  upstream Session/authentication settings, bounded
   reconnect policy, vail-backed TLS 1.3 with CA/hostname verification,
   ordered per-bridge cipher-suite policy, required stapled-OCSP validation,
   and optional encrypted-key mTLS,
@@ -1013,7 +1014,8 @@ Current protocol coverage includes:
   automatic/one-shot lifecycles, independently configurable remote/local
   Client IDs and clean Sessions, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
-  Mosquitto private-bridge negotiation with same-endpoint MQTT 3.1.1 fallback,
+  Mosquitto private-bridge negotiation with same-endpoint MQTT 3.1.1 fallback
+  for one-way bridges and mandatory private mode for bidirectional bridges,
   explicit local IPv4/IPv6 source-address binding across cleartext and TLS
   reconnects, configurable TCP keepalive plus optional Linux
   `TCP_USER_TIMEOUT` policy preserved across cleartext/TLS fallback and

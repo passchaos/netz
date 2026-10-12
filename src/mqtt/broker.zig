@@ -2372,6 +2372,26 @@ pub const Broker = struct {
         self: *Broker,
         publish: mqtt.Publish,
     ) Error!void {
+        return self.publishLocalFromSource(null, publish);
+    }
+
+    /// Publish on behalf of a broker-local consumer while excluding its own
+    /// No Local subscriptions. Bidirectional bridges use this to prevent a
+    /// remotely received publication from immediately crossing back over the
+    /// same bridge. The consumer must be active and owned by this Broker.
+    pub fn publishLocalFromConsumer(
+        self: *Broker,
+        consumer: *const LocalConsumer,
+        publish: mqtt.Publish,
+    ) Error!void {
+        return self.publishLocalFromSource(consumer, publish);
+    }
+
+    fn publishLocalFromSource(
+        self: *Broker,
+        consumer: ?*const LocalConsumer,
+        publish: mqtt.Publish,
+    ) Error!void {
         try validateLocalPublish(publish);
         if (self.payloadTooLarge(publish.payload)) {
             return error.PacketTooLarge;
@@ -2385,9 +2405,21 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             self.finishPartialPersistentChange(persistent_changed);
         };
+        const publisher_id = if (consumer) |source| blk: {
+            if (!source.active) return error.LocalConsumerClosed;
+            const registration = self.local_consumer_routes.get(
+                source.route_id,
+            ) orelse return error.LocalConsumerClosed;
+            if (registration.session.index != source.session.index or
+                registration.session.generation != source.session.generation)
+            {
+                return error.LocalConsumerClosed;
+            }
+            break :blk sessionSubscriberId(source.route_id);
+        } else null;
         const plan = self.enqueuePublishLocked(
             false,
-            null,
+            publisher_id,
             publish,
             null,
             null,
@@ -2467,6 +2499,26 @@ pub const Broker = struct {
         self: *Broker,
         key: BridgeQoS2Key,
     ) Error!BridgeQoS2Release {
+        return self.releaseBridgeQoS2FromSource(key, null);
+    }
+
+    /// Release a durable bridge transaction while treating `consumer` as the
+    /// publisher for No Local routing. The exclusion is resolved from the
+    /// current local-consumer handle, so it remains correct when a bridge is
+    /// recreated and resumes an upstream PUBREL.
+    pub fn releaseBridgeQoS2FromConsumer(
+        self: *Broker,
+        key: BridgeQoS2Key,
+        consumer: *const LocalConsumer,
+    ) Error!BridgeQoS2Release {
+        return self.releaseBridgeQoS2FromSource(key, consumer);
+    }
+
+    fn releaseBridgeQoS2FromSource(
+        self: *Broker,
+        key: BridgeQoS2Key,
+        consumer: ?*const LocalConsumer,
+    ) Error!BridgeQoS2Release {
         self.persistence_mutex.lockUncancelable(self.io);
         var persistence_locked = true;
         defer if (persistence_locked) self.persistence_mutex.unlock(self.io);
@@ -2516,9 +2568,28 @@ pub const Broker = struct {
         const released_payload_len = publish.payload.len;
         var persistent_changed = false;
         var publication_effect_committed = false;
+        const publisher_id = if (consumer) |source| blk: {
+            if (!source.active) {
+                self.state_mutex.unlock(self.io);
+                return error.LocalConsumerClosed;
+            }
+            const registration = self.local_consumer_routes.get(
+                source.route_id,
+            ) orelse {
+                self.state_mutex.unlock(self.io);
+                return error.LocalConsumerClosed;
+            };
+            if (registration.session.index != source.session.index or
+                registration.session.generation != source.session.generation)
+            {
+                self.state_mutex.unlock(self.io);
+                return error.LocalConsumerClosed;
+            }
+            break :blk sessionSubscriberId(source.route_id);
+        } else null;
         const plan = self.enqueuePublishLocked(
             false,
-            null,
+            publisher_id,
             publish,
             null,
             null,
