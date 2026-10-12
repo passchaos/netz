@@ -1803,7 +1803,10 @@ sibling reuse, and connection-error precedence.
    obsolete external ClientHello rather than the HTTP/2 or TLS server path.
    After the zio migration, both h2c and TLS strict suites were rerun against
    the upstream v2.6.0 commit `70ac2294`; each completed 147/147 with zero
-   skipped and zero failed cases.
+   skipped and zero failed cases. Passing `--tls12` now runs the same strict
+   HTTP/2 cases
+   through the RFC 7540 TLS 1.2 profile with mandatory `h2` ALPN instead of
+   relying on the peer's highest-version choice.
    Bidirectional interoperability now has a separate process boundary rather
    than being inferred from those h2spec server-only results:
    `zig build interop-http2-hyper-client -Doptimize=ReleaseFast` builds a

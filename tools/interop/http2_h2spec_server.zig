@@ -1,4 +1,4 @@
-//! Long-lived h2c adapter for the external h2spec conformance runner.
+//! Long-lived h2c/TLS adapter for the external h2spec conformance runner.
 //!
 //! h2spec deliberately tears down malformed connections and immediately opens
 //! another one. Protocol errors therefore terminate only the current accepted
@@ -12,9 +12,14 @@ pub fn main(init: std.process.Init) !void {
     if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
-    const use_tls = args.len == 3 and
-        std.mem.eql(u8, args[2], "--tls");
-    if (args.len == 3 and !use_tls) return error.InvalidArgument;
+    const protocol_policy: ?netz.tls.stream.VersionPolicy = if (args.len == 2)
+        null
+    else if (std.mem.eql(u8, args[2], "--tls"))
+        .tls13_only
+    else if (std.mem.eql(u8, args[2], "--tls12"))
+        .tls12_only
+    else
+        return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -26,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
         .max_concurrent_streams = 128,
         .handshake_timeout = .fromSeconds(5),
     };
-    if (use_tls) {
+    if (protocol_policy) |policy| {
         var certificate_der: [netz.tls.testing.certificate_der_len]u8 =
             undefined;
         try std.base64.standard.Decoder.decode(
@@ -46,10 +51,16 @@ pub fn main(init: std.process.Init) !void {
                     } },
                 },
                 .limits = limits,
+                .protocol_policy = policy,
             },
         );
         defer server.deinit();
-        try serveForever(&server, io, allocator);
+        try serveForever(
+            &server,
+            io,
+            allocator,
+            if (policy == .tls12_only) "tls12" else "tls13",
+        );
     } else {
         var server = try netz.http2.runtime.Server.listen(
             allocator,
@@ -58,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
             limits,
         );
         defer server.deinit();
-        try serveForever(&server, io, allocator);
+        try serveForever(&server, io, allocator, "h2c");
     }
 }
 
@@ -66,11 +77,13 @@ fn serveForever(
     server: anytype,
     io: std.Io,
     allocator: std.mem.Allocator,
+    transport: []const u8,
 ) !void {
     const ConnectionTask = AcceptTask(@TypeOf(server.*));
     std.debug.print(
-        "netz h2spec server listening on {f} server_io=zio-std-io\n",
-        .{server.address()},
+        "netz h2spec server listening on {f} transport={s} " ++
+            "server_io=zio-std-io\n",
+        .{ server.address(), transport },
     );
 
     var connections: std.Io.Group = .init;

@@ -1593,7 +1593,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| h2spec.addArgs(args);
     const h2spec_step = b.step(
         "interop-http2-h2spec",
-        "Run strict external h2spec against netz h2c (pass --tls for ALPN/TLS)",
+        "Run strict h2spec against h2c, TLS 1.3, or TLS 1.2 (--tls/--tls12)",
     );
     h2spec_step.dependOn(&h2spec.step);
 

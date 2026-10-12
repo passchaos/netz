@@ -30,11 +30,21 @@ PY
 
 server_args=("$port")
 h2spec_transport_args=()
-if [[ ${1:-} == "--tls" ]]; then
-  shift
-  server_args+=(--tls)
-  h2spec_transport_args+=(--tls --insecure)
-fi
+server_transport=h2c
+case ${1:-} in
+  --tls)
+    shift
+    server_args+=(--tls)
+    h2spec_transport_args+=(--tls --insecure)
+    server_transport=tls13
+    ;;
+  --tls12)
+    shift
+    server_args+=(--tls12)
+    h2spec_transport_args+=(--tls --insecure)
+    server_transport=tls12
+    ;;
+esac
 
 "$server" "${server_args[@]}" >"$work/server.log" 2>&1 &
 server_pid=$!
@@ -54,6 +64,7 @@ if ! grep -q 'h2spec server listening' "$work/server.log"; then
   exit 1
 fi
 grep -Fq 'server_io=zio-std-io' "$work/server.log"
+grep -Fq "transport=$server_transport" "$work/server.log"
 
 log="$work/h2spec.log"
 # Strict mode adds the connection-error GOAWAY check that h2spec otherwise

@@ -1331,6 +1331,8 @@ FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=Relea
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
 # Also run the same strict suite over TLS 1.3 with mandatory h2 ALPN.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
+# Or force the HTTP/2 TLS 1.2 profile while retaining mandatory h2 ALPN.
+zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls12
 # Build the locked local Hyper reference offline, then verify chunked bodies,
 # negotiated trailers, and Expect/100-continue handshakes in both directions.
 # The netz client also proves 103-before-100 handling and a bodyless 417 early
