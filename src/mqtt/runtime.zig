@@ -2913,6 +2913,16 @@ pub const Connection = struct {
         return self.transport.negotiatedTlsProtocol();
     }
 
+    pub fn wasTlsSessionResumed(self: *const Connection) ?bool {
+        return self.transport.wasTlsSessionResumed();
+    }
+
+    pub fn takeTls12SessionTicket(
+        self: *Connection,
+    ) ?tls_stream.Tls12SessionTicket {
+        return self.transport.takeTls12SessionTicket();
+    }
+
     /// Return authenticated TLS cipher-suite metadata for native TLS or
     /// vail-backed WSS. Other transports return null.
     pub fn negotiatedCipherSuite(

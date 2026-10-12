@@ -1171,6 +1171,7 @@ pub const TlsListenOptions = struct {
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    tls12_session_tickets: ?tls_stream.Tls12ServerTicketPolicy = null,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute TLS handshake receive budget. HTTP/2 frame waits begin only
@@ -1211,6 +1212,7 @@ pub const TlsServer = struct {
                 .cipher_suites = options.cipher_suites,
                 .tls12_cipher_suites = options.tls12_cipher_suites,
                 .protocol_policy = options.protocol_policy,
+                .tls12_session_tickets = options.tls12_session_tickets,
                 .max_client_hello_size = options.max_client_hello_size,
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
@@ -3114,6 +3116,8 @@ pub const TlsConnectOptions = struct {
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    request_tls12_session_ticket: bool = true,
+    tls12_ticket_resumption: ?*const tls_stream.Tls12SessionTicket = null,
     max_server_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget spanning ServerHello and the encrypted flight.
     tls_handshake_timeout: ?std.Io.Duration = null,
@@ -3135,6 +3139,8 @@ fn verifiedTlsClientOptions(
         .cipher_suites = options.cipher_suites,
         .tls12_cipher_suites = options.tls12_cipher_suites,
         .protocol_policy = options.protocol_policy,
+        .request_tls12_session_ticket = options.request_tls12_session_ticket,
+        .tls12_ticket_resumption = options.tls12_ticket_resumption,
         .max_server_handshake_size = options.max_server_handshake_size,
         .handshake_timeout = options.tls_handshake_timeout,
     };
@@ -3532,6 +3538,25 @@ pub const Connection = struct {
             .tls_client => |connection| connection.negotiatedProtocol(),
             .tls_server => |connection| connection.negotiatedProtocol(),
             .tcp => null,
+        };
+    }
+
+    pub fn wasTlsSessionResumed(self: *const Connection) ?bool {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_client => |connection| connection.wasResumed(),
+            .tls_server => |connection| connection.wasResumed(),
+            .tcp => null,
+        };
+    }
+
+    pub fn takeTls12SessionTicket(
+        self: *Connection,
+    ) ?tls_stream.Tls12SessionTicket {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_client => |connection| connection.takeTls12SessionTicket(),
+            .tls_server, .tcp => null,
         };
     }
 

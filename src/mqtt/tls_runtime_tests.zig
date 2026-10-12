@@ -168,7 +168,7 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT TLS 1.2 completes authenticated MQTT 5 traffic" {
+test "MQTT TLS 1.2 resumes RFC 5077 ticket across MQTT 5 traffic" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -181,6 +181,11 @@ test "MQTT TLS 1.2 completes authenticated MQTT 5 traffic" {
     );
     const key_pair = try tls_test.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
+    var keyring = try tls_stream.Tls12TicketKeyring.init(.{
+        .id = 12,
+        .secret = [_]u8{0x5c} ** tls_stream.tls12_ticket_key_len,
+    });
+    defer keyring.deinit();
     var server = try mqtt_tls.Server.listen(
         allocator,
         io,
@@ -198,37 +203,49 @@ test "MQTT TLS 1.2 completes authenticated MQTT 5 traffic" {
                 .ecdhe_ecdsa_aes_128_gcm_sha256,
             },
             .protocol_policy = .tls12_only,
+            .tls12_session_tickets = .{
+                .keyring = &keyring,
+                .server_id = "localhost",
+                .lifetime_seconds = 3600,
+            },
         },
     );
     defer server.deinit();
 
     const Shared = struct {
         server: *mqtt_tls.Server,
+        resumed: [2]bool = .{ false, false },
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
-                shared.err = err;
-                return;
-            };
-            defer accepted.deinit(shared.server.allocator);
-            if (accepted.connection.negotiatedTlsProtocol() != .tls12) {
-                shared.err = error.InvalidProtocolVersion;
-                return;
+            for (0..2) |index| {
+                var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                defer accepted.deinit(shared.server.allocator);
+                if (accepted.connection.negotiatedTlsProtocol() != .tls12) {
+                    shared.err = error.InvalidProtocolVersion;
+                    return;
+                }
+                shared.resumed[index] = accepted.connection.wasTlsSessionResumed() orelse {
+                    shared.err = error.MissingTlsMetadata;
+                    return;
+                };
+                accepted.connection.readPingReq() catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                accepted.connection.writePingResp() catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                var disconnect = accepted.connection.readDisconnect() catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                disconnect.deinit(shared.server.allocator);
             }
-            accepted.connection.readPingReq() catch |err| {
-                shared.err = err;
-                return;
-            };
-            accepted.connection.writePingResp() catch |err| {
-                shared.err = err;
-                return;
-            };
-            var disconnect = accepted.connection.readDisconnect() catch |err| {
-                shared.err = err;
-                return;
-            };
-            disconnect.deinit(shared.server.allocator);
         }
     };
     var shared = Shared{ .server = &server };
@@ -236,46 +253,58 @@ test "MQTT TLS 1.2 completes authenticated MQTT 5 traffic" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var client = try mqtt_tls.Client.connectAddress(
-        allocator,
-        io,
-        server.address(),
-        "localhost",
-        .{
-            .mqtt = .{
-                .protocol = .v5,
-                .client_id = "mqtt-tls12",
+    var ticket: ?tls_stream.Tls12SessionTicket = null;
+    defer if (ticket) |*cached| cached.deinit();
+    for (0..2) |index| {
+        var client = try mqtt_tls.Client.connectAddress(
+            allocator,
+            io,
+            server.address(),
+            "localhost",
+            .{
+                .mqtt = .{
+                    .protocol = .v5,
+                    .client_id = "mqtt-tls12",
+                },
+                .server_verifier = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .alpn_protocols = &.{"mqtt"},
+                .cipher_suites = &.{.aes_128_gcm_sha256},
+                .tls12_cipher_suites = &.{
+                    .ecdhe_ecdsa_aes_128_gcm_sha256,
+                },
+                .protocol_policy = .tls12_only,
+                .tls12_ticket_resumption = if (index == 0) null else &ticket.?,
             },
-            .server_verifier = .{
-                .pinned_ecdsa_p256_public_key = public_key,
-            },
-            .alpn_protocols = &.{"mqtt"},
-            .cipher_suites = &.{.aes_128_gcm_sha256},
-            .tls12_cipher_suites = &.{
-                .ecdhe_ecdsa_aes_128_gcm_sha256,
-            },
-            .protocol_policy = .tls12_only,
-        },
-    );
-    defer client.close();
-    try std.testing.expectEqual(
-        tls_stream.Protocol.tls12,
-        client.negotiatedTlsProtocol().?,
-    );
-    try std.testing.expectEqual(
-        tls_stream.NegotiatedCipherSuite.ecdhe_ecdsa_aes_128_gcm_sha256,
-        client.negotiatedCipherSuite().?,
-    );
-    try std.testing.expectError(
-        error.TlsKeyUpdateUnavailable,
-        client.updateTrafficKeys(false),
-    );
-    try client.ping();
-    try client.disconnect(0);
+        );
+        defer client.close();
+        try std.testing.expectEqual(
+            tls_stream.Protocol.tls12,
+            client.negotiatedTlsProtocol().?,
+        );
+        try std.testing.expectEqual(index != 0, client.wasTlsSessionResumed().?);
+        try std.testing.expectEqual(
+            tls_stream.NegotiatedCipherSuite.ecdhe_ecdsa_aes_128_gcm_sha256,
+            client.negotiatedCipherSuite().?,
+        );
+        try std.testing.expectError(
+            error.TlsKeyUpdateUnavailable,
+            client.updateTrafficKeys(false),
+        );
+        try client.ping();
+        if (client.takeTls12SessionTicket()) |renewed| {
+            if (ticket) |*cached| cached.deinit();
+            ticket = renewed;
+        }
+        if (index == 0) try std.testing.expect(ticket != null);
+        try client.disconnect(0);
+    }
 
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqualSlices(bool, &.{ false, true }, &shared.resumed);
 }
 
 test "MQTT TLS explicitly selects vail with ordinary CA verification" {

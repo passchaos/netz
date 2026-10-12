@@ -60,6 +60,10 @@ pub const Options = struct {
     tls12_cipher_suites: []const vail.tls.tls12.Suite =
         &version.default_tls12_cipher_suites,
     protocol_policy: version.Policy = .tls12_and_tls13,
+    /// Request an RFC 5077 ticket on a full TLS 1.2 handshake. A supplied
+    /// resumption ticket is always offered and requests renewal.
+    request_tls12_session_ticket: bool = true,
+    tls12_ticket_resumption: ?*const vail.tls.tls12_ticket.Cached = null,
     request_ocsp: bool = true,
     max_server_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
@@ -79,6 +83,8 @@ pub const VerifiedOptions = struct {
     tls12_cipher_suites: []const vail.tls.tls12.Suite =
         &version.default_tls12_cipher_suites,
     protocol_policy: version.Policy = .tls12_and_tls13,
+    request_tls12_session_ticket: bool = true,
+    tls12_ticket_resumption: ?*const vail.tls.tls12_ticket.Cached = null,
     max_server_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
 };
@@ -111,6 +117,8 @@ pub const Connection = struct {
     cipher_suite: version.NegotiatedCipherSuite,
     transcript_hash: vail.tls.secret.Hash,
     exporter: Exporter,
+    tls12_session_ticket: ?vail.tls.tls12_ticket.Cached = null,
+    resumed: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -158,6 +166,11 @@ pub const Connection = struct {
             options.tls12_cipher_suites.len == 0) or
             (options.protocol_policy.offersTls13() and
                 options.cipher_suites.len == 0))
+        {
+            return error.InvalidProtocolPolicy;
+        }
+        if (!options.protocol_policy.offersTls12() and
+            options.tls12_ticket_resumption != null)
         {
             return error.InvalidProtocolPolicy;
         }
@@ -279,6 +292,9 @@ pub const Connection = struct {
             .server_verifier = options.server_verifier,
             .client_identity = options.client_identity,
             .request_ocsp = options.request_ocsp,
+            .request_session_ticket = options.request_tls12_session_ticket or
+                options.tls12_ticket_resumption != null,
+            .ticket_resumption = options.tls12_ticket_resumption,
             .now_seconds = now_seconds,
         };
 
@@ -341,7 +357,14 @@ pub const Connection = struct {
             );
         }
         errdefer established.deinit();
-        return fromEstablished(allocator, io, stream, &established);
+        return fromEstablished(
+            allocator,
+            io,
+            stream,
+            options.server_name,
+            now_seconds,
+            &established,
+        );
     }
 
     pub fn initVerified(
@@ -407,6 +430,8 @@ pub const Connection = struct {
             .cipher_suites = options.cipher_suites,
             .tls12_cipher_suites = options.tls12_cipher_suites,
             .protocol_policy = options.protocol_policy,
+            .request_tls12_session_ticket = options.request_tls12_session_ticket,
+            .tls12_ticket_resumption = options.tls12_ticket_resumption,
             .request_ocsp = options.request_ocsp,
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.handshake_timeout,
@@ -431,6 +456,7 @@ pub const Connection = struct {
             allocator.free(certificate);
         }
         allocator.free(self.peer_certificate_chain);
+        if (self.tls12_session_ticket) |*ticket| ticket.deinit();
         switch (self.exporter) {
             .tls13 => |*secret| secret.deinit(),
             .tls12 => |*state| {
@@ -465,6 +491,20 @@ pub const Connection = struct {
         self: *const Connection,
     ) vail.tls.secret.Hash {
         return self.transcript_hash;
+    }
+
+    pub fn wasResumed(self: *const Connection) bool {
+        return self.resumed;
+    }
+
+    /// Transfer the newest authenticated RFC 5077 ticket to the caller.
+    /// Returns null for TLS 1.3 or when the TLS 1.2 server issued no ticket.
+    pub fn takeTls12SessionTicket(
+        self: *Connection,
+    ) ?vail.tls.tls12_ticket.Cached {
+        const ticket = self.tls12_session_ticket;
+        self.tls12_session_ticket = null;
+        return ticket;
     }
 
     pub fn exportKeyingMaterial(
@@ -632,11 +672,15 @@ fn fromEstablished(
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
+    server_identity: []const u8,
+    now_seconds: u64,
     established: *AutoClient.Established,
 ) Error!*Connection {
     const connection = try allocator.create(Connection);
+    errdefer allocator.destroy(connection);
     connection.* = switch (established.*) {
         .tls13 => |*value| blk: {
+            const resumed = value.resumed;
             const selected_alpn = value.selected_alpn;
             value.selected_alpn = null;
             const peer_certificate_chain = value.peer_certificate_chain;
@@ -676,9 +720,17 @@ fn fromEstablished(
                 .cipher_suite = .fromTls13(cipher_suite),
                 .transcript_hash = cipher_suite.hash(),
                 .exporter = .{ .tls13 = exporter },
+                .tls12_session_ticket = null,
+                .resumed = resumed,
             };
         },
         .tls12 => |*value| blk: {
+            const resumed = value.resumed;
+            var session_ticket = if (value.session_ticket != null)
+                try value.createTicketSession(server_identity, now_seconds)
+            else
+                null;
+            errdefer if (session_ticket) |*ticket| ticket.deinit();
             const selected_alpn = value.selected_alpn;
             value.selected_alpn = null;
             const peer_certificate_chain = value.peer_certificate_chain;
@@ -709,6 +761,8 @@ fn fromEstablished(
                 .cipher_suite = .fromTls12(suite),
                 .transcript_hash = version.transcriptHash(suite),
                 .exporter = .{ .tls12 = exporter },
+                .tls12_session_ticket = session_ticket,
+                .resumed = resumed,
             };
         },
     };

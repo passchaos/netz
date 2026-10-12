@@ -195,6 +195,25 @@ pub const Transport = union(enum) {
         };
     }
 
+    pub fn wasTlsSessionResumed(self: *const Transport) ?bool {
+        return switch (self.*) {
+            .tls_vail => |transport| transport.connection.wasResumed(),
+            .tls_server => |transport| transport.connection.wasResumed(),
+            .websocket => |ws| ws.connection.wasTlsSessionResumed(),
+            .tcp, .tls => null,
+        };
+    }
+
+    pub fn takeTls12SessionTicket(
+        self: *Transport,
+    ) ?tls_stream.Tls12SessionTicket {
+        return switch (self.*) {
+            .tls_vail => |transport| transport.connection.takeTls12SessionTicket(),
+            .websocket => |ws| ws.connection.takeTls12SessionTicket(),
+            .tls_server, .tcp, .tls => null,
+        };
+    }
+
     pub fn negotiatedCipherSuite(
         self: *const Transport,
     ) ?tls_stream.NegotiatedCipherSuite {

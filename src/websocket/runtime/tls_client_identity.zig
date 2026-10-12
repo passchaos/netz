@@ -36,6 +36,8 @@ pub const Options = struct {
     tls12_cipher_suites: []const vail.tls.tls12.Suite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    request_tls12_session_ticket: bool = true,
+    tls12_ticket_resumption: ?*const tls_stream.Tls12SessionTicket = null,
     max_server_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget spanning all server handshake flights.
     handshake_timeout: ?std.Io.Duration = null,
@@ -131,6 +133,8 @@ fn verifiedOptions(
         .cipher_suites = identity_options.cipher_suites,
         .tls12_cipher_suites = identity_options.tls12_cipher_suites,
         .protocol_policy = identity_options.protocol_policy,
+        .request_tls12_session_ticket = identity_options.request_tls12_session_ticket,
+        .tls12_ticket_resumption = identity_options.tls12_ticket_resumption,
         .max_server_handshake_size = identity_options.max_server_handshake_size,
         .handshake_timeout = identity_options.handshake_timeout orelse tls_options.handshake_timeout,
     };

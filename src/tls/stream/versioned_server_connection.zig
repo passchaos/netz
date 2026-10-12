@@ -33,6 +33,13 @@ pub const Error = std.mem.Allocator.Error ||
     };
 
 pub const Options = struct {
+    pub const Tls12SessionTicketPolicy = struct {
+        keyring: *const vail.tls.ticket_keyring.Keyring,
+        /// Stable identity bound into ticket AEAD associated data.
+        server_id: []const u8,
+        lifetime_seconds: u32 = 24 * 60 * 60,
+    };
+
     identity: vail.tls.auth.ServerIdentity,
     identity_provider: ?server_handshake.ServerIdentityProvider = null,
     cipher_suites: []const vail.tls.cipher_suite.Suite =
@@ -44,6 +51,7 @@ pub const Options = struct {
     max_client_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    tls12_session_tickets: ?Tls12SessionTicketPolicy = null,
     alpn_protocols: []const []const u8 = &.{},
     require_alpn: bool = true,
 
@@ -58,8 +66,23 @@ pub const Options = struct {
     }
 
     pub fn validateIdentity(self: Options) Error!void {
+        if (self.tls12_session_tickets) |tickets| {
+            if (!self.protocol_policy.offersTls12() or
+                tickets.server_id.len == 0 or
+                tickets.lifetime_seconds == 0 or
+                tickets.lifetime_seconds >
+                    vail.tls.tls12_ticket.max_lifetime_seconds)
+            {
+                return error.InvalidSessionTicketConfiguration;
+            }
+        }
         var lease = try self.acquireIdentity();
         defer lease.deinit();
+        if (self.tls12_session_tickets != null and
+            (lease.client_auth != null or self.client_auth != null))
+        {
+            return error.InvalidSessionTicketConfiguration;
+        }
     }
 };
 
@@ -91,6 +114,7 @@ pub const Connection = struct {
     cipher_suite: version.NegotiatedCipherSuite,
     transcript_hash: vail.tls.secret.Hash,
     exporter: Exporter,
+    resumed: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -154,6 +178,9 @@ pub const Connection = struct {
         defer identity_lease.deinit();
         const identity = identity_lease.identity;
         const client_auth = identity_lease.client_auth orelse options.client_auth;
+        if (options.tls12_session_tickets != null and client_auth != null) {
+            return error.InvalidSessionTicketConfiguration;
+        }
 
         var client_hello: std.ArrayList(u8) = .empty;
         defer client_hello.deinit(allocator);
@@ -200,6 +227,11 @@ pub const Connection = struct {
         var tls12_random: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &tls12_random);
         try std.Io.randomSecure(io, &tls12_random);
+        var ticket_nonce: [vail.tls.ticket_keyring.nonce_len]u8 = undefined;
+        defer std.crypto.secureZero(u8, &ticket_nonce);
+        if (options.tls12_session_tickets != null) {
+            try std.Io.randomSecure(io, &ticket_nonce);
+        }
         var signer = try freshSigner(io, identity.signer);
         defer std.crypto.secureZero(u8, std.mem.asBytes(&signer));
 
@@ -234,12 +266,26 @@ pub const Connection = struct {
                         policy.certificate_authorities
                     else
                         null,
+                    .issue_session_ticket = options.tls12_session_tickets != null,
                 },
                 .server_random = tls12_random,
                 .server_private_key = &tls12_key,
                 .certificate_chain = identity.certificate_chain,
                 .signer = signer,
                 .client_auth_policy = client_auth,
+                .session_tickets = if (options.tls12_session_tickets) |tickets|
+                    .{
+                        .keyring = tickets.keyring,
+                        .server_id = tickets.server_id,
+                        .now_seconds = @intCast(@max(
+                            0,
+                            std.Io.Timestamp.now(io, .real).toSeconds(),
+                        )),
+                        .lifetime_seconds = tickets.lifetime_seconds,
+                        .sealing_nonce = ticket_nonce,
+                    }
+                else
+                    null,
             },
             .enable_tls13 = options.protocol_policy.offersTls13(),
             .enable_tls12 = options.protocol_policy.offersTls12(),
@@ -326,6 +372,10 @@ pub const Connection = struct {
         self: *const Connection,
     ) vail.tls.secret.Hash {
         return self.transcript_hash;
+    }
+
+    pub fn wasResumed(self: *const Connection) bool {
+        return self.resumed;
     }
 
     pub fn exportKeyingMaterial(
@@ -498,6 +548,7 @@ fn fromEstablished(
     const connection = try allocator.create(Connection);
     connection.* = switch (established.*) {
         .tls13 => |*value| blk: {
+            const resumed = value.resumed;
             const peer_certificate_chain = value.peer_certificate_chain;
             value.peer_certificate_chain = null;
             const cipher_suite = value.application.suite;
@@ -537,9 +588,11 @@ fn fromEstablished(
                 .cipher_suite = .fromTls13(cipher_suite),
                 .transcript_hash = cipher_suite.hash(),
                 .exporter = .{ .tls13 = exporter },
+                .resumed = resumed,
             };
         },
         .tls12 => |*value| blk: {
+            const resumed = value.resumed;
             const peer_certificate_chain = value.peer_certificate_chain;
             value.peer_certificate_chain = null;
             const suite = value.suite;
@@ -568,6 +621,7 @@ fn fromEstablished(
                 .cipher_suite = .fromTls12(suite),
                 .transcript_hash = version.transcriptHash(suite),
                 .exporter = .{ .tls12 = exporter },
+                .resumed = resumed,
             };
         },
     };

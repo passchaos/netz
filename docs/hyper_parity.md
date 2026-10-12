@@ -1023,6 +1023,8 @@ The native vail-backed TCP transports now negotiate TLS 1.2 and TLS 1.3 with
 an explicit version policy. TLS 1.2 is limited to ECDHE+AEAD, requires Extended
 Master Secret and secure-renegotiation signaling, and is covered by HTTP/1 and
 HTTP/2 application round trips; QUIC/HTTP/3 remains TLS 1.3-only by protocol.
+The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets, explicit
+resumption status, and caller-owned ticket transfer for HTTP connection pools.
 
 | Area | netz | hyper |
 | --- | --- | --- |

@@ -1053,6 +1053,7 @@ pub const TlsServer = struct {
             .cipher_suites = options.cipher_suites,
             .tls12_cipher_suites = options.tls12_cipher_suites,
             .protocol_policy = options.protocol_policy,
+            .tls12_session_tickets = options.tls12_session_tickets,
             .max_client_hello_size = options.max_client_hello_size,
             .max_client_handshake_size = options.max_client_handshake_size,
             .handshake_timeout = options.tls_handshake_timeout,
@@ -1347,6 +1348,7 @@ pub const TlsListenOptions = struct {
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    tls12_session_tickets: ?tls_stream.Tls12ServerTicketPolicy = null,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute TLS handshake receive budget. The WebSocket Upgrade-head
@@ -3835,6 +3837,23 @@ pub const Connection = struct {
             return connection.negotiatedProtocol();
         }
         return null;
+    }
+
+    pub fn wasTlsSessionResumed(self: *const Connection) ?bool {
+        if (self.tls_server_conn) |connection| {
+            return connection.wasResumed();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.wasResumed();
+        }
+        return null;
+    }
+
+    pub fn takeTls12SessionTicket(
+        self: *Connection,
+    ) ?tls_stream.Tls12SessionTicket {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.takeTls12SessionTicket();
     }
 
     /// Return the transcript/HKDF hash implied by the negotiated WSS suite.

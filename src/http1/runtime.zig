@@ -162,6 +162,8 @@ pub const VailTlsClientOptions = struct {
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    request_tls12_session_ticket: bool = true,
+    tls12_ticket_resumption: ?*const tls_stream.Tls12SessionTicket = null,
     max_server_handshake_size: usize = 256 * 1024,
     handshake_timeout: ?std.Io.Duration = null,
 };
@@ -1721,6 +1723,7 @@ pub const TlsListenOptions = struct {
     tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    tls12_session_tickets: ?tls_stream.Tls12ServerTicketPolicy = null,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget for TLS setup, independent of HTTP request-head
@@ -1764,6 +1767,7 @@ pub const TlsServer = struct {
                 .cipher_suites = options.cipher_suites,
                 .tls12_cipher_suites = options.tls12_cipher_suites,
                 .protocol_policy = options.protocol_policy,
+                .tls12_session_tickets = options.tls12_session_tickets,
                 .max_client_hello_size = options.max_client_hello_size,
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
@@ -2930,6 +2934,18 @@ pub const Client = struct {
     ) ?tls_stream.Protocol {
         const connection = self.tls_vail_conn orelse return null;
         return connection.negotiatedProtocol();
+    }
+
+    pub fn wasTlsSessionResumed(self: *const Client) ?bool {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.wasResumed();
+    }
+
+    pub fn takeTls12SessionTicket(
+        self: *Client,
+    ) ?tls_stream.Tls12SessionTicket {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.takeTls12SessionTicket();
     }
 
     pub fn negotiatedCipherSuite(
@@ -4113,6 +4129,8 @@ fn verifiedTlsClientOptions(
         .cipher_suites = options.cipher_suites,
         .tls12_cipher_suites = options.tls12_cipher_suites,
         .protocol_policy = options.protocol_policy,
+        .request_tls12_session_ticket = options.request_tls12_session_ticket,
+        .tls12_ticket_resumption = options.tls12_ticket_resumption,
         .max_server_handshake_size = options.max_server_handshake_size,
         .handshake_timeout = options.handshake_timeout,
     };
@@ -4173,6 +4191,11 @@ pub const Connection = struct {
     ) ?tls_stream.Protocol {
         const connection = self.tls_server_conn orelse return null;
         return connection.negotiatedProtocol();
+    }
+
+    pub fn wasTlsSessionResumed(self: *const Connection) ?bool {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.wasResumed();
     }
 
     pub fn negotiatedTranscriptHash(

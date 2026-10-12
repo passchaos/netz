@@ -2419,6 +2419,11 @@ static-RSA key exchange, or renegotiation. Listener `tls_version`/`ciphers` and
 bridge `bridge_tls_version`/`bridge_ciphers` map this policy explicitly.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
 interoperability covers both endpoint roles and good/missing/revoked OCSP.
+The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:
+servers use an application-owned bounded keyring and generate a unique sealing
+nonce per connection, while clients can transfer an owned ticket cache into a
+later connection. Cached state is bound to the server identity, ALPN, cipher
+suite, and lifetime; an unauthentic ticket falls back to a full handshake.
 
 `mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the
