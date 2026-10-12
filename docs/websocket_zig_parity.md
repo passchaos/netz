@@ -101,8 +101,9 @@ selection and empty-certificate fallback for TLS 1.3; unknown request
 extensions remain forward-compatible while duplicate types are rejected across
 the complete 16-bit namespace without an arbitrary count ceiling. Repeated
 signature-algorithm values are accepted in TLS 1.2/1.3 ClientHello and TLS 1.3
-CertificateRequest vectors, and the initial handshake requires an empty
-CertificateRequest context.
+CertificateRequest vectors. A present certificate-authorities extension must
+contain at least one non-empty DistinguishedName, and the initial handshake
+requires an empty CertificateRequest context.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.

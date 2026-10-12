@@ -1039,8 +1039,10 @@ ignores unknown extensions while rejecting duplicate types across the complete
 16-bit namespace without an arbitrary count ceiling and preserving strict
 validation of known ones. Repeated entries inside TLS 1.2/1.3 ClientHello and
 TLS 1.3 CertificateRequest signature-algorithm vectors remain acceptable as RFC
-5246 and RFC 8446 permit. Initial-handshake CertificateRequest messages must
-carry an empty request context in both client and server paths.
+5246 and RFC 8446 permit. A present certificate-authorities extension must
+contain at least one non-empty DistinguishedName; omitting it expresses no CA
+restriction. Initial-handshake CertificateRequest messages must carry an empty
+request context in both client and server paths.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
 resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
 TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake

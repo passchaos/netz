@@ -2432,8 +2432,9 @@ uses the same CA-aware selection and empty-certificate fallback. Unknown TLS
 duplicate extension types remain fatal across the complete 16-bit namespace
 without an arbitrary count ceiling. Repeated signature-algorithm values remain
 acceptable in TLS 1.2/1.3 ClientHello and TLS 1.3 CertificateRequest vectors.
-Non-empty request contexts are rejected during the initial handshake and remain
-reserved for post-handshake auth.
+A present certificate-authorities extension must contain at least one non-empty
+DistinguishedName; omitting it permits any issuer. Non-empty request contexts
+are rejected during the initial handshake and remain reserved for post-handshake auth.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
 interoperability covers both endpoint roles and good/missing/revoked OCSP.
 The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:
