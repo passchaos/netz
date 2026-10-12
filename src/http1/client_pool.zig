@@ -9,6 +9,8 @@
 const std = @import("std");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
+const tls_ticket_cache = @import("../tls/stream/client_ticket_cache.zig");
 const runtime = @import("runtime.zig");
 
 pub const Error = runtime.Error || error{
@@ -30,6 +32,12 @@ pub const Options = struct {
     idle_timeout: ?std.Io.Duration = .fromSeconds(90),
     limits: runtime.Limits = .{},
     tls: runtime.TlsClientOptions = .{},
+    /// Select the vail TLS 1.2/1.3 transport for HTTPS pool connections.
+    /// Null preserves the standard-library TLS client path.
+    vail_tls: ?runtime.VailTlsClientOptions = null,
+    /// Maximum cached RFC 5077 TLS 1.2 tickets across HTTPS authorities.
+    /// Zero disables automatic ticket retention and resumption.
+    max_tls12_session_tickets: usize = 32,
 };
 
 const Transport = enum { cleartext, tls };
@@ -58,6 +66,7 @@ pub const Pool = struct {
     sequence: u64 = 0,
     connections: usize = 0,
     capacity_waiters: fifo_admission.Queue = .{},
+    tls12_tickets: tls_ticket_cache.Cache,
     closed: bool = false,
 
     pub fn init(
@@ -71,7 +80,16 @@ pub const Pool = struct {
         if (options.idle_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.InvalidPoolOptions;
         }
-        return .{ .allocator = allocator, .io = io, .options = options };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .options = options,
+            .tls12_tickets = .init(
+                allocator,
+                io,
+                options.max_tls12_session_tickets,
+            ),
+        };
     }
 
     pub fn deinit(self: *Pool) void {
@@ -82,6 +100,7 @@ pub const Pool = struct {
         std.debug.assert(self.connections == 0);
         std.debug.assert(self.capacity_waiters.count() == 0);
         self.idle.deinit(self.allocator);
+        self.tls12_tickets.deinit();
         self.* = undefined;
     }
 
@@ -96,6 +115,7 @@ pub const Pool = struct {
         self.idle.clearRetainingCapacity();
         self.capacity_waiters.notifyAll(self.io);
         self.mutex.unlock(self.io);
+        self.tls12_tickets.clear();
     }
 
     pub fn requestUri(
@@ -466,6 +486,22 @@ pub const Pool = struct {
         var connection_reserved = true;
         errdefer if (connection_reserved) self.releaseConnectionSlot();
 
+        var tls12_ticket = if (transport == .tls and
+            self.options.vail_tls != null and
+            self.options.vail_tls.?.protocol_policy.offersTls12())
+            try self.tls12_tickets.cloneFor(
+                endpoint.tls_host,
+                endpoint.port,
+                realNowSeconds(self.io),
+            )
+        else
+            null;
+        defer if (tls12_ticket) |*ticket| ticket.deinit();
+        var vail_tls_options = self.options.vail_tls;
+        if (tls12_ticket) |*ticket| {
+            vail_tls_options.?.tls12_ticket_resumption = ticket;
+        }
+
         var client = switch (transport) {
             .cleartext => switch (endpoint.target) {
                 .host => if (deadline) |absolute|
@@ -508,7 +544,48 @@ pub const Pool = struct {
                     break :blk value;
                 },
             },
-            .tls => switch (endpoint.target) {
+            .tls => if (vail_tls_options) |tls_options|
+                switch (endpoint.target) {
+                    .host => if (deadline) |absolute|
+                        try runtime.Client.connectVailTlsHostWithDeadline(
+                            self.allocator,
+                            self.io,
+                            endpoint.tls_host,
+                            endpoint.port,
+                            self.options.limits,
+                            tls_options,
+                            absolute,
+                        )
+                    else
+                        try runtime.Client.connectVailTlsHost(
+                            self.allocator,
+                            self.io,
+                            endpoint.tls_host,
+                            endpoint.port,
+                            self.options.limits,
+                            tls_options,
+                        ),
+                    .ip => |address| if (deadline) |absolute|
+                        try runtime.Client.connectVailTlsAddressWithDeadline(
+                            self.allocator,
+                            self.io,
+                            address,
+                            endpoint.tls_host,
+                            self.options.limits,
+                            tls_options,
+                            absolute,
+                        )
+                    else
+                        try runtime.Client.connectVailTlsAddress(
+                            self.allocator,
+                            self.io,
+                            address,
+                            endpoint.tls_host,
+                            self.options.limits,
+                            tls_options,
+                        ),
+                }
+            else switch (endpoint.target) {
                 .host => if (deadline) |absolute|
                     try runtime.Client.connectTlsHostWithDeadline(
                         self.allocator,
@@ -552,6 +629,9 @@ pub const Pool = struct {
             },
         };
         errdefer client.close();
+        if (transport == .tls and vail_tls_options != null) {
+            self.rememberTls12SessionTicket(endpoint, &client);
+        }
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
         connection_reserved = false;
         return .{ .pool = self, .slot = .{
@@ -562,6 +642,30 @@ pub const Pool = struct {
             .last_used = 0,
             .idle_since_ns = 0,
         } };
+    }
+
+    fn rememberTls12SessionTicket(
+        self: *Pool,
+        endpoint: runtime.UriEndpoint,
+        client: *runtime.Client,
+    ) void {
+        if (client.takeTls12SessionTicket()) |ticket| {
+            self.tls12_tickets.store(
+                endpoint.tls_host,
+                endpoint.port,
+                ticket,
+                realNowSeconds(self.io),
+            );
+            return;
+        }
+        if (client.negotiatedTlsProtocol() == .tls12 and
+            !(client.wasTlsSessionResumed() orelse false))
+        {
+            _ = self.tls12_tickets.remove(
+                endpoint.tls_host,
+                endpoint.port,
+            );
+        }
     }
 
     fn release(self: *Pool, slot_value: Slot, reusable: bool) void {
@@ -756,6 +860,10 @@ fn retryableStaleConnectionError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+fn realNowSeconds(io: std.Io) u64 {
+    return @intCast(@max(0, std.Io.Timestamp.now(io, .real).toSeconds()));
 }
 
 test "HTTP/1 client pool validates idle limits" {

@@ -9,6 +9,8 @@ const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const http_method = @import("../internal/http_method.zig");
 const http1_runtime = @import("../http1/runtime.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
+const tls_ticket_cache = @import("../tls/stream/client_ticket_cache.zig");
 const runtime = @import("runtime.zig");
 
 pub const Error = runtime.Error || error{
@@ -28,6 +30,9 @@ pub const Options = struct {
     idle_timeout: ?std.Io.Duration = .fromSeconds(90),
     limits: runtime.Limits = .{},
     tls: runtime.TlsConnectOptions = .{},
+    /// Maximum cached RFC 5077 TLS 1.2 tickets across HTTPS authorities.
+    /// Zero disables automatic ticket retention and resumption.
+    max_tls12_session_tickets: usize = 32,
 };
 
 const Transport = enum { cleartext, tls };
@@ -56,6 +61,7 @@ pub const Pool = struct {
     sequence: u64 = 0,
     connections: usize = 0,
     capacity_waiters: fifo_admission.Queue = .{},
+    tls12_tickets: tls_ticket_cache.Cache,
     closed: bool = false,
 
     pub fn init(
@@ -69,7 +75,16 @@ pub const Pool = struct {
         if (options.idle_timeout) |timeout| {
             if (timeout.nanoseconds <= 0) return error.InvalidPoolOptions;
         }
-        return .{ .allocator = allocator, .io = io, .options = options };
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .options = options,
+            .tls12_tickets = .init(
+                allocator,
+                io,
+                options.max_tls12_session_tickets,
+            ),
+        };
     }
 
     pub fn deinit(self: *Pool) void {
@@ -77,6 +92,7 @@ pub const Pool = struct {
         std.debug.assert(self.connections == 0);
         std.debug.assert(self.capacity_waiters.count() == 0);
         self.idle.deinit(self.allocator);
+        self.tls12_tickets.deinit();
         self.* = undefined;
     }
 
@@ -91,6 +107,7 @@ pub const Pool = struct {
         self.idle.clearRetainingCapacity();
         self.capacity_waiters.notifyAll(self.io);
         self.mutex.unlock(self.io);
+        self.tls12_tickets.clear();
     }
 
     /// Acquire an exclusive persistent HTTP/2 connection for one URI origin.
@@ -425,6 +442,21 @@ pub const Pool = struct {
         var reserved = true;
         errdefer if (reserved) self.releaseConnectionSlot();
 
+        var tls12_ticket = if (transport == .tls and
+            self.options.tls.protocol_policy.offersTls12())
+            try self.tls12_tickets.cloneFor(
+                endpoint.tls_host,
+                endpoint.port,
+                realNowSeconds(self.io),
+            )
+        else
+            null;
+        defer if (tls12_ticket) |*ticket| ticket.deinit();
+        var tls_options = self.options.tls;
+        if (tls12_ticket) |*ticket| {
+            tls_options.tls12_ticket_resumption = ticket;
+        }
+
         var connection = switch (transport) {
             .cleartext => switch (endpoint.target) {
                 .host => if (deadline) |absolute|
@@ -468,7 +500,7 @@ pub const Pool = struct {
                         endpoint.tls_host,
                         endpoint.port,
                         self.options.limits,
-                        self.options.tls,
+                        tls_options,
                         absolute,
                     )
                 else
@@ -478,7 +510,7 @@ pub const Pool = struct {
                         endpoint.tls_host,
                         endpoint.port,
                         self.options.limits,
-                        self.options.tls,
+                        tls_options,
                     ),
                 .ip => |address| if (deadline) |absolute|
                     try runtime.Client.connectTlsAddressWithDeadline(
@@ -488,7 +520,7 @@ pub const Pool = struct {
                         endpoint.tls_host,
                         endpoint.authority,
                         self.options.limits,
-                        self.options.tls,
+                        tls_options,
                         absolute,
                     )
                 else
@@ -499,11 +531,14 @@ pub const Pool = struct {
                         endpoint.tls_host,
                         endpoint.authority,
                         self.options.limits,
-                        self.options.tls,
+                        tls_options,
                     ),
             },
         };
         errdefer connection.close();
+        if (transport == .tls) {
+            self.rememberTls12SessionTicket(endpoint, &connection);
+        }
         if (connection.default_authority) |authority| {
             self.allocator.free(authority);
         }
@@ -522,6 +557,30 @@ pub const Pool = struct {
             .last_used = 0,
             .idle_since_ns = 0,
         } };
+    }
+
+    fn rememberTls12SessionTicket(
+        self: *Pool,
+        endpoint: http1_runtime.UriEndpoint,
+        connection: *runtime.Connection,
+    ) void {
+        if (connection.takeTls12SessionTicket()) |ticket| {
+            self.tls12_tickets.store(
+                endpoint.tls_host,
+                endpoint.port,
+                ticket,
+                realNowSeconds(self.io),
+            );
+            return;
+        }
+        if (connection.negotiatedTlsProtocol() == .tls12 and
+            !(connection.wasTlsSessionResumed() orelse false))
+        {
+            _ = self.tls12_tickets.remove(
+                endpoint.tls_host,
+                endpoint.port,
+            );
+        }
     }
 
     fn release(self: *Pool, slot_value: Slot, reusable: bool) void {
@@ -683,6 +742,10 @@ fn retryableStaleConnectionError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+fn realNowSeconds(io: std.Io) u64 {
+    return @intCast(@max(0, std.Io.Timestamp.now(io, .real).toSeconds()));
 }
 
 fn uriTargetAlloc(

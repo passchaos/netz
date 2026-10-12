@@ -1,6 +1,7 @@
 const std = @import("std");
 const pool_mod = @import("../client_pool.zig");
 const runtime = @import("../runtime.zig");
+const tls_stream = @import("../../tls/mod.zig").stream;
 
 fn localCaBundle(
     allocator: std.mem.Allocator,
@@ -1005,6 +1006,108 @@ test "HTTP/1 client pool reuses verified TLS connection" {
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
+}
+
+test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tls_testing = @import("../../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var keyring = try tls_stream.Tls12TicketKeyring.init(.{
+        .id = 29,
+        .secret = [_]u8{0x29} ** tls_stream.tls12_ticket_key_len,
+    });
+    defer keyring.deinit();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+            .protocol_policy = .tls12_only,
+            .alpn_protocols = &.{"http/1.1"},
+            .tls12_session_tickets = .{
+                .keyring = &keyring,
+                .server_id = "127.0.0.1",
+                .lifetime_seconds = 3600,
+            },
+        },
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        resumed: [2]bool = .{ false, false },
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..2) |index| {
+                var connection = try self.server.accept();
+                defer connection.close();
+                self.resumed[index] = connection.wasTlsSessionResumed() orelse
+                    return error.MissingTlsMetadata;
+                var request = try connection.readRequest(.{});
+                defer request.deinit(allocator);
+                try connection.writeResponse(.{
+                    .body = if (index == 0) "first" else "second",
+                    .request_method = request.request.method,
+                });
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_idle_connections = 0,
+        .max_idle_per_authority = 0,
+        .vail_tls = .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"http/1.1"},
+            .protocol_policy = .tls12_only,
+        },
+    });
+    defer pool.deinit();
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "https://127.0.0.1:{d}/ticket",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var first = try pool.requestUri(uri, .{});
+    defer first.deinit(allocator);
+    try std.testing.expectEqualStrings("first", first.response.body);
+    var second = try pool.requestUri(uri, .{});
+    defer second.deinit(allocator);
+    try std.testing.expectEqualStrings("second", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualSlices(bool, &.{ false, true }, &shared.resumed);
 }
 
 test "HTTP/1 client pool discards TLS-buffered unsolicited response" {

@@ -240,6 +240,8 @@ Current protocol coverage includes:
   authenticated invalid-ticket fallback to a full handshake; MQTT reconnect
   clients retain the newest ticket, renew it across native TLS or WSS
   connections, and discard it locally when its advertised lifetime expires;
+  HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
+  connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in
   both the TLS client and server roles,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
