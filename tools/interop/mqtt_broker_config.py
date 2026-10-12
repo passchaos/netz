@@ -2178,14 +2178,24 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
         "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ=="
     )
-    password_file.write_text(f"old:{password_hash}\n")
-    acl_file.write_text("user old\ntopic readwrite before/#\n")
+    password_file.write_text(
+        f"old:{password_hash}\n"
+        f"stable:{password_hash}\n"
+    )
+    acl_file.write_text(
+        "user old\n"
+        "topic readwrite before/#\n"
+        "topic write revoked/will\n"
+        "user stable\n"
+        "topic read after/#\n"
+        "topic read revoked/#\n"
+    )
     config.write_text(
         f"password_file {password_file}\n"
         f"acl_file {acl_file}\n"
         f"listener {port} 127.0.0.1\n"
         "allow_anonymous false\n"
-        "max_connections 6\n"
+        "max_connections 5\n"
     )
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
@@ -2195,7 +2205,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 1 listeners for 6 clients" not in ready:
+    if "configured 1 listeners for 5 clients" not in ready:
         raise RuntimeError(f"security reload broker failed to start: {ready}")
     listener = process.stdout.readline().strip()
     if not listener.startswith("mqtt "):
@@ -2205,6 +2215,8 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         client_id: str,
         username: str,
         expected_reason: int,
+        will_topic: str | None = None,
+        will_payload: bytes = b"",
     ) -> socket.socket:
         client = socket.create_connection(("127.0.0.1", port), timeout=5)
         client.settimeout(5)
@@ -2212,6 +2224,8 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             client_id,
             username=username,
             password="password",
+            will_topic=will_topic,
+            will_payload=will_payload,
         ))
         reason = connack_reason(read_mqtt_packet(client))
         if reason != expected_reason:
@@ -2240,18 +2254,29 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
 
     clients: list[socket.socket] = []
     try:
-        old = connect("reload-old-live", "old", 0)
+        old = connect(
+            "reload-old-live",
+            "old",
+            0,
+            will_topic="revoked/will",
+            will_payload=b"must-not-publish",
+        )
         clients.append(old)
-        subscriber = connect("reload-old-subscriber", "old", 0)
+        subscriber = connect("reload-stable-subscriber", "stable", 0)
         clients.append(subscriber)
         subscriber.sendall(subscribe_packet(1, "after/#"))
         if read_mqtt_packet(subscriber) != bytes.fromhex("900400010000"):
             raise AssertionError("security reload initial SUBACK mismatch")
+        subscriber.sendall(subscribe_packet(2, "revoked/#"))
+        if read_mqtt_packet(subscriber) != bytes.fromhex("900400020000"):
+            raise AssertionError("security reload Will SUBACK mismatch")
         expect_publish_reason(old, "before/value", 1, 0x10)
 
-        password_file.write_text(f"new:{password_hash}\n")
         acl_file.write_text(
             "user old\ntopic readwrite after/#\n"
+            "topic write revoked/will\n"
+            "user stable\ntopic read after/#\n"
+            "topic read revoked/#\n"
             "user new\ntopic write after/#\n"
         )
         os.kill(process.pid, signal.SIGHUP)
@@ -2269,6 +2294,27 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 "security reload did not update existing subscription ACL"
             )
 
+        password_file.write_text(
+            f"stable:{password_hash}\n"
+            f"new:{password_hash}\n"
+        )
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "successful password reload",
+        )
+        administrative_disconnect = read_mqtt_packet(old)
+        if administrative_disconnect != bytes.fromhex("e00198"):
+            raise AssertionError(
+                "revoked live credential did not receive MQTT 5 "
+                "Administrative Action: " + administrative_disconnect.hex()
+            )
+        old.close()
+        clients.remove(old)
+        mqtt_ping(subscriber)
+        expect_no_packet(subscriber, "administratively disconnected Will")
+
         rejected_old = connect("reload-old-rejected", "old", 0x87)
         rejected_old.close()
         new = connect("reload-new", "new", 0)
@@ -2279,9 +2325,6 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             raise AssertionError(
                 "security reload did not update existing subscription ACL"
             )
-        new.sendall(bytes.fromhex("e000"))
-        new.close()
-        clients.remove(new)
 
         password_file.write_text(f"third:{password_hash}\n")
         acl_file.write_text("unsupported directive\n")
@@ -2291,8 +2334,9 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             "security reload failed: error=InvalidDirective",
             "failed security reload",
         )
-        mqtt_ping(old)
-        expect_publish_reason(old, "after/still-allowed", 5, 0x00)
+        mqtt_ping(new)
+        mqtt_ping(subscriber)
+        expect_publish_reason(new, "after/still-allowed", 5, 0x00)
         expected_rollback_delivery = publish_packet(
             "after/still-allowed", b"reload"
         )
@@ -2301,16 +2345,11 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 "failed security reload changed existing delivery ACL"
             )
 
-        retained_new = connect("reload-new-retained", "new", 0)
-        clients.append(retained_new)
-        retained_new.sendall(bytes.fromhex("e000"))
-        retained_new.close()
-        clients.remove(retained_new)
         rejected_third = connect("reload-third-rejected", "third", 0x87)
         rejected_third.close()
-        old.sendall(bytes.fromhex("e000"))
-        old.close()
-        clients.remove(old)
+        new.sendall(bytes.fromhex("e000"))
+        new.close()
+        clients.remove(new)
         subscriber.sendall(bytes.fromhex("e000"))
         subscriber.close()
         clients.remove(subscriber)
@@ -5429,7 +5468,8 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "atomic password/ACL and TLS/WSS identity/key-password/CA/CRL "
+        "atomic password/ACL with selective live credential revocation and "
+        "TLS/WSS identity/key-password/CA/CRL "
         "SIGHUP reload with rollback, "
         "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME

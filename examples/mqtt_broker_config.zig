@@ -372,8 +372,24 @@ pub fn run(
     }
     const listener_ids = try allocator.alloc(u16, config.listeners.len);
     defer allocator.free(listener_ids);
-    for (config.listeners, listener_ids) |listener, *id| {
+    const password_authentication = try allocator.alloc(
+        bool,
+        config.listeners.len,
+    );
+    defer allocator.free(password_authentication);
+    for (
+        config.listeners,
+        listener_ids,
+        password_authentication,
+    ) |listener, *id, *uses_password| {
         id.* = listener.address.getPort();
+        const password_file = if (config.per_listener_settings)
+            listener.password_file
+        else
+            config.password_file;
+        uses_password.* = password_file.len != 0 and
+            !listener.use_identity_as_username and
+            !listener.use_subject_as_username;
     }
     var security = try reloadable_security.Security.init(
         allocator,
@@ -384,6 +400,7 @@ pub fn run(
         config.per_listener_settings,
     );
     defer security.deinit();
+    try security.setPasswordAuthentication(password_authentication);
     const source_access_control = security.sourceAccessControl();
     const max_inflight_messages = config.effectiveMaxInflightMessages();
     const base_accept = mqtt.runtime.AcceptOptions{
@@ -887,6 +904,7 @@ fn serveWithManagement(
                 if (ReloadSignal.take()) {
                     if (security) |policy| {
                         reloadSecurityAndIdentities(
+                            broker,
                             policy,
                             identities orelse unreachable,
                         ) catch |err| {
@@ -955,6 +973,7 @@ fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {
 }
 
 fn reloadSecurityAndIdentities(
+    broker: *mqtt.broker.Broker,
     security: *reloadable_security.Security,
     identities: *reloadable_identity.Set,
 ) !void {
@@ -968,6 +987,11 @@ fn reloadSecurityAndIdentities(
         &prepared_identities,
     );
     security.lock.unlock(security.io);
+    _ = broker.disconnectUnauthorizedConnections(.{
+        .context = &retired_security,
+        .still_authorized = reloadable_security.RetiredReload
+            .stillAuthorizesConnection,
+    });
     retired_security.deinit();
     retired_identities.deinit();
 }

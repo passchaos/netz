@@ -1031,7 +1031,8 @@ Current protocol coverage includes:
   PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, plus fail-closed
   global or `per_listener_settings`-isolated Mosquitto password/ACL files
   with anonymous/user scopes and Linux SIGHUP atomic password/ACL plus TLS/WSS
-  server-identity/key-password/client-CA/CRL reload with whole-policy rollback and
+  server-identity/key-password/client-CA/CRL reload, selective live credential
+  revocation, whole-policy rollback, and
   ref-counted in-flight handshake generations, exact per-listener WebSocket Origin allowlists,
   a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and
   per-listener zero-length Client ID admission,

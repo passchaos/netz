@@ -38,12 +38,56 @@ pub const RetiredReload = struct {
     files: FileSet,
     client_crls: ?ClientCrlSet,
 
+    /// Reauthorize a live connection against the replacement password files.
+    /// Unchanged parsed credentials survive comments, ordering, and unrelated
+    /// user edits; removed or modified credentials require a fresh CONNECT.
+    pub fn stillAuthorizesConnection(
+        context: *anyopaque,
+        connection: mqtt.broker.ActiveConnectionAuthorization,
+    ) bool {
+        const self: *RetiredReload = @ptrCast(@alignCast(context));
+        const listener_id = connection.listener_id orelse return true;
+        const username = connection.username orelse return true;
+        self.security.lock.lockSharedUncancelable(self.security.io);
+        defer self.security.lock.unlockShared(self.security.io);
+
+        for (self.security.listener_ids, 0..) |candidate, index| {
+            if (@as(u64, candidate) != listener_id) continue;
+            if (!self.security.listenerUsesPasswordAuthentication(index)) {
+                continue;
+            }
+            // Listener IDs are caller-defined and need not be globally unique.
+            // If any matching listener changed this user's credential, fail
+            // closed rather than retaining a connection under ambiguous scope.
+            if (!sameCredential(
+                &self.files.passwords[
+                    self.security.securityIndex(index)
+                ],
+                &self.security.files.passwords[
+                    self.security.securityIndex(index)
+                ],
+                username,
+            )) return false;
+        }
+        return true;
+    }
+
     pub fn deinit(self: *RetiredReload) void {
         self.files.deinit(self.security.allocator);
         if (self.client_crls) |*crls| crls.deinit(self.security.allocator);
         self.* = undefined;
     }
 };
+
+fn sameCredential(
+    previous: *const ?mqtt.password_file.File,
+    current: *const ?mqtt.password_file.File,
+    username: []const u8,
+) bool {
+    const old = if (previous.*) |*file| file else return current.* == null;
+    const new = if (current.*) |*file| file else return false;
+    return old.sameCredential(new, username);
+}
 
 const FileSet = struct {
     passwords: []?mqtt.password_file.File,
@@ -166,6 +210,10 @@ pub const Security = struct {
     paths: []const Paths,
     listener_ids: []const u16,
     per_listener_settings: bool,
+    /// Optional per-listener description of whether CONNECT authentication
+    /// actually uses the configured password file. An empty slice derives the
+    /// legacy all-password-listeners behavior from `paths`.
+    password_authentication: []const bool = &.{},
     files: FileSet,
     client_auth_paths: []const ClientAuthPaths = &.{},
     client_crls: ?ClientCrlSet = null,
@@ -200,6 +248,16 @@ pub const Security = struct {
         if (self.client_crls) |*crls| crls.deinit(self.allocator);
         self.files.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn setPasswordAuthentication(
+        self: *Security,
+        enabled: []const bool,
+    ) !void {
+        if (enabled.len != self.listener_ids.len) {
+            return error.InvalidSecurityLayout;
+        }
+        self.password_authentication = enabled;
     }
 
     /// Attach the immutable client-CA topology and load every configured CRL
@@ -352,6 +410,16 @@ pub const Security = struct {
     fn securityIndex(self: *const Security, listener_index: usize) usize {
         std.debug.assert(listener_index < self.listener_ids.len);
         return if (self.per_listener_settings) listener_index else 0;
+    }
+
+    fn listenerUsesPasswordAuthentication(
+        self: *const Security,
+        listener_index: usize,
+    ) bool {
+        if (self.password_authentication.len != 0) {
+            return self.password_authentication[listener_index];
+        }
+        return self.files.passwords[self.securityIndex(listener_index)] != null;
     }
 
     fn aclAllows(
@@ -736,6 +804,71 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
             .retain = true,
             .properties = &.{},
         },
+    ));
+}
+
+test "reloadable MQTT security reauthorizes credentials per listener" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const changed_hash = "$6$MDEyMzQ1Njc4OWFi$" ++
+        "QQ3PWSJ3IyGPP66YMDh3aUdVyS29efC2oPtFLnz5O/EXQO4dovrApaaZv32acQ3b" ++
+        "0Lt02H8GBYcsYpkBYYcERg==";
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "passwords",
+        .data = "stable:" ++ password_hash ++ "\n" ++
+            "changed:" ++ password_hash ++ "\n" ++
+            "removed:" ++ password_hash ++ "\n",
+    });
+    const paths = [_]Paths{.{ .password_file = "passwords" }};
+    const listener_ids = [_]u16{1883};
+    var security = try Security.init(
+        allocator,
+        io,
+        tmp.dir,
+        &paths,
+        &listener_ids,
+        false,
+    );
+    defer security.deinit();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "passwords",
+        .data = "changed:" ++ changed_hash ++ "\n" ++
+            "stable:" ++ password_hash ++ "\n",
+    });
+    var prepared = try security.prepareReload();
+    defer prepared.deinit();
+    security.lock.lockUncancelable(io);
+    var retired = security.swapPreparedReload(&prepared);
+    security.lock.unlock(io);
+    defer retired.deinit();
+
+    try std.testing.expect(RetiredReload.stillAuthorizesConnection(
+        &retired,
+        .{ .username = "stable", .listener_id = 1883 },
+    ));
+    try std.testing.expect(!RetiredReload.stillAuthorizesConnection(
+        &retired,
+        .{ .username = "changed", .listener_id = 1883 },
+    ));
+    try std.testing.expect(!RetiredReload.stillAuthorizesConnection(
+        &retired,
+        .{ .username = "removed", .listener_id = 1883 },
+    ));
+    try std.testing.expect(RetiredReload.stillAuthorizesConnection(
+        &retired,
+        .{ .listener_id = 1883 },
+    ));
+    try std.testing.expect(RetiredReload.stillAuthorizesConnection(
+        &retired,
+        .{ .username = "changed", .listener_id = 2883 },
+    ));
+    try security.setPasswordAuthentication(&.{false});
+    try std.testing.expect(RetiredReload.stillAuthorizesConnection(
+        &retired,
+        .{ .username = "changed", .listener_id = 1883 },
     ));
 }
 

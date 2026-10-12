@@ -233,6 +233,101 @@ test "broker rejects unconfigured Enhanced Authentication with CONNACK" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker administrative reauthorization is selective and suppresses Will" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try testBroker(allocator, io, 3, 16);
+    defer broker.deinit();
+    var serve = ServeState{
+        .broker = &broker,
+        .connection_count = 3,
+    };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var observer = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "reauthorize-observer",
+        .username = "stable",
+    });
+    defer observer.close();
+    var suback = try observer.subscribe(&.{.{
+        .topic_filter = "reauthorize/will",
+    }}, .{});
+    defer suback.deinit(allocator);
+
+    var revoked = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v5,
+        .client_id = "reauthorize-revoked",
+        .username = "revoked",
+        .will = .{
+            .topic = "reauthorize/will",
+            .payload = "must-not-publish",
+        },
+    });
+    defer revoked.close();
+    var legacy_revoked = try connectWithOptions(allocator, io, broker, .{
+        .protocol = .v3_1_1,
+        .client_id = "reauthorize-revoked-v311",
+        .username = "revoked",
+        .will = .{
+            .topic = "reauthorize/will",
+            .payload = "legacy-must-not-publish",
+        },
+    });
+    defer legacy_revoked.close();
+
+    const Policy = struct {
+        fn stillAuthorized(
+            _: *anyopaque,
+            connection: broker_mod.ActiveConnectionAuthorization,
+        ) bool {
+            const username = connection.username orelse return true;
+            return !std.mem.eql(u8, username, "revoked");
+        }
+    };
+    var context: u8 = 0;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        broker.disconnectUnauthorizedConnections(.{
+            .context = &context,
+            .still_authorized = Policy.stillAuthorized,
+        }),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        broker.disconnectUnauthorizedConnections(.{
+            .context = &context,
+            .still_authorized = Policy.stillAuthorized,
+        }),
+    );
+    var disconnect = try revoked.readDisconnect();
+    defer disconnect.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(u8, 0x98),
+        disconnect.disconnect.reason_code,
+    );
+    try waitForPeerClose(&legacy_revoked);
+
+    // PING is an ordering barrier for prior routed traffic. If the
+    // administrative close were treated as a transport failure, the revoked
+    // client's Will would be queued before this PINGRESP.
+    try observer.ping();
+    try std.testing.expectError(
+        error.Timeout,
+        observer.readClientPacketEventWithTimeout(.fromMilliseconds(20)),
+    );
+    try observer.disconnect(0);
+
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker shares mounted and global TCP listener namespaces" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

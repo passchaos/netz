@@ -547,9 +547,12 @@ All replacement files are parsed before any active set is changed; any missing,
 malformed, unsigned,
 mismatched, or otherwise invalid file keeps the complete previous policy and
 TLS identities.
-Existing clients immediately observe new ACL rules, password changes apply to
-later CONNECT attempts, and server-certificate, client-CA, and CRL changes apply
-to later TLS/WSS handshakes without rebinding the listener. In-flight handshakes
+Existing clients immediately observe new ACL rules. A successful password-file
+reload compares parsed credentials per listener and username: unchanged users
+stay connected, while removed or modified users receive MQTT 5 Administrative
+Action (MQTT 3.1.1 closes directly), have their Will canceled, and must
+authenticate again. Server-certificate, client-CA, and CRL changes apply to
+later TLS/WSS handshakes without rebinding the listener. In-flight handshakes
 retain their complete TLS policy generation until completion, while established
 TLS connections retain traffic keys and authenticated peer metadata without
 depending on the old files. Listener topology, anonymous policy, limits, and

@@ -89,6 +89,23 @@ pub const File = struct {
         return self.entries.len;
     }
 
+    /// Return whether `other` contains the same parsed credential for one
+    /// username. This compares the algorithm, work factors, salt, and digest;
+    /// comments, ordering, and unrelated users do not force a live client to
+    /// reconnect after an atomic password-file reload.
+    pub fn sameCredential(
+        self: *const File,
+        other: *const File,
+        username: []const u8,
+    ) bool {
+        const left = self.index.get(username) orelse return false;
+        const right = other.index.get(username) orelse return false;
+        return std.meta.eql(
+            self.entries[left].hash,
+            other.entries[right].hash,
+        );
+    }
+
     /// Verify one complete MQTT username/password pair. Unknown usernames,
     /// missing passwords, and internal KDF failures all return false. Expensive
     /// password computations are serialized so concurrent CONNECT attempts
@@ -412,6 +429,40 @@ test "MQTT password file verifies Mosquitto Argon2id" {
             "MDEyMzQ1Njc4OWFiY2RlZg$hoITHlJQ9BQSDFM3EJP0xeU50GBsmMtcLnThmLoiluM\n",
         "argon",
     );
+}
+
+test "MQTT password file compares one parsed credential across reloads" {
+    const allocator = std.testing.allocator;
+    const hash = "$7$1000$MDEyMzQ1Njc4OWFi$" ++
+        "c9YpKMKKFXo4iKjCHWgIKvbTAC0Q4UwNh03D5+1WeU4qgE0EqSKzvYKJitoqJI1+" ++
+        "KMfRf9YJT//3a9+kZTXUdA==";
+    const changed = "$6$MDEyMzQ1Njc4OWFi$" ++
+        "QQ3PWSJ3IyGPP66YMDh3aUdVyS29efC2oPtFLnz5O/EXQO4dovrApaaZv32acQ3b" ++
+        "0Lt02H8GBYcsYpkBYYcERg==";
+    var first = try parse(
+        allocator,
+        std.testing.io,
+        "# first ordering\nuser:" ++ hash ++ "\nother:" ++ changed ++ "\n",
+    );
+    defer first.deinit();
+    var second = try parse(
+        allocator,
+        std.testing.io,
+        "other:" ++ changed ++ "\n# reordered\nuser:" ++ hash ++ "\n",
+    );
+    defer second.deinit();
+    var replacement = try parse(
+        allocator,
+        std.testing.io,
+        "user:" ++ changed ++ "\n",
+    );
+    defer replacement.deinit();
+
+    try std.testing.expect(first.sameCredential(&second, "user"));
+    try std.testing.expect(first.sameCredential(&second, "other"));
+    try std.testing.expect(!first.sameCredential(&second, "missing"));
+    try std.testing.expect(!first.sameCredential(&replacement, "user"));
+    try std.testing.expect(!first.sameCredential(&replacement, "other"));
 }
 
 test "MQTT password file fails closed and owns its input" {

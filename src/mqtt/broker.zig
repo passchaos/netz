@@ -436,6 +436,22 @@ pub const RetainedSourceAuthorization = struct {
     properties: []const mqtt.Property,
 };
 
+/// Borrowed identity for reauthorizing an established connection after a
+/// policy reload. The callback runs under the broker state lock and must not
+/// retain either slice or re-enter the Broker.
+pub const ActiveConnectionAuthorization = struct {
+    username: ?[]const u8 = null,
+    listener_id: ?u64 = null,
+};
+
+pub const ConnectionReauthorizationHandler = struct {
+    context: *anyopaque,
+    still_authorized: *const fn (
+        context: *anyopaque,
+        connection: ActiveConnectionAuthorization,
+    ) bool,
+};
+
 pub const AuthenticationHandler = struct {
     context: *anyopaque,
     /// Complete any CONNECT-before-CONNACK exchange and call
@@ -622,7 +638,8 @@ const ClientSlot = struct {
         has_will_handle: bool = false,
         has_session_handle: bool = false,
         has_retained_source_id: bool = false,
-        _padding: u3 = 0,
+        administrative_disconnect: bool = false,
+        _padding: u2 = 0,
     } = .{},
     /// Allocated only after policy and Session admission, immediately before a
     /// successful CONNACK. Keeping the large transport/session state out of
@@ -2281,6 +2298,50 @@ pub const Broker = struct {
                 connection.shutdown() catch {};
             }
         }
+    }
+
+    /// Reauthorize every established connection and administratively close
+    /// the ones rejected by `handler`. MQTT 5 peers receive reason 0x98 before
+    /// transport shutdown; MQTT 3.1.1 has no server DISCONNECT packet. The
+    /// close is graceful from the broker's perspective, so it cancels rather
+    /// than publishes the client's Will while preserving durable Session
+    /// state. Returns the number of connections selected for disconnection.
+    pub fn disconnectUnauthorizedConnections(
+        self: *Broker,
+        handler: ConnectionReauthorizationHandler,
+    ) usize {
+        var disconnected: usize = 0;
+        for (self.slots) |*slot| {
+            slot.writer_mutex.lockUncancelable(self.io);
+            self.state_mutex.lockUncancelable(self.io);
+            const connection = if (slot.state.active and
+                slot.connection != null and
+                !slot.state.graceful_disconnect and
+                !slot.state.administrative_disconnect and
+                !handler.still_authorized(handler.context, .{
+                    .username = slot.username(),
+                    .listener_id = slot.retainedSourceId(),
+                }))
+            blk: {
+                slot.state.administrative_disconnect = true;
+                break :blk slot.connection;
+            } else null;
+            self.state_mutex.unlock(self.io);
+            if (connection) |active| {
+                // Commit Session detachment and Will cancellation before the
+                // peer can observe the administrative close. If persistence
+                // fails, unregister sees `administrative_disconnect` and
+                // retries the same idempotent cleanup after transport shutdown.
+                self.handleDisconnect(slot, .{}) catch {};
+                if (active.protocol == .v5) {
+                    active.writeDisconnectWithProperties(0x98, &.{}) catch {};
+                }
+                active.shutdown() catch {};
+                disconnected += 1;
+            }
+            slot.writer_mutex.unlock(self.io);
+        }
+        return disconnected;
     }
 
     /// Return a coherent, allocation-free snapshot suitable for metrics,
@@ -4306,6 +4367,7 @@ pub const Broker = struct {
         slot.setSessionHandle(null);
         slot.state.session_present = false;
         slot.state.session_persistent = false;
+        slot.state.administrative_disconnect = false;
         std.debug.assert(slot.assignedClientId() == null);
         std.debug.assert(slot.buffers == null);
         errdefer slot.clearBuffers(self.allocator);
@@ -4845,11 +4907,18 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             self.finishPartialPersistentChange(persistent_changed);
         };
-        if (!slot.state.graceful_disconnect) {
+        const will_close_reason: ?will_mod.CloseReason =
+            if (slot.state.administrative_disconnect)
+                .normal_disconnect
+            else if (!slot.state.graceful_disconnect)
+                .ungraceful
+            else
+                null;
+        if (will_close_reason) |close_reason| {
             if (slot.willHandle()) |handle| {
                 const result: ?will_mod.CloseResult = self.wills.close(
                     handle,
-                    .ungraceful,
+                    close_reason,
                     std.Io.Clock.awake.now(self.io),
                 ) catch |err| switch (err) {
                     error.WillNotFound => blk: {
@@ -4866,6 +4935,10 @@ pub const Broker = struct {
                 };
                 if (result) |changed_result| {
                     persistent_changed = changed_result != .no_will;
+                    if (changed_result == .canceled) {
+                        _ = self.will_publishers.remove(handle);
+                        slot.setWillHandle(null);
+                    }
                 }
             }
         }
@@ -4916,6 +4989,7 @@ pub const Broker = struct {
         slot.setSessionHandle(null);
         slot.state.session_present = false;
         slot.state.session_persistent = false;
+        slot.state.administrative_disconnect = false;
         slot.listener_access_control = null;
         slot.setRetainedSourceId(null);
         slot.setUsername(null);
@@ -8428,6 +8502,10 @@ const ClientTask = struct {
     fn run(task: ClientTask) std.Io.Cancelable!void {
         var connect = task.connect;
         const slot = &task.broker.slots[task.slot_index];
+        // The slot's username view borrows CONNECT storage. Register the
+        // teardown after this defer so unregister clears that view before
+        // OwnedConnect releases the packet or replacement identity.
+        defer connect.deinit(task.broker.allocator);
         const connection = slot.connection.?;
         defer task.broker.unregister(
             task.slot_index,
@@ -8436,9 +8514,6 @@ const ClientTask = struct {
         ) catch |err| {
             task.result.* = err;
         };
-        // The effective generated Client ID borrows slot storage, so release
-        // the parsed CONNECT before unregister frees that optional allocation.
-        defer connect.deinit(task.broker.allocator);
 
         var read_error: ?anyerror = null;
         task.runLoop(slot, connection, connect.connect) catch |err| {
