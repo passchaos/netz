@@ -1044,9 +1044,11 @@ contain at least one non-empty DistinguishedName; omitting it expresses no CA
 restriction. TLS 1.3 OID filters are available to servers and constrain client
 leaf selection for the RFC-defined Key Usage and Extended Key Usage OIDs;
 duplicate recognized OIDs, malformed recognized values, and
-anyExtendedKeyUsage requests are rejected, while unrecognized OIDs are ignored. Initial-handshake
-CertificateRequest messages must carry an empty request context in both client
-and server paths.
+anyExtendedKeyUsage requests are rejected, while unrecognized OIDs are ignored.
+The server preflights every CertificateRequest field and nested vector length
+before emitting ServerHello, so invalid authentication configuration cannot
+leave a partial flight. Initial-handshake CertificateRequest messages must carry
+an empty request context in both client and server paths.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
 resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
 TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake
