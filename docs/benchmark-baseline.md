@@ -2417,6 +2417,22 @@ uncapped at 103.562 MiB/s while the netz receiver still recorded the paired
 setting. This is configuration/behavior evidence, not a recommended production
 rate or a general throughput comparison.
 
+A subsequent fixed-commit (`b618417d`), CPU-0/client and CPU-1/server,
+ReleaseFast A/B/B/A run used one warmup plus two measured fresh connections,
+four 4-MiB streams, QUIC v1, and socket-traffic accounting. All four arms used
+the same netz-client (`3502160c...fad87`), netz-server
+(`7bb3b568...f5ab`), and quic-go (`89d1a437...59a15`) executable hashes. With
+netz as the upload sender, the two unlimited A arms recorded 1,918 and 2,133
+transport losses, matched by 1,928 and 2,144 quic-go `dos_prevention` drops;
+both 128-MiB/s B arms recorded zero losses and zero drops. With netz as the
+download sender, the unlimited arms recorded 1,413 and 2,592 losses, matched
+by 1,416 and 2,598 drops; both capped arms again recorded zero. A one-pass
+coarse scan still showed loss at 192 and 256 MiB/s while both 128 and 96 MiB/s
+were loss-free on this host. This brackets the local zero-latency receiver-
+queue threshold but does not justify a universal default: the production
+default stays unlimited, and 128 MiB/s is only an explicit experiment or
+deployment policy for a known receiver capacity.
+
 The opt-in capture mode starts a dedicated Linux `AF_PACKET`/`SOCK_DGRAM`
 packet socket on a third pinned CPU before each server. It filters the loopback
 single cooked IPv4 copy (`PACKET_HOST`) by the pair's unique UDP server port.

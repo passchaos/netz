@@ -2041,6 +2041,16 @@ stream upload smoke held the netz sender at 1.010 MiB/s with zero transport
 loss and zero quic-go drops; the reverse pairing left quic-go uncapped. This
 validates the control path without promoting that artificial loopback rate to
 a production default.
+A fixed-binary A/B/B/A follow-up on clean commit `b618417d` used four 4-MiB
+streams and one warmup plus two measured connections per arm. The same
+netz-client, netz-server, and quic-go executable hashes appeared in every
+record. Unlimited netz upload arms lost 1,918/2,133 packets and the matching
+quic-go receiver reported 1,928/2,144 `dos_prevention` drops; unlimited
+download arms lost 1,413/2,592 with 1,416/2,598 peer drops. Both 128-MiB/s
+candidate arms in both directions had zero transport loss and zero peer drops.
+A single coarse scan retained losses at 192 and 256 MiB/s but not at 128 or
+96 MiB/s. This isolates a host-specific receiver-capacity knee; it supports the
+new opt-in control while explicitly leaving the production default unlimited.
 
 ## Next recommended work
 
