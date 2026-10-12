@@ -1030,7 +1030,8 @@ sends the required empty Certificate message instead of aborting locally.
 `zig build interop-tls12-client-auth-openssl -Doptimize=ReleaseSafe` verifies
 both branches against an independent OpenSSL server: a matching CA receives
 the configured certificate, while an unmatched CA completes optional mTLS
-without one.
+without one. Servers validate the client's CertificateVerify algorithm against
+the same list emitted in CertificateRequest.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
 resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
 TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake

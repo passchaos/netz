@@ -242,7 +242,8 @@ Current protocol coverage includes:
   signature algorithms, and acceptable CA names, including P-521, and send an
   empty Certificate when no configured identity is suitable; an OpenSSL
   process gate verifies both matching-certificate and optional unmatched-CA
-  handshakes;
+  handshakes, while servers reject CertificateVerify algorithms outside the
+  exact set they advertised;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in

@@ -94,7 +94,8 @@ type, signature algorithm, and issuing CA match CertificateRequest. P-521 is
 included in the supported signature set, and an unsuitable identity produces
 the required empty Certificate response instead of aborting optional mTLS.
 The shared `interop-tls12-client-auth-openssl` gate verifies both matching and
-unmatched CA selection against an independent OpenSSL server.
+unmatched CA selection against an independent OpenSSL server. Server-side
+CertificateVerify validation rejects algorithms outside the advertised set.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.
