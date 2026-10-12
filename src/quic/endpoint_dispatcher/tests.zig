@@ -129,6 +129,32 @@ test "QUIC endpoint dispatcher owns CID routing across connections" {
     try dispatcher.registerConnection(10, &server_a);
     try dispatcher.registerConnection(20, &server_b);
 
+    server_a.pacing_blocked_until_ns = 9_000_000;
+    try dispatcher.refreshConnectionTimer(10);
+    try std.testing.expectEqual(
+        one_rtt.TimerDeadlineKind.pacing,
+        dispatcher.nextTimerDeadline().?.timer.kind,
+    );
+    try dispatcher.setConnectionMaxPacingRateBytesPerSecondAt(
+        10,
+        125_000,
+        1_000_000,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 125_000),
+        server_a.maxPacingRateBytesPerSecond(),
+    );
+    try std.testing.expect(dispatcher.nextTimerDeadline() == null);
+    try dispatcher.setConnectionMaxPacingRateBytesPerSecond(10, null);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        server_a.maxPacingRateBytesPerSecond(),
+    );
+    try std.testing.expectError(
+        error.UnknownConnectionHandle,
+        dispatcher.setConnectionMaxPacingRateBytesPerSecond(99, 1),
+    );
+
     const ping = [_]quic.Frame{.{ .ping = {} }};
     try client_b.send(&ping);
     try client_a.send(&ping);

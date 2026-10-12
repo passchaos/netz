@@ -63,6 +63,36 @@ pub const Pacer = struct {
             null;
     }
 
+    /// Changes the steady-state ceiling without applying the new rate to time
+    /// that elapsed under the old policy. Already earned burst credit remains
+    /// available, and a regressed caller timestamp cannot move accounting
+    /// behind the last successful send.
+    pub fn setMaxPacingRateBytesPerSecondAt(
+        self: *Pacer,
+        max_rate_bytes_per_second: ?u64,
+        now_ns: u64,
+        congestion_window: usize,
+        smoothed_rtt_ns: u64,
+    ) void {
+        if (self.maxPacingRateBytesPerSecond() == max_rate_bytes_per_second) {
+            return;
+        }
+        if (self.enabled) {
+            if (self.lastSentTimeNs()) |last_sent| {
+                const accounted_at = @max(now_ns, last_sent);
+                self.budget = self.budgetAt(
+                    accounted_at,
+                    congestion_window,
+                    smoothed_rtt_ns,
+                );
+                self.setLastSentTimeNs(accounted_at);
+            }
+        }
+        self.has_max_pacing_rate = max_rate_bytes_per_second != null;
+        self.max_pacing_rate_bytes_per_second_value =
+            max_rate_bytes_per_second orelse 0;
+    }
+
     pub fn lastSentTimeNs(self: Pacer) ?u64 {
         return if (self.has_last_sent_time)
             self.last_sent_time_ns_value
@@ -359,6 +389,65 @@ test "QUIC pacer keeps congestion rate when lower than maximum rate" {
     try std.testing.expectEqual(
         @as(?u64, 2_000_000),
         pacer.deadlineAt(1_000_000, 1200, 48_000, 100_000_000),
+    );
+}
+
+test "QUIC pacer changes rate without repricing earned credit" {
+    var lowered = Pacer.init(true, 1200, 10);
+    lowered.onPacketSentAt(0, 12_000, 48_000, 100_000_000);
+    lowered.setMaxPacingRateBytesPerSecondAt(
+        100_000,
+        1_000_000,
+        48_000,
+        100_000_000,
+    );
+    // The first millisecond was earned at 600,000 bytes/s. Only subsequent
+    // credit uses the new 100,000-byte/s ceiling.
+    try std.testing.expectEqual(@as(usize, 600), lowered.budget);
+    try std.testing.expectEqual(
+        @as(usize, 700),
+        lowered.budgetAt(2_000_000, 48_000, 100_000_000),
+    );
+
+    lowered.setMaxPacingRateBytesPerSecondAt(
+        null,
+        2_000_000,
+        48_000,
+        100_000_000,
+    );
+    try std.testing.expectEqual(@as(usize, 700), lowered.budget);
+    try std.testing.expectEqual(
+        @as(usize, 1300),
+        lowered.budgetAt(3_000_000, 48_000, 100_000_000),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        lowered.maxPacingRateBytesPerSecond(),
+    );
+}
+
+test "QUIC pacer rate update preserves future accounting timestamp" {
+    var pacer = Pacer.init(true, 1200, 10);
+    pacer.budget = 0;
+    pacer.setLastSentTimeNs(10_000_000);
+    pacer.setMaxPacingRateBytesPerSecondAt(
+        0,
+        1_000_000,
+        12_000,
+        100_000_000,
+    );
+    try std.testing.expectEqual(@as(usize, 0), pacer.budget);
+    try std.testing.expectEqual(
+        @as(?u64, 10_000_000),
+        pacer.lastSentTimeNs(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 0),
+        pacer.maxPacingRateBytesPerSecond(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, std.math.maxInt(u64)),
+        pacer.deadlineAt(10_000_000, 1, 12_000, 100_000_000),
     );
 }
 

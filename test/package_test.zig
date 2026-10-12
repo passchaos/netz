@@ -6843,6 +6843,14 @@ test "public modules are reachable" {
         "receiveRoutedBytesHandlingVersionNegotiationWithDeadline",
     ));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "sendManyBytes"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "setConnectionMaxPacingRateBytesPerSecond",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.endpoint_dispatcher.Dispatcher,
+        "setConnectionMaxPacingRateBytesPerSecondAt",
+    ));
     try std.testing.expect(@hasDecl(netz.quic, "RetryPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "writeRetryPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "retryPacketLen"));
@@ -6927,6 +6935,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "maxPacingRateBytesPerSecond",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "setMaxPacingRateBytesPerSecond",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "setMaxPacingRateBytesPerSecondAt",
     ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_min_ack_delay"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_min_ack_delay"));

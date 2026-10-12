@@ -960,6 +960,37 @@ pub const Dispatcher = struct {
         try self.timers.armFromConnection(handle, entry.connection);
     }
 
+    /// Change one registered connection's pacing ceiling and refresh its
+    /// endpoint timer entry through the dispatcher owner.
+    pub fn setConnectionMaxPacingRateBytesPerSecond(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+        max_rate_bytes_per_second: ?u64,
+    ) Error!void {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        entry.connection.setMaxPacingRateBytesPerSecond(
+            max_rate_bytes_per_second,
+        );
+        try self.timers.armFromConnection(handle, entry.connection);
+    }
+
+    /// Timestamped form for event loops that already sampled the awake clock.
+    pub fn setConnectionMaxPacingRateBytesPerSecondAt(
+        self: *Dispatcher,
+        handle: ConnectionHandle,
+        max_rate_bytes_per_second: ?u64,
+        now_ns: u64,
+    ) Error!void {
+        const entry = self.connections.getPtr(handle) orelse
+            return error.UnknownConnectionHandle;
+        entry.connection.setMaxPacingRateBytesPerSecondAt(
+            max_rate_bytes_per_second,
+            now_ns,
+        );
+        try self.timers.armFromConnection(handle, entry.connection);
+    }
+
     pub fn nextTimerDeadline(
         self: *const Dispatcher,
     ) ?endpoint_timers.EndpointTimerDeadline {

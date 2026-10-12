@@ -4615,6 +4615,41 @@ pub const Connection = struct {
         return self.pacer.maxPacingRateBytesPerSecond();
     }
 
+    /// Changes the pacing ceiling using the connection's monotonic clock.
+    /// Dispatcher-owned connections should instead use the matching
+    /// `Dispatcher` method so its endpoint timer index is refreshed.
+    pub fn setMaxPacingRateBytesPerSecond(
+        self: *Connection,
+        max_rate_bytes_per_second: ?u64,
+    ) void {
+        self.setMaxPacingRateBytesPerSecondAt(
+            max_rate_bytes_per_second,
+            self.monotonicNowNs(),
+        );
+    }
+
+    /// Timestamped form for event loops that already sampled the awake clock.
+    pub fn setMaxPacingRateBytesPerSecondAt(
+        self: *Connection,
+        max_rate_bytes_per_second: ?u64,
+        now_ns: u64,
+    ) void {
+        if (self.maxPacingRateBytesPerSecond() ==
+            max_rate_bytes_per_second)
+        {
+            return;
+        }
+        self.pacer.setMaxPacingRateBytesPerSecondAt(
+            max_rate_bytes_per_second,
+            now_ns,
+            self.congestion.congestion_window,
+            self.rtt_stats.smoothedOrInitial(),
+        );
+        self.config.max_pacing_rate_bytes_per_second =
+            max_rate_bytes_per_second;
+        self.pacing_blocked_until_ns = null;
+    }
+
     pub fn pacingBudgetAt(self: Connection, now_ns: u64) usize {
         return self.pacer.budgetAt(now_ns, self.congestion.congestion_window, self.rtt_stats.smoothedOrInitial());
     }

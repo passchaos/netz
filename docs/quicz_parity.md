@@ -2034,7 +2034,13 @@ than hiding the receiver limit with a benchmark-only delay.
 Netz now exposes an optional production `max_pacing_rate_bytes_per_second` on
 both direct and handshake-created 1-RTT connections. The token bucket uses the
 lower of that ceiling and `1.25 * cwnd / RTT`, while the default remains
-unlimited. `bench-http3-quic-go` accepts the corresponding
+unlimited. Established connections can change or remove the ceiling without a
+reconnect: the pacer first accounts elapsed time under the old rate, preserves
+already earned burst credit, advances from a non-regressing timestamp, and
+invalidates any cached pacing wake-up before future sends use the new policy.
+The shared-socket dispatcher exposes matching handle-based setters that update
+the registered connection and its endpoint timer index as one owner operation.
+`bench-http3-quic-go` accepts the corresponding
 `--netz-max-pacing-rate-bytes-per-second` experiment parameter and records it
 in config and loss-attribution records. A 1-MiB/s, four-stream, 64-KiB-per-
 stream upload smoke held the netz sender at 1.010 MiB/s with zero transport

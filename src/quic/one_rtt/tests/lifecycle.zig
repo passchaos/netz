@@ -96,6 +96,39 @@ test "QUIC 1-RTT installs maximum pacing rate" {
         @as(usize, 10),
         connection.pacingBudgetAt(1_000_000),
     );
+
+    connection.pacing_blocked_until_ns = 9_000_000;
+    connection.setMaxPacingRateBytesPerSecondAt(null, 1_000_000);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        connection.maxPacingRateBytesPerSecond(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        connection.config.max_pacing_rate_bytes_per_second,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        connection.pendingPacingDeadline(),
+    );
+    try std.testing.expect(connection.pacingBudgetAt(2_000_000) > 10);
+
+    // An idempotent update leaves a currently published wake-up intact.
+    connection.pacing_blocked_until_ns = 8_000_000;
+    connection.setMaxPacingRateBytesPerSecondAt(null, 2_000_000);
+    try std.testing.expectEqual(
+        @as(?u64, 8_000_000),
+        connection.pendingPacingDeadline(),
+    );
+    connection.setMaxPacingRateBytesPerSecond(20_000);
+    try std.testing.expectEqual(
+        @as(?u64, 20_000),
+        connection.maxPacingRateBytesPerSecond(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        connection.pendingPacingDeadline(),
+    );
 }
 
 test "QUIC 1-RTT stateless reset enters draining" {

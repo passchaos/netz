@@ -790,7 +790,8 @@ Current protocol coverage includes:
   congestion detection with already-reported period skips that collapses the congestion window and resets the RTT
   measurement epoch after long contiguous lost periods, default RFC 9002 token-bucket
   send pacing with configurable burst/disable controls and an optional explicit
-  bytes-per-second ceiling, zero-packet sent no-ops, current-budget deadline skips, full-budget arithmetic skips, exact retry deadlines,
+  bytes-per-second ceiling that can be retuned on an established connection
+  without repricing already earned credit, zero-packet sent no-ops, current-budget deadline skips, full-budget arithmetic skips, exact retry deadlines,
   ACK bypass, transactional rejection, and path-reset handling, allocation-free short-packet
   sealing into caller storage and connection-level plaintext/protected send-buffer
   reuse (while retaining stable recovery payload ownership), PMTUD/DPLPMTUD path MTU
