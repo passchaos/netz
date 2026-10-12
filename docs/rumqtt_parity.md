@@ -2438,7 +2438,10 @@ are rejected during the initial handshake and remain reserved for post-handshake
 auth. TLS 1.3 servers can additionally send OID filters; clients enforce Key
 Usage and Extended Key Usage subsets on the leaf, reject repeated or malformed
 recognized filters and prohibited anyExtendedKeyUsage requests, and ignore
-unrecognized OIDs. Servers validate the complete CertificateRequest and its
+unrecognized OIDs. CertificateRequest accepts and exposes the standard empty
+status-request signal, rejects non-empty forms and recognized extensions that
+are illegal in that message, and ignores only genuinely unknown extensions.
+Servers validate the complete CertificateRequest and its
 nested vector lengths before writing ServerHello, preserving transactional
 failure for invalid authentication configuration.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL

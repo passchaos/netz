@@ -1045,6 +1045,10 @@ restriction. TLS 1.3 OID filters are available to servers and constrain client
 leaf selection for the RFC-defined Key Usage and Extended Key Usage OIDs;
 duplicate recognized OIDs, malformed recognized values, and
 anyExtendedKeyUsage requests are rejected, while unrecognized OIDs are ignored.
+The standard empty status-request signal is retained for client-certificate
+selection; non-empty forms and recognized extensions placed illegally in
+CertificateRequest are rejected, while genuinely unknown extensions remain
+forward-compatible.
 The server preflights every CertificateRequest field and nested vector length
 before emitting ServerHello, so invalid authentication configuration cannot
 leave a partial flight. Initial-handshake CertificateRequest messages must carry

@@ -106,6 +106,8 @@ contain at least one non-empty DistinguishedName, and the initial handshake
 requires an empty CertificateRequest context. TLS 1.3 OID filters additionally
 constrain client leaf Key Usage and Extended Key Usage; duplicate or malformed
 recognized filters are rejected while unrecognized OIDs remain ignorable. The
+standard empty status-request signal is accepted, while non-empty forms and
+recognized extensions prohibited in CertificateRequest are rejected. The
 server preflights the complete request before emitting ServerHello, so invalid
 authentication configuration cannot leave a partial flight.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
