@@ -125,6 +125,8 @@ websockets_origin https://console.example
 listener_auto_id_prefix tenant-
 certfile server-chain.pem
 keyfile server-key.pem
+tls_version tlsv1.2
+ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305
 cafile client-ca.pem
 crlfile client-revocations.pem
 require_certificate true
@@ -156,6 +158,7 @@ bridge_certfile bridge-client-chain.pem
 bridge_keyfile bridge-client-key.pem
 bridge_keyfile_password_file bridge-client-key.password
 bridge_alpn mqtt
+bridge_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305
 bridge_ciphers_tls1.3 TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
 bridge_require_ocsp true
 bridge_tls_version tlsv1.3
@@ -164,6 +167,7 @@ bridge_tls_version tlsv1.3
 The accepted directives are exactly `listener`, `protocol`, `socket_domain`,
 `bind_interface`, `certfile`,
 `keyfile`, `keyfile_password_file`, `cafile`, `capath`, `crlfile`, `require_certificate`,
+`tls_version`, `ciphers`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
 `allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
 `accept_protocol_versions`,
@@ -191,7 +195,7 @@ The accepted directives are exactly `listener`, `protocol`, `socket_domain`,
 `bridge_tcp_keepalive`, `bridge_tcp_user_timeout`, `remote_clientid`,
 `remote_username`, `remote_password`, `restart_timeout`, `bridge_cafile`, `bridge_capath`,
 `bridge_tls_use_os_certs`, `bridge_certfile`, `bridge_keyfile`,
-`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_ciphers_tls1.3`,
+`bridge_keyfile_password_file`, `bridge_alpn`, `bridge_ciphers`, `bridge_ciphers_tls1.3`,
 `bridge_require_ocsp`, `bridge_insecure`,
 `bridge_tls_version`, `round_robin`, `start_type`, `threshold`, `idle_timeout`, `notifications`,
 `notifications_local_only`, and `notification_topic`. Unknown directives,
@@ -327,7 +331,7 @@ duplicate outbound local IDs are rejected before listeners open. Changing an
 explicit local ID deliberately starts a different source Session, while
 renaming a bridge with the same explicit ID keeps its persistence identity.
 
-Bridge TLS always uses the vail TLS 1.3 data plane with hostname verification.
+Bridge TLS uses the vail TLS 1.2/1.3 data plane with hostname verification.
 Trust comes from a bounded explicit `bridge_cafile`, a non-recursive
 OpenSSL-style `bridge_capath`, operating-system roots enabled by
 `bridge_tls_use_os_certs true`, or any combination. Directory loading accepts
@@ -342,14 +346,17 @@ IANA TLS 1.3 suite names and applies it to every initial and reconnect
 ClientHello. Empty components, duplicates, aliases such as `DEFAULT`, and
 unknown names fail during configuration rather than falling back to another
 cipher policy.
+`bridge_ciphers` independently accepts the modern TLS 1.2 ECDHE+AEAD OpenSSL
+names implemented by Vail. `bridge_tls_version tlsv1.2` permits TLS 1.2 and
+prefers TLS 1.3 when the peer offers it; `tlsv1.3` requires TLS 1.3. Listener
+`tls_version` and `ciphers` apply the same policy to MQTT TLS and WSS.
 `bridge_require_ocsp true` requires every initial and reconnect TLS handshake
 to carry a current, correctly signed `good` OCSP staple bound to the presented
 leaf and issuer. Missing, expired, malformed, unknown, and revoked responses
 fail the TLS handshake before MQTT CONNECT is sent. Vail clients request OCSP
 by default so RFC 7633 Must-Staple certificates remain usable even when this
 explicit Mosquitto policy is left false.
-`bridge_insecure true` and `bridge_tls_version tlsv1.2` are rejected rather
-than weakening authentication or silently selecting a different TLS stack.
+`bridge_insecure true` remains rejected rather than weakening authentication.
 Every configured CA and client identity is loaded before any listener binds.
 Bridge notifications default on. The configured or
 `$SYS/broker/connection/<remote-client-id>/state` topic starts as retained

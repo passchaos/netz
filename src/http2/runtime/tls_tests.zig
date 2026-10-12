@@ -255,7 +255,7 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
         client.negotiatedAlpn().?,
     );
     try std.testing.expectEqual(
-        tls_stream.CipherSuite.aes_128_gcm_sha256,
+        tls_stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
         client.negotiatedCipherSuite().?,
     );
     try std.testing.expectEqual(
@@ -273,6 +273,110 @@ test "HTTP/2 TLS runtime negotiates h2 and exchanges a request" {
     try std.testing.expectEqual(@as(u64, 1), updates.sent);
     try std.testing.expectEqual(@as(u64, 1), updates.received);
     try std.testing.expect(!updates.awaiting_peer_response);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 negotiates TLS 1.2 and preserves h2 ALPN" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const limits: runtime.Limits = .{
+        .max_frame_payload = 4096,
+        .max_body_bytes = 4096,
+    };
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .limits = limits,
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            if (connection.negotiatedTlsProtocol() != .tls12) {
+                shared.err = error.InvalidProtocolVersion;
+                return;
+            }
+            var request = connection.readRequest() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(shared.server.allocator);
+            if (!std.mem.eql(u8, request.path, "/tls12")) {
+                shared.err = error.InvalidRequest;
+                return;
+            }
+            connection.writeResponse(request.stream_id, .{
+                .body = "tls12-h2",
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try runtime.Client.connectTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        limits,
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    );
+    defer client.close();
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls12,
+        client.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expectEqualStrings("h2", client.negotiatedAlpn().?);
+    var response = try client.request(.{ .path = "/tls12" });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("tls12-h2", response.body);
 
     thread.join();
     joined = true;

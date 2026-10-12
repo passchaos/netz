@@ -82,7 +82,7 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
                 accepted.connection.peerCertificates() == null,
             );
             try std.testing.expectEqual(
-                tls_stream.CipherSuite.aes_128_gcm_sha256,
+                tls_stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
                 accepted.connection.negotiatedCipherSuite().?,
             );
             try std.testing.expectEqual(
@@ -149,7 +149,7 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
         client.negotiatedAlpn().?,
     );
     try std.testing.expectEqual(
-        tls_stream.CipherSuite.aes_128_gcm_sha256,
+        tls_stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
         client.negotiatedCipherSuite().?,
     );
     try std.testing.expectEqual(
@@ -161,6 +161,116 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
     try std.testing.expectEqual(@as(u64, 1), updates.sent);
     try std.testing.expectEqual(@as(u64, 1), updates.received);
     try std.testing.expect(!updates.awaiting_peer_response);
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT TLS 1.2 completes authenticated MQTT 5 traffic" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer accepted.deinit(shared.server.allocator);
+            if (accepted.connection.negotiatedTlsProtocol() != .tls12) {
+                shared.err = error.InvalidProtocolVersion;
+                return;
+            }
+            accepted.connection.readPingReq() catch |err| {
+                shared.err = err;
+                return;
+            };
+            accepted.connection.writePingResp() catch |err| {
+                shared.err = err;
+                return;
+            };
+            var disconnect = accepted.connection.readDisconnect() catch |err| {
+                shared.err = err;
+                return;
+            };
+            disconnect.deinit(shared.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try mqtt_tls.Client.connectAddress(
+        allocator,
+        io,
+        server.address(),
+        "localhost",
+        .{
+            .mqtt = .{
+                .protocol = .v5,
+                .client_id = "mqtt-tls12",
+            },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    );
+    defer client.close();
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls12,
+        client.negotiatedTlsProtocol().?,
+    );
+    try std.testing.expectEqual(
+        tls_stream.NegotiatedCipherSuite.ecdhe_ecdsa_aes_128_gcm_sha256,
+        client.negotiatedCipherSuite().?,
+    );
+    try std.testing.expectError(
+        error.TlsKeyUpdateUnavailable,
+        client.updateTrafficKeys(false),
+    );
+    try client.ping();
     try client.disconnect(0);
 
     thread.join();

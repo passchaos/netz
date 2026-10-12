@@ -1,0 +1,902 @@
+//! Blocking vail-backed TLS 1.2/TLS 1.3 client connection.
+
+const std = @import("std");
+const vail = @import("vail");
+const handshake_deadline = @import("handshake_deadline.zig");
+const record_io = @import("record_io.zig");
+const record_stream = @import("record_stream.zig");
+const tls12_record_stream = @import("tls12_record_stream.zig");
+const version = @import("version.zig");
+
+const net = std.Io.net;
+const CertificateBundle = std.crypto.Certificate.Bundle;
+const max_handshake_size: usize = 256 * 1024;
+const max_post_handshake_size: usize = 64 * 1024;
+const max_tls12_cipher_suites: usize = 64;
+const AutoClient = vail.tls.versioned_client_connection.ClientConnection(
+    max_handshake_size,
+    max_post_handshake_size,
+);
+const Tls13Client = vail.tls.client_connection.ClientConnection(
+    max_handshake_size,
+    max_post_handshake_size,
+);
+const Tls12Client = vail.tls.tls12_client_connection.ClientConnection(
+    max_handshake_size,
+    max_post_handshake_size,
+);
+
+pub const Error = std.mem.Allocator.Error ||
+    std.Io.RandomSecureError ||
+    CertificateBundle.RescanError ||
+    record_io.Error ||
+    vail.tls.versioned_client_connection.Error ||
+    vail.tls.tls12_client_connection.Error ||
+    record_stream.Error ||
+    tls12_record_stream.Error ||
+    vail.tls.auth.Error ||
+    error{
+        HandshakeMessageTooLarge,
+        InvalidProtocolPolicy,
+        PeerAbortedHandshake,
+        CertificateUntrusted,
+        ConflictingOcspVerifier,
+        OcspPolicyRequiresRequest,
+        TlsKeyUpdateUnavailable,
+    };
+
+pub const CaBundle = struct {
+    bundle: *CertificateBundle,
+    lock: *std.Io.RwLock,
+};
+
+pub const Options = struct {
+    server_name: []const u8,
+    server_verifier: vail.tls.auth.ClientVerifier,
+    client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    alpn_protocols: []const []const u8 = &.{},
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const vail.tls.tls12.Suite =
+        &version.default_tls12_cipher_suites,
+    protocol_policy: version.Policy = .tls12_and_tls13,
+    request_ocsp: bool = true,
+    max_server_handshake_size: usize = max_handshake_size,
+    handshake_timeout: ?std.Io.Duration = null,
+};
+
+pub const VerifiedOptions = struct {
+    server_name: []const u8,
+    verify_host: bool = true,
+    ca_bundle: ?CaBundle = null,
+    server_verifier: ?vail.tls.auth.ClientVerifier = null,
+    stapled_ocsp: vail.x509.trust.StapledOcspPolicy = .ignore,
+    request_ocsp: bool = true,
+    client_identity: ?vail.tls.client_auth.ClientIdentity = null,
+    alpn_protocols: []const []const u8 = &.{},
+    cipher_suites: []const vail.tls.cipher_suite.Suite =
+        &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const vail.tls.tls12.Suite =
+        &version.default_tls12_cipher_suites,
+    protocol_policy: version.Policy = .tls12_and_tls13,
+    max_server_handshake_size: usize = max_handshake_size,
+    handshake_timeout: ?std.Io.Duration = null,
+};
+
+pub const Connection = struct {
+    const Records = union(enum) {
+        tls13: record_stream.Stream,
+        tls12: tls12_record_stream.Stream,
+    };
+
+    const Tls12Exporter = struct {
+        master_secret: [vail.tls.tls12.master_secret_len]u8,
+        client_random: [32]u8,
+        server_random: [32]u8,
+        suite: vail.tls.tls12.Suite,
+    };
+
+    const Exporter = union(enum) {
+        tls13: vail.tls.secret.Secret,
+        tls12: Tls12Exporter,
+    };
+
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    records: Records,
+    selected_alpn: ?[]u8,
+    peer_certificate_chain: [][]const u8,
+    protocol: version.Protocol,
+    cipher_suite: version.NegotiatedCipherSuite,
+    transcript_hash: vail.tls.secret.Hash,
+    exporter: Exporter,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+    ) Error!*Connection {
+        return initBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            try handshake_deadline.fromTimeout(io, options.handshake_timeout),
+        );
+    }
+
+    pub fn initWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        return initBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            try handshake_deadline.capTimeout(
+                io,
+                deadline,
+                options.handshake_timeout,
+            ),
+        );
+    }
+
+    fn initBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: Options,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        if ((options.protocol_policy.offersTls12() and
+            options.tls12_cipher_suites.len == 0) or
+            (options.protocol_policy.offersTls13() and
+                options.cipher_suites.len == 0))
+        {
+            return error.InvalidProtocolPolicy;
+        }
+        if (options.max_server_handshake_size == 0 or
+            options.max_server_handshake_size > max_handshake_size)
+        {
+            return error.HandshakeMessageTooLarge;
+        }
+        if (options.client_identity) |identity| try identity.validate();
+
+        var client_random: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &client_random);
+        try std.Io.randomSecure(io, &client_random);
+        var session_id: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &session_id);
+        try std.Io.randomSecure(io, &session_id);
+        var tls13_key: vail.tls.key_exchange.ClientKeyMaterial =
+            if (options.protocol_policy.offersTls12())
+                .{ .secp256r1 = try randomP256(io) }
+            else
+                .{ .x25519 = try randomX25519(io) };
+        var tls13_retry_key: vail.tls.key_exchange.ClientKeyMaterial =
+            if (options.protocol_policy.offersTls12())
+                .{ .x25519 = try randomX25519(io) }
+            else
+                .{ .secp256r1 = try randomP256(io) };
+        var tls13_keys_owned = true;
+        defer if (tls13_keys_owned) {
+            tls13_key.wipe();
+            tls13_retry_key.wipe();
+        };
+        var tls13_public_storage: [vail.tls.key_exchange.p256.public_len]u8 = undefined;
+        const tls13_public = switch (tls13_key) {
+            .x25519 => |secret| blk: {
+                const public = try vail.tls.key_exchange.publicKey(secret);
+                @memcpy(tls13_public_storage[0..public.len], &public);
+                break :blk tls13_public_storage[0..public.len];
+            },
+            .secp256r1 => |secret| blk: {
+                const public = try vail.tls.key_exchange.p256.publicKey(secret);
+                @memcpy(tls13_public_storage[0..public.len], &public);
+                break :blk tls13_public_storage[0..public.len];
+            },
+            else => unreachable,
+        };
+        var tls12_key = try randomP256(io);
+        defer std.crypto.secureZero(u8, &tls12_key);
+
+        var tls12_wire: [max_tls12_cipher_suites + 1]u16 = undefined;
+        if (options.tls12_cipher_suites.len > max_tls12_cipher_suites) {
+            return error.InvalidProtocolPolicy;
+        }
+        for (options.tls12_cipher_suites, 0..) |suite, index| {
+            tls12_wire[index] = @intFromEnum(suite);
+        }
+        // TLS_EMPTY_RENEGOTIATION_INFO_SCSV is mandatory for the strict TLS
+        // 1.2 profile and harmless to TLS 1.3 peers.
+        tls12_wire[options.tls12_cipher_suites.len] = 0x00ff;
+
+        const now_seconds: u64 = @intCast(@max(
+            0,
+            std.Io.Timestamp.now(io, .real).toSeconds(),
+        ));
+        const tls13_config = vail.tls.client_connection.Config{
+            .allocator = allocator,
+            .random = client_random,
+            .session_id = &session_id,
+            .server_name = options.server_name,
+            .key_material = &tls13_key,
+            .retry_key_material = &tls13_retry_key,
+            .cipher_suites = options.cipher_suites,
+            .additional_cipher_suites = if (options.protocol_policy.offersTls12())
+                tls12_wire[0 .. options.tls12_cipher_suites.len + 1]
+            else
+                &.{},
+            .supported_versions = if (options.protocol_policy.offersTls12())
+                &.{ 0x0304, 0x0303 }
+            else
+                &.{0x0304},
+            .offer_extended_master_secret = options.protocol_policy.offersTls12(),
+            .alpn_protocols = options.alpn_protocols,
+            .request_ocsp = options.request_ocsp,
+            .certificate_compression_algorithms = &.{},
+            .server_verifier = options.server_verifier,
+            .client_identity = options.client_identity,
+        };
+        const tls12_config = vail.tls.tls12_client_connection.Config{
+            .allocator = allocator,
+            .random = client_random,
+            .server_name = options.server_name,
+            .client_private_key = &tls12_key,
+            .policy = .{
+                .cipher_suites = options.tls12_cipher_suites,
+                .groups = &version.default_tls12_groups,
+                .alpn_protocols = options.alpn_protocols,
+            },
+            .tls13_cipher_suites = if (options.protocol_policy.offersTls13())
+                options.cipher_suites
+            else
+                &.{},
+            .client_hello_key_share = if (options.protocol_policy.offersTls13())
+                .{
+                    .group = tls13_key.namedGroup(),
+                    .key_exchange = tls13_public,
+                }
+            else
+                null,
+            .client_hello_supported_groups = if (options.protocol_policy.offersTls13())
+                &.{
+                    vail.tls.key_exchange.named_group_secp256r1,
+                    vail.tls.key_exchange.named_group_x25519,
+                }
+            else
+                &.{vail.tls.key_exchange.named_group_secp256r1},
+            .supported_versions = if (options.protocol_policy.offersTls13())
+                &.{ 0x0304, 0x0303 }
+            else
+                &.{0x0303},
+            .server_verifier = options.server_verifier,
+            .client_identity = options.client_identity,
+            .request_ocsp = options.request_ocsp,
+            .now_seconds = now_seconds,
+        };
+
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        var established: AutoClient.Established = undefined;
+        if (options.protocol_policy == .tls13_only) {
+            const engine = try allocator.create(Tls13Client);
+            defer allocator.destroy(engine);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(engine));
+            tls13_keys_owned = false;
+            try engine.initInto(tls13_config, &output);
+            defer engine.deinit();
+            try record_io.writeAll(io, stream, output.items);
+            output.clearRetainingCapacity();
+            established = .{ .tls13 = try driveTls13(
+                engine,
+                io,
+                stream,
+                &output,
+                options.max_server_handshake_size,
+                deadline,
+            ) };
+        } else if (options.protocol_policy == .tls12_only) {
+            const engine = try allocator.create(Tls12Client);
+            defer allocator.destroy(engine);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(engine));
+            try engine.initInto(tls12_config, &output);
+            defer engine.deinit();
+            try record_io.writeAll(io, stream, output.items);
+            output.clearRetainingCapacity();
+            established = .{ .tls12 = try driveTls12(
+                engine,
+                allocator,
+                io,
+                stream,
+                &output,
+                options.max_server_handshake_size,
+                deadline,
+            ) };
+        } else {
+            const engine = try allocator.create(AutoClient);
+            defer allocator.destroy(engine);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(engine));
+            tls13_keys_owned = false;
+            try engine.initInto(.{
+                .tls13 = tls13_config,
+                .tls12 = tls12_config,
+            }, &output);
+            defer engine.deinit();
+            try record_io.writeAll(io, stream, output.items);
+            output.clearRetainingCapacity();
+            established = try driveAuto(
+                engine,
+                io,
+                stream,
+                &output,
+                options.max_server_handshake_size,
+                deadline,
+            );
+        }
+        errdefer established.deinit();
+        return fromEstablished(allocator, io, stream, &established);
+    }
+
+    pub fn initVerified(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: VerifiedOptions,
+    ) Error!*Connection {
+        return initVerifiedBefore(allocator, io, stream, options, null);
+    }
+
+    pub fn initVerifiedWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: VerifiedOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        return initVerifiedBefore(
+            allocator,
+            io,
+            stream,
+            options,
+            try handshake_deadline.usable(io, deadline),
+        );
+    }
+
+    fn initVerifiedBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        options: VerifiedOptions,
+        outer_deadline: ?std.Io.Clock.Timestamp,
+    ) Error!*Connection {
+        try validateVerifiedOptions(options);
+        var system_store: ?vail.x509.trust.SystemStore = null;
+        defer if (system_store) |*store| store.deinit();
+        var caller_bundle_locked = false;
+        defer if (caller_bundle_locked) options.ca_bundle.?.lock.unlockShared(io);
+        var bundle_verifier: vail.x509.trust.BundleVerifier = undefined;
+        const verifier = options.server_verifier orelse blk: {
+            if (!options.verify_host) return error.CertificateUntrusted;
+            const now = std.Io.Timestamp.now(io, .real);
+            if (options.ca_bundle) |ca_bundle| {
+                try ca_bundle.lock.lockShared(io);
+                caller_bundle_locked = true;
+                bundle_verifier = .{
+                    .bundle = ca_bundle.bundle,
+                    .now_seconds = now.toSeconds(),
+                };
+            } else {
+                system_store = try .init(allocator, io, now);
+                bundle_verifier = system_store.?.verifier(now.toSeconds());
+            }
+            bundle_verifier.stapled_ocsp = options.stapled_ocsp;
+            break :blk bundle_verifier.clientVerifier();
+        };
+        const mapped = Options{
+            .server_name = options.server_name,
+            .server_verifier = verifier,
+            .client_identity = options.client_identity,
+            .alpn_protocols = options.alpn_protocols,
+            .cipher_suites = options.cipher_suites,
+            .tls12_cipher_suites = options.tls12_cipher_suites,
+            .protocol_policy = options.protocol_policy,
+            .request_ocsp = options.request_ocsp,
+            .max_server_handshake_size = options.max_server_handshake_size,
+            .handshake_timeout = options.handshake_timeout,
+        };
+        return if (outer_deadline) |deadline|
+            initWithDeadline(allocator, io, stream, mapped, deadline)
+        else
+            init(allocator, io, stream, mapped);
+    }
+
+    pub fn deinit(self: *Connection) void {
+        if (self.shouldSendCloseNotify()) {
+            self.sendCloseNotify() catch {};
+        }
+        switch (self.records) {
+            inline else => |*records| records.deinit(),
+        }
+        self.stream.close(self.io);
+        const allocator = self.allocator;
+        if (self.selected_alpn) |protocol| allocator.free(protocol);
+        for (self.peer_certificate_chain) |certificate| {
+            allocator.free(certificate);
+        }
+        allocator.free(self.peer_certificate_chain);
+        switch (self.exporter) {
+            .tls13 => |*secret| secret.deinit(),
+            .tls12 => |*state| {
+                std.crypto.secureZero(u8, &state.master_secret);
+                std.crypto.secureZero(u8, &state.client_random);
+                std.crypto.secureZero(u8, &state.server_random);
+            },
+        }
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+
+    pub fn negotiatedProtocol(self: *const Connection) version.Protocol {
+        return self.protocol;
+    }
+
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        return self.selected_alpn;
+    }
+
+    pub fn peerCertificates(self: *const Connection) []const []const u8 {
+        return self.peer_certificate_chain;
+    }
+
+    pub fn negotiatedCipherSuite(
+        self: *const Connection,
+    ) version.NegotiatedCipherSuite {
+        return self.cipher_suite;
+    }
+
+    pub fn negotiatedTranscriptHash(
+        self: *const Connection,
+    ) vail.tls.secret.Hash {
+        return self.transcript_hash;
+    }
+
+    pub fn exportKeyingMaterial(
+        self: *const Connection,
+        label: []const u8,
+        context: []const u8,
+        out: []u8,
+    ) Error!void {
+        return switch (self.exporter) {
+            .tls13 => |secret| vail.tls.key_schedule.exportKeyingMaterialFor(
+                secret,
+                label,
+                context,
+                out,
+            ),
+            .tls12 => |state| vail.tls.tls12.exportKeyingMaterial(
+                state.suite,
+                &state.master_secret,
+                state.client_random,
+                state.server_random,
+                label,
+                context,
+                out,
+            ),
+        };
+    }
+
+    pub fn updateTrafficKeys(self: *Connection, request_peer_update: bool) Error!void {
+        return switch (self.records) {
+            .tls13 => |*records| records.updateTrafficKeys(
+                self.io,
+                self.stream,
+                request_peer_update,
+            ),
+            .tls12 => error.TlsKeyUpdateUnavailable,
+        };
+    }
+
+    pub fn keyUpdateCounts(self: *const Connection) @import("record_stream.zig").KeyUpdateCounts {
+        return switch (self.records) {
+            .tls13 => |*records| records.keyUpdateCounts(),
+            .tls12 => .{
+                .sent = 0,
+                .received = 0,
+                .awaiting_peer_response = false,
+            },
+        };
+    }
+
+    pub fn sendCloseNotify(self: *Connection) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.sendCloseNotify(
+                self.io,
+                self.stream,
+            ),
+        };
+    }
+
+    pub fn receivedCloseNotify(self: *const Connection) bool {
+        return switch (self.records) {
+            inline else => |*records| records.receivedCloseNotify(),
+        };
+    }
+
+    pub fn isReusableBoundary(self: *const Connection) bool {
+        return switch (self.records) {
+            inline else => |*records| records.isReusableBoundary(),
+        };
+    }
+
+    pub fn read(self: *Connection, out: []u8) Error!usize {
+        return switch (self.records) {
+            inline else => |*records| records.read(self.io, self.stream, out),
+        };
+    }
+
+    pub fn readWithDeadline(
+        self: *Connection,
+        out: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!usize {
+        return switch (self.records) {
+            inline else => |*records| records.readWithDeadline(
+                self.io,
+                self.stream,
+                out,
+                deadline,
+            ),
+        };
+    }
+
+    pub fn writeAll(self: *Connection, bytes: []const u8) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.writeAll(
+                self.io,
+                self.stream,
+                bytes,
+            ),
+        };
+    }
+
+    pub fn writeAllWithDeadline(
+        self: *Connection,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.writeAllWithDeadline(
+                self.io,
+                self.stream,
+                bytes,
+                committed,
+                deadline,
+            ),
+        };
+    }
+
+    pub fn finishPendingWrite(self: *Connection, committed: *usize) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.finishPendingWrite(
+                self.io,
+                self.stream,
+                committed,
+            ),
+        };
+    }
+
+    pub fn writeAllParts(
+        self: *Connection,
+        first: []const u8,
+        second: []const u8,
+    ) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.writeAllParts(
+                self.io,
+                self.stream,
+                first,
+                second,
+            ),
+        };
+    }
+
+    pub fn writeAllSlices(
+        self: *Connection,
+        parts: []const []const u8,
+    ) Error!void {
+        return switch (self.records) {
+            inline else => |*records| records.writeAllSlices(
+                self.io,
+                self.stream,
+                parts,
+            ),
+        };
+    }
+
+    fn shouldSendCloseNotify(self: *const Connection) bool {
+        return switch (self.records) {
+            inline else => |*records| records.shouldSendCloseNotify(),
+        };
+    }
+};
+
+fn fromEstablished(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    established: *AutoClient.Established,
+) Error!*Connection {
+    const connection = try allocator.create(Connection);
+    connection.* = switch (established.*) {
+        .tls13 => |*value| blk: {
+            const selected_alpn = value.selected_alpn;
+            value.selected_alpn = null;
+            const peer_certificate_chain = value.peer_certificate_chain;
+            value.peer_certificate_chain = &.{};
+            const cipher_suite = value.application.suite;
+            const exporter = value.exporter_master_secret;
+            var records = record_stream.Stream.init(
+                value.application.traffic.read.keys,
+                value.application.traffic.write.keys,
+                value.application.traffic.read.traffic_secret,
+                value.application.traffic.write.traffic_secret,
+            );
+            value.application.secrets_extracted = true;
+            std.crypto.secureZero(
+                u8,
+                std.mem.asBytes(&value.application.traffic),
+            );
+            value.application.deinit();
+            value.master_secret.deinit();
+            value.exporter_master_secret.deinit();
+            if (value.local_application_settings) |settings| {
+                allocator.free(settings);
+            }
+            if (value.peer_application_settings) |settings| {
+                allocator.free(settings);
+            }
+            value.* = undefined;
+            records.allowNewSessionTickets();
+            break :blk .{
+                .allocator = allocator,
+                .io = io,
+                .stream = stream,
+                .records = .{ .tls13 = records },
+                .selected_alpn = selected_alpn,
+                .peer_certificate_chain = peer_certificate_chain,
+                .protocol = .tls13,
+                .cipher_suite = .fromTls13(cipher_suite),
+                .transcript_hash = cipher_suite.hash(),
+                .exporter = .{ .tls13 = exporter },
+            };
+        },
+        .tls12 => |*value| blk: {
+            const selected_alpn = value.selected_alpn;
+            value.selected_alpn = null;
+            const peer_certificate_chain = value.peer_certificate_chain;
+            value.peer_certificate_chain = &.{};
+            const suite = value.suite;
+            const exporter = Connection.Tls12Exporter{
+                .master_secret = value.master_secret,
+                .client_random = value.client_random,
+                .server_random = value.server_random,
+                .suite = suite,
+            };
+            const records = tls12_record_stream.Stream.init(
+                value.read,
+                value.write,
+            );
+            value.secrets_extracted = true;
+            std.crypto.secureZero(u8, std.mem.asBytes(&value.read));
+            std.crypto.secureZero(u8, std.mem.asBytes(&value.write));
+            value.deinit();
+            break :blk .{
+                .allocator = allocator,
+                .io = io,
+                .stream = stream,
+                .records = .{ .tls12 = records },
+                .selected_alpn = selected_alpn,
+                .peer_certificate_chain = peer_certificate_chain,
+                .protocol = .tls12,
+                .cipher_suite = .fromTls12(suite),
+                .transcript_hash = version.transcriptHash(suite),
+                .exporter = .{ .tls12 = exporter },
+            };
+        },
+    };
+    established.* = undefined;
+    return connection;
+}
+
+fn driveAuto(
+    engine: *AutoClient,
+    io: std.Io,
+    stream: net.Stream,
+    output: *std.ArrayList(u8),
+    limit: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!AutoClient.Established {
+    var established: AutoClient.Established = undefined;
+    var total: usize = 0;
+    var reader: record_io.Reader = .{};
+    var encoded: [record_io.max_record_len]u8 = undefined;
+    while (true) {
+        const record = try readHandshakeRecord(
+            &reader,
+            io,
+            stream,
+            &encoded,
+            deadline,
+        );
+        total = std.math.add(usize, total, record.len) catch
+            return error.HandshakeMessageTooLarge;
+        if (total > limit) return error.HandshakeMessageTooLarge;
+        var input = record;
+        while (true) {
+            const result = try engine.receiveInto(input, output, &established);
+            if (result.consumed > input.len) return error.ConnectionFailed;
+            input = input[result.consumed..];
+            if (output.items.len != 0) {
+                try record_io.writeAll(io, stream, output.items);
+                output.clearRetainingCapacity();
+            }
+            if (result.event) |event| switch (event) {
+                .tls13 => |nested| switch (nested) {
+                    .peer_alert => return error.PeerAbortedHandshake,
+                    .ech_rejected => return error.PeerAbortedHandshake,
+                    .established => return established,
+                    else => {},
+                },
+                .tls12 => |nested| switch (nested) {
+                    .peer_alert => return error.PeerAbortedHandshake,
+                    .established => return established,
+                    else => {},
+                },
+            };
+            if (input.len == 0 and result.event == null) break;
+            if (input.len == 0 and result.consumed == 0) break;
+        }
+    }
+}
+
+fn driveTls13(
+    engine: *Tls13Client,
+    io: std.Io,
+    stream: net.Stream,
+    output: *std.ArrayList(u8),
+    limit: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!Tls13Client.Established {
+    var established: Tls13Client.Established = undefined;
+    var total: usize = 0;
+    var reader: record_io.Reader = .{};
+    var encoded: [record_io.max_record_len]u8 = undefined;
+    while (true) {
+        const record = try readHandshakeRecord(
+            &reader,
+            io,
+            stream,
+            &encoded,
+            deadline,
+        );
+        total = std.math.add(usize, total, record.len) catch
+            return error.HandshakeMessageTooLarge;
+        if (total > limit) return error.HandshakeMessageTooLarge;
+        var input = record;
+        while (true) {
+            const result = try engine.receiveInto(input, output, &established);
+            if (result.consumed > input.len) return error.ConnectionFailed;
+            input = input[result.consumed..];
+            if (output.items.len != 0) {
+                try record_io.writeAll(io, stream, output.items);
+                output.clearRetainingCapacity();
+            }
+            if (result.event) |event| switch (event) {
+                .peer_alert, .ech_rejected => return error.PeerAbortedHandshake,
+                .established => return established,
+                else => {},
+            };
+            if (input.len == 0 and result.event == null) break;
+            if (input.len == 0 and result.consumed == 0) break;
+        }
+    }
+}
+
+fn driveTls12(
+    engine: *Tls12Client,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stream: net.Stream,
+    output: *std.ArrayList(u8),
+    limit: usize,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!vail.tls.tls12_client_connection.Established {
+    _ = allocator;
+    var established: vail.tls.tls12_client_connection.Established = undefined;
+    var total: usize = 0;
+    var reader: record_io.Reader = .{};
+    var encoded: [record_io.max_record_len]u8 = undefined;
+    while (true) {
+        const record = try readHandshakeRecord(
+            &reader,
+            io,
+            stream,
+            &encoded,
+            deadline,
+        );
+        total = std.math.add(usize, total, record.len) catch
+            return error.HandshakeMessageTooLarge;
+        if (total > limit) return error.HandshakeMessageTooLarge;
+        var input = record;
+        while (true) {
+            const result = try engine.receiveInto(input, output, &established);
+            if (result.consumed > input.len) return error.ConnectionFailed;
+            input = input[result.consumed..];
+            if (output.items.len != 0) {
+                try record_io.writeAll(io, stream, output.items);
+                output.clearRetainingCapacity();
+            }
+            if (result.event) |event| switch (event) {
+                .peer_alert => return error.PeerAbortedHandshake,
+                .established => return established,
+                else => {},
+            };
+            if (input.len == 0 and result.event == null) break;
+            if (input.len == 0 and result.consumed == 0) break;
+        }
+    }
+}
+
+fn readHandshakeRecord(
+    reader: *record_io.Reader,
+    io: std.Io,
+    stream: net.Stream,
+    encoded: []u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) record_io.Error![]u8 {
+    return if (deadline) |absolute|
+        reader.readWithDeadline(io, stream, encoded, absolute)
+    else
+        reader.read(io, stream, encoded);
+}
+
+fn randomP256(io: std.Io) (std.Io.RandomSecureError || error{InvalidSecretKey})![vail.tls.key_exchange.p256.secret_len]u8 {
+    var secret: [vail.tls.key_exchange.p256.secret_len]u8 = undefined;
+    var attempts: usize = 0;
+    while (attempts < 16) : (attempts += 1) {
+        try std.Io.randomSecure(io, &secret);
+        _ = vail.tls.key_exchange.p256.publicKey(secret) catch |err| switch (err) {
+            error.InvalidSecretKey => continue,
+            else => return error.InvalidSecretKey,
+        };
+        return secret;
+    }
+    std.crypto.secureZero(u8, &secret);
+    return error.InvalidSecretKey;
+}
+
+fn randomX25519(io: std.Io) std.Io.RandomSecureError![vail.tls.key_exchange.secret_len]u8 {
+    var secret: [vail.tls.key_exchange.secret_len]u8 = undefined;
+    try std.Io.randomSecure(io, &secret);
+    secret[0] &= 248;
+    secret[31] &= 127;
+    secret[31] |= 64;
+    return secret;
+}
+
+fn validateVerifiedOptions(options: VerifiedOptions) Error!void {
+    if (options.stapled_ocsp != .ignore and !options.request_ocsp) {
+        return error.OcspPolicyRequiresRequest;
+    }
+    if (options.server_verifier != null and options.stapled_ocsp != .ignore) {
+        return error.ConflictingOcspVerifier;
+    }
+}

@@ -1283,7 +1283,7 @@ pub fn build(b: *std.Build) void {
     mqtt_mtls_openssl.addArtifactArg(mqtt_mtls_server);
     const mqtt_mtls_interop_step = b.step(
         "interop-mqtt-mtls-openssl",
-        "Exercise required and optional MQTT mTLS with OpenSSL",
+        "Exercise TLS 1.2/1.3 required and optional MQTT mTLS with OpenSSL",
     );
     mqtt_mtls_interop_step.dependOn(&mqtt_mtls_openssl.step);
 
@@ -2161,7 +2161,7 @@ pub fn build(b: *std.Build) void {
     http1_ocsp_interop.addArtifactArg(http1_ocsp_client);
     const http1_ocsp_interop_step = b.step(
         "interop-http1-ocsp",
-        "Require good OpenSSL OCSP staples from the HTTP/1 client",
+        "Require good OpenSSL TLS 1.2/1.3 OCSP staples from the HTTP/1 client",
     );
     http1_ocsp_interop_step.dependOn(&http1_ocsp_interop.step);
     test_step.dependOn(&http1_ocsp_interop.step);

@@ -2907,11 +2907,17 @@ pub const Connection = struct {
         return self.transport.negotiatedAlpn();
     }
 
-    /// Return authenticated TLS 1.3 cipher-suite metadata for native TLS or
+    pub fn negotiatedTlsProtocol(
+        self: *const Connection,
+    ) ?tls_stream.Protocol {
+        return self.transport.negotiatedTlsProtocol();
+    }
+
+    /// Return authenticated TLS cipher-suite metadata for native TLS or
     /// vail-backed WSS. Other transports return null.
     pub fn negotiatedCipherSuite(
         self: *const Connection,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         return self.transport.negotiatedCipherSuite();
     }
 

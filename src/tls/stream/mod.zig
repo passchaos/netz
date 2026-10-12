@@ -1,31 +1,56 @@
-//! Blocking TLS 1.3 client/server streams backed by vail.
+//! Blocking TLS 1.2/1.3 client/server streams backed by vail.
 
-pub const ClientConnection = @import("client_connection.zig").Connection;
-pub const ClientOptions = @import("client_connection.zig").Options;
-pub const ClientVerifiedOptions =
+pub const Tls13ClientConnection = @import("client_connection.zig").Connection;
+pub const Tls13ClientOptions = @import("client_connection.zig").Options;
+pub const Tls13ClientVerifiedOptions =
     @import("client_connection.zig").VerifiedOptions;
-pub const ClientCaBundle = @import("client_connection.zig").CaBundle;
+pub const ClientConnection =
+    @import("versioned_client_connection.zig").Connection;
+pub const ClientOptions = @import("versioned_client_connection.zig").Options;
+pub const ClientVerifiedOptions =
+    @import("versioned_client_connection.zig").VerifiedOptions;
+pub const ClientCaBundle = @import("versioned_client_connection.zig").CaBundle;
 pub const StapledOcspPolicy = @import("vail").x509.trust.StapledOcspPolicy;
-pub const ServerConnection = @import("server_connection.zig").Connection;
-pub const ServerOptions = @import("server_connection.zig").Options;
+pub const Tls13ServerConnection = @import("server_connection.zig").Connection;
+pub const Tls13ServerOptions = @import("server_connection.zig").Options;
+pub const ServerConnection =
+    @import("versioned_server_connection.zig").Connection;
+pub const ServerOptions = @import("versioned_server_connection.zig").Options;
 pub const ServerIdentityLease =
     @import("server_handshake.zig").ServerIdentityLease;
 pub const ServerIdentityProvider =
     @import("server_handshake.zig").ServerIdentityProvider;
-/// Public TLS 1.3 negotiation metadata shared by every stream adapter.
+/// TLS 1.3 cipher-suite configuration retained for source compatibility.
 pub const CipherSuite = @import("vail").tls.cipher_suite.Suite;
 pub const TranscriptHash = @import("vail").tls.secret.Hash;
 pub const KeyUpdateCounts = @import("record_stream.zig").KeyUpdateCounts;
 pub const PeerCertificateChain =
     @import("server_handshake.zig").PeerCertificateChain;
+pub const VersionedClientConnection = ClientConnection;
+pub const VersionedClientOptions = ClientOptions;
+pub const VersionedClientVerifiedOptions = ClientVerifiedOptions;
+pub const VersionedServerConnection = ServerConnection;
+pub const VersionedServerOptions = ServerOptions;
+pub const Protocol = @import("version.zig").Protocol;
+pub const VersionPolicy = @import("version.zig").Policy;
+pub const NegotiatedCipherSuite =
+    @import("version.zig").NegotiatedCipherSuite;
+pub const Tls12CipherSuite = @import("vail").tls.tls12.Suite;
+pub const default_tls12_cipher_suites =
+    &@import("version.zig").default_tls12_cipher_suites;
 
-pub const Error = @import("client_connection.zig").Error ||
-    @import("server_connection.zig").Error;
+pub const Error = @import("versioned_client_connection.zig").Error ||
+    @import("versioned_server_connection.zig").Error;
 
 test {
     _ = @import("handshake_deadline.zig");
     _ = @import("record_io.zig");
     _ = @import("record_stream.zig");
+    _ = @import("version.zig");
+    _ = @import("tls12_record_stream.zig");
+    _ = @import("versioned_client_connection.zig");
+    _ = @import("versioned_server_connection.zig");
+    _ = @import("versioned_tests.zig");
     _ = @import("server_handshake.zig");
     _ = @import("alpn_tests.zig");
     _ = @import("handshake_timeout_tests.zig");

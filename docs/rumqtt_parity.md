@@ -2391,8 +2391,9 @@ the rumqttd server path still contains `TODO: Add support for V5 protocol with
 websockets`. Netz tests both versions end to end on its client and server and
 also covers cross-message packet reassembly, QoS 1, QoS 2, and strict
 subprotocol rejection. Client `wss://` uses the generic WebSocket TLS
-transport. Setting `ConnectOptions.client_identity` selects the shared
-vail-backed TLS 1.3 client, which sends Ed25519/ECDSA/SM2 identities and maps
+transport. Setting `ConnectOptions.client_identity` or a TLS version policy
+selects the shared vail-backed TLS 1.2/1.3 client, which sends supported
+client identities and maps
 the same system/caller CA plus hostname policy or a pin/custom
 `server_verifier`. Cleartext address-based `connect` rejects configured TLS
 credentials instead of silently dropping them.
@@ -2410,20 +2411,30 @@ identities instead of requiring certificate/key file paths.
 
 ## Native MQTT-over-TLS transport
 
+The native vail transport now negotiates TLS 1.2 and TLS 1.3. Callers can
+require either version or offer both with TLS 1.3 preference. The TLS 1.2
+profile is deliberately modern: ECDHE with AES-GCM or ChaCha20-Poly1305,
+mandatory Extended Master Secret and secure-renegotiation signaling, no CBC,
+static-RSA key exchange, or renegotiation. Listener `tls_version`/`ciphers` and
+bridge `bridge_tls_version`/`bridge_ciphers` map this policy explicitly.
+HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
+interoperability covers both endpoint roles and good/missing/revoked OCSP.
+
 `mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the
 same Zig 0.16 TLS client as HTTPS/WSS, including operating-system roots,
 caller-managed CA bundles, hostname verification, and explicit truncation
-policy. Setting `ConnectOptions.client_identity` selects the vail TLS 1.3
+policy. Setting `ConnectOptions.client_identity` or a non-default TLS version
+policy selects the vail TLS 1.2/1.3
 stream client so it can answer CertificateRequest with Ed25519, ECDSA, or SM2
 identity material. The vail path maps the same system/caller CA and hostname
 policy by default, or accepts a pinned/custom `server_verifier`; clients
 without an identity keep the standard-library TLS path.
 
-`mqtt.tls_runtime.Server` is a native TLS 1.3 listener backed by project-local
+`mqtt.tls_runtime.Server` is a native TLS 1.2/1.3 listener backed by project-local
 vail primitives. It accepts caller-provided DER certificate chains and
 Ed25519/ECDSA/SM2 signers, generates fresh handshake/key-exchange/signature
-entropy per connection, supports configured TLS 1.3 cipher-suite preference,
+entropy per connection, supports separate TLS 1.2 and TLS 1.3 cipher-suite preference,
 supports an ALPN protocol list with mandatory overlap when configured,
 fragments large MQTT writes into bounded TLS records, and preserves byte-stream
 semantics when records and MQTT Control Packets have different boundaries. The
@@ -2474,7 +2485,8 @@ CertificateVerify, peer-chain exposure, CA/SAN verification, and bad server-pin
 rejection. The explicit
 `zig build interop-mqtt-mtls-openssl` gate additionally proves authenticated,
 ECDSA and RSA-PSS client identities, anonymous-rejected, untrusted-rejected,
-and optional-anonymous TLS 1.3 paths against OpenSSL's real
+and optional-anonymous TLS 1.3 paths plus required ECDSA mTLS over TLS 1.2
+against OpenSSL's real
 client-certificate implementation. The netz endpoint obtains `std.Io` from
 zio, and the gate requires every readiness/result record to identify
 `client_io=openssl-sync server_io=zio-std-io`.
@@ -3159,7 +3171,8 @@ that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Listener
 topology, anonymous policy, limits, and persistence settings still require
 restart.
-Delegated indirect-CRL signer chains and plugins remain explicit gaps.
+Delegated indirect-CRL signer chains remain an explicit gap. Broker plugins are
+intentionally outside the target scope and are not counted as a standards gap.
 CA-signed indirect CRLs are accepted only after signer authorization, and a
 leaf receives coverage only when its CRL distribution point names that CRL
 issuer with matching scope and reasons. `use_identity_as_username`

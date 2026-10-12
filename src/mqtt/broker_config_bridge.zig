@@ -9,6 +9,7 @@ const mqtt = @import("mod.zig");
 const rule_helpers = @import("bridge/rules.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_cipher_suites = @import("../tls/cipher_suites.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
 
 const net = std.Io.net;
 
@@ -137,6 +138,8 @@ pub const Bridge = struct {
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
     cipher_suites: []tls_cipher_suites.Suite = &.{},
+    tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
+    tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     require_ocsp: bool = false,
     round_robin: bool = false,
     start_type: StartType = .automatic,
@@ -166,6 +169,9 @@ pub const Bridge = struct {
         }
         if (self.alpn.len != 0) allocator.free(self.alpn);
         if (self.cipher_suites.len != 0) allocator.free(self.cipher_suites);
+        if (self.tls12_cipher_suites.len != 0) {
+            allocator.free(self.tls12_cipher_suites);
+        }
         if (self.notification_topic.len != 0) {
             allocator.free(self.notification_topic);
         }
@@ -284,6 +290,7 @@ const Seen = struct {
     bridge_keyfile_password_file: bool = false,
     bridge_alpn: bool = false,
     bridge_ciphers_tls13: bool = false,
+    bridge_ciphers: bool = false,
     bridge_require_ocsp: bool = false,
     bridge_insecure: bool = false,
     bridge_tls_version: bool = false,
@@ -328,6 +335,8 @@ pub const Builder = struct {
     private_key_password_file: []u8 = &.{},
     alpn: []u8 = &.{},
     cipher_suites: []tls_cipher_suites.Suite = &.{},
+    tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
+    tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     require_ocsp: bool = false,
     round_robin: bool = false,
     start_type: StartType = .automatic,
@@ -371,6 +380,9 @@ pub const Builder = struct {
         }
         if (self.alpn.len != 0) allocator.free(self.alpn);
         if (self.cipher_suites.len != 0) allocator.free(self.cipher_suites);
+        if (self.tls12_cipher_suites.len != 0) {
+            allocator.free(self.tls12_cipher_suites);
+        }
         if (self.notification_topic.len != 0) {
             allocator.free(self.notification_topic);
         }
@@ -526,6 +538,12 @@ pub const Builder = struct {
                 allocator,
                 try parseOne(words),
             );
+        } else if (std.mem.eql(u8, directive, "bridge_ciphers")) {
+            try markOnce(&self.seen.bridge_ciphers);
+            self.tls12_cipher_suites = try tls_cipher_suites.parseOpenSslTls12List(
+                allocator,
+                try parseOne(words),
+            );
         } else if (std.mem.eql(u8, directive, "bridge_require_ocsp")) {
             try markOnce(&self.seen.bridge_require_ocsp);
             self.require_ocsp = try parseOneBool(words);
@@ -536,9 +554,13 @@ pub const Builder = struct {
             }
         } else if (std.mem.eql(u8, directive, "bridge_tls_version")) {
             try markOnce(&self.seen.bridge_tls_version);
-            if (!std.mem.eql(u8, try parseOne(words), "tlsv1.3")) {
+            const value = try parseOne(words);
+            self.tls_protocol_policy = if (std.mem.eql(u8, value, "tlsv1.3"))
+                .tls13_only
+            else if (std.mem.eql(u8, value, "tlsv1.2"))
+                .tls12_and_tls13
+            else
                 return error.UnsupportedBridgeTlsVersion;
-            }
         } else if (std.mem.eql(u8, directive, "round_robin")) {
             try markOnce(&self.seen.round_robin);
             self.round_robin = try parseOneBool(words);
@@ -626,6 +648,7 @@ pub const Builder = struct {
         }
         const tls_option_configured = self.certificate_file.len != 0 or
             self.alpn.len != 0 or self.cipher_suites.len != 0 or
+            self.tls12_cipher_suites.len != 0 or
             self.seen.bridge_require_ocsp or
             self.seen.bridge_insecure or
             self.seen.bridge_tls_version;
@@ -731,6 +754,8 @@ pub const Builder = struct {
             .private_key_password_file = self.private_key_password_file,
             .alpn = self.alpn,
             .cipher_suites = self.cipher_suites,
+            .tls12_cipher_suites = self.tls12_cipher_suites,
+            .tls_protocol_policy = self.tls_protocol_policy,
             .require_ocsp = self.require_ocsp,
             .round_robin = self.round_robin,
             .start_type = self.start_type,
@@ -903,6 +928,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_keyfile_password_file") or
         std.mem.eql(u8, value, "bridge_alpn") or
         std.mem.eql(u8, value, "bridge_ciphers_tls1.3") or
+        std.mem.eql(u8, value, "bridge_ciphers") or
         std.mem.eql(u8, value, "bridge_require_ocsp") or
         std.mem.eql(u8, value, "bridge_insecure") or
         std.mem.eql(u8, value, "bridge_tls_version") or

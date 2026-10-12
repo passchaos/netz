@@ -99,6 +99,7 @@ def _start_openssl_stapling_server(
     response: Path | None,
     *,
     alpn: str = "mqtt",
+    tls_version: str = "tls1_3",
 ) -> subprocess.Popen[bytes]:
     command = [
         "openssl",
@@ -110,7 +111,7 @@ def _start_openssl_stapling_server(
         str(certificate),
         "-key",
         str(key),
-        "-tls1_3",
+        f"-{tls_version}",
         "-alpn",
         alpn,
     ]

@@ -7,6 +7,7 @@ const tls_test = netz.tls.testing;
 
 const Mode = enum {
     required,
+    required_tls12,
     required_rsa,
     required_reject,
     required_untrusted,
@@ -48,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     const requirement: netz.mqtt.tls_runtime.ClientAuthRequirement =
         switch (mode) {
             .required,
+            .required_tls12,
             .required_rsa,
             .required_reject,
             .required_untrusted,
@@ -109,13 +111,18 @@ pub fn main(init: std.process.Init) !void {
 
     var accepted = try server.accept(.{ .protocol = .v5 });
     defer accepted.deinit(allocator);
+    if (mode == .required_tls12 and
+        accepted.connection.negotiatedTlsProtocol() != .tls12)
+    {
+        return error.InvalidProtocolVersion;
+    }
     try std.testing.expectEqualStrings(
         "openssl-mtls",
         accepted.connect.connect.client_id,
     );
     const peer_certificates = accepted.connection.peerCertificates();
     switch (mode) {
-        .required, .required_rsa => {
+        .required, .required_tls12, .required_rsa => {
             const chain = peer_certificates orelse
                 return error.MissingPeerCertificate;
             try std.testing.expectEqual(@as(usize, 1), chain.len);
@@ -129,7 +136,12 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print(
                 "required mTLS authenticated {s} peer certificate " ++
                     "client_io=openssl-sync server_io=zio-std-io\n",
-                .{if (mode == .required_rsa) "RSA" else "ECDSA"},
+                .{if (mode == .required_rsa)
+                    "RSA"
+                else if (mode == .required_tls12)
+                    "ECDSA-TLS1.2"
+                else
+                    "ECDSA"},
             );
         },
         .optional_anonymous => {

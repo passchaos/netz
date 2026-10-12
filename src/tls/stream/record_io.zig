@@ -7,11 +7,13 @@ const stream_io = @import("../../internal/stream_io.zig");
 const net = std.Io.net;
 
 pub const max_plaintext_len: usize = 16 * 1024;
-pub const max_record_len =
+pub const max_record_len = @max(
     vail.tls.record.header_len +
-    max_plaintext_len +
-    1 +
-    vail.tls.record.tag_len;
+        max_plaintext_len +
+        1 +
+        vail.tls.record.tag_len,
+    vail.tls.tls12.max_record_len,
+);
 
 pub const Error = net.Stream.Reader.Error ||
     net.Stream.Writer.Error ||

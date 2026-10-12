@@ -5,7 +5,9 @@ const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 3) return error.InvalidArgument;
+    if (args.len < 3 or args.len > 4) return error.InvalidArgument;
+    const tls12 = args.len == 4 and std.mem.eql(u8, args[3], "tls12");
+    if (args.len == 4 and !tls12) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0 or !std.Io.Dir.path.isAbsolute(args[2])) {
         return error.InvalidArgument;
@@ -34,9 +36,15 @@ pub fn main(init: std.process.Init) !void {
             .ca_bundle = .{ .bundle = &ca_bundle, .lock = &ca_lock },
             .stapled_ocsp = .require,
             .alpn_protocols = &.{"http/1.1"},
+            .protocol_policy = if (tls12) .tls12_only else .tls13_only,
         },
     );
     defer client.close();
+    const expected_protocol: netz.tls.stream.Protocol =
+        if (tls12) .tls12 else .tls13;
+    if (client.negotiatedTlsProtocol() != expected_protocol) {
+        return error.InvalidProtocolVersion;
+    }
     var response = try client.request(.{
         .method = .GET,
         .target = "/ocsp",
@@ -49,7 +57,8 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/1 client required a good OpenSSL OCSP staple: status=200\n",
-        .{},
+        "netz HTTP/1 client required a good OpenSSL OCSP staple: " ++
+            "tls={s} status=200\n",
+        .{if (tls12) "1.2" else "1.3"},
     );
 }

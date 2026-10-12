@@ -44,6 +44,7 @@ def _run_case(
     label: str,
     response: Path | None,
     accepted: bool,
+    tls_version: str = "tls1_3",
 ) -> None:
     port = _distinct_ports(1)[0]
     ca = directory / "bridge-ca.pem"
@@ -55,16 +56,30 @@ def _run_case(
         key,
         response,
         alpn="http/1.1",
+        tls_version=tls_version,
     )
     process = None
     try:
         process = subprocess.Popen(
-            [str(client), str(port), str(ca.resolve())],
+            [
+                str(client),
+                str(port),
+                str(ca.resolve()),
+                *(["tls12"] if tls_version == "tls1_2" else []),
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
         if accepted:
-            request = _read_http_head(server)
+            try:
+                request = _read_http_head(server)
+            except Exception as error:
+                client_output = process.communicate(timeout=5)[0].decode(
+                    errors="replace"
+                )
+                raise AssertionError(
+                    f"{label} client={client_output!r}"
+                ) from error
             if not request.startswith(b"GET /ocsp HTTP/1.1\r\n") or \
                     b"\r\nHost: localhost\r\n" not in request:
                 raise AssertionError(f"unexpected HTTP/1 request: {request!r}")
@@ -76,8 +91,11 @@ def _run_case(
             server.stdin.flush()
         output = process.communicate(timeout=10)[0].decode(errors="replace")
         if accepted:
-            if process.returncode != 0 or \
-                    "required a good OpenSSL OCSP staple" not in output:
+            expected = (
+                f"tls={'1.2' if tls_version == 'tls1_2' else '1.3'} "
+                "status=200"
+            )
+            if process.returncode != 0 or expected not in output:
                 raise AssertionError(f"good OCSP HTTP/1 client failed: {output}")
         elif process.returncode == 0 or "CertificateUntrusted" not in output:
             raise AssertionError(
@@ -113,7 +131,10 @@ def main() -> None:
         _run_case(client, directory, "good", good, True)
         _run_case(client, directory, "missing", None, False)
         _run_case(client, directory, "revoked", revoked, False)
-    print("HTTP/1 OpenSSL OCSP good/missing/revoked interop passed")
+        _run_case(client, directory, "TLS 1.2 good", good, True, "tls1_2")
+        _run_case(client, directory, "TLS 1.2 missing", None, False, "tls1_2")
+        _run_case(client, directory, "TLS 1.2 revoked", revoked, False, "tls1_2")
+    print("HTTP/1 OpenSSL TLS 1.2/1.3 OCSP good/missing/revoked interop passed")
 
 
 if __name__ == "__main__":

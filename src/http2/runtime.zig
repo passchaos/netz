@@ -1168,6 +1168,9 @@ pub const TlsListenOptions = struct {
     limits: Limits = .{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute TLS handshake receive budget. HTTP/2 frame waits begin only
@@ -1177,7 +1180,7 @@ pub const TlsListenOptions = struct {
     tcp_nodelay: bool = true,
 };
 
-/// Native TLS 1.3 HTTP/2 listener. ALPN is mandatory and restricted to `h2`,
+/// Native TLS 1.2/1.3 HTTP/2 listener. ALPN is mandatory and restricted to `h2`,
 /// so HTTP/1 traffic can never enter the prior-knowledge HTTP/2 parser.
 pub const TlsServer = struct {
     allocator: std.mem.Allocator,
@@ -1206,6 +1209,8 @@ pub const TlsServer = struct {
             .tls = .{
                 .identity = options.identity,
                 .cipher_suites = options.cipher_suites,
+                .tls12_cipher_suites = options.tls12_cipher_suites,
+                .protocol_policy = options.protocol_policy,
                 .max_client_hello_size = options.max_client_hello_size,
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
@@ -3106,6 +3111,9 @@ pub const TlsConnectOptions = struct {
     client_identity: ?vail.tls.client_auth.ClientIdentity = null,
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     max_server_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget spanning ServerHello and the encrypted flight.
     tls_handshake_timeout: ?std.Io.Duration = null,
@@ -3125,6 +3133,8 @@ fn verifiedTlsClientOptions(
         .client_identity = options.client_identity,
         .alpn_protocols = &.{"h2"},
         .cipher_suites = options.cipher_suites,
+        .tls12_cipher_suites = options.tls12_cipher_suites,
+        .protocol_policy = options.protocol_policy,
         .max_server_handshake_size = options.max_server_handshake_size,
         .handshake_timeout = options.tls_handshake_timeout,
     };
@@ -3514,11 +3524,22 @@ pub const Connection = struct {
         };
     }
 
-    /// Return authenticated TLS 1.3 cipher-suite metadata when this HTTP/2
+    pub fn negotiatedTlsProtocol(
+        self: *const Connection,
+    ) ?tls_stream.Protocol {
+        const transport = self.transport orelse return null;
+        return switch (transport) {
+            .tls_client => |connection| connection.negotiatedProtocol(),
+            .tls_server => |connection| connection.negotiatedProtocol(),
+            .tcp => null,
+        };
+    }
+
+    /// Return authenticated TLS cipher-suite metadata when this HTTP/2
     /// connection uses a vail-backed TLS transport.
     pub fn negotiatedCipherSuite(
         self: *const Connection,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         const transport = self.transport orelse return null;
         return switch (transport) {
             .tls_client => |connection| connection.negotiatedCipherSuite(),

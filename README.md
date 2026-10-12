@@ -227,12 +227,15 @@ Current protocol coverage includes:
   nonblocking socket peek before returning idle; buffered or kernel-queued
   unsolicited responses and EOF are therefore discarded instead of being
   attributed to the next lease
-- Shared vail-backed TLS 1.3 stream client/server wrappers with optional/required
-  client authentication, explicit ALPN offer/selection enforcement, owned
+- Shared vail-backed TLS 1.2/1.3 stream client/server wrappers with explicit
+  TLS-1.3-only, TLS-1.2-only, or highest-version negotiation policy; TLS 1.2
+  permits only ECDHE+AEAD suites, requires Extended Master Secret and secure
+  renegotiation signaling, and rejects renegotiation. Both versions provide
+  optional/required client authentication, explicit ALPN enforcement, owned
   negotiated-protocol metadata, authenticated cipher-suite/transcript-hash
   introspection, default RFC 6066 OCSP status requests plus optional mandatory
   staple validation across HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT-over-WSS,
-  RFC 8446 post-handshake KeyUpdate with reciprocal-update
+  RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation
 - Strict owned TLS server-identity loading from PEM certificate chains and
@@ -281,7 +284,7 @@ Current protocol coverage includes:
   preservation, informational-response exclusion, and an opt-out limit,
   traditional CONNECT header-only tunnel acceptance with DATA tunnel helpers and strict `:authority`-only host:port pseudo-header rules, CONNECT body/Content-Length rules, bounded Extended CONNECT rejection bodies/trailers with stream-local cleanup, and opt-in RFC 8441 extended CONNECT / `:protocol` handling with irreversible
   SETTINGS_ENABLE_CONNECT_PROTOCOL downgrade rejection,
-  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`, and a native TLS 1.3 client/server runtime that requires negotiated `h2` ALPN and optionally authenticates clients with application-visible verified certificate chains,
+  open/accept/reject tunnel helpers and DATA-frame tunnel read/write mapping, RFC 7540 h2c Upgrade client/server helpers that carry `HTTP2-Settings` and receive/respond on stream 1, a blocking prior-knowledge h2c client/server runtime with default `:authority` host/port synthesis and transport/URI-derived `:scheme`, and a native TLS 1.2/1.3 client/server runtime that requires negotiated `h2` ALPN and optionally authenticates clients with application-visible verified certificate chains,
   `http://` URI helpers with host-name DNS and IPv4/bracketed-IPv6 literal connect support, allocation-free HTTP/2 runtime SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, transactional single-reservation SETTINGS frames with payload length reuse and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,
   stack-first request/response/informational/Push-Promise header assembly with
@@ -1010,8 +1013,9 @@ Current protocol coverage includes:
   supervised single-Session inbound, outbound, mixed, and `topic ... both ...`
   bridges with strict QoS/prefix mapping, local/remote loop suppression,
   upstream Session/authentication settings, bounded
-  reconnect policy, vail-backed TLS 1.3 with CA/hostname verification,
-  ordered per-bridge cipher-suite policy, required stapled-OCSP validation,
+  reconnect policy, vail-backed TLS 1.2/1.3 with CA/hostname verification,
+  explicit minimum-version policy, separate ordered TLS 1.2/TLS 1.3
+  cipher-suite policy, required stapled-OCSP validation,
   and optional encrypted-key mTLS,
   primary-preferred and round-robin multi-address
   failover, retained local/remote connection-state notifications,
@@ -1173,13 +1177,14 @@ CONNECT/SUBSCRIBE/PUBLISH/PING/DISCONNECT flows, including QoS 1 and QoS 2
 publish acknowledgements. The TLS and
 MQTT TLS and WebSocket clients support `mqtts://`/`ssl://` and `wss://`
 respectively through the shared verified TLS client transport. Configuring
-either client's `client_identity` selects the vail TLS 1.3 stream and answers
+either client's `client_identity` or explicit TLS version policy selects the
+vail TLS 1.2/1.3 stream; an identity answers
 CertificateRequest while preserving system/caller CA and hostname policy or an
 explicit server verifier. The TLS server reuses the same MQTT
 broker-side state machine as TCP/WebSocket and supports optional or required
-TLS 1.3 client certificates with application-visible verified DER chains.
+TLS 1.2/1.3 client certificates with application-visible verified DER chains.
 Clients without an identity retain Zig's standard TLS implementation.
-`tls_handshake_timeout` applies to netz's vail-backed TLS 1.3 client and server
+`tls_handshake_timeout` applies to netz's vail-backed TLS 1.2/1.3 client and server
 handshakes as one absolute receive budget across all handshake records; the
 Zig 0.16 standard TLS client path does not expose an equivalent handshake
 deadline. HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT WSS listeners forward the

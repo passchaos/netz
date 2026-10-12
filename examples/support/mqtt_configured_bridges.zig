@@ -779,9 +779,13 @@ fn loadTlsResources(
         else
             resources.alpn_protocols[0..1],
         .stapled_ocsp = if (source.require_ocsp) .require else .ignore,
+        .protocol_policy = source.tls_protocol_policy,
     };
     if (source.cipher_suites.len != 0) {
         connect_options.cipher_suites = source.cipher_suites;
+    }
+    if (source.tls12_cipher_suites.len != 0) {
+        connect_options.tls12_cipher_suites = source.tls12_cipher_suites;
     }
     resources.connector = .{
         .source = source,

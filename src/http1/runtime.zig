@@ -140,7 +140,7 @@ pub const TlsClientOptions = struct {
     handshake_timeout: ?std.Io.Duration = null,
 };
 
-/// Opt-in vail TLS 1.3 client features that Zig's standard client does not
+/// Opt-in vail TLS 1.2/1.3 client features that Zig's standard client does not
 /// expose: client authentication, ALPN, peer chains, exporters and KeyUpdate.
 /// Supplying this object selects the vail transport while preserving the same
 /// hostname/system-root defaults through `initVerified`.
@@ -159,6 +159,9 @@ pub const VailTlsClientOptions = struct {
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const tls_stream.CipherSuite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     max_server_handshake_size: usize = 256 * 1024,
     handshake_timeout: ?std.Io.Duration = null,
 };
@@ -373,7 +376,7 @@ test "HTTP/1 TLS server exchanges persistent requests" {
             defer connection.close();
             try std.testing.expect(connection.peerCertificates() == null);
             try std.testing.expectEqual(
-                tls_stream.CipherSuite.aes_128_gcm_sha256,
+                tls_stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
                 connection.negotiatedCipherSuite().?,
             );
             try std.testing.expectEqual(
@@ -424,6 +427,108 @@ test "HTTP/1 TLS server exchanges persistent requests" {
     var second = try client.request(.{ .target = "/second" });
     defer second.deinit(allocator);
     try std.testing.expectEqualStrings("two", second.response.body);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/1 negotiates TLS 1.2 with ALPN and serves a request" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const tls_testing = @import("../tls/testing.zig");
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"http/1.1"},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var connection = shared.server.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer connection.close();
+            if (connection.negotiatedTlsProtocol() != .tls12) {
+                shared.err = error.InvalidProtocolVersion;
+                return;
+            }
+            var request = connection.readRequest(.{}) catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer request.deinit(std.testing.allocator);
+            if (!std.mem.eql(u8, request.request.target, "/tls12")) {
+                shared.err = error.InvalidTarget;
+                return;
+            }
+            connection.writeResponse(.{
+                .body = "tls12-http1",
+                .request_method = request.request.method,
+            }) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var client = try Client.connectVailTlsHost(
+        allocator,
+        io,
+        "localhost",
+        server.address().ip4.port,
+        .{},
+        .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"http/1.1"},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    );
+    defer client.close();
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls12,
+        client.negotiatedTlsProtocol().?,
+    );
+    var response = try client.request(.{ .target = "/tls12" });
+    defer response.deinit(allocator);
+    try std.testing.expectEqualStrings("tls12-http1", response.response.body);
 
     thread.join();
     joined = true;
@@ -488,7 +593,7 @@ test "HTTP/1 vail TLS client exposes mTLS metadata and key updates" {
                 chain[0],
             );
             try std.testing.expectEqual(
-                tls_stream.CipherSuite.aes_256_gcm_sha384,
+                tls_stream.NegotiatedCipherSuite.aes_256_gcm_sha384,
                 connection.negotiatedCipherSuite().?,
             );
             try std.testing.expectEqual(
@@ -556,7 +661,7 @@ test "HTTP/1 vail TLS client exposes mTLS metadata and key updates" {
         client.negotiatedAlpn().?,
     );
     try std.testing.expectEqual(
-        tls_stream.CipherSuite.aes_256_gcm_sha384,
+        tls_stream.NegotiatedCipherSuite.aes_256_gcm_sha384,
         client.negotiatedCipherSuite().?,
     );
     try std.testing.expectEqual(
@@ -1613,6 +1718,9 @@ pub const TlsListenOptions = struct {
     limits: Limits = .{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget for TLS setup, independent of HTTP request-head
@@ -1625,7 +1733,7 @@ pub const TlsListenOptions = struct {
     tcp_nodelay: bool = true,
 };
 
-/// TLS 1.3 server transport for the same HTTP/1 parser and writer used by the
+/// TLS 1.2/1.3 server transport for the same HTTP/1 parser and writer used by the
 /// cleartext listener. Accepted connections own their TLS state and expose the
 /// authenticated peer chain when client certificates are configured.
 pub const TlsServer = struct {
@@ -1654,6 +1762,8 @@ pub const TlsServer = struct {
             .tls = .{
                 .identity = options.identity,
                 .cipher_suites = options.cipher_suites,
+                .tls12_cipher_suites = options.tls12_cipher_suites,
+                .protocol_policy = options.protocol_policy,
                 .max_client_hello_size = options.max_client_hello_size,
                 .max_client_handshake_size = options.max_client_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
@@ -2815,9 +2925,16 @@ pub const Client = struct {
         return connection.negotiatedAlpn();
     }
 
+    pub fn negotiatedTlsProtocol(
+        self: *const Client,
+    ) ?tls_stream.Protocol {
+        const connection = self.tls_vail_conn orelse return null;
+        return connection.negotiatedProtocol();
+    }
+
     pub fn negotiatedCipherSuite(
         self: *const Client,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         const connection = self.tls_vail_conn orelse return null;
         return connection.negotiatedCipherSuite();
     }
@@ -3994,6 +4111,8 @@ fn verifiedTlsClientOptions(
         .client_identity = options.client_identity,
         .alpn_protocols = options.alpn_protocols,
         .cipher_suites = options.cipher_suites,
+        .tls12_cipher_suites = options.tls12_cipher_suites,
+        .protocol_policy = options.protocol_policy,
         .max_server_handshake_size = options.max_server_handshake_size,
         .handshake_timeout = options.handshake_timeout,
     };
@@ -4040,13 +4159,20 @@ pub const Connection = struct {
         return tls_connection.peerCertificates();
     }
 
-    /// Return authenticated TLS 1.3 negotiation metadata for HTTPS server
+    /// Return authenticated TLS negotiation metadata for HTTPS server
     /// connections. Cleartext connections return null.
     pub fn negotiatedCipherSuite(
         self: *const Connection,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         const connection = self.tls_server_conn orelse return null;
         return connection.negotiatedCipherSuite();
+    }
+
+    pub fn negotiatedTlsProtocol(
+        self: *const Connection,
+    ) ?tls_stream.Protocol {
+        const connection = self.tls_server_conn orelse return null;
+        return connection.negotiatedProtocol();
     }
 
     pub fn negotiatedTranscriptHash(

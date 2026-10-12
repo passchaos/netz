@@ -74,7 +74,7 @@ pub fn validateBridge(
         connection.negotiatedAlpn() orelse return error.InvalidAlpn,
     );
     try std.testing.expectEqual(
-        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        netz.tls.stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
         connection.negotiatedCipherSuite().?,
     );
     try std.testing.expectEqual(

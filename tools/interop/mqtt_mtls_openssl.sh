@@ -5,9 +5,17 @@ server=${1:?server executable path}
 work=$(mktemp -d)
 server_pid=
 cleanup() {
+  local status=$?
   if [[ -n "$server_pid" ]]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+  fi
+  if [[ $status -ne 0 ]]; then
+    for log in "$work"/*.log; do
+      [[ -f "$log" ]] || continue
+      echo "--- $log ---" >&2
+      sed -n '1,160p' "$log" >&2
+    done
   fi
   rm -rf "$work"
 }
@@ -78,6 +86,20 @@ run_client() {
       -quiet "$@" >"$work/client-$port.log" 2>&1 || true
 }
 
+run_client_tls12() {
+  local port=$1
+  shift
+  printf '%s' "$mqtt_connect" | xxd -r -p |
+    timeout 5s openssl s_client \
+      -connect "127.0.0.1:$port" \
+      -tls1_2 \
+      -cipher ECDHE-ECDSA-AES128-GCM-SHA256 \
+      -servername localhost \
+      -CAfile "$work/cert.pem" \
+      -verify_hostname localhost \
+      -quiet "$@" >"$work/client-tls12-$port.log" 2>&1 || true
+}
+
 free_port() {
   python3 - <<'PY'
 import socket
@@ -95,6 +117,15 @@ server_pid=
 grep -Fq \
   'required mTLS authenticated ECDSA peer certificate client_io=openssl-sync server_io=zio-std-io' \
   "$work/required.log"
+
+port=$(free_port)
+run_server required_tls12 "$port" "$work/required-tls12.log"
+run_client_tls12 "$port" -cert "$work/cert.pem" -key "$work/key.pem"
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'required mTLS authenticated ECDSA-TLS1.2 peer certificate client_io=openssl-sync server_io=zio-std-io' \
+  "$work/required-tls12.log"
 
 port=$(free_port)
 run_server required_rsa "$port" "$work/rsa.log" "$work/rsa-public.der"
@@ -134,4 +165,4 @@ grep -Fq \
   'optional mTLS accepted anonymous client client_io=openssl-sync server_io=zio-std-io' \
   "$work/optional.log"
 
-echo 'OpenSSL MQTT mTLS interop passed: required ECDSA/RSA, anonymous rejection, untrusted rejection, optional anonymous client_io=openssl-sync server_io=zio-std-io'
+echo 'OpenSSL MQTT mTLS interop passed: TLS 1.2/1.3 required ECDSA, TLS 1.3 required RSA, anonymous rejection, untrusted rejection, optional anonymous client_io=openssl-sync server_io=zio-std-io'

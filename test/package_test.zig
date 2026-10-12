@@ -1010,6 +1010,14 @@ test "public modules are reachable" {
         netz.http1.runtime.VailTlsClientOptions,
         "request_ocsp",
     ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.VailTlsClientOptions,
+        "protocol_policy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "negotiatedTlsProtocol",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.RequestWriter,
         "waitForContinueWithInformational",
@@ -6254,6 +6262,14 @@ test "public modules are reachable" {
         "alpn_protocols",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "protocol_policy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "tls12_cipher_suites",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ListenOptions,
         "identity",
     ));
@@ -6265,9 +6281,17 @@ test "public modules are reachable" {
         netz.mqtt.tls_runtime.ListenOptions,
         "alpn_protocols",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ListenOptions,
+        "protocol_policy",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "peerCertificates",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "negotiatedTlsProtocol",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

@@ -83,8 +83,12 @@ close metadata. Browser coverage for RFC 8441/9220 remains limited by the
 standard browser WebSocket API's HTTP version selection and current browser
 support.
 
-`websocket.runtime.TlsServer` performs TLS 1.3 before the same transport-neutral
+`websocket.runtime.TlsServer` negotiates TLS 1.2 or TLS 1.3 before the same transport-neutral
 HTTP Upgrade parser and frame state machine used by cleartext `Server`.
+The vail-backed WSS client and server expose explicit TLS-1.2-only,
+TLS-1.3-only, and highest-version policies; a real TLS 1.2 ALPN Upgrade and
+binary echo regression covers the legacy-compatible path. QUIC-backed RFC
+9220 WebSocket remains TLS 1.3-only as required by QUIC.
 End-to-end tests cover verified localhost CA/SAN, strict subprotocol selection,
 encrypted binary echo, public-client mTLS with server pin verification and
 application-visible client certificate chains, and the shared close/ownership

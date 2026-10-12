@@ -73,7 +73,7 @@ pub fn State(comptime Server: type, comptime tls: bool) type {
 
 fn validateTls(connection: *runtime.Connection) !void {
     try std.testing.expectEqual(
-        netz.tls.stream.CipherSuite.aes_128_gcm_sha256,
+        netz.tls.stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
         connection.negotiatedCipherSuite().?,
     );
     try std.testing.expectEqual(

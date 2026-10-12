@@ -155,6 +155,113 @@ test "WSS server completes verified WebSocket echo" {
     if (shared.err) |err| return err;
 }
 
+test "WSS negotiates TLS 1.2 and completes an echo" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var server = try runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+            .alpn_protocols = &.{"http/1.1"},
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.TlsServer,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            var pending = shared.server.receiveUpgradeRequest(.{}) catch |err| {
+                shared.err = err;
+                return;
+            };
+            var pending_owned = true;
+            defer if (pending_owned) pending.deinit();
+            var connection = pending.accept() catch |err| {
+                shared.err = err;
+                return;
+            };
+            pending_owned = false;
+            defer connection.close();
+            if (connection.negotiatedTlsProtocol() != .tls12) {
+                shared.err = error.InvalidProtocolVersion;
+                return;
+            }
+            var message = connection.receiveMessage() catch |err| {
+                shared.err = err;
+                return;
+            };
+            defer message.deinit(std.testing.allocator);
+            connection.sendBinary(message.payload) catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "wss://localhost:{d}/tls12",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(uri);
+    var client = try runtime.Client.connectUriTls(
+        allocator,
+        io,
+        uri,
+        .{ .vail_tls = .{
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"http/1.1"},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        } },
+        .{},
+    );
+    defer client.close();
+    try std.testing.expectEqual(
+        tls_stream.Protocol.tls12,
+        client.negotiatedTlsProtocol().?,
+    );
+    try client.sendBinary("tls12-wss");
+    var echoed = try client.receiveMessage();
+    defer echoed.deinit(allocator);
+    try std.testing.expectEqualStrings("tls12-wss", echoed.payload);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}
+
 test "WSS client connects to resolved address with separate TLS host" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -406,7 +513,7 @@ test "ordinary vail WSS client exposes TLS state and KeyUpdate" {
         return error.MissingPeerCertificate;
     try std.testing.expectEqualSlices(u8, &certificate_der, chain[0]);
     try std.testing.expectEqual(
-        tls_stream.CipherSuite.aes_256_gcm_sha384,
+        tls_stream.NegotiatedCipherSuite.aes_256_gcm_sha384,
         client.negotiatedCipherSuite().?,
     );
     var exporter: [32]u8 = undefined;
@@ -746,7 +853,7 @@ test "WSS public client identity completes mTLS echo" {
         server_chain[0],
     );
     try std.testing.expectEqual(
-        tls_stream.CipherSuite.aes_128_gcm_sha256,
+        tls_stream.NegotiatedCipherSuite.aes_128_gcm_sha256,
         client.negotiatedCipherSuite().?,
     );
     try std.testing.expectEqual(

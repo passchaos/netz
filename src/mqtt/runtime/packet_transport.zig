@@ -184,9 +184,20 @@ pub const Transport = union(enum) {
         };
     }
 
+    pub fn negotiatedTlsProtocol(
+        self: *const Transport,
+    ) ?tls_stream.Protocol {
+        return switch (self.*) {
+            .tls_vail => |transport| transport.connection.negotiatedProtocol(),
+            .tls_server => |transport| transport.connection.negotiatedProtocol(),
+            .websocket => |ws| ws.connection.negotiatedTlsProtocol(),
+            .tcp, .tls => null,
+        };
+    }
+
     pub fn negotiatedCipherSuite(
         self: *const Transport,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         return switch (self.*) {
             .tls_vail => |transport| transport.connection.negotiatedCipherSuite(),
             .tls_server => |transport| transport.connection.negotiatedCipherSuite(),

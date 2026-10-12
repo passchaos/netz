@@ -5,6 +5,7 @@ const runtime = @import("runtime.zig");
 const websocket = @import("../websocket/mod.zig");
 const websocket_runtime = websocket.runtime;
 const http1_runtime = @import("../http1/mod.zig").runtime;
+const tls_stream = @import("../tls/mod.zig").stream;
 const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const vail = @import("vail");
@@ -600,6 +601,8 @@ pub const TlsServer = struct {
                 options.max_head_bytes,
             ),
             .cipher_suites = options.cipher_suites,
+            .tls12_cipher_suites = options.tls12_cipher_suites,
+            .protocol_policy = options.protocol_policy,
             .max_client_hello_size = options.max_client_hello_size,
             .max_client_handshake_size = options.max_client_handshake_size,
             .tls_handshake_timeout = options.tls_handshake_timeout,
@@ -838,6 +841,9 @@ pub const TlsListenOptions = struct {
     max_head_bytes: usize = 64 * 1024,
     cipher_suites: []const @import("vail").tls.cipher_suite.Suite =
         &@import("vail").tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const @import("vail").tls.tls12.Suite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute TLS handshake receive budget before the HTTP Upgrade budget.
@@ -2019,6 +2025,9 @@ pub const ConnectOptions = struct {
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const vail.tls.tls12.Suite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls13_only,
     max_server_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget for the vail WSS client handshake.
     tls_handshake_timeout: ?std.Io.Duration = null,
@@ -2332,6 +2341,7 @@ fn websocketConnectOptions(
             options.max_head_bytes,
         ),
         .vail_tls = if (options.use_vail_tls or
+            options.protocol_policy != .tls13_only or
             options.client_identity != null or
             options.server_verifier != null or
             options.stapled_ocsp != .ignore)
@@ -2342,6 +2352,8 @@ fn websocketConnectOptions(
                 .request_ocsp = options.request_ocsp,
                 .alpn_protocols = options.alpn_protocols,
                 .cipher_suites = options.cipher_suites,
+                .tls12_cipher_suites = options.tls12_cipher_suites,
+                .protocol_policy = options.protocol_policy,
                 .max_server_handshake_size = options.max_server_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
             }

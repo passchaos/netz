@@ -1051,6 +1051,8 @@ pub const TlsServer = struct {
             .identity = options.identity,
             .identity_provider = options.identity_provider,
             .cipher_suites = options.cipher_suites,
+            .tls12_cipher_suites = options.tls12_cipher_suites,
+            .protocol_policy = options.protocol_policy,
             .max_client_hello_size = options.max_client_hello_size,
             .max_client_handshake_size = options.max_client_handshake_size,
             .handshake_timeout = options.tls_handshake_timeout,
@@ -1342,6 +1344,9 @@ pub const TlsListenOptions = struct {
     limits: Limits = .{},
     cipher_suites: []const vail.tls.cipher_suite.Suite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const tls_stream.Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute TLS handshake receive budget. The WebSocket Upgrade-head
@@ -1778,7 +1783,7 @@ pub const PendingUpgrade = struct {
 
     pub fn negotiatedCipherSuite(
         self: *const PendingUpgrade,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         const connection = switch (self.transport) {
             .tls_server => |value| value,
             else => return null,
@@ -3795,11 +3800,11 @@ pub const Connection = struct {
         return null;
     }
 
-    /// Return authenticated TLS 1.3 cipher-suite metadata for vail-backed
+    /// Return authenticated TLS cipher-suite metadata for vail-backed
     /// WSS. Cleartext and Zig standard-library TLS transports return null.
     pub fn negotiatedCipherSuite(
         self: *const Connection,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         if (self.tls_server_conn) |connection| {
             return connection.negotiatedCipherSuite();
         }
@@ -3816,6 +3821,18 @@ pub const Connection = struct {
         }
         if (self.tls_vail_conn) |connection| {
             return connection.negotiatedAlpn();
+        }
+        return null;
+    }
+
+    pub fn negotiatedTlsProtocol(
+        self: *const Connection,
+    ) ?tls_stream.Protocol {
+        if (self.tls_server_conn) |connection| {
+            return connection.negotiatedProtocol();
+        }
+        if (self.tls_vail_conn) |connection| {
+            return connection.negotiatedProtocol();
         }
         return null;
     }
@@ -6793,7 +6810,7 @@ pub const H2Connection = struct {
 
     pub fn negotiatedCipherSuite(
         self: *const H2Connection,
-    ) ?tls_stream.CipherSuite {
+    ) ?tls_stream.NegotiatedCipherSuite {
         return self.tunnel.connection.negotiatedCipherSuite();
     }
 

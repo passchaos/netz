@@ -16,13 +16,15 @@ pub const ServerIdentity = vail.tls.auth.ServerIdentity;
 pub const ServerIdentityProvider = tls_stream.ServerIdentityProvider;
 pub const ServerSigner = vail.tls.auth.Signer;
 pub const CipherSuite = vail.tls.cipher_suite.Suite;
+pub const Tls12CipherSuite = vail.tls.tls12.Suite;
+pub const ProtocolPolicy = tls_stream.VersionPolicy;
 pub const StapledOcspPolicy = tls_stream.StapledOcspPolicy;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
 pub const ClientAuthPolicy = vail.tls.client_auth.ServerPolicy;
 pub const ClientAuthRequirement = vail.tls.client_auth.Requirement;
 pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
 
-/// Native MQTT-over-TLS listener using vail's TLS 1.3 primitives.
+/// Native MQTT-over-TLS listener using vail's TLS 1.2/1.3 primitives.
 ///
 /// Each accepted socket completes its TLS handshake before the shared MQTT
 /// runtime reads CONNECT. Static identities remain borrowed while `Server` can
@@ -73,6 +75,8 @@ pub const Server = struct {
             .identity = options.identity,
             .identity_provider = options.identity_provider,
             .cipher_suites = options.cipher_suites,
+            .tls12_cipher_suites = options.tls12_cipher_suites,
+            .protocol_policy = options.protocol_policy,
             .max_client_hello_size = options.max_client_hello_size,
             .max_client_handshake_size = options.max_client_handshake_size,
             .handshake_timeout = options.tls_handshake_timeout,
@@ -333,11 +337,14 @@ pub const ListenOptions = struct {
     limits: mqtt_runtime.Limits = .{},
     cipher_suites: []const CipherSuite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: ProtocolPolicy = .tls12_and_tls13,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget for TLS setup before MQTT CONNECT parsing.
     tls_handshake_timeout: ?std.Io.Duration = null,
-    /// Request and verify a TLS 1.3 client certificate. `required` is the
+    /// Request and verify a TLS client certificate. `required` is the
     /// default within the policy; use `.optional` to retain anonymous clients.
     client_auth: ?ClientAuthPolicy = null,
     /// Supported ALPN protocols, with selection exposed on Connection.
@@ -1062,7 +1069,7 @@ pub const ConnectOptions = struct {
     /// and a custom verifier are not otherwise needed. This is useful for
     /// production adapters that require one TLS implementation consistently.
     use_vail: bool = false,
-    /// Select the vail TLS 1.3 stream client and answer CertificateRequest.
+    /// Select the vail TLS 1.2/1.3 stream client and answer CertificateRequest.
     /// The identity storage only needs to outlive the synchronous connect call.
     client_identity: ?ClientIdentity = null,
     /// Server trust policy for the vail path. When omitted, the runtime maps
@@ -1081,6 +1088,9 @@ pub const ConnectOptions = struct {
     alpn_protocols: []const []const u8 = &.{},
     cipher_suites: []const CipherSuite =
         &vail.tls.cipher_suite.default_preference,
+    tls12_cipher_suites: []const Tls12CipherSuite =
+        tls_stream.default_tls12_cipher_suites,
+    protocol_policy: ProtocolPolicy = .tls13_only,
     max_server_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget for the vail client handshake. The standard
     /// TLS path continues to use its own transport behavior.
@@ -1316,6 +1326,7 @@ fn connectStreamAttemptMaybeBefore(
         .user_timeout_ms = options.mqtt.limits.tcp_user_timeout_ms,
     });
     if (options.use_vail or
+        options.protocol_policy != .tls13_only or
         options.client_identity != null or
         options.server_verifier != null or
         options.alpn_protocols.len != 0 or
@@ -1400,6 +1411,8 @@ fn connectVailStreamAttempt(
         .client_identity = client_identity,
         .alpn_protocols = options.alpn_protocols,
         .cipher_suites = options.cipher_suites,
+        .tls12_cipher_suites = options.tls12_cipher_suites,
+        .protocol_policy = options.protocol_policy,
         .max_server_handshake_size = options.max_server_handshake_size,
         .handshake_timeout = options.tls_handshake_timeout,
     };

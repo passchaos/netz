@@ -10,6 +10,8 @@ const mqtt = @import("mod.zig");
 const bridge_config = @import("broker_config_bridge.zig");
 const broker_config_include = @import("broker_config_include.zig");
 const client_id = @import("broker/client_id.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
+const tls_cipher_suites = @import("../tls/cipher_suites.zig");
 
 const net = std.Io.net;
 
@@ -53,6 +55,8 @@ pub const Listener = struct {
     cafile: []u8 = &.{},
     capath: []u8 = &.{},
     crlfile: []u8 = &.{},
+    tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
+    tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
     use_subject_as_username: bool = false,
@@ -84,6 +88,9 @@ pub const Listener = struct {
         if (self.cafile.len != 0) allocator.free(self.cafile);
         if (self.capath.len != 0) allocator.free(self.capath);
         if (self.crlfile.len != 0) allocator.free(self.crlfile);
+        if (self.tls12_cipher_suites.len != 0) {
+            allocator.free(self.tls12_cipher_suites);
+        }
         if (self.mount_point.len != 0) allocator.free(self.mount_point);
         for (self.websocket_origins.items) |origin| allocator.free(origin);
         self.websocket_origins.deinit(allocator);
@@ -219,6 +226,7 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     DirectiveRequiresListener,
     DuplicateDirective,
     UnsupportedDirective,
+    UnsupportedTlsVersion,
     InvalidDirective,
     InvalidBoolean,
     InvalidInteger,
@@ -247,6 +255,8 @@ const ListenerSeen = struct {
     cafile: bool = false,
     capath: bool = false,
     crlfile: bool = false,
+    ciphers: bool = false,
+    tls_version: bool = false,
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
     use_subject_as_username: bool = false,
@@ -635,6 +645,26 @@ fn parseSources(
                 } else if (std.mem.eql(u8, directive, "crlfile")) {
                     try markOnce(&seen.crlfile);
                     listener.crlfile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "ciphers")) {
+                    try markOnce(&seen.ciphers);
+                    listener.tls12_cipher_suites =
+                        try tls_cipher_suites.parseOpenSslTls12List(
+                            allocator,
+                            try parseOne(&words),
+                        );
+                } else if (std.mem.eql(u8, directive, "tls_version")) {
+                    try markOnce(&seen.tls_version);
+                    const value = try parseOne(&words);
+                    listener.tls_protocol_policy = if (std.mem.eql(
+                        u8,
+                        value,
+                        "tlsv1.3",
+                    ))
+                        .tls13_only
+                    else if (std.mem.eql(u8, value, "tlsv1.2"))
+                        .tls12_and_tls13
+                    else
+                        return error.UnsupportedTlsVersion;
                 } else if (std.mem.eql(u8, directive, "require_certificate")) {
                     try markOnce(&seen.require_certificate);
                     listener.require_certificate = try parseOneBool(&words);
@@ -786,6 +816,11 @@ fn parseSources(
         {
             return error.TlsIdentityIncomplete;
         }
+        if ((seen.tls_version or listener.tls12_cipher_suites.len != 0) and
+            !listener.usesTls())
+        {
+            return error.TlsIdentityIncomplete;
+        }
         const proxy_v2 = listener.proxy_protocol == .v2;
         if (listener.require_certificate and
             !proxy_v2 and (!has_client_ca or !listener.usesTls()))
@@ -904,6 +939,8 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "cafile") or
         std.mem.eql(u8, value, "capath") or
         std.mem.eql(u8, value, "crlfile") or
+        std.mem.eql(u8, value, "ciphers") or
+        std.mem.eql(u8, value, "tls_version") or
         std.mem.eql(u8, value, "require_certificate") or
         std.mem.eql(u8, value, "use_identity_as_username") or
         std.mem.eql(u8, value, "use_subject_as_username") or
@@ -1419,6 +1456,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_keyfile_password_file client-key.password
         \\bridge_alpn mqtt
         \\bridge_ciphers_tls1.3 TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
+        \\bridge_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-CHACHA20-POLY1305
         \\bridge_require_ocsp true
         \\bridge_insecure false
         \\bridge_tls_version tlsv1.3
@@ -1527,6 +1565,14 @@ test "MQTT broker config parses owned inbound bridges" {
         mqtt.tls_runtime.CipherSuite,
         &.{ .chacha20_poly1305_sha256, .aes_256_gcm_sha384 },
         upstream.cipher_suites,
+    );
+    try std.testing.expectEqualSlices(
+        mqtt.tls_runtime.Tls12CipherSuite,
+        &.{
+            .ecdhe_ecdsa_aes_128_gcm_sha256,
+            .ecdhe_rsa_chacha20_poly1305_sha256,
+        },
+        upstream.tls12_cipher_suites,
     );
     try std.testing.expect(upstream.require_ocsp);
     try std.testing.expectEqual(@as(usize, 2), upstream.rules.len);
@@ -1918,11 +1964,19 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
             "connection insecure\naddress localhost\ntopic # in 0\n" ++
             "bridge_cafile ca.pem\nbridge_insecure true\n"),
     );
+    var tls12 = try parse(allocator, listener ++
+        "connection tls12\naddress localhost\ntopic # in 0\n" ++
+        "bridge_cafile ca.pem\nbridge_tls_version tlsv1.2\n");
+    defer tls12.deinit(allocator);
+    try std.testing.expectEqual(
+        @TypeOf(tls12.bridges[0].tls_protocol_policy).tls12_and_tls13,
+        tls12.bridges[0].tls_protocol_policy,
+    );
     try std.testing.expectError(
         error.UnsupportedBridgeTlsVersion,
         parse(allocator, listener ++
-            "connection tls12\naddress localhost\ntopic # in 0\n" ++
-            "bridge_cafile ca.pem\nbridge_tls_version tlsv1.2\n"),
+            "connection tls11\naddress localhost\ntopic # in 0\n" ++
+            "bridge_cafile ca.pem\nbridge_tls_version tlsv1.1\n"),
     );
     try std.testing.expectError(
         error.UnsupportedBridgeRestartTimeout,
@@ -2822,6 +2876,38 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     try std.testing.expectError(
         error.DirectiveRequiresListener,
         parse(allocator, "keyfile_password_file secret\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "tls_version tlsv1.2\nlistener 1883"),
+    );
+    var tls12_listener = try parse(allocator,
+        \\listener 8883
+        \\certfile server.pem
+        \\keyfile server.key
+        \\tls_version tlsv1.2
+        \\ciphers ECDHE-ECDSA-AES128-GCM-SHA256
+        \\allow_anonymous true
+    );
+    defer tls12_listener.deinit(allocator);
+    try std.testing.expectEqual(
+        tls_stream.VersionPolicy.tls12_and_tls13,
+        tls12_listener.listeners[0].tls_protocol_policy,
+    );
+    try std.testing.expectEqualSlices(
+        tls_cipher_suites.Tls12Suite,
+        &.{.ecdhe_ecdsa_aes_128_gcm_sha256},
+        tls12_listener.listeners[0].tls12_cipher_suites,
+    );
+    try std.testing.expectError(
+        error.UnsupportedTlsVersion,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\tls_version tlsv1.1
+            \\allow_anonymous true
+        ),
     );
     try std.testing.expectError(
         error.TlsIdentityIncomplete,

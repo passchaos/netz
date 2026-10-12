@@ -220,6 +220,11 @@ fn openConfiguredServer(
                 .identity = identity.?,
                 .identity_provider = provider,
                 .client_auth = client_auth,
+                .protocol_policy = configured.tls_protocol_policy,
+                .tls12_cipher_suites = if (configured.tls12_cipher_suites.len != 0)
+                    configured.tls12_cipher_suites
+                else
+                    netz.tls.stream.default_tls12_cipher_suites,
                 .alpn_protocols = &.{"mqtt"},
                 .require_alpn = false,
                 .limits = listenerLimits(config, configured),
@@ -235,6 +240,11 @@ fn openConfiguredServer(
                     .identity = identity.?,
                     .identity_provider = provider,
                     .client_auth = client_auth,
+                    .protocol_policy = configured.tls_protocol_policy,
+                    .tls12_cipher_suites = if (configured.tls12_cipher_suites.len != 0)
+                        configured.tls12_cipher_suites
+                    else
+                        netz.tls.stream.default_tls12_cipher_suites,
                     .allowed_origins = configured.websocket_origins.items,
                     .max_head_bytes = config.websocket_headers_size,
                     .limits = listenerLimits(config, configured),
