@@ -1073,6 +1073,10 @@ pub fn build(b: *std.Build) void {
         "python3",
         "tools/interop/http3_benchmark_check_test.py",
     });
+    const http3_socket_traffic_checker_tests = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http3_socket_traffic_check_test.py",
+    });
     const http3_packet_capture_tests = b.addSystemCommand(&.{
         "python3",
         "tools/interop/http3_packet_capture_test.py",
@@ -1238,6 +1242,7 @@ pub fn build(b: *std.Build) void {
         &quic_quinn_handshake_benchmark_checker_tests.step,
     );
     test_step.dependOn(&http3_benchmark_checker_tests.step);
+    test_step.dependOn(&http3_socket_traffic_checker_tests.step);
     test_step.dependOn(&http3_packet_capture_tests.step);
     test_step.dependOn(&http3_packet_capture_checker_tests.step);
     test_step.dependOn(&http3_packet_capture_compare_tests.step);

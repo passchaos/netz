@@ -93,3 +93,23 @@ func TestCaptureRequiresDisabledGSO(t *testing.T) {
 		t.Fatal("capture accepted with allocation statistics")
 	}
 }
+
+func TestSocketTrafficRequiresDisabledGSOAndSeparateInstrumentation(t *testing.T) {
+	c := multiStreamTestConfig()
+	c.socketTraffic = true
+	t.Setenv("QUIC_GO_DISABLE_GSO", "")
+	if c.validateInstrumentation(false) == nil {
+		t.Fatal("socket traffic accepted without disabling GSO")
+	}
+	t.Setenv("QUIC_GO_DISABLE_GSO", "true")
+	if err := c.validateInstrumentation(false); err != nil {
+		t.Fatal(err)
+	}
+	if c.validateInstrumentation(true) == nil {
+		t.Fatal("socket traffic accepted with allocation statistics")
+	}
+	c.capture = true
+	if c.validateInstrumentation(false) == nil {
+		t.Fatal("socket traffic accepted with packet capture")
+	}
+}

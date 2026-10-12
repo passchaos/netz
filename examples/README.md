@@ -730,6 +730,14 @@ bounded 1-through-16 receive batch. Keep the endpoint value identical when
 using those options for a batch-policy A/B. The integrated HTTP/3 default is
 4,096 bytes; standalone QUIC endpoints retain their 65,535-byte default.
 
+`bench-http3-quic-go --socket-traffic` provides a no-privilege alternative to
+the separate `--capture` evidence mode. It disables GSO on both implementations
+and reports complete-run userspace UDP datagram and payload-byte counters for
+both endpoints. The strict checker verifies workload identity, endpoint roles,
+counter conservation, and one record per endpoint. These counters do not
+replace kernel PCAP evidence and their throughput samples are deliberately
+marked `timing_usable=false`.
+
 The QUIC examples are preconfigured-key transport smoke tests that bypass TLS
 so individual 1-RTT features are easy to inspect:
 

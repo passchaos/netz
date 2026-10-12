@@ -2014,6 +2014,17 @@ bytes, checksums, stream counts, and statuses. A new privileged capture is
 still required to replace the pre-change 1,125-byte packet-size distribution;
 the current process cannot open AF_PACKET and has no passwordless sudo.
 
+The new `bench-http3-quic-go --socket-traffic` mode supplies a strict
+no-privilege userspace boundary while that PCAP rerun is unavailable. It wraps
+both stacks' UDP endpoints, disables GSO, validates sender/receiver accounting,
+and marks timings unusable. On the full v1 2-warmup + 5-measured, four-stream,
+4-MiB-per-stream shape, netz now averages 1,189.293/1,189.145 UDP payload bytes
+for download/upload versus quic-go's 1,186.113/1,186.905. The former packet-fill
+deficit is therefore absent at this boundary. Netz still sends 4.14%/4.77%
+more datagrams and 4.42%/4.97% more bytes, narrowing the remaining investigation
+to retransmission and control/ACK behavior without claiming encrypted-frame or
+kernel-wire equivalence.
+
 ## Next recommended work
 
 The Quinn full-handshake matrix now removes its certificate-wire confounder:

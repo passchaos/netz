@@ -20,11 +20,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
-	"golang.org/x/net/ipv4"
+	"netz-quic-go-interop/internal/sockettraffic"
 	"netz-quic-go-interop/internal/testcert"
 )
 
@@ -63,13 +62,6 @@ type config struct {
 	timeout        time.Duration
 }
 
-type socketTraffic struct {
-	sentDatagrams     uint64
-	sentBytes         uint64
-	receivedDatagrams uint64
-	receivedBytes     uint64
-}
-
 type goMemorySnapshot struct {
 	mallocs    uint64
 	frees      uint64
@@ -88,94 +80,6 @@ func readGoMemory() goMemorySnapshot {
 		heapAlloc: stats.HeapAlloc, heapSys: stats.HeapSys, sys: stats.Sys,
 		numGC: stats.NumGC,
 	}
-}
-
-func (current socketTraffic) since(previous socketTraffic) socketTraffic {
-	return socketTraffic{
-		sentDatagrams:     current.sentDatagrams - previous.sentDatagrams,
-		sentBytes:         current.sentBytes - previous.sentBytes,
-		receivedDatagrams: current.receivedDatagrams - previous.receivedDatagrams,
-		receivedBytes:     current.receivedBytes - previous.receivedBytes,
-	}
-}
-
-// countingUDPConn preserves quic-go's optimized OOB/ECN and recvmmsg paths
-// while recording every UDP payload successfully handed to or received from
-// the socket. ReadBatch must be explicit: quic-go otherwise constructs its own
-// ipv4.PacketConn from SyscallConn and bypasses ReadFrom / ReadMsgUDP wrappers.
-type countingUDPConn struct {
-	*net.UDPConn
-	batch             *ipv4.PacketConn
-	sentDatagrams     atomic.Uint64
-	sentBytes         atomic.Uint64
-	receivedDatagrams atomic.Uint64
-	receivedBytes     atomic.Uint64
-}
-
-func newCountingUDPConn(conn *net.UDPConn) *countingUDPConn {
-	return &countingUDPConn{UDPConn: conn, batch: ipv4.NewPacketConn(conn)}
-}
-
-func (conn *countingUDPConn) stats() socketTraffic {
-	return socketTraffic{
-		sentDatagrams:     conn.sentDatagrams.Load(),
-		sentBytes:         conn.sentBytes.Load(),
-		receivedDatagrams: conn.receivedDatagrams.Load(),
-		receivedBytes:     conn.receivedBytes.Load(),
-	}
-}
-
-func (conn *countingUDPConn) recordSent(bytes int) {
-	if bytes <= 0 {
-		return
-	}
-	conn.sentDatagrams.Add(1)
-	conn.sentBytes.Add(uint64(bytes))
-}
-
-func (conn *countingUDPConn) recordReceived(bytes int) {
-	if bytes <= 0 {
-		return
-	}
-	conn.receivedDatagrams.Add(1)
-	conn.receivedBytes.Add(uint64(bytes))
-}
-
-func (conn *countingUDPConn) ReadFrom(packet []byte) (int, net.Addr, error) {
-	n, address, err := conn.UDPConn.ReadFrom(packet)
-	conn.recordReceived(n)
-	return n, address, err
-}
-
-func (conn *countingUDPConn) WriteTo(packet []byte, address net.Addr) (int, error) {
-	n, err := conn.UDPConn.WriteTo(packet, address)
-	conn.recordSent(n)
-	return n, err
-}
-
-func (conn *countingUDPConn) ReadMsgUDP(packet, oob []byte) (int, int, int, *net.UDPAddr, error) {
-	n, oobn, flags, address, err := conn.UDPConn.ReadMsgUDP(packet, oob)
-	conn.recordReceived(n)
-	return n, oobn, flags, address, err
-}
-
-func (conn *countingUDPConn) WriteMsgUDP(packet, oob []byte, address *net.UDPAddr) (int, int, error) {
-	n, oobn, err := conn.UDPConn.WriteMsgUDP(packet, oob, address)
-	conn.recordSent(n)
-	return n, oobn, err
-}
-
-func (conn *countingUDPConn) ReadBatch(messages []ipv4.Message, flags int) (int, error) {
-	n, err := conn.batch.ReadBatch(messages, flags)
-	var bytes uint64
-	for index := 0; index < n; index++ {
-		bytes += uint64(messages[index].N)
-	}
-	if n > 0 {
-		conn.receivedDatagrams.Add(uint64(n))
-		conn.receivedBytes.Add(bytes)
-	}
-	return n, err
 }
 
 func (c config) rounds() uint32           { return c.warmup + c.iterations }
@@ -408,7 +312,7 @@ func runServer(address, caOut string, c config, s sender) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	counting := newCountingUDPConn(udp)
+	counting := sockettraffic.New(udp)
 	transport := &quic.Transport{Conn: counting}
 	defer transport.Close()
 	listener, err := transport.Listen(&tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13}, c.quicConfig())
@@ -418,7 +322,7 @@ func runServer(address, caOut string, c config, s sender) {
 	fmt.Printf("QUIC_GO_RAW_BENCH_ADDR=%s\n", address)
 	printConfig("quic-go", "netz-client+quic-go-server", "server", s, c)
 	for round := uint32(0); round < c.rounds(); round++ {
-		trafficBefore := counting.stats()
+		trafficBefore := counting.Stats()
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		conn, err := listener.Accept(ctx)
 		cancel()
@@ -432,7 +336,7 @@ func runServer(address, caOut string, c config, s sender) {
 			log.Fatal(err)
 		}
 		if round >= c.warmup {
-			printSocketTraffic("quic-go", "netz-client+quic-go-server", "server", s, c, round-c.warmup+1, counting.stats().since(trafficBefore))
+			printSocketTraffic("quic-go", "netz-client+quic-go-server", "server", s, c, round-c.warmup+1, counting.Stats().Since(trafficBefore))
 		}
 	}
 }
@@ -456,7 +360,7 @@ func runClient(address, caPath string, c config, s sender) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		counting := newCountingUDPConn(udp)
+		counting := sockettraffic.New(udp)
 		transport := &quic.Transport{Conn: counting}
 		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 		conn, err := transport.Dial(ctx, peer, &tls.Config{RootCAs: roots, ServerName: "localhost", NextProtos: []string{alpn}, MinVersion: tls.VersionTLS13}, c.quicConfig())
@@ -490,7 +394,7 @@ func runClient(address, caPath string, c config, s sender) {
 			log.Fatal(err)
 		}
 		if round >= c.warmup {
-			printSocketTraffic("quic-go", "quic-go-client+netz-server", "client", s, c, round-c.warmup+1, counting.stats())
+			printSocketTraffic("quic-go", "quic-go-client+netz-server", "client", s, c, round-c.warmup+1, counting.Stats())
 		}
 		_ = transport.Close()
 	}
@@ -870,8 +774,8 @@ func printReceiverCompletion(implementation, rolePair, endpointRole string, s se
 	fmt.Printf("record=receiver-complete implementation=%s protocol=quic-stream direction=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s connection_scope=fresh-per-sample benchmark_scope=same-application-shape sample=%d streams=%d bytes_per_stream=%d received_bytes=%d checksum=%d completion_exchange_verified=true complete=true\n", implementation, ifSender(s, "upload", "download"), rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), sample, c.streams, c.bytesPerStream, c.totalBytes(), checksum)
 }
 
-func printSocketTraffic(implementation, rolePair, endpointRole string, s sender, c config, sample uint32, traffic socketTraffic) {
-	fmt.Printf("record=socket-traffic implementation=%s protocol=quic-stream role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s sample=%d streams=%d traffic_scope=connection socket_boundary=userspace-udp-payload udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), sample, c.streams, traffic.sentDatagrams, traffic.sentBytes, traffic.receivedDatagrams, traffic.receivedBytes)
+func printSocketTraffic(implementation, rolePair, endpointRole string, s sender, c config, sample uint32, traffic sockettraffic.Stats) {
+	fmt.Printf("record=socket-traffic implementation=%s protocol=quic-stream role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s sample=%d streams=%d traffic_scope=connection socket_boundary=userspace-udp-payload udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, rolePair, endpointRole, ifSender(s, "client", "server"), clientIO(rolePair), serverIO(rolePair), sample, c.streams, traffic.SentDatagrams, traffic.SentBytes, traffic.ReceivedDatagrams, traffic.ReceivedBytes)
 }
 
 func printGoMemory(rolePair, endpointRole string, s sender, c config, before, after goMemorySnapshot) {

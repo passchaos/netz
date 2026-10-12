@@ -59,6 +59,7 @@ def verify(
     client_log: Path,
     server_log: Path,
     capture: bool = False,
+    socket_traffic: bool = False,
 ) -> None:
     endpoints = {
         "netz-client+quic-go-server": {"client": "netz", "server": "quic-go"},
@@ -97,12 +98,18 @@ def verify(
         "server": records(server_log, "config", role_pair),
     }
     sender = "client" if mode == "upload" else "server"
+    if capture and socket_traffic:
+        raise ValueError("capture and socket traffic modes are mutually exclusive")
     benchmark_scope = (
         "capture-backed-same-application-shape"
         if capture
-        else "same-application-shape"
+        else (
+            "socket-traffic-same-application-shape"
+            if socket_traffic
+            else "same-application-shape"
+        )
     )
-    timing_usable = "false" if capture else "true"
+    timing_usable = "false" if capture or socket_traffic else "true"
     for role, rows in config_records.items():
         if len(rows) != 1:
             raise ValueError(f"expected one {role} config record, found {len(rows)}")
@@ -135,7 +142,7 @@ def verify(
             "pacing": "true",
             "gso": (
                 "false"
-                if endpoints[role] == "netz" or capture
+                if endpoints[role] == "netz" or capture or socket_traffic
                 else "implementation-default"
             ),
             "gro": "false" if endpoints[role] == "netz" else "implementation-default",
@@ -236,6 +243,7 @@ def main() -> None:
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
     parser.add_argument("--capture", action="store_true")
+    parser.add_argument("--socket-traffic", action="store_true")
     args = parser.parse_args()
     verify(
         role_pair=args.role_pair, mode=args.mode, iterations=args.iterations,
@@ -244,7 +252,7 @@ def main() -> None:
         warmup=args.warmup, chunk_bytes=args.chunk_bytes,
         stream_window=args.stream_window, timeout_ms=args.timeout_ms,
         client_log=args.client_log, server_log=args.server_log,
-        capture=args.capture,
+        capture=args.capture, socket_traffic=args.socket_traffic,
     )
 
 

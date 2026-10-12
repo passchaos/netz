@@ -357,7 +357,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         return error.InvalidArgument;
     }
     const config = try benchmark.Config.parse(config_args.items);
-    if (stats and config.capture) return error.InvalidArgument;
+    if (stats and (config.capture or config.socket_traffic)) {
+        return error.InvalidArgument;
+    }
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
     defer if (stats) benchmark.printNetzMemory(
@@ -369,6 +371,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
 
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -387,6 +390,10 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             .max_frames_per_datagram = benchmark.max_frames,
             .enable_gso_send = false,
             .enable_gro_receive = false,
+            .socket_traffic_counters = if (config.socket_traffic)
+                &socket_traffic
+            else
+                null,
         } },
         .{
             .handshake = .{
@@ -520,6 +527,15 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             .status = 200,
             .headers = &.{.{ .name = "x-netz-bench-close", .value = "ok" }},
         }, config.timeout());
+    }
+    if (config.socket_traffic) {
+        benchmark.printSocketTraffic(
+            "netz",
+            role_pair,
+            "server",
+            config,
+            socket_traffic.stats(),
+        );
     }
 }
 

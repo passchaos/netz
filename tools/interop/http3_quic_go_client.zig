@@ -310,7 +310,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
         return error.InvalidArgument;
     }
     const config = try benchmark.Config.parse(config_args.items);
-    if (stats and config.capture) return error.InvalidArgument;
+    if (stats and (config.capture or config.socket_traffic)) {
+        return error.InvalidArgument;
+    }
     var counting = CountingAllocator.init(std.heap.c_allocator);
     const allocator = if (stats) counting.allocator() else std.heap.c_allocator;
     defer if (stats) benchmark.printNetzMemory(
@@ -322,6 +324,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     var backend = try netz.runtime.Backend.init(allocator);
     defer backend.deinit();
     const io = backend.io();
+    var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -356,6 +359,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             config,
             &original_dcid,
             &client_cid,
+            if (config.socket_traffic) &socket_traffic else null,
         );
         const result = blk: {
             defer client.deinit();
@@ -393,6 +397,15 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
                 result.checksum,
             );
         }
+    }
+    if (config.socket_traffic) {
+        benchmark.printSocketTraffic(
+            "netz",
+            role_pair,
+            "client",
+            config,
+            socket_traffic.stats(),
+        );
     }
 }
 
@@ -435,6 +448,7 @@ fn connectBenchmarkClient(
     config: benchmark.Config,
     original_dcid: []const u8,
     client_cid: []const u8,
+    socket_traffic: ?*netz.quic.runtime.SocketTrafficCounters,
 ) !netz.http3.runtime.HandshakeClient {
     return netz.http3.runtime.HandshakeClient.connect(
         allocator,
@@ -446,6 +460,7 @@ fn connectBenchmarkClient(
             .max_frames_per_datagram = benchmark.max_frames,
             .enable_gso_send = false,
             .enable_gro_receive = false,
+            .socket_traffic_counters = socket_traffic,
         } },
         .{
             .connect_timeout = config.timeout(),

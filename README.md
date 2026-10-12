@@ -1517,6 +1517,9 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --netz-only --mode=uploa
 # On Linux with CAP_NET_RAW, retain bounded PCAP evidence for both mixed role
 # pairs. Run separately from timing or allocator measurements.
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --capture --mode=upload --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304
+# Without packet-capture privileges, compare complete userspace UDP payload
+# counts with GSO disabled. This mode is also separate from timing and memory.
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- --socket-traffic --mode=download --warmup=2 --iterations=5 --streams=4 --body-bytes=4194304
 zig build bench-websocket-frame -Doptimize=ReleaseFast
 zig build bench-websocket-receive-buffer -Doptimize=ReleaseFast
 zig build bench-websocket-echo -Doptimize=ReleaseFast

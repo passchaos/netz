@@ -207,6 +207,30 @@ class Http3BenchmarkCheckTests(unittest.TestCase):
                 capture=True,
             )
 
+    def test_socket_traffic_scope_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            client, server = self.write_pair(directory)
+            for path in (client, server):
+                path.write_text(
+                    path.read_text().replace(
+                        "benchmark_scope=same-application-shape",
+                        "benchmark_scope=socket-traffic-same-application-shape",
+                    ).replace(
+                        "timing_usable=true",
+                        "timing_usable=false",
+                    ).replace(
+                        "gso=implementation-default",
+                        "gso=false",
+                    )
+                )
+            CHECK.verify(
+                role_pair="quic-go-client+netz-server", mode="download",
+                iterations=1, streams=4, body_bytes=1024, quic_version=2,
+                warmup=1, chunk_bytes=512, stream_window=1048576,
+                timeout_ms=30000, client_log=client, server_log=server,
+                socket_traffic=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ server=${2:?netz HTTP/3 server executable path}
 bench_mode=${3:-}
 netz_only=false
 capture=false
+socket_traffic=false
 if [[ $bench_mode == --bench ]]; then
   for arg in "${@:4}"; do
     if [[ $arg == --netz-only ]]; then
@@ -21,6 +22,13 @@ if [[ $bench_mode == --bench ]]; then
         exit 2
       fi
       capture=true
+    fi
+    if [[ $arg == --socket-traffic ]]; then
+      if [[ $socket_traffic == true ]]; then
+        echo 'duplicate --socket-traffic option' >&2
+        exit 2
+      fi
+      socket_traffic=true
     fi
   done
 fi
@@ -102,6 +110,7 @@ if [[ ${3:-} == --bench ]]; then
   done
   set -- "${filtered_args[@]}"
   python3 "$netz_root/tools/interop/http3_benchmark_check_test.py"
+  python3 "$netz_root/tools/interop/http3_socket_traffic_check_test.py"
   python3 "$netz_root/tools/interop/http3_packet_capture_test.py"
   python3 "$netz_root/tools/interop/http3_packet_capture_check_test.py"
   python3 "$netz_root/tools/interop/http3_packet_capture_compare_test.py"
@@ -133,7 +142,7 @@ PY
   server_cpu=${bench_cpus[1]}
   if [[ $netz_only != true ]]; then
     (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" test -mod=readonly \
-      ./http3_bench)
+      ./http3_bench ./internal/sockettraffic)
     (cd "$fixture_dir" && GOTOOLCHAIN=local "$go_bin" build -mod=readonly \
       -o "$work/quic-go-http3-bench" ./http3_bench)
   fi
@@ -167,8 +176,12 @@ PY
       esac
     fi
   done
-  if [[ $stats == true && $capture == true ]]; then
-    echo '--stats and --capture must run separately' >&2
+  if [[ $stats == true && ( $capture == true || $socket_traffic == true ) ]]; then
+    echo '--stats, --capture, and --socket-traffic must run separately' >&2
+    exit 2
+  fi
+  if [[ $capture == true && $socket_traffic == true ]]; then
+    echo '--capture and --socket-traffic must run separately' >&2
     exit 2
   fi
   capture_cpu=
@@ -198,7 +211,7 @@ PY
     echo "capture_artifact_dir=$capture_artifact_dir"
   fi
   go_environment=()
-  if [[ $capture == true ]]; then
+  if [[ $capture == true || $socket_traffic == true ]]; then
     go_environment=(env QUIC_GO_DISABLE_GSO=true)
   else
     go_environment=(env -u QUIC_GO_DISABLE_GSO)
@@ -225,8 +238,19 @@ PY
   check_samples() {
     local capture_args=()
     if [[ $capture == true ]]; then capture_args+=(--capture); fi
+    if [[ $socket_traffic == true ]]; then capture_args+=(--socket-traffic); fi
     python3 "$netz_root/tools/interop/http3_benchmark_check.py" \
       "${capture_args[@]}" "$@"
+  }
+
+  check_socket_traffic() {
+    if [[ $socket_traffic != true ]]; then return; fi
+    python3 "$netz_root/tools/interop/http3_socket_traffic_check.py" \
+      --role-pair="$1" --mode="$benchmark_mode" \
+      --warmup="$warmup" --iterations="$iterations" \
+      --streams="$streams" --body-bytes="$body_bytes" \
+      --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
+      --quic-version="$version" --client-log="$2" --server-log="$3"
   }
 
   check_memory() {
@@ -393,6 +417,8 @@ PY
         --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
         --timeout-ms="$timeout_ms" --client-log="$pair_dir/netz-client.log" \
         --server-log="$pair_dir/netz-server.log"
+      check_socket_traffic netz-client+netz-server \
+        "$pair_dir/netz-client.log" "$pair_dir/netz-server.log"
       check_memory --role-pair=netz-client+netz-server \
         --sender="$sender_role" --streams="$streams" \
         --mode="$benchmark_mode" --body-bytes="$body_bytes" \
@@ -448,6 +474,8 @@ PY
       --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
       --client-log="$pair_dir/netz-client.log" \
       --server-log="$pair_dir/quic-go-server.log"
+    check_socket_traffic netz-client+quic-go-server \
+      "$pair_dir/netz-client.log" "$pair_dir/quic-go-server.log"
     check_memory --role-pair=netz-client+quic-go-server \
       --sender="$sender_role" \
       --streams="$streams" --mode="$benchmark_mode" --body-bytes="$body_bytes" \
@@ -499,6 +527,8 @@ PY
       --stream-window="$stream_window" --timeout-ms="$timeout_ms" \
       --client-log="$pair_dir/quic-go-client.log" \
       --server-log="$pair_dir/netz-server.log"
+    check_socket_traffic quic-go-client+netz-server \
+      "$pair_dir/quic-go-client.log" "$pair_dir/netz-server.log"
     check_memory --role-pair=quic-go-client+netz-server \
       --sender="$sender_role" \
       --streams="$streams" --mode="$benchmark_mode" --body-bytes="$body_bytes" \

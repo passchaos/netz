@@ -31,6 +31,7 @@ pub const Config = struct {
     stream_window: u64 = 1024 * 1024,
     timeout_ms: u32 = 30_000,
     capture: bool = false,
+    socket_traffic: bool = false,
 
     pub fn parse(args: []const []const u8) !Config {
         var mode: ?Mode = null;
@@ -44,6 +45,7 @@ pub const Config = struct {
         config.stream_window = 1024 * 1024;
         config.timeout_ms = 30_000;
         config.capture = false;
+        config.socket_traffic = false;
         for (args) |arg| {
             if (option(arg, "--mode=")) |value| {
                 mode = try Mode.parse(value);
@@ -68,11 +70,18 @@ pub const Config = struct {
                 !config.capture)
             {
                 config.capture = true;
+            } else if (std.mem.eql(u8, arg, "--socket-traffic") and
+                !config.socket_traffic)
+            {
+                config.socket_traffic = true;
             } else {
                 return error.InvalidArgument;
             }
         }
         config.mode = mode orelse return error.InvalidArgument;
+        if (config.capture and config.socket_traffic) {
+            return error.InvalidArgument;
+        }
         const round_count = try config.rounds();
         if (config.streams != 1 and config.streams != 4 and
             config.streams != 16)
@@ -356,7 +365,7 @@ pub fn printConfig(
             clientIo(role_pair),
             serverIo(role_pair),
             benchmarkScope(config),
-            !config.capture,
+            timingUsable(config),
             config.warmup,
             config.iterations,
             config.streams,
@@ -393,7 +402,7 @@ pub fn printSample(
             "body_bytes={d} elapsed_ns={d} logical_MiB_s={d:.3} sent_bytes={d} " ++
             "received_bytes={d} checksum={d} status=200 streams_finished={d} " ++
             "per_stream_verified=true quic_version={d} complete=true\n",
-        .{ implementation, config.mode.name(), role_pair, endpoint_role, senderRole(config), clientIo(role_pair), serverIo(role_pair), benchmarkScope(config), !config.capture, sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
+        .{ implementation, config.mode.name(), role_pair, endpoint_role, senderRole(config), clientIo(role_pair), serverIo(role_pair), benchmarkScope(config), timingUsable(config), sample, config.streams, config.body_bytes, elapsed_ns, mib_s, total_bytes, total_bytes, checksum, config.streams, if (config.version == .version_2) @as(u8, 2) else 1 },
     );
 }
 
@@ -417,9 +426,49 @@ pub fn printServerComplete(
             "per_stream_verified=true quic_version={d} complete=true\n",
         .{
             implementation,      config.mode.name(),  role_pair,              senderRole(config),
-            clientIo(role_pair), serverIo(role_pair), benchmarkScope(config), !config.capture,
+            clientIo(role_pair), serverIo(role_pair), benchmarkScope(config), timingUsable(config),
             sample,              config.streams,      config.body_bytes,      sent_bytes,
             received_bytes,      checksum,            config.streams,         if (config.version == .version_2) @as(u8, 2) else 1,
+        },
+    );
+}
+
+pub fn printSocketTraffic(
+    implementation: []const u8,
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    traffic: netz.quic.runtime.SocketTrafficStats,
+) void {
+    std.debug.print(
+        "record=socket-traffic implementation={s} protocol=http3 mode={s} role_pair={s} " ++
+            "endpoint_role={s} sender_role={s} client_io={s} server_io={s} " ++
+            "warmup={d} iterations={d} streams={d} body_bytes={d} " ++
+            "application_chunk_effective={d} stream_window={d} quic_version={d} " ++
+            "traffic_scope=all-rounds socket_boundary=userspace-udp-payload " ++
+            "benchmark_scope=socket-traffic-same-application-shape " ++
+            "udp_sent_datagrams={d} udp_sent_payload_bytes={d} " ++
+            "udp_received_datagrams={d} udp_received_payload_bytes={d} " ++
+            "logical_udp_segments=true complete=true\n",
+        .{
+            implementation,
+            config.mode.name(),
+            role_pair,
+            endpoint_role,
+            senderRole(config),
+            clientIo(role_pair),
+            serverIo(role_pair),
+            config.warmup,
+            config.iterations,
+            config.streams,
+            config.body_bytes,
+            config.effectiveChunk(),
+            config.stream_window,
+            if (config.version == .version_2) @as(u8, 2) else 1,
+            traffic.sent_datagrams,
+            traffic.sent_bytes,
+            traffic.received_datagrams,
+            traffic.received_bytes,
         },
     );
 }
@@ -475,6 +524,27 @@ test "HTTP/3 external benchmark capture changes evidence scope" {
     try std.testing.expectError(
         error.InvalidArgument,
         Config.parse(&.{ "--mode=upload", "--capture", "--capture" }),
+    );
+}
+
+test "HTTP/3 external benchmark socket traffic has a distinct evidence scope" {
+    const config = try Config.parse(&.{
+        "--mode=download",
+        "--socket-traffic",
+    });
+    try std.testing.expect(config.socket_traffic);
+    try std.testing.expect(!timingUsable(config));
+    try std.testing.expectEqualStrings(
+        "socket-traffic-same-application-shape",
+        benchmarkScope(config),
+    );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{
+            "--mode=download",
+            "--socket-traffic",
+            "--capture",
+        }),
     );
 }
 
@@ -538,8 +608,14 @@ fn senderRole(config: Config) []const u8 {
 fn benchmarkScope(config: Config) []const u8 {
     return if (config.capture)
         "capture-backed-same-application-shape"
+    else if (config.socket_traffic)
+        "socket-traffic-same-application-shape"
     else
         "same-application-shape";
+}
+
+fn timingUsable(config: Config) bool {
+    return !config.capture and !config.socket_traffic;
 }
 
 pub fn clientIo(role_pair: []const u8) []const u8 {

@@ -2370,6 +2370,13 @@ zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --body-bytes=4194304 --chunk-bytes=16384 \
   --stream-window=1048576 --timeout-ms=30000
 
+# No CAP_NET_RAW is required. Both implementations disable GSO and report
+# complete-run userspace UDP datagram and payload-byte counters.
+zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
+  --socket-traffic --mode=download --warmup=2 --iterations=5 --streams=4 \
+  --body-bytes=4194304 --chunk-bytes=16384 \
+  --stream-window=1048576 --timeout-ms=30000
+
 NETZ_HTTP3_INTEROP_VERSION=2 \
 zig build bench-http3-quic-go -Doptimize=ReleaseFast -- \
   --mode=upload --warmup=2 --iterations=5 --streams=4 \
@@ -2408,6 +2415,34 @@ timings are labeled `timing_usable=false`; equal aggregate counts or packet
 sizes do not by themselves establish equal QUIC frames, ACK policy, cipher, or
 application scheduling. `--capture`, `--stats`, and `--netz-only` are therefore
 kept as separate evidence modes.
+
+The no-privilege `--socket-traffic` mode wraps quic-go's UDP socket without
+hiding its OOB/ECN or batched-receive interfaces, attaches netz's optional
+endpoint traffic counters, and forces GSO off for both implementations. It
+reports one `traffic_scope=all-rounds` record per endpoint and marks timing as
+unusable because the counters add instrumentation overhead. The strict checker
+binds both records to the exact workload and runtime roles, then verifies that
+the receiving endpoint never observed traffic its peer did not report sending.
+Unlike PCAP, this boundary cannot prove packet ordering or inspect encrypted
+frame composition.
+
+A QUIC v1 run with two warmups plus five measured rounds, four 4-MiB streams
+per round, a 1,152-byte effective application chunk, and a 1,280-byte MTU
+reported:
+
+| Direction | Sender | UDP datagrams | UDP payload bytes | Mean payload |
+|---|---|---:|---:|---:|
+| download | netz server | 106,366 | 126,500,316 | 1,189.293 bytes |
+| download | quic-go server | 102,134 | 121,142,495 | 1,186.113 bytes |
+| upload | netz client | 106,942 | 127,169,581 | 1,189.145 bytes |
+| upload | quic-go client | 102,072 | 121,149,762 | 1,186.905 bytes |
+
+The final netz mean payload is no longer smaller than quic-go's. Netz still
+emits 4.14%/4.77% more sender datagrams and 4.42%/4.97% more UDP payload bytes
+for download/upload. This narrows the next investigation to retransmission and
+control/ACK behavior; userspace totals alone cannot assign that difference to
+a particular encrypted frame type. A QUIC v2 four-stream smoke independently
+passed both role pairings and the same counter-conservation checks.
 
 This host has no effective `CAP_NET_RAW`: the capability probe fails with
 `AF_PACKET was denied` before starting either benchmark process. Parser, PCAP
