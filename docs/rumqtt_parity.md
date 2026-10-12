@@ -2441,6 +2441,9 @@ recognized filters and prohibited anyExtendedKeyUsage requests, and ignore
 unrecognized OIDs. CertificateRequest accepts and exposes the standard empty
 status-request signal, rejects non-empty forms and recognized extensions that
 are illegal in that message, and ignores only genuinely unknown extensions.
+Client identities can carry leaf or per-entry OCSP staples; clients send them
+only when requested, while servers reject unsolicited staples and preserve the
+CertificateEntry association for trust verification.
 Servers validate the complete CertificateRequest and its
 nested vector lengths before writing ServerHello, preserving transactional
 failure for invalid authentication configuration.

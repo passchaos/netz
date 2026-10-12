@@ -257,6 +257,9 @@ Current protocol coverage includes:
   TLS 1.3 CertificateRequest accepts the standard empty status-request signal,
   rejects non-empty forms and recognized extensions prohibited in that message,
   and ignores only genuinely unknown extensions;
+  configured client identities can attach leaf or per-chain-entry OCSP staples;
+  they are sent only when requested, rejected when unsolicited, and passed to
+  the server trust verifier without losing CertificateEntry association;
   servers preflight all CertificateRequest fields and nested lengths before
   emitting ServerHello, so invalid authentication configuration is transactional;
   both peers reject a non-empty CertificateRequest context during the initial

@@ -1048,7 +1048,9 @@ anyExtendedKeyUsage requests are rejected, while unrecognized OIDs are ignored.
 The standard empty status-request signal is retained for client-certificate
 selection; non-empty forms and recognized extensions placed illegally in
 CertificateRequest are rejected, while genuinely unknown extensions remain
-forward-compatible.
+forward-compatible. Client identities can attach a leaf or per-entry OCSP
+staple; the client sends it only after that request, and the server rejects an
+unsolicited response while forwarding requested responses to its trust verifier.
 The server preflights every CertificateRequest field and nested vector length
 before emitting ServerHello, so invalid authentication configuration cannot
 leave a partial flight. Initial-handshake CertificateRequest messages must carry
