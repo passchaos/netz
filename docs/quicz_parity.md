@@ -2040,6 +2040,10 @@ already earned burst credit, advances from a non-regressing timestamp, and
 invalidates any cached pacing wake-up before future sends use the new policy.
 The shared-socket dispatcher exposes matching handle-based setters that update
 the registered connection and its endpoint timer index as one owner operation.
+Connection statistics expose both the configured ceiling and the effective
+rate after the congestion-derived value is capped; qlog
+`recovery:metrics_updated` now populates its existing `pacing_rate` field from
+the same calculation instead of silently omitting it.
 `bench-http3-quic-go` accepts the corresponding
 `--netz-max-pacing-rate-bytes-per-second` experiment parameter and records it
 in config and loss-attribution records. A 1-MiB/s, four-stream, 64-KiB-per-

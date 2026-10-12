@@ -6632,6 +6632,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "active_receive_streams"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "closed_peer_stream_ranges"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionStats, "closed_local_stream_ranges"));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.ConnectionStats,
+        "pacing_rate_bytes_per_second",
+    ));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.ConnectionStats,
+        "max_pacing_rate_bytes_per_second",
+    ));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "requestCompletedLocalStreamRelease",
@@ -6935,6 +6943,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,
         "maxPacingRateBytesPerSecond",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "pacingRateBytesPerSecond",
     ));
     try std.testing.expect(@hasDecl(
         netz.quic.one_rtt.Connection,

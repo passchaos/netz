@@ -63,6 +63,36 @@ pub const Pacer = struct {
             null;
     }
 
+    /// Returns the finite rate currently governing this pacer, in bytes per
+    /// second. Null means pacing is disabled or neither congestion state nor
+    /// an explicit ceiling supplies a finite rate.
+    pub fn rateBytesPerSecond(
+        self: Pacer,
+        congestion_window: usize,
+        smoothed_rtt_ns: u64,
+    ) ?u64 {
+        if (!self.enabled) return null;
+        const congestion_rate: ?u64 = if (congestion_window == 0 or
+            smoothed_rtt_ns == 0)
+            null
+        else
+            std.math.cast(
+                u64,
+                mulDivFloorSaturating(
+                    @as(Wide, congestion_window) *
+                        congestion_rate_numerator,
+                    nanoseconds_per_second,
+                    @as(Wide, smoothed_rtt_ns) *
+                        congestion_rate_denominator,
+                ),
+            ) orelse std.math.maxInt(u64);
+        const configured_max = self.maxPacingRateBytesPerSecond();
+        if (congestion_rate) |rate| {
+            return if (configured_max) |maximum| @min(rate, maximum) else rate;
+        }
+        return configured_max;
+    }
+
     /// Changes the steady-state ceiling without applying the new rate to time
     /// that elapsed under the old policy. Already earned burst credit remains
     /// available, and a regressed caller timestamp cannot move accounting
@@ -300,6 +330,33 @@ test "QUIC pacer keeps optional rate state compact" {
     try std.testing.expectEqual(
         @as(?u64, 0),
         paused.maxPacingRateBytesPerSecond(),
+    );
+}
+
+test "QUIC pacer reports its effective byte rate" {
+    const unlimited = Pacer.init(true, 1200, 10);
+    try std.testing.expectEqual(
+        @as(?u64, 150_000),
+        unlimited.rateBytesPerSecond(12_000, 100_000_000),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        unlimited.rateBytesPerSecond(0, 0),
+    );
+
+    const limited = Pacer.initWithRateLimit(true, 1200, 10, 100_000);
+    try std.testing.expectEqual(
+        @as(?u64, 100_000),
+        limited.rateBytesPerSecond(12_000, 100_000_000),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 100_000),
+        limited.rateBytesPerSecond(0, 0),
+    );
+    const disabled = Pacer.initWithRateLimit(false, 1200, 10, 100_000);
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        disabled.rateBytesPerSecond(12_000, 100_000_000),
     );
 }
 

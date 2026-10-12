@@ -8607,6 +8607,7 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
         .send_keys = keys,
         .local_connection_id = &client_cid,
         .peer_connection_id = &server_cid,
+        .max_pacing_rate_bytes_per_second = 1,
         .qlog_observer = &client_observer,
     });
     defer client.deinit();
@@ -8682,6 +8683,11 @@ test "QUIC 1-RTT qlog observer records packet and recovery events" {
         u8,
         client_output.buffered(),
         "\"name\":\"recovery:metrics_updated\"",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        client_output.buffered(),
+        "\"pacing_rate\":1",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,

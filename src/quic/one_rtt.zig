@@ -595,6 +595,10 @@ pub const ConnectionStats = struct {
     bytes_in_flight: usize,
     congestion_window: usize,
     congestion_available: usize,
+    /// Effective pacer rate after applying the congestion-derived rate and
+    /// optional configured ceiling. Null means no finite pacing rate exists.
+    pacing_rate_bytes_per_second: ?u64,
+    max_pacing_rate_bytes_per_second: ?u64,
     outgoing_streams_created: u64,
     incoming_streams_created: u64,
     active_send_streams: usize,
@@ -3948,6 +3952,8 @@ pub const Connection = struct {
             .bytes_in_flight = self.congestion.bytes_in_flight,
             .congestion_window = self.congestion.congestion_window,
             .congestion_available = self.congestion.available(),
+            .pacing_rate_bytes_per_second = self.pacingRateBytesPerSecond(),
+            .max_pacing_rate_bytes_per_second = self.maxPacingRateBytesPerSecond(),
             .outgoing_streams_created = self.outgoing_streams_created_count,
             .incoming_streams_created = self.incoming_streams_created_count,
             .active_send_streams = self.stream_send_flows.items.len,
@@ -4613,6 +4619,14 @@ pub const Connection = struct {
     /// Null means pacing follows only the congestion-derived rate.
     pub fn maxPacingRateBytesPerSecond(self: Connection) ?u64 {
         return self.pacer.maxPacingRateBytesPerSecond();
+    }
+
+    /// Returns the effective finite pacing rate in bytes per second.
+    pub fn pacingRateBytesPerSecond(self: Connection) ?u64 {
+        return self.pacer.rateBytesPerSecond(
+            self.congestion.congestion_window,
+            self.rtt_stats.smoothedOrInitial(),
+        );
     }
 
     /// Changes the pacing ceiling using the connection's monotonic clock.
@@ -14476,6 +14490,7 @@ pub const Connection = struct {
                     null,
                 .congestion_window = self.congestion.congestion_window,
                 .bytes_in_flight = self.congestion.bytes_in_flight,
+                .pacing_rate_bps = self.pacingRateBytesPerSecond(),
             },
         );
     }

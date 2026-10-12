@@ -91,6 +91,18 @@ test "QUIC 1-RTT installs maximum pacing rate" {
         @as(?u64, 10_000),
         connection.maxPacingRateBytesPerSecond(),
     );
+    try std.testing.expectEqual(
+        @as(?u64, 10_000),
+        connection.pacingRateBytesPerSecond(),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 10_000),
+        connection.stats().pacing_rate_bytes_per_second,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, 10_000),
+        connection.stats().max_pacing_rate_bytes_per_second,
+    );
     one_rtt.testing.exhaustPacingAt(&connection, 0);
     try std.testing.expectEqual(
         @as(usize, 10),
@@ -102,6 +114,9 @@ test "QUIC 1-RTT installs maximum pacing rate" {
     try std.testing.expectEqual(
         @as(?u64, null),
         connection.maxPacingRateBytesPerSecond(),
+    );
+    try std.testing.expect(
+        connection.pacingRateBytesPerSecond().? > 10_000,
     );
     try std.testing.expectEqual(
         @as(?u64, null),
