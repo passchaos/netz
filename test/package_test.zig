@@ -5341,6 +5341,18 @@ test "public modules are reachable" {
         "capath",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "tls12_session_tickets",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "tls12_session_ticket_server_id",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
+        "tls12_session_ticket_lifetime_seconds",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
         "per_listener_settings",
     ));

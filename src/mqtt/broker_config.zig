@@ -30,6 +30,7 @@ pub const maximum_retain_expiry_interval_minutes: u32 = 10_000_000;
 pub const default_auto_id_prefix = "auto-";
 pub const default_persistence_file = "netz-mqtt.db";
 pub const default_autosave_interval: u32 = 1800;
+pub const default_tls12_session_ticket_lifetime_seconds: u32 = 24 * 60 * 60;
 
 pub const Protocol = enum { mqtt, websockets };
 pub const SocketDomain = enum { ipv4, ipv6 };
@@ -57,6 +58,10 @@ pub const Listener = struct {
     crlfile: []u8 = &.{},
     tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
     tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    tls12_session_tickets: bool = false,
+    tls12_session_ticket_server_id: []u8 = &.{},
+    tls12_session_ticket_lifetime_seconds: u32 =
+        default_tls12_session_ticket_lifetime_seconds,
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
     use_subject_as_username: bool = false,
@@ -90,6 +95,9 @@ pub const Listener = struct {
         if (self.crlfile.len != 0) allocator.free(self.crlfile);
         if (self.tls12_cipher_suites.len != 0) {
             allocator.free(self.tls12_cipher_suites);
+        }
+        if (self.tls12_session_ticket_server_id.len != 0) {
+            allocator.free(self.tls12_session_ticket_server_id);
         }
         if (self.mount_point.len != 0) allocator.free(self.mount_point);
         for (self.websocket_origins.items) |origin| allocator.free(origin);
@@ -235,6 +243,7 @@ pub const Error = mqtt.Error || net.IpAddress.ParseLiteralError || error{
     AuthenticationRequired,
     TlsIdentityIncomplete,
     ClientCertificateConfigurationIncomplete,
+    InvalidSessionTicketConfiguration,
     CapathUnsupportedForWebSockets,
     DirectiveRequiresBridge,
     DuplicateBridge,
@@ -257,6 +266,9 @@ const ListenerSeen = struct {
     crlfile: bool = false,
     ciphers: bool = false,
     tls_version: bool = false,
+    tls12_session_tickets: bool = false,
+    tls12_session_ticket_server_id: bool = false,
+    tls12_session_ticket_lifetime: bool = false,
     require_certificate: bool = false,
     use_identity_as_username: bool = false,
     use_subject_as_username: bool = false,
@@ -665,6 +677,29 @@ fn parseSources(
                         .tls12_and_tls13
                     else
                         return error.UnsupportedTlsVersion;
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "tls12_session_tickets",
+                )) {
+                    try markOnce(&seen.tls12_session_tickets);
+                    listener.tls12_session_tickets = try parseOneBool(&words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "tls12_session_ticket_server_id",
+                )) {
+                    try markOnce(&seen.tls12_session_ticket_server_id);
+                    listener.tls12_session_ticket_server_id =
+                        try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "tls12_session_ticket_lifetime",
+                )) {
+                    try markOnce(&seen.tls12_session_ticket_lifetime);
+                    listener.tls12_session_ticket_lifetime_seconds =
+                        try parseOnePositive(u32, &words);
                 } else if (std.mem.eql(u8, directive, "require_certificate")) {
                     try markOnce(&seen.require_certificate);
                     listener.require_certificate = try parseOneBool(&words);
@@ -821,6 +856,25 @@ fn parseSources(
         {
             return error.TlsIdentityIncomplete;
         }
+        const ticket_parameters_seen = seen.tls12_session_ticket_server_id or
+            seen.tls12_session_ticket_lifetime;
+        const ticket_alpn_len: usize = switch (listener.protocol) {
+            .mqtt => "mqtt".len,
+            .websockets => "http/1.1".len,
+        };
+        if ((ticket_parameters_seen and !listener.tls12_session_tickets) or
+            (listener.tls12_session_tickets and
+                (!listener.usesTls() or
+                    !listener.tls_protocol_policy.offersTls12() or
+                    has_client_ca or
+                    listener.tls12_session_ticket_server_id.len == 0 or
+                    listener.tls12_session_ticket_server_id.len +
+                        3 + ticket_alpn_len > 512 or
+                    listener.tls12_session_ticket_lifetime_seconds >
+                        @import("vail").tls.tls12_ticket.max_lifetime_seconds)))
+        {
+            return error.InvalidSessionTicketConfiguration;
+        }
         const proxy_v2 = listener.proxy_protocol == .v2;
         if (listener.require_certificate and
             !proxy_v2 and (!has_client_ca or !listener.usesTls()))
@@ -941,6 +995,9 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "crlfile") or
         std.mem.eql(u8, value, "ciphers") or
         std.mem.eql(u8, value, "tls_version") or
+        std.mem.eql(u8, value, "tls12_session_tickets") or
+        std.mem.eql(u8, value, "tls12_session_ticket_server_id") or
+        std.mem.eql(u8, value, "tls12_session_ticket_lifetime") or
         std.mem.eql(u8, value, "require_certificate") or
         std.mem.eql(u8, value, "use_identity_as_username") or
         std.mem.eql(u8, value, "use_subject_as_username") or
@@ -2887,6 +2944,9 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\keyfile server.key
         \\tls_version tlsv1.2
         \\ciphers ECDHE-ECDSA-AES128-GCM-SHA256
+        \\tls12_session_tickets true
+        \\tls12_session_ticket_server_id mqtt.example
+        \\tls12_session_ticket_lifetime 3600
         \\allow_anonymous true
     );
     defer tls12_listener.deinit(allocator);
@@ -2898,6 +2958,70 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         tls_cipher_suites.Tls12Suite,
         &.{.ecdhe_ecdsa_aes_128_gcm_sha256},
         tls12_listener.listeners[0].tls12_cipher_suites,
+    );
+    try std.testing.expect(tls12_listener.listeners[0].tls12_session_tickets);
+    try std.testing.expectEqualStrings(
+        "mqtt.example",
+        tls12_listener.listeners[0].tls12_session_ticket_server_id,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 3600),
+        tls12_listener.listeners[0].tls12_session_ticket_lifetime_seconds,
+    );
+    var tickets_disabled = try parse(allocator,
+        \\listener 1883
+        \\tls12_session_tickets false
+        \\allow_anonymous true
+    );
+    defer tickets_disabled.deinit(allocator);
+    try std.testing.expect(
+        !tickets_disabled.listeners[0].tls12_session_tickets,
+    );
+    try std.testing.expectError(
+        error.InvalidSessionTicketConfiguration,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\tls12_session_tickets true
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionTicketConfiguration,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\tls_version tlsv1.3
+            \\tls12_session_tickets true
+            \\tls12_session_ticket_server_id mqtt.example
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionTicketConfiguration,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\cafile clients.pem
+            \\tls12_session_tickets true
+            \\tls12_session_ticket_server_id mqtt.example
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionTicketConfiguration,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\tls12_session_tickets true
+            \\tls12_session_ticket_server_id mqtt.example
+            \\tls12_session_ticket_lifetime 604801
+            \\allow_anonymous true
+        ),
     );
     try std.testing.expectError(
         error.UnsupportedTlsVersion,

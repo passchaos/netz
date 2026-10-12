@@ -2433,6 +2433,16 @@ poison later reconnect attempts. The shared stream's bidirectional
 `interop-tls12-ticket-openssl` process gate independently proves both netz
 client and netz server resumption against OpenSSL rather than relying only on
 self-interoperability.
+Configured MQTT TLS and WSS listeners can enable the same behavior with
+`tls12_session_tickets true`, an explicit
+`tls12_session_ticket_server_id`, and a bounded
+`tls12_session_ticket_lifetime`. Each logical listener owns one securely
+generated process-lifetime keyring shared by its IPv4/IPv6 sockets. The
+configuration rejects missing identities, TLS-1.3-only listeners, zero or
+overlong lifetimes, and TLS client-authentication combinations that the
+underlying TLS 1.2 ticket profile cannot safely resume. A dedicated
+Python/OpenSSL gate verifies both configured MQTT/TLS and MQTT-over-WSS
+resumption through complete MQTT 5 CONNECT/PING/DISCONNECT exchanges.
 
 `mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the

@@ -15,6 +15,7 @@ const reloadable_identity = @import(
 const configured_bridges = @import(
     "support/mqtt_configured_bridges.zig",
 );
+const tls_ticket_keys = @import("support/mqtt_tls_ticket_keys.zig");
 
 const mqtt = netz.mqtt;
 
@@ -203,6 +204,7 @@ fn openConfiguredServer(
     identity: ?mqtt.tls_runtime.ServerIdentity,
     identity_provider: ?mqtt.tls_runtime.ServerIdentityProvider,
     client_auth: ?mqtt.tls_runtime.ClientAuthPolicy,
+    tls12_session_tickets: ?netz.tls.stream.Tls12ServerTicketPolicy,
     bind_address: std.Io.net.IpAddress,
 ) !ConfiguredServer {
     var listener = try netz.runtime.listenTcp(io, bind_address, .{
@@ -221,6 +223,7 @@ fn openConfiguredServer(
                 .identity_provider = provider,
                 .client_auth = client_auth,
                 .protocol_policy = configured.tls_protocol_policy,
+                .tls12_session_tickets = tls12_session_tickets,
                 .tls12_cipher_suites = if (configured.tls12_cipher_suites.len != 0)
                     configured.tls12_cipher_suites
                 else
@@ -241,6 +244,7 @@ fn openConfiguredServer(
                     .identity_provider = provider,
                     .client_auth = client_auth,
                     .protocol_policy = configured.tls_protocol_policy,
+                    .tls12_session_tickets = tls12_session_tickets,
                     .tls12_cipher_suites = if (configured.tls12_cipher_suites.len != 0)
                         configured.tls12_cipher_suites
                     else
@@ -530,6 +534,12 @@ pub fn run(
         &security.lock,
     );
     defer identities.deinit();
+    var ticket_keyrings = try tls_ticket_keys.Set.init(
+        allocator,
+        io,
+        config.listeners,
+    );
+    defer ticket_keyrings.deinit();
     const has_reloadable_files = security.hasReloadableFiles() or
         identities.hasReloadableFiles();
     var reload_signal = if (has_reloadable_files)
@@ -618,6 +628,10 @@ pub fn run(
         const identity = identities.initialIdentity(config_index);
         const identity_provider = identities.provider(config_index);
         const client_auth = identities.initialClientAuth(config_index);
+        const tls12_session_tickets = ticket_keyrings.policy(
+            config_index,
+            configured,
+        );
         var bind_address_storage: [2]std.Io.net.IpAddress = undefined;
         const bind_addresses = try listenerBindAddresses(
             configured,
@@ -635,6 +649,7 @@ pub fn run(
                 identity,
                 identity_provider,
                 client_auth,
+                tls12_session_tickets,
                 bind_address,
             ) catch |err| {
                 if (bind_addresses.len > 1 and
