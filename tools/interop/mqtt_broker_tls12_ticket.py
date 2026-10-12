@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify configured MQTT TLS 1.2 ticket resumption with Python/OpenSSL."""
+"""Verify configured MQTT TLS 1.2/1.3 ticket resumption with Python/OpenSSL."""
 
 from __future__ import annotations
 
@@ -29,6 +29,12 @@ from mqtt_broker_config_bridge import _create_tls_material
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("broker", type=Path)
+    parser.add_argument(
+        "mode",
+        choices=("tls12", "tls13"),
+        default="tls12",
+        nargs="?",
+    )
     return parser.parse_args()
 
 
@@ -38,6 +44,7 @@ def run_client(
     client_id: str,
     session: ssl.SSLSession | None,
     expect_resumed: bool,
+    expected_version: str,
 ) -> ssl.SSLSession:
     raw = socket.create_connection(("127.0.0.1", port), timeout=5)
     raw.settimeout(5)
@@ -47,7 +54,7 @@ def run_client(
         session=session,
     )
     try:
-        if client.version() != "TLSv1.2":
+        if client.version() != expected_version:
             raise AssertionError(f"unexpected TLS version: {client.version()}")
         if client.selected_alpn_protocol() != "mqtt":
             raise AssertionError(
@@ -83,6 +90,7 @@ def run_websocket_client(
     client_id: str,
     session: ssl.SSLSession | None,
     expect_resumed: bool,
+    expected_version: str,
 ) -> ssl.SSLSession:
     raw = socket.create_connection(("127.0.0.1", port), timeout=5)
     raw.settimeout(5)
@@ -92,7 +100,7 @@ def run_websocket_client(
         session=session,
     )
     try:
-        if client.version() != "TLSv1.2":
+        if client.version() != expected_version:
             raise AssertionError(f"unexpected WSS TLS version: {client.version()}")
         if client.selected_alpn_protocol() is not None:
             raise AssertionError(
@@ -139,6 +147,20 @@ def run_websocket_client(
 
 def main() -> None:
     args = parse_args()
+    tls13 = args.mode == "tls13"
+    configured_version = "tlsv1.3" if tls13 else "tlsv1.2"
+    expected_version = "TLSv1.3" if tls13 else "TLSv1.2"
+    ticket_directives = (
+        "tls13_session_tickets true\n"
+        "tls13_session_ticket_server_id localhost\n"
+        "tls13_session_ticket_lifetime 3600\n"
+        if tls13
+        else
+        "ciphers ECDHE-ECDSA-AES128-GCM-SHA256\n"
+        "tls12_session_tickets true\n"
+        "tls12_session_ticket_server_id localhost\n"
+        "tls12_session_ticket_lifetime 3600\n"
+    )
     with tempfile.TemporaryDirectory(prefix="netz-mqtt-ticket-") as raw:
         directory = Path(raw)
         ca, certificate, key, _, _ = _create_tls_material(directory)
@@ -151,22 +173,16 @@ def main() -> None:
             f"listener {port} 127.0.0.1\n"
             f"certfile {certificate}\n"
             f"keyfile {key}\n"
-            "tls_version tlsv1.2\n"
-            "ciphers ECDHE-ECDSA-AES128-GCM-SHA256\n"
-            "tls12_session_tickets true\n"
-            "tls12_session_ticket_server_id localhost\n"
-            "tls12_session_ticket_lifetime 3600\n"
+            f"tls_version {configured_version}\n"
+            f"{ticket_directives}"
             "allow_anonymous true\n"
             "max_connections 2\n"
             f"listener {websocket_port} 127.0.0.1\n"
             "protocol websockets\n"
             f"certfile {certificate}\n"
             f"keyfile {key}\n"
-            "tls_version tlsv1.2\n"
-            "ciphers ECDHE-ECDSA-AES128-GCM-SHA256\n"
-            "tls12_session_tickets true\n"
-            "tls12_session_ticket_server_id localhost\n"
-            "tls12_session_ticket_lifetime 3600\n"
+            f"tls_version {configured_version}\n"
+            f"{ticket_directives}"
             "allow_anonymous true\n"
             "max_connections 2\n"
         )
@@ -183,7 +199,7 @@ def main() -> None:
             listeners = read_listener_lines(
                 process,
                 2,
-                "TLS 1.2 ticket broker",
+                f"{expected_version} ticket broker",
             )
             if not any(line.startswith("mqtts ") for line in listeners):
                 raise AssertionError(
@@ -194,9 +210,14 @@ def main() -> None:
                     f"missing MQTT/WSS listener: {listeners!r}"
                 )
             context = ssl.create_default_context(cafile=str(ca))
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
-            context.maximum_version = ssl.TLSVersion.TLSv1_2
-            context.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256")
+            context.minimum_version = (
+                ssl.TLSVersion.TLSv1_3
+                if tls13
+                else ssl.TLSVersion.TLSv1_2
+            )
+            context.maximum_version = context.minimum_version
+            if not tls13:
+                context.set_ciphers("ECDHE-ECDSA-AES128-GCM-SHA256")
             context.set_alpn_protocols(["mqtt"])
             session = run_client(
                 context,
@@ -204,6 +225,7 @@ def main() -> None:
                 "configured-ticket-first",
                 None,
                 False,
+                expected_version,
             )
             run_client(
                 context,
@@ -211,19 +233,22 @@ def main() -> None:
                 "configured-ticket-second",
                 session,
                 True,
+                expected_version,
             )
             websocket_context = ssl.create_default_context(cafile=str(ca))
-            websocket_context.minimum_version = ssl.TLSVersion.TLSv1_2
-            websocket_context.maximum_version = ssl.TLSVersion.TLSv1_2
-            websocket_context.set_ciphers(
-                "ECDHE-ECDSA-AES128-GCM-SHA256"
-            )
+            websocket_context.minimum_version = context.minimum_version
+            websocket_context.maximum_version = context.maximum_version
+            if not tls13:
+                websocket_context.set_ciphers(
+                    "ECDHE-ECDSA-AES128-GCM-SHA256"
+                )
             websocket_session = run_websocket_client(
                 websocket_context,
                 websocket_port,
                 "configured-wss-ticket-first",
                 None,
                 False,
+                expected_version,
             )
             run_websocket_client(
                 websocket_context,
@@ -231,17 +256,22 @@ def main() -> None:
                 "configured-wss-ticket-second",
                 websocket_session,
                 True,
+                expected_version,
             )
             if process.wait(timeout=5) != 0:
                 raise RuntimeError(
-                    "configured TLS 1.2 ticket broker failed: "
+                    f"configured {expected_version} ticket broker failed: "
                     + (process.stdout.read() if process.stdout else "")
                 )
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=5)
-    print("configured MQTT TLS/WSS 1.2 RFC 5077 resumption passed")
+    standard = "RFC 8446" if tls13 else "RFC 5077"
+    print(
+        f"configured MQTT TLS/WSS {expected_version} "
+        f"{standard} resumption passed"
+    )
 
 
 if __name__ == "__main__":

@@ -2447,16 +2447,18 @@ versions. Before a multi-address attempt, the connector validates each cached
 ticket against the selected endpoint hostname and lifetime; a failover target
 therefore performs a full handshake instead of receiving another host's
 resumption state.
-Configured MQTT TLS and WSS listeners can enable the same behavior with
-`tls12_session_tickets true`, an explicit
-`tls12_session_ticket_server_id`, and a bounded
-`tls12_session_ticket_lifetime`. Each logical listener owns one securely
-generated process-lifetime keyring shared by its IPv4/IPv6 sockets. The
-configuration rejects missing identities, TLS-1.3-only listeners, zero or
-overlong lifetimes, and TLS client-authentication combinations that the
-underlying TLS 1.2 ticket profile cannot safely resume. A dedicated
-Python/OpenSSL gate verifies both configured MQTT/TLS and MQTT-over-WSS
-resumption through complete MQTT 5 CONNECT/PING/DISCONNECT exchanges.
+Configured MQTT TLS and WSS listeners can enable either version with
+`tls12_session_tickets true` or `tls13_session_tickets true`, an explicit
+matching `*_session_ticket_server_id`, and a bounded
+`*_session_ticket_lifetime`. Each logical listener owns independent, securely
+generated process-lifetime TLS 1.2 and TLS 1.3 keyrings shared by its IPv4/IPv6
+sockets, preventing the protocols from sharing an AEAD key/nonce domain. The
+configuration rejects missing identities, policies that do not offer the
+configured ticket version, zero or overlong lifetimes, and TLS
+client-authentication combinations whose peer identity cannot safely survive
+stateless resumption. Dedicated Python/OpenSSL gates verify both versions on
+configured MQTT/TLS and MQTT-over-WSS listeners through complete MQTT 5
+CONNECT/PING/DISCONNECT exchanges.
 
 `mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the

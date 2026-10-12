@@ -204,7 +204,7 @@ fn openConfiguredServer(
     identity: ?mqtt.tls_runtime.ServerIdentity,
     identity_provider: ?mqtt.tls_runtime.ServerIdentityProvider,
     client_auth: ?mqtt.tls_runtime.ClientAuthPolicy,
-    tls12_session_tickets: ?netz.tls.stream.Tls12ServerTicketPolicy,
+    session_tickets: tls_ticket_keys.Policies,
     bind_address: std.Io.net.IpAddress,
 ) !ConfiguredServer {
     var listener = try netz.runtime.listenTcp(io, bind_address, .{
@@ -223,7 +223,8 @@ fn openConfiguredServer(
                 .identity_provider = provider,
                 .client_auth = client_auth,
                 .protocol_policy = configured.tls_protocol_policy,
-                .tls12_session_tickets = tls12_session_tickets,
+                .tls12_session_tickets = session_tickets.tls12,
+                .tls13_session_tickets = session_tickets.tls13,
                 .tls12_cipher_suites = if (configured.tls12_cipher_suites.len != 0)
                     configured.tls12_cipher_suites
                 else
@@ -244,7 +245,8 @@ fn openConfiguredServer(
                     .identity_provider = provider,
                     .client_auth = client_auth,
                     .protocol_policy = configured.tls_protocol_policy,
-                    .tls12_session_tickets = tls12_session_tickets,
+                    .tls12_session_tickets = session_tickets.tls12,
+                    .tls13_session_tickets = session_tickets.tls13,
                     .tls12_cipher_suites = if (configured.tls12_cipher_suites.len != 0)
                         configured.tls12_cipher_suites
                     else
@@ -628,7 +630,7 @@ pub fn run(
         const identity = identities.initialIdentity(config_index);
         const identity_provider = identities.provider(config_index);
         const client_auth = identities.initialClientAuth(config_index);
-        const tls12_session_tickets = ticket_keyrings.policy(
+        const session_tickets = ticket_keyrings.policies(
             config_index,
             configured,
         );
@@ -649,7 +651,7 @@ pub fn run(
                 identity,
                 identity_provider,
                 client_auth,
-                tls12_session_tickets,
+                session_tickets,
                 bind_address,
             ) catch |err| {
                 if (bind_addresses.len > 1 and

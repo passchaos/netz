@@ -1501,6 +1501,7 @@ pub fn build(b: *std.Build) void {
         "tools/interop/mqtt_broker_tls12_ticket.py",
     });
     mqtt_broker_tls12_ticket.addArtifactArg(mqtt_vectors_broker);
+    mqtt_broker_tls12_ticket.addArg("tls12");
     const mqtt_broker_tls12_ticket_step = b.step(
         "interop-mqtt-broker-tls12-ticket",
         "Verify configured MQTT TLS 1.2 ticket resumption with OpenSSL",
@@ -1509,6 +1510,21 @@ pub fn build(b: *std.Build) void {
         &mqtt_broker_tls12_ticket.step,
     );
     test_step.dependOn(&mqtt_broker_tls12_ticket.step);
+
+    const mqtt_broker_tls13_ticket = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/mqtt_broker_tls12_ticket.py",
+    });
+    mqtt_broker_tls13_ticket.addArtifactArg(mqtt_vectors_broker);
+    mqtt_broker_tls13_ticket.addArg("tls13");
+    const mqtt_broker_tls13_ticket_step = b.step(
+        "interop-mqtt-broker-tls13-ticket",
+        "Verify configured MQTT TLS 1.3 ticket resumption with OpenSSL",
+    );
+    mqtt_broker_tls13_ticket_step.dependOn(
+        &mqtt_broker_tls13_ticket.step,
+    );
+    test_step.dependOn(&mqtt_broker_tls13_ticket.step);
 
     const mqtt_websocket_origin = b.addSystemCommand(&.{
         "python3",

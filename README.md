@@ -248,8 +248,10 @@ Current protocol coverage includes:
   separate bounded HTTP/1 and HTTP/2 pool caches that resume after physical
   connection retirement; MQTT reconnect clients retain separate TLS 1.2 and
   TLS 1.3 tickets, renew them across native TLS or WSS connections, and discard
-  them locally when their advertised lifetime expires, without enabling early
-  data,
+  them locally when their advertised lifetime expires; configured native MQTT
+  TLS and WSS listeners expose both ticket versions with independent keyrings,
+  explicit server identity and lifetime bounds, and OpenSSL resumption gates,
+  without enabling early data,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation
