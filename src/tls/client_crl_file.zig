@@ -3,8 +3,10 @@
 //! Each PEM CRL must be signed by exactly one CA in the configured client CA
 //! file. Complete lists may be followed by one or more compatible delta CRLs;
 //! the newest delta is combined with its base before the client leaf is
-//! checked. The composite verifier first validates the client chain and then
-//! requires complete revocation coverage for the leaf issuer.
+//! checked. Directly signed indirect CRLs are authorized against their target
+//! CA and still require the leaf's cRLIssuer distribution-point binding. The
+//! composite verifier first validates the client chain and then requires
+//! complete revocation coverage for the leaf issuer.
 
 const std = @import("std");
 const vail = @import("vail");
@@ -33,8 +35,12 @@ pub const File = struct {
     sources: [][]u8,
     lists: []vail.x509.crl.List,
     combined_lists: []vail.x509.crl.CombinedList,
+    indirect_lists: []vail.x509.crl.AuthorizedIndirectList,
+    indirect_combined_lists: []vail.x509.crl.AuthorizedIndirectCombinedList,
 
     pub fn deinit(self: *File) void {
+        self.allocator.free(self.indirect_combined_lists);
+        self.allocator.free(self.indirect_lists);
         self.allocator.free(self.combined_lists);
         self.allocator.free(self.lists);
         for (self.sources) |source| self.allocator.free(source);
@@ -46,28 +52,68 @@ pub const File = struct {
         self: *const File,
         certificate_der: []const u8,
     ) Error!void {
+        const certificate = std.crypto.Certificate.parse(.{
+            .buffer = certificate_der,
+            .index = 0,
+        }) catch return error.InvalidCrl;
         const verified = vail.x509.crl.VerifiedSet{
             .lists = self.lists,
             .combined_lists = self.combined_lists,
+            .indirect_lists = self.indirect_lists,
+            .indirect_combined_lists = self.indirect_combined_lists,
         };
         for (self.lists) |list| {
             // Every accepted delta has a matching complete list. Trying one
             // issuer certificate per complete list lets VerifiedSet enforce
             // the matching scope and apply the newest compatible delta.
-            if (list.isDelta()) continue;
-            verified.policy(true).verify(
+            if (list.isDelta() or list.isIndirect()) continue;
+            if (try verifyForIssuer(
+                &verified,
                 certificate_der,
                 list.issuer_certificate_der,
-            ) catch |err| switch (err) {
-                error.CertificateRevocationStatusUnavailable => continue,
-                error.CertificateRevoked => return error.CertificateRevoked,
-                else => return error.InvalidCrl,
-            };
-            return;
+            )) return;
+        }
+        for (self.indirect_combined_lists) |authorized| {
+            if (!certificateIssuerMatches(
+                certificate,
+                authorized.certificate_issuer_der,
+            )) continue;
+            if (try verifyForIssuer(
+                &verified,
+                certificate_der,
+                authorized.certificate_issuer_der,
+            )) return;
+        }
+        for (self.indirect_lists) |authorized| {
+            if (!certificateIssuerMatches(
+                certificate,
+                authorized.certificate_issuer_der,
+            )) continue;
+            if (try verifyForIssuer(
+                &verified,
+                certificate_der,
+                authorized.certificate_issuer_der,
+            )) return;
         }
         return error.CrlNotFound;
     }
 };
+
+fn verifyForIssuer(
+    verified: *const vail.x509.crl.VerifiedSet,
+    certificate_der: []const u8,
+    issuer_der: []const u8,
+) Error!bool {
+    verified.policy(true).verify(
+        certificate_der,
+        issuer_der,
+    ) catch |err| switch (err) {
+        error.CertificateRevocationStatusUnavailable => return false,
+        error.CertificateRevoked => return error.CertificateRevoked,
+        else => return error.InvalidCrl,
+    };
+    return true;
+}
 
 pub const Verifier = struct {
     trust: vail.x509.trust.ClientCertificateBundleVerifier,
@@ -121,6 +167,20 @@ pub fn load(
         client_cas,
         std.Io.Timestamp.now(io, .real).toSeconds(),
     );
+}
+
+fn certificateIssuerMatches(
+    certificate: std.crypto.Certificate.Parsed,
+    issuer_der: []const u8,
+) bool {
+    const issuer = std.crypto.Certificate.parse(.{
+        .buffer = issuer_der,
+        .index = 0,
+    }) catch return false;
+    return vail.x509.distinguished_name.eql(
+        certificate.issuer(),
+        issuer.subject(),
+    ) catch false;
 }
 
 pub fn parse(
@@ -179,16 +239,13 @@ pub fn parse(
             matched = candidate;
         }
         const list = matched orelse return error.MissingCrlIssuer;
-        // Delegated and indirect CRLs require an authenticated signer path and
-        // certificate cRLIssuer binding. Do not silently treat one as complete
-        // direct coverage until that configuration surface is available.
-        if (list.isIndirect()) return error.InvalidCrl;
         for (lists.items) |existing| {
             if (!std.mem.eql(
                 u8,
                 existing.issuer_certificate_der,
                 list.issuer_certificate_der,
             )) continue;
+            if (!sameScope(existing, list)) continue;
             if (!existing.isDelta() and !list.isDelta()) {
                 return error.DuplicateCrlIssuer;
             }
@@ -217,12 +274,120 @@ pub fn parse(
     errdefer allocator.free(owned_lists);
     const combined_lists = try combineDeltaCrls(allocator, owned_lists);
     errdefer allocator.free(combined_lists);
+    const indirect_lists = try authorizeIndirectLists(
+        allocator,
+        owned_lists,
+        combined_lists,
+        client_cas.certificates,
+        now_seconds,
+    );
+    errdefer allocator.free(indirect_lists);
+    const indirect_combined_lists = try authorizeIndirectCombinedLists(
+        allocator,
+        combined_lists,
+        client_cas.certificates,
+        now_seconds,
+    );
+    errdefer allocator.free(indirect_combined_lists);
     return .{
         .allocator = allocator,
         .sources = owned_sources,
         .lists = owned_lists,
         .combined_lists = combined_lists,
+        .indirect_lists = indirect_lists,
+        .indirect_combined_lists = indirect_combined_lists,
     };
+}
+
+fn authorizeIndirectLists(
+    allocator: std.mem.Allocator,
+    lists: []const vail.x509.crl.List,
+    combined_lists: []const vail.x509.crl.CombinedList,
+    certificate_issuers: []const []const u8,
+    now_seconds: i64,
+) Error![]vail.x509.crl.AuthorizedIndirectList {
+    var authorized: std.ArrayList(
+        vail.x509.crl.AuthorizedIndirectList,
+    ) = .empty;
+    defer authorized.deinit(allocator);
+    for (lists) |list| {
+        if (!list.isIndirect() or list.isDelta() or
+            isCombinedBase(combined_lists, list)) continue;
+        var matched = false;
+        for (certificate_issuers) |issuer| {
+            const candidate = vail.x509.crl.AuthorizedIndirectList.init(
+                list,
+                issuer,
+                now_seconds,
+            ) catch |err| switch (err) {
+                error.InvalidIssuer => continue,
+                else => return error.InvalidCrl,
+            };
+            try authorized.append(allocator, candidate);
+            matched = true;
+        }
+        if (!matched) return error.MissingCrlIssuer;
+    }
+    return authorized.toOwnedSlice(allocator);
+}
+
+fn authorizeIndirectCombinedLists(
+    allocator: std.mem.Allocator,
+    combined_lists: []const vail.x509.crl.CombinedList,
+    certificate_issuers: []const []const u8,
+    now_seconds: i64,
+) Error![]vail.x509.crl.AuthorizedIndirectCombinedList {
+    var authorized: std.ArrayList(
+        vail.x509.crl.AuthorizedIndirectCombinedList,
+    ) = .empty;
+    defer authorized.deinit(allocator);
+    for (combined_lists) |combined| {
+        if (!combined.base.isIndirect()) continue;
+        var matched = false;
+        for (certificate_issuers) |issuer| {
+            const candidate =
+                vail.x509.crl.AuthorizedIndirectCombinedList.init(
+                    combined,
+                    issuer,
+                    now_seconds,
+                ) catch |err| switch (err) {
+                    error.InvalidIssuer => continue,
+                    else => return error.InvalidCrl,
+                };
+            try authorized.append(allocator, candidate);
+            matched = true;
+        }
+        if (!matched) return error.MissingCrlIssuer;
+    }
+    return authorized.toOwnedSlice(allocator);
+}
+
+fn isCombinedBase(
+    combined_lists: []const vail.x509.crl.CombinedList,
+    list: vail.x509.crl.List,
+) bool {
+    for (combined_lists) |combined| {
+        if (combined.base.der.ptr == list.der.ptr and
+            combined.base.der.len == list.der.len) return true;
+    }
+    return false;
+}
+
+fn sameScope(
+    a: vail.x509.crl.List,
+    b: vail.x509.crl.List,
+) bool {
+    const a_scope = if (a.issuing_distribution_point) |point|
+        point.encoded
+    else
+        null;
+    const b_scope = if (b.issuing_distribution_point) |point|
+        point.encoded
+    else
+        null;
+    if (a_scope == null or b_scope == null) return a_scope == null and
+        b_scope == null;
+    return std.mem.eql(u8, a_scope.?, b_scope.?);
 }
 
 fn combineDeltaCrls(
@@ -491,6 +656,15 @@ test "client CRL file applies a direct delta over its base" {
     const base_der = decodeHexFixture(vectors.delta_crl_base_hex);
     const delta_der = decodeHexFixture(vectors.delta_crl_delta_hex);
     const indirect_der = decodeHexFixture(vectors.delta_crl_indirect_hex);
+    const indirect_target = decodeHexFixture(
+        vectors.delta_crl_indirect_target_hex,
+    );
+    const indirect_authorized_der = decodeHexFixture(
+        vectors.delta_crl_indirect_authorized_hex,
+    );
+    const delegated_der = decodeHexFixture(
+        vectors.indirect_crl_delegate_crl_hex,
+    );
 
     const ca_source = try encodePemForTest(
         allocator,
@@ -519,6 +693,18 @@ test "client CRL file applies a direct delta over its base" {
         &indirect_der,
     );
     defer allocator.free(indirect_source);
+    const indirect_authorized_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &indirect_authorized_der,
+    );
+    defer allocator.free(indirect_authorized_source);
+    const delegated_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &delegated_der,
+    );
+    defer allocator.free(delegated_source);
     const crl_source = try std.mem.concat(
         allocator,
         u8,
@@ -556,9 +742,40 @@ test "client CRL file applies a direct delta over its base" {
         error.MissingBaseCrl,
         parse(allocator, delta_source, &cas, now),
     );
+    var indirect = try parse(allocator, indirect_source, &cas, now);
+    defer indirect.deinit();
+    try std.testing.expectEqual(@as(usize, 1), indirect.indirect_lists.len);
+    try std.testing.expectError(error.CrlNotFound, indirect.verifyLeaf(&held));
+
+    var authorized = try parse(
+        allocator,
+        indirect_authorized_source,
+        &cas,
+        now,
+    );
+    defer authorized.deinit();
+    try std.testing.expectEqual(@as(usize, 1), authorized.indirect_lists.len);
     try std.testing.expectError(
-        error.InvalidCrl,
-        parse(allocator, indirect_source, &cas, now),
+        error.CertificateRevoked,
+        authorized.verifyLeaf(&indirect_target),
+    );
+    var indirect_verifier = Verifier{
+        .trust = cas.verifier(now),
+        .crls = &authorized,
+    };
+    try std.testing.expectError(
+        error.CertificateRevoked,
+        indirect_verifier.verify(.{
+            .server_name = null,
+            .chain = &.{&indirect_target},
+        }),
+    );
+
+    // A CRL signed by a delegated certificate is still rejected until the
+    // caller supplies that signer's authenticated chain explicitly.
+    try std.testing.expectError(
+        error.MissingCrlIssuer,
+        parse(allocator, delegated_source, &cas, now),
     );
     const duplicate_delta_source = try std.mem.concat(
         allocator,
@@ -680,5 +897,20 @@ test "client base and delta CRL allocation failures are transactional" {
         allocator,
         parseDeltaForAllocationTest,
         .{ crl_source, &cas, now },
+    );
+
+    const indirect_der = decodeHexFixture(
+        vectors.delta_crl_indirect_authorized_hex,
+    );
+    const indirect_source = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &indirect_der,
+    );
+    defer allocator.free(indirect_source);
+    try std.testing.checkAllAllocationFailures(
+        allocator,
+        parseDeltaForAllocationTest,
+        .{ indirect_source, &cas, now },
     );
 }

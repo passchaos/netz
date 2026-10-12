@@ -3159,7 +3159,10 @@ that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Listener
 topology, anonymous policy, limits, and persistence settings still require
 restart.
-Indirect CRLs and plugins remain explicit gaps. `use_identity_as_username`
+Delegated indirect-CRL signer chains and plugins remain explicit gaps.
+CA-signed indirect CRLs are accepted only after signer authorization, and a
+leaf receives coverage only when its CRL distribution point names that CRL
+issuer with matching scope and reasons. `use_identity_as_username`
 strictly extracts one owned UTF-8 Subject CN before every broker/listener
 authorization callback; `use_subject_as_username` uses the complete Subject in
 OpenSSL's RFC 2253 form, including reverse RDN order and escaping. Both ignore
@@ -3173,8 +3176,10 @@ match and verify under one `cafile` CA; update windows, unsupported critical or
 scope-changing extensions and canonical leaf serials are checked before bind.
 Direct RFC 5280 delta CRLs are paired with a compatible complete base, the
 newest supplied delta wins, and `removeFromCRL` plus newly revoked serials are
-applied atomically during the TLS client-authentication decision. Orphan,
-mismatched, duplicate-number and indirect CRLs fail before bind.
+applied atomically during the TLS client-authentication decision. Indirect
+base/delta lists signed by a configured CA use the same composition rules;
+orphan, mismatched, duplicate-number, unauthorized-signer, and unbound-scope
+inputs fail closed before bind.
 The OpenSSL process gate keeps non-revoked TLS/WSS clients live, rejects a
 revoked client before MQTT CONNECT, rejects a tampered CRL before any port
 opens, and independently runs 2048-bit RSA, P-384/SHA-384, and Ed25519 CA/leaf/CRL
