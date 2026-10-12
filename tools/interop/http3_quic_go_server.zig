@@ -372,6 +372,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     defer backend.deinit();
     const io = backend.io();
     var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
+    var transport_stats: benchmark.TransportStats = .{};
 
     var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
     try std.base64.standard.Decoder.decode(
@@ -527,6 +528,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             .status = 200,
             .headers = &.{.{ .name = "x-netz-bench-close", .value = "ok" }},
         }, config.timeout());
+        if (config.socket_traffic) {
+            transport_stats.add(session.established.connection.stats());
+        }
     }
     if (config.socket_traffic) {
         benchmark.printSocketTraffic(
@@ -535,6 +539,12 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             "server",
             config,
             socket_traffic.stats(),
+        );
+        benchmark.printTransportStats(
+            role_pair,
+            "server",
+            config,
+            transport_stats,
         );
     }
 }

@@ -23,6 +23,8 @@ import (
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go/qlog"
+	"github.com/quic-go/quic-go/qlogwriter"
 	"netz-quic-go-interop/internal/sockettraffic"
 	"netz-quic-go-interop/internal/testcert"
 )
@@ -51,6 +53,56 @@ type memorySnapshot struct {
 	heapSys    uint64
 	sys        uint64
 	numGC      uint32
+}
+
+type packetDropTrace struct {
+	mu     sync.Mutex
+	counts map[qlog.PacketDropReason]uint64
+}
+
+type packetDropStats struct {
+	total          uint64
+	dosPrevention  uint64
+	duplicate      uint64
+	payloadDecrypt uint64
+	other          uint64
+}
+
+func newPacketDropTrace() *packetDropTrace {
+	return &packetDropTrace{counts: make(map[qlog.PacketDropReason]uint64)}
+}
+
+func (trace *packetDropTrace) AddProducer() qlogwriter.Recorder { return trace }
+func (trace *packetDropTrace) SupportsSchemas(string) bool      { return true }
+func (trace *packetDropTrace) Close() error                     { return nil }
+func (trace *packetDropTrace) RecordEvent(event qlogwriter.Event) {
+	dropped, ok := event.(qlog.PacketDropped)
+	if !ok {
+		return
+	}
+	trace.mu.Lock()
+	trace.counts[dropped.Trigger]++
+	trace.mu.Unlock()
+}
+
+func (trace *packetDropTrace) stats() packetDropStats {
+	trace.mu.Lock()
+	defer trace.mu.Unlock()
+	var stats packetDropStats
+	for reason, count := range trace.counts {
+		stats.total += count
+		switch reason {
+		case qlog.PacketDropDOSPrevention:
+			stats.dosPrevention += count
+		case qlog.PacketDropDuplicate:
+			stats.duplicate += count
+		case qlog.PacketDropPayloadDecryptError:
+			stats.payloadDecrypt += count
+		default:
+			stats.other += count
+		}
+	}
+	return stats
 }
 
 func readMemory() memorySnapshot {
@@ -309,10 +361,18 @@ func runServer(address, caOut string, config benchConfig) {
 			served <- err
 		})
 	}
+	quicConfig := config.quicConfig()
+	var dropTrace *packetDropTrace
+	if config.socketTraffic {
+		dropTrace = newPacketDropTrace()
+		quicConfig.Tracer = func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
+			return dropTrace
+		}
+	}
 	server := &http3.Server{
 		Addr:       address,
 		TLSConfig:  &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13},
-		QUICConfig: config.quicConfig(),
+		QUICConfig: quicConfig,
 		ConnContext: func(ctx context.Context, conn *quic.Conn) context.Context {
 			if (config.capture || config.socketTraffic) && conn.ConnectionState().GSO {
 				report(errors.New("quic-go server GSO unexpectedly enabled"))
@@ -491,6 +551,12 @@ func runServer(address, caOut string, config benchConfig) {
 			config,
 			counting.Stats(),
 		)
+		printPacketDrops(
+			"netz-client+quic-go-server",
+			"server",
+			config,
+			dropTrace.stats(),
+		)
 	}
 }
 
@@ -510,10 +576,20 @@ func runClient(address, caPath string, config benchConfig) {
 	}
 	printConfig("quic-go", "quic-go-client+netz-server", "client", config)
 	var aggregateTraffic sockettraffic.Stats
+	var dropTrace *packetDropTrace
+	if config.socketTraffic {
+		dropTrace = newPacketDropTrace()
+	}
 	for round := uint(0); round < config.rounds(); round++ {
+		quicConfig := config.quicConfig()
+		if dropTrace != nil {
+			quicConfig.Tracer = func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
+				return dropTrace
+			}
+		}
 		transport := &http3.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS13},
-			QUICConfig:      config.quicConfig(),
+			QUICConfig:      quicConfig,
 		}
 		var counting *sockettraffic.UDPConn
 		var quicTransport *quic.Transport
@@ -642,6 +718,12 @@ func runClient(address, caPath string, config benchConfig) {
 			"client",
 			config,
 			aggregateTraffic,
+		)
+		printPacketDrops(
+			"quic-go-client+netz-server",
+			"client",
+			config,
+			dropTrace.stats(),
 		)
 	}
 }
@@ -949,6 +1031,10 @@ func printServerComplete(implementation, rolePair string, config benchConfig, sa
 
 func printSocketTraffic(implementation, rolePair, endpointRole string, config benchConfig, traffic sockettraffic.Stats) {
 	fmt.Printf("record=socket-traffic implementation=%s protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s warmup=%d iterations=%d streams=%d body_bytes=%d application_chunk_effective=%d stream_window=%d quic_version=%d traffic_scope=all-rounds socket_boundary=userspace-udp-payload benchmark_scope=socket-traffic-same-application-shape udp_sent_datagrams=%d udp_sent_payload_bytes=%d udp_received_datagrams=%d udp_received_payload_bytes=%d logical_udp_segments=true complete=true\n", implementation, config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, config.effectiveChunk(), config.streamWindow, config.version, traffic.SentDatagrams, traffic.SentBytes, traffic.ReceivedDatagrams, traffic.ReceivedBytes)
+}
+
+func printPacketDrops(rolePair, endpointRole string, config benchConfig, drops packetDropStats) {
+	fmt.Printf("record=packet-drop-stats implementation=quic-go protocol=http3 mode=%s role_pair=%s endpoint_role=%s sender_role=%s client_io=%s server_io=%s warmup=%d iterations=%d streams=%d body_bytes=%d traffic_scope=all-rounds benchmark_scope=socket-traffic-same-application-shape dropped_total=%d dropped_dos_prevention=%d dropped_duplicate=%d dropped_payload_decrypt=%d dropped_other=%d complete=true\n", config.mode, rolePair, endpointRole, senderRole(config), clientIO(rolePair), serverIO(rolePair), config.warmup, config.iterations, config.streams, config.bodyBytes, drops.total, drops.dosPrevention, drops.duplicate, drops.payloadDecrypt, drops.other)
 }
 
 func benchmarkScope(config benchConfig) string {

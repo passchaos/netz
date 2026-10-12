@@ -325,6 +325,7 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
     defer backend.deinit();
     const io = backend.io();
     var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
+    var transport_stats: benchmark.TransportStats = .{};
 
     const now = std.Io.Clock.real.now(io);
     var ca_bundle: std.crypto.Certificate.Bundle = .empty;
@@ -384,6 +385,9 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
                 ),
             };
             try benchmarkClose(allocator, &client, config, round);
+            if (config.socket_traffic) {
+                transport_stats.add(client.established.connection.stats());
+            }
             break :blk measured;
         };
         if (round >= config.warmup) {
@@ -405,6 +409,12 @@ fn runBenchmark(_: std.process.Init, args: []const []const u8) !void {
             "client",
             config,
             socket_traffic.stats(),
+        );
+        benchmark.printTransportStats(
+            role_pair,
+            "client",
+            config,
+            transport_stats,
         );
     }
 }

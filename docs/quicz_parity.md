@@ -2023,7 +2023,14 @@ for download/upload versus quic-go's 1,186.113/1,186.905. The former packet-fill
 deficit is therefore absent at this boundary. Netz still sends 4.14%/4.77%
 more datagrams and 4.42%/4.97% more bytes, narrowing the remaining investigation
 to retransmission and control/ACK behavior without claiming encrypted-frame or
-kernel-wire equivalence.
+kernel-wire equivalence. Structured transport/qlog attribution then matched
+4,257 netz download losses to 4,264 quic-go `dos_prevention` drops and 3,586
+netz upload losses to 3,615 corresponding drops. All quic-go duplicate,
+payload-decrypt, and other drop categories and all netz authentication failures
+were zero. The residual retransmission cost therefore comes from the peer's
+bounded unprocessed-packet queue under this zero-latency workload, not malformed
+netz packets; future pacing work must preserve normal-network throughput rather
+than hiding the receiver limit with a benchmark-only delay.
 
 ## Next recommended work
 

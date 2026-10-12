@@ -29,6 +29,16 @@ def positive(record: dict[str, str], key: str) -> int:
     return value
 
 
+def nonnegative(record: dict[str, str], key: str) -> int:
+    try:
+        value = int(record[key])
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"invalid {key}: {record}") from error
+    if value < 0:
+        raise ValueError(f"negative {key}: {record}")
+    return value
+
+
 def verify(
     *,
     role_pair: str,
@@ -60,6 +70,7 @@ def verify(
         for role, implementation in endpoints.items()
     }
     records: dict[str, dict[str, str]] = {}
+    paths_by_role: dict[str, Path] = {}
     for path in (client_log, server_log):
         rows = BENCHMARK.records(path, "socket-traffic", role_pair)
         if len(rows) != 1:
@@ -69,6 +80,7 @@ def verify(
         if role not in ("client", "server") or role in records:
             raise ValueError(f"invalid or duplicate endpoint role in {path}: {record}")
         records[role] = record
+        paths_by_role[role] = path
     if set(records) != {"client", "server"}:
         raise ValueError("socket-traffic records do not cover both endpoints")
 
@@ -112,6 +124,100 @@ def verify(
             )
         }
 
+    transport_stats: dict[str, dict[str, int]] = {}
+    for role, implementation in endpoints.items():
+        if implementation != "netz":
+            continue
+        rows = BENCHMARK.records(paths_by_role[role], "transport-stats", role_pair)
+        if len(rows) != 1:
+            raise ValueError(
+                f"expected one netz transport-stats record for {role}, found {len(rows)}"
+            )
+        record = rows[0]
+        expected_transport = {
+            "implementation": "netz",
+            "protocol": "http3",
+            "mode": mode,
+            "role_pair": role_pair,
+            "endpoint_role": role,
+            "sender_role": sender_role,
+            "client_io": endpoint_io["client"],
+            "server_io": endpoint_io["server"],
+            "warmup": str(warmup),
+            "iterations": str(iterations),
+            "streams": str(streams),
+            "body_bytes": str(body_bytes),
+            "traffic_scope": "all-rounds",
+            "benchmark_scope": "socket-traffic-same-application-shape",
+            "complete": "true",
+        }
+        for key, value in expected_transport.items():
+            if record.get(key) != value:
+                raise ValueError(f"netz {role} transport {key} mismatch: {record}")
+        transport_stats[role] = {
+            "packets_sent": positive(record, "packets_sent"),
+            "packets_received": positive(record, "packets_received"),
+            "packets_lost": nonnegative(record, "packets_lost"),
+            "bytes_sent": positive(record, "bytes_sent"),
+            "bytes_received": positive(record, "bytes_received"),
+            "authentication_failures": nonnegative(record, "authentication_failures"),
+            "local_key_updates": nonnegative(record, "local_key_updates"),
+            "peer_key_updates": nonnegative(record, "peer_key_updates"),
+        }
+        if transport_stats[role]["packets_lost"] > transport_stats[role]["packets_sent"]:
+            raise ValueError(f"netz {role} lost more packets than it sent")
+
+    drop_stats: dict[str, int] | None = None
+    for role, implementation in endpoints.items():
+        if implementation != "quic-go":
+            continue
+        rows = BENCHMARK.records(paths_by_role[role], "packet-drop-stats", role_pair)
+        if len(rows) != 1:
+            raise ValueError(
+                f"expected one quic-go packet-drop-stats record for {role}, found {len(rows)}"
+            )
+        record = rows[0]
+        expected_drops = {
+            "implementation": "quic-go",
+            "protocol": "http3",
+            "mode": mode,
+            "role_pair": role_pair,
+            "endpoint_role": role,
+            "sender_role": sender_role,
+            "client_io": endpoint_io["client"],
+            "server_io": endpoint_io["server"],
+            "warmup": str(warmup),
+            "iterations": str(iterations),
+            "streams": str(streams),
+            "body_bytes": str(body_bytes),
+            "traffic_scope": "all-rounds",
+            "benchmark_scope": "socket-traffic-same-application-shape",
+            "complete": "true",
+        }
+        for key, value in expected_drops.items():
+            if record.get(key) != value:
+                raise ValueError(f"quic-go {role} drop {key} mismatch: {record}")
+        drop_stats = {
+            key: nonnegative(record, key)
+            for key in (
+                "dropped_total",
+                "dropped_dos_prevention",
+                "dropped_duplicate",
+                "dropped_payload_decrypt",
+                "dropped_other",
+            )
+        }
+        if drop_stats["dropped_total"] != sum(
+            drop_stats[key]
+            for key in (
+                "dropped_dos_prevention",
+                "dropped_duplicate",
+                "dropped_payload_decrypt",
+                "dropped_other",
+            )
+        ):
+            raise ValueError("quic-go packet-drop categories do not sum to total")
+
     client = values["client"]
     server = values["server"]
     c2s_datagram_delta = client["udp_sent_datagrams"] - server["udp_received_datagrams"]
@@ -124,6 +230,20 @@ def verify(
     sender = values[sender_role]
     sender_impl = endpoints[sender_role]
     average_payload = sender["udp_sent_payload_bytes"] / sender["udp_sent_datagrams"]
+    netz_role = (
+        sender_role
+        if endpoints[sender_role] == "netz"
+        else next(role for role, implementation in endpoints.items() if implementation == "netz")
+    )
+    netz_transport = transport_stats[netz_role]
+    loss_rate = netz_transport["packets_lost"] / netz_transport["packets_sent"]
+    drops = drop_stats or {
+        "dropped_total": 0,
+        "dropped_dos_prevention": 0,
+        "dropped_duplicate": 0,
+        "dropped_payload_decrypt": 0,
+        "dropped_other": 0,
+    }
     print(
         " ".join(
             (
@@ -135,6 +255,14 @@ def verify(
                 f"sender_udp_datagrams={sender['udp_sent_datagrams']}",
                 f"sender_udp_payload_bytes={sender['udp_sent_payload_bytes']}",
                 f"sender_mean_udp_payload_bytes={average_payload:.3f}",
+                f"netz_packets_sent={netz_transport['packets_sent']}",
+                f"netz_packets_lost={netz_transport['packets_lost']}",
+                f"netz_packet_loss_rate={loss_rate:.6f}",
+                f"quic_go_dropped_total={drops['dropped_total']}",
+                f"quic_go_dropped_dos_prevention={drops['dropped_dos_prevention']}",
+                f"quic_go_dropped_duplicate={drops['dropped_duplicate']}",
+                f"quic_go_dropped_payload_decrypt={drops['dropped_payload_decrypt']}",
+                f"quic_go_dropped_other={drops['dropped_other']}",
                 f"client_to_server_observation_delta_datagrams={c2s_datagram_delta}",
                 f"client_to_server_observation_delta_bytes={c2s_byte_delta}",
                 f"server_to_client_observation_delta_datagrams={s2c_datagram_delta}",

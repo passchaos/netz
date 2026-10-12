@@ -473,6 +473,66 @@ pub fn printSocketTraffic(
     );
 }
 
+pub const TransportStats = struct {
+    packets_sent: u64 = 0,
+    packets_received: u64 = 0,
+    packets_lost: u64 = 0,
+    bytes_sent: u64 = 0,
+    bytes_received: u64 = 0,
+    authentication_failures: u64 = 0,
+    local_key_updates: u64 = 0,
+    peer_key_updates: u64 = 0,
+
+    pub fn add(self: *TransportStats, stats: anytype) void {
+        self.packets_sent +|= stats.packets_sent;
+        self.packets_received +|= stats.packets_received;
+        self.packets_lost +|= stats.packets_lost;
+        self.bytes_sent +|= stats.bytes_sent;
+        self.bytes_received +|= stats.bytes_received;
+        self.authentication_failures +|= stats.authentication_failures;
+        self.local_key_updates +|= stats.local_key_update_count;
+        self.peer_key_updates +|= stats.peer_key_update_count;
+    }
+};
+
+pub fn printTransportStats(
+    role_pair: []const u8,
+    endpoint_role: []const u8,
+    config: Config,
+    stats: TransportStats,
+) void {
+    std.debug.print(
+        "record=transport-stats implementation=netz protocol=http3 mode={s} " ++
+            "role_pair={s} endpoint_role={s} sender_role={s} " ++
+            "client_io={s} server_io={s} warmup={d} iterations={d} streams={d} " ++
+            "body_bytes={d} traffic_scope=all-rounds " ++
+            "benchmark_scope=socket-traffic-same-application-shape packets_sent={d} " ++
+            "packets_received={d} packets_lost={d} bytes_sent={d} " ++
+            "bytes_received={d} authentication_failures={d} " ++
+            "local_key_updates={d} peer_key_updates={d} complete=true\n",
+        .{
+            config.mode.name(),
+            role_pair,
+            endpoint_role,
+            senderRole(config),
+            clientIo(role_pair),
+            serverIo(role_pair),
+            config.warmup,
+            config.iterations,
+            config.streams,
+            config.body_bytes,
+            stats.packets_sent,
+            stats.packets_received,
+            stats.packets_lost,
+            stats.bytes_sent,
+            stats.bytes_received,
+            stats.authentication_failures,
+            stats.local_key_updates,
+            stats.peer_key_updates,
+        },
+    );
+}
+
 test "HTTP/3 external benchmark multi-stream checksum is index-aware" {
     const config: Config = .{
         .mode = .upload,
@@ -546,6 +606,38 @@ test "HTTP/3 external benchmark socket traffic has a distinct evidence scope" {
             "--capture",
         }),
     );
+}
+
+test "HTTP/3 external benchmark transport stats aggregate connection totals" {
+    var totals: TransportStats = .{};
+    totals.add(.{
+        .packets_sent = @as(u64, 10),
+        .packets_received = @as(u64, 9),
+        .packets_lost = @as(u64, 2),
+        .bytes_sent = @as(u64, 1000),
+        .bytes_received = @as(u64, 900),
+        .authentication_failures = @as(u64, 1),
+        .local_key_update_count = @as(u64, 3),
+        .peer_key_update_count = @as(u64, 4),
+    });
+    totals.add(.{
+        .packets_sent = @as(u64, 5),
+        .packets_received = @as(u64, 6),
+        .packets_lost = @as(u64, 1),
+        .bytes_sent = @as(u64, 500),
+        .bytes_received = @as(u64, 600),
+        .authentication_failures = @as(u64, 0),
+        .local_key_update_count = @as(u64, 1),
+        .peer_key_update_count = @as(u64, 2),
+    });
+    try std.testing.expectEqual(@as(u64, 15), totals.packets_sent);
+    try std.testing.expectEqual(@as(u64, 15), totals.packets_received);
+    try std.testing.expectEqual(@as(u64, 3), totals.packets_lost);
+    try std.testing.expectEqual(@as(u64, 1500), totals.bytes_sent);
+    try std.testing.expectEqual(@as(u64, 1500), totals.bytes_received);
+    try std.testing.expectEqual(@as(u64, 1), totals.authentication_failures);
+    try std.testing.expectEqual(@as(u64, 4), totals.local_key_updates);
+    try std.testing.expectEqual(@as(u64, 6), totals.peer_key_updates);
 }
 
 test "HTTP/3 external benchmark budgets aggregate DATA framing" {

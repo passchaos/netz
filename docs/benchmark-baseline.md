@@ -2439,10 +2439,18 @@ reported:
 
 The final netz mean payload is no longer smaller than quic-go's. Netz still
 emits 4.14%/4.77% more sender datagrams and 4.42%/4.97% more UDP payload bytes
-for download/upload. This narrows the next investigation to retransmission and
-control/ACK behavior; userspace totals alone cannot assign that difference to
-a particular encrypted frame type. A QUIC v2 four-stream smoke independently
-passed both role pairings and the same counter-conservation checks.
+for download/upload. The structured follow-up makes the cause explicit. Netz
+reported 4,257 packet-threshold losses in the download sender role and 3,586
+in the upload sender role; the corresponding quic-go receiver qlog reported
+4,264 and 3,615 packet drops, all with `dos_prevention` because its bounded
+per-connection unprocessed-packet queue was full. Duplicate, payload-decrypt,
+and other drop categories were zero, as were netz authentication failures.
+The near one-for-one loss/drop counts show that the remaining retransmissions
+respond to a real peer processing-queue drop at this benchmark boundary rather
+than a packet-number, key-update, or packet-fill defect. A QUIC v2 four-stream
+smoke independently passed both role pairings and the same accounting checks.
+Kernel capture is still required for packet ordering and encrypted frame-shape
+claims.
 
 This host has no effective `CAP_NET_RAW`: the capability probe fails with
 `AF_PACKET was denied` before starting either benchmark process. Parser, PCAP

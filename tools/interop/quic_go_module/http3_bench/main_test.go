@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/qlog"
 )
 
 func multiStreamTestConfig() benchConfig {
@@ -12,6 +13,20 @@ func multiStreamTestConfig() benchConfig {
 		mode: "upload", version: 1, streams: 4, warmup: 1, iterations: 2,
 		bodyBytes: 1000, chunkBytes: 1000, streamWindow: 65536,
 		timeout: time.Second,
+	}
+}
+
+func TestPacketDropTraceClassifiesReasons(t *testing.T) {
+	trace := newPacketDropTrace()
+	trace.RecordEvent(qlog.PacketDropped{Trigger: qlog.PacketDropDOSPrevention})
+	trace.RecordEvent(qlog.PacketDropped{Trigger: qlog.PacketDropDuplicate})
+	trace.RecordEvent(qlog.PacketDropped{Trigger: qlog.PacketDropPayloadDecryptError})
+	trace.RecordEvent(qlog.PacketDropped{Trigger: qlog.PacketDropUnexpectedPacket})
+	trace.RecordEvent(qlog.PacketReceived{})
+	stats := trace.stats()
+	if stats.total != 4 || stats.dosPrevention != 1 || stats.duplicate != 1 ||
+		stats.payloadDecrypt != 1 || stats.other != 1 {
+		t.Fatalf("unexpected packet-drop stats: %+v", stats)
 	}
 }
 
