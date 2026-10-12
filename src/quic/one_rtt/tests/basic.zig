@@ -2553,10 +2553,21 @@ test "QUIC 1-RTT padding-only packets are in flight but non-eliciting" {
     try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
     try std.testing.expect(!client.sent.packets.items[0].ack_eliciting);
     try std.testing.expect(client.sent.packets.items[0].in_flight);
-    try std.testing.expectEqual(@as(usize, 16), client.sent.packets.items[0].bytes);
+    const protected_packet_len = client.sent.packets.items[0].datagram_size;
+    try std.testing.expectEqual(
+        protected_packet_len,
+        client.sent.packets.items[0].bytes,
+    );
+    try std.testing.expectEqual(
+        1 + server_cid.len + 1 + 16 + quic.protection.aead_tag_len,
+        protected_packet_len,
+    );
     try std.testing.expectEqual(@as(usize, 0), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(?one_rtt.LossDetectionTimerDeadline, null), client.lossDetectionTimerDeadline());
-    try std.testing.expectEqual(@as(usize, 16), client.congestion.bytes_in_flight);
+    try std.testing.expectEqual(
+        protected_packet_len,
+        client.congestion.bytes_in_flight,
+    );
 
     var padded = try server.receivePacket();
     defer padded.deinit(allocator);
@@ -4131,7 +4142,7 @@ test "QUIC 1-RTT pacing gates in-flight packets transactionally" {
     const frames = [_]quic.Frame{.{ .padding = .{ .len = 1160 } }};
     try std.testing.expect(connection.pacingEnabled());
     try connection.sendAt(&frames, 1_000_000);
-    const packet_len = connection.sent.packets.items[0].bytes + 1 + "peer".len + 1 + quic.protection.aead_tag_len;
+    const packet_len = connection.sent.packets.items[0].bytes;
     try std.testing.expectEqual(@as(u64, 1), connection.next_packet_number);
     try std.testing.expect(connection.pacingBudgetAt(1_000_000) < packet_len);
 

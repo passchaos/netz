@@ -2603,7 +2603,7 @@ pub const Connection = struct {
                     next_pacing_deadline = deadline;
                     break;
                 }
-                if (payload_len > congestion_available -
+                if (packet_len > congestion_available -
                     @min(congestion_available, total_in_flight))
                 {
                     if (count == 0) return error.CongestionLimited;
@@ -2678,7 +2678,7 @@ pub const Connection = struct {
             total_stream_bytes += packet_stream_bytes;
             total_packet_len += packet_len;
             if (in_flight) {
-                total_in_flight += payload_len;
+                total_in_flight += packet_len;
                 simulated_pacer.onPacketSentAt(
                     now_ns,
                     packet_len,
@@ -2827,7 +2827,7 @@ pub const Connection = struct {
                 packet.packet_number,
                 packet.ack_eliciting,
                 packet.in_flight,
-                packet.payload_len,
+                packet.packet_len,
                 packet.packet_len,
                 batch_ecn,
                 sent_time_ns,
@@ -2918,7 +2918,7 @@ pub const Connection = struct {
             sent_packet_len += packet.packet_len;
             sent_stream_bytes += packet.stream_bytes;
             if (packet.in_flight) {
-                sent_in_flight += packet.payload_len;
+                sent_in_flight += packet.packet_len;
                 self.pacer.onPacketSentAt(
                     now_ns,
                     packet.packet_len,
@@ -5196,12 +5196,12 @@ pub const Connection = struct {
         );
         var tracked_congestion = false;
         if (prepared.is_in_flight) {
-            try self.congestion.reserve(prepared.payload_len);
+            try self.congestion.reserve(prepared.packet_len);
             tracked_congestion = true;
         }
         errdefer {
             if (tracked_congestion) {
-                self.congestion.discard(prepared.payload_len);
+                self.congestion.discard(prepared.packet_len);
             }
         }
         var tracked_recovery = false;
@@ -5253,16 +5253,8 @@ pub const Connection = struct {
             packet_number,
             prepared.is_ack_eliciting,
             prepared.is_in_flight,
-            prepared.payload_len,
-            try quic.protection.shortPacketLen(.{
-                .destination_connection_id = self.config.peer_connection_id,
-                .packet_number = packet_number,
-                .packet_number_len = prepared.packet_number_len,
-                .fixed_bit = true,
-                .spin_bit = false,
-                .key_phase = self.send_key_phase.currentKeyPhase(),
-                .payload = payload,
-            }),
+            prepared.packet_len,
+            prepared.packet_len,
             ecn,
             sent_time_ns,
             null,
@@ -5491,13 +5483,13 @@ pub const Connection = struct {
         @memset(payload, 0);
         payload[0] = @intFromEnum(quic.FrameType.ping);
 
-        try self.congestion.reserve(payload.len);
-        errdefer self.congestion.discard(payload.len);
+        try self.congestion.reserve(probe_size);
+        errdefer self.congestion.discard(probe_size);
         try self.sent.sentInFlightAtWithPmtuAndDatagramSizeAndEpochAndPathEpoch(
             packet_number,
             true,
             true,
-            payload.len,
+            probe_size,
             probe_size,
             .not_ect,
             sent_time_ns,
@@ -6146,8 +6138,8 @@ pub const Connection = struct {
         }
         std.debug.assert(self.scratch.send_packet.capacity >= packet_len);
 
-        self.congestion.onPtoProbeSent(payload.len);
-        errdefer self.congestion.discard(payload.len);
+        self.congestion.onPtoProbeSent(packet_len);
+        errdefer self.congestion.discard(packet_len);
         // IMMEDIATE_ACK is deliberately not retransmitted: every future PTO
         // creates a fresh request. Legacy PING retains recovery ownership.
         const tracked_recovery = !request_immediate_ack;
@@ -6161,7 +6153,7 @@ pub const Connection = struct {
         try self.sent.sentAtWithDatagramSizeAndPathEpoch(
             packet_number,
             true,
-            payload.len,
+            packet_len,
             packet_len,
             .not_ect,
             sent_time_ns,
@@ -6482,7 +6474,6 @@ pub const Connection = struct {
     fn retransmitPtoProbeBatchAt(self: *Connection, first_candidate_index: usize, remaining_limit: usize, sent_time_ns: ?u64) Error!PtoProbeBatchResult {
         const batch_limit = @min(remaining_limit, max_batch_packets);
         var probes: [max_batch_packets]PreparedPtoProbe = undefined;
-        var total_payload_len: usize = 0;
         var total_packet_len: usize = 0;
         var count: usize = 0;
         var simulated_pacer = self.pacer;
@@ -6562,7 +6553,6 @@ pub const Connection = struct {
                 .packet_len = packet_len,
                 .request_immediate_ack = request_immediate_ack,
             };
-            total_payload_len = std.math.add(usize, total_payload_len, payload_len) catch return error.InvalidPayloadLength;
             total_packet_len = std.math.add(usize, total_packet_len, packet_len) catch return error.InvalidPayloadLength;
         }
         if (count == 0) return .{
@@ -6595,14 +6585,14 @@ pub const Connection = struct {
         }
 
         for (probes[0..count]) |probe| {
-            self.congestion.onPtoProbeSent(probe.payload_len);
-            tracked_congestion += probe.payload_len;
+            self.congestion.onPtoProbeSent(probe.packet_len);
+            tracked_congestion += probe.packet_len;
             try self.recovery.recordRetransmission(probe.candidate.group_index, probe.packet_number);
             recorded_recovery_count += 1;
             try self.sent.sentAtWithDatagramSizeAndPathEpoch(
                 probe.packet_number,
                 true,
-                probe.payload_len,
+                probe.packet_len,
                 probe.packet_len,
                 .not_ect,
                 sent_time_ns,
@@ -6674,7 +6664,6 @@ pub const Connection = struct {
         // and transactionally discard the unsent suffix. Protection has still
         // consumed every nonce, so packet-number progress follows the complete
         // sealed batch rather than only the socket-visible prefix.
-        var sent_payload_len: usize = 0;
         var sent_packet_len: usize = 0;
         for (probes[0..send_result.sent_count]) |probe| {
             self.noteOneRttPacketSent(
@@ -6683,7 +6672,6 @@ pub const Connection = struct {
                 now_ns,
                 true,
             );
-            sent_payload_len += probe.payload_len;
             sent_packet_len += probe.packet_len;
             self.pacer.onPacketSentAt(
                 now_ns,
@@ -6693,9 +6681,8 @@ pub const Connection = struct {
             );
             self.congestion.onPacketSent(probe.packet_number);
         }
-        const unsent_payload_len = total_payload_len - sent_payload_len;
         self.releaseAntiAmplification(total_packet_len - sent_packet_len);
-        self.congestion.discard(unsent_payload_len);
+        self.congestion.discard(total_packet_len - sent_packet_len);
         for (probes[send_result.sent_count..count]) |probe| {
             _ = self.recovery.forgetPacketNumber(probe.packet_number);
             _ = self.sent.forget(probe.packet_number);
@@ -6777,17 +6764,17 @@ pub const Connection = struct {
         }
         std.debug.assert(self.scratch.send_packet.capacity >= packet_len);
         switch (mode) {
-            .congestion_controlled => try self.congestion.reserve(payload.len),
-            .pto_probe => self.congestion.onPtoProbeSent(payload.len),
+            .congestion_controlled => try self.congestion.reserve(packet_len),
+            .pto_probe => self.congestion.onPtoProbeSent(packet_len),
         }
-        errdefer self.congestion.discard(payload.len);
+        errdefer self.congestion.discard(packet_len);
 
         try self.recovery.recordRetransmission(candidate.group_index, packet_number);
         errdefer _ = self.recovery.forgetPacketNumber(packet_number);
         try self.sent.sentAtWithDatagramSizeAndPathEpoch(
             packet_number,
             true,
-            payload.len,
+            packet_len,
             packet_len,
             .not_ect,
             sent_time_ns,
@@ -10750,6 +10737,7 @@ pub const Connection = struct {
         // unacknowledged sibling copies on a finite recovery timer after any
         // one copy retires the shared payload group.
         const imported_sent_time_ns = self.monotonicNowNs();
+        var in_flight_bytes: usize = 0;
         var packet_index: usize = 0;
         while (packet_index < sent_count) : (packet_index += 1) {
             const packet_number = earlyDataPacketNumber(
@@ -10776,20 +10764,22 @@ pub const Connection = struct {
                 packet_number,
                 is_ack_eliciting,
                 is_in_flight,
-                payload.items.len,
+                packet_len,
                 datagram_size,
                 .not_ect,
                 imported_sent_time_ns,
                 self.pmtu_path_epoch,
             );
+            if (is_in_flight) {
+                in_flight_bytes = std.math.add(
+                    usize,
+                    in_flight_bytes,
+                    packet_len,
+                ) catch return error.CongestionLimited;
+            }
             tracked_sent_packets += 1;
         }
         if (is_in_flight) {
-            const in_flight_bytes = std.math.mul(
-                usize,
-                payload.items.len,
-                sent_count,
-            ) catch return error.CongestionLimited;
             // These datagrams have already reached the socket during the
             // handshake. Account the complete flight even when PTO copies
             // exceed the newly initialized congestion window.

@@ -164,6 +164,14 @@ test "QUIC 1-RTT stateful batch rolls back unsent suffix and skips nonces" {
     try std.testing.expectEqual(@as(usize, 1), client.pendingRecoveryCount());
     try std.testing.expectEqual(@as(usize, 1), client.sent.packets.items.len);
     try std.testing.expectEqual(
+        client.sent.packets.items[0].datagram_size,
+        client.sent.packets.items[0].bytes,
+    );
+    try std.testing.expectEqual(
+        client.sent.packets.items[0].bytes,
+        client.bytesInFlight(),
+    );
+    try std.testing.expectEqual(
         quic.packet_space.EcnCodepoint.ect0,
         client.sent.packets.items[0].ecn,
     );
@@ -543,11 +551,14 @@ test "QUIC imported 0-RTT copies preserve application packet numbers" {
         @as(usize, 3),
         stats.recovery_queue_stats.packet_number_copies,
     );
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        stats.bytes_in_flight % 3,
-    );
-    const one_copy_bytes = stats.bytes_in_flight / 3;
+    var expected_flight: usize = 0;
+    for (connection.sent.packets.items) |packet| {
+        try std.testing.expectEqual(packet.datagram_size, packet.bytes);
+        expected_flight += packet.bytes;
+    }
+    try std.testing.expectEqual(expected_flight, stats.bytes_in_flight);
+    const one_copy_bytes = connection.sent.packets.items[0].bytes;
+    try std.testing.expectEqual(one_copy_bytes * 3, expected_flight);
     for (0..3) |packet_number| {
         try std.testing.expect(one_rtt.testing.recoveryPayloadForPacket(
             &connection,
@@ -1353,6 +1364,19 @@ test "QUIC DATAGRAM batch validates all input and commits socket prefix" {
     try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
     try std.testing.expectEqual(@as(u64, 0), client.datagramsSent());
 
+    // The encoded DATAGRAM frame fits this payload-sized window, but the
+    // complete protected QUIC packet does not.
+    const initial_window = client.congestion.congestion_window;
+    client.congestion.congestion_window = 5;
+    try std.testing.expectError(
+        error.CongestionLimited,
+        client.trySendDatagrams(&.{"one"}, &committed),
+    );
+    try std.testing.expectEqual(@as(usize, 0), committed);
+    try std.testing.expectEqual(@as(usize, 0), client.bytesInFlight());
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+    client.congestion.congestion_window = initial_window;
+
     var partial_send = ObservedBatchSend{
         .delegate = client.endpoint.io,
         .fail_after_prefix = 1,
@@ -1721,7 +1745,10 @@ test "QUIC 1-RTT PTO batch commits a socket-sent prefix before returning error" 
     try std.testing.expectEqual(@as(usize, 1), partial_send.calls);
     try std.testing.expectEqual(@as(u64, 4), client.next_packet_number);
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
-    try std.testing.expectEqual(bytes_in_flight_before + 2, client.bytesInFlight());
+    try std.testing.expectEqual(
+        bytes_in_flight_before + client.sent.packets.items[2].datagram_size,
+        client.bytesInFlight(),
+    );
     try std.testing.expectEqual(@as(usize, 2), client.recovery.pending.items[0].packetCount());
     try std.testing.expectEqual(@as(usize, 1), client.recovery.pending.items[1].packetCount());
 

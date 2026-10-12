@@ -1184,9 +1184,11 @@ terminal-extension, reordered WebTransport-prefix, and injected send-failure
 tests cover these ownership boundaries.
 
 The 1-RTT anti-amplification budget is server-only and accounts complete
-protected UDP datagram lengths rather than plaintext payload lengths. Batch and
-PTO partial-send rollback retain exactly the socket-visible prefix. Clients can
-therefore probe a migrated or server-preferred address before receiving bytes
+protected UDP datagram lengths rather than plaintext payload lengths. RFC 9002
+congestion accounting likewise includes the QUIC header and AEAD tag for every
+ordinary send, PTO retransmission, PMTU probe, and imported 0-RTT copy. Batch
+and PTO partial-send rollback retain exactly the socket-visible prefix. Clients
+can therefore probe a migrated or server-preferred address before receiving bytes
 on that path, including when the server advertised `disable_active_migration`;
 ordinary client-selected migration still honors that transport parameter.
 PATH_CHALLENGE state is now transactional as well: capacity and frame bytes are

@@ -704,6 +704,11 @@ test "QUIC 1-RTT connection sends and validates PMTU probes" {
     const probe_size = (try client.sendPmtuProbeAt(1300, 10)).?;
     try std.testing.expectEqual(@as(usize, 1300), probe_size);
     try std.testing.expect(!client.pmtudShouldProbe());
+    try std.testing.expectEqual(probe_size, client.bytesInFlight());
+    try std.testing.expectEqual(
+        probe_size,
+        client.sent.packets.items[0].bytes,
+    );
     try std.testing.expectEqual(
         quic.packet_space.EcnCodepoint.not_ect,
         one_rtt.testing.lastSentPacketEcn(&client).?,
@@ -1775,9 +1780,15 @@ test "QUIC 1-RTT connection enforces congestion send window" {
         .peer_connection_id = &server_cid,
     });
     defer client.deinit();
-    client.congestion.congestion_window = 0;
-
     const ping = [_]quic.Frame{.{ .ping = {} }};
+    // The one-byte PING payload fits, but RFC 9002 charges the complete
+    // protected packet (short header, packet number, and AEAD tag).
+    client.congestion.congestion_window = 1;
+    try std.testing.expectError(error.CongestionLimited, client.send(&ping));
+    try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
+    try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);
+
+    client.congestion.congestion_window = 0;
     try std.testing.expectError(error.CongestionLimited, client.send(&ping));
     try std.testing.expectEqual(@as(usize, 0), client.congestion.bytes_in_flight);
     try std.testing.expectEqual(@as(u64, 0), client.next_packet_number);

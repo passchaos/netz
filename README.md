@@ -801,7 +801,8 @@ Current protocol coverage includes:
   confidentiality/integrity limits with proactive key rotation and terminal
   limit handling,
   configurable RFC 9438 CUBIC (default) and NewReno congestion-window control with zero-byte reserve/ACK/loss/PTO accounting no-ops,
-  bytes-in-flight send admission wired into 1-RTT sending and ACK/ACK_ECN processing,
+  RFC 9002 protected-packet bytes-in-flight send admission wired into 1-RTT
+  sending and ACK/ACK_ECN processing,
   deterministic timestamp injection plus automatic monotonic runtime timing,
   default configurable RFC 9406 HyStart++ slow-start overshoot prevention with
   packet-number RTT rounds, Conservative Slow Start, jitter recovery, and public

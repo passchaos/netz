@@ -357,11 +357,14 @@ pub const SentPacket = struct {
     acknowledged: bool = false,
     lost: bool = false,
     loss_reported: bool = false,
+    /// Complete protected QUIC packet bytes counted toward RFC 9002
+    /// bytes_in_flight. This includes QUIC header and AEAD overhead, but not
+    /// UDP or IP overhead.
     bytes: usize = 0,
-    /// Full protected datagram size on the wire for this packet.
+    /// Full UDP datagram payload size containing this packet.
     ///
-    /// Recovery and congestion track only payload bytes in `bytes`, but PMTU
-    /// black-hole detection needs the actual protected datagram length to
+    /// This normally equals `bytes`; a coalesced Initial/0-RTT datagram can be
+    /// larger. PMTU black-hole detection uses the complete datagram length to
     /// determine whether an ordinary packet exercised the validated MTU.
     datagram_size: usize = 0,
     ecn: EcnCodepoint = .not_ect,
