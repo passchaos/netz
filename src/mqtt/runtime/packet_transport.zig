@@ -214,6 +214,16 @@ pub const Transport = union(enum) {
         };
     }
 
+    pub fn takeTls13SessionTicket(
+        self: *Transport,
+    ) Error!?tls_stream.Tls13SessionTicket {
+        return switch (self.*) {
+            .tls_vail => |transport| transport.connection.takeTls13SessionTicket(),
+            .websocket => |ws| ws.connection.takeTls13SessionTicket(),
+            .tls_server, .tcp, .tls => null,
+        };
+    }
+
     pub fn negotiatedCipherSuite(
         self: *const Transport,
     ) ?tls_stream.NegotiatedCipherSuite {

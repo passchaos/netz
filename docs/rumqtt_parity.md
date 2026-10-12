@@ -2433,6 +2433,12 @@ poison later reconnect attempts. The shared stream's bidirectional
 `interop-tls12-ticket-openssl` process gate independently proves both netz
 client and netz server resumption against OpenSSL rather than relying only on
 self-interoperability.
+The versioned stream additionally exposes RFC 8446 TLS 1.3 PSK-DHE tickets:
+post-handshake messages are authenticated and retained instead of discarded,
+and the server issues a fresh stateless ticket after either a full or resumed
+handshake. The bidirectional `interop-tls13-ticket-openssl` gate validates
+both endpoint roles against OpenSSL. Early data remains disabled, so MQTT
+CONNECT ordering is unchanged.
 Configured TLS bridges use the same reconnect-owned ticket lifecycle. Before a
 multi-address attempt, the connector validates the cached ticket against the
 selected endpoint hostname and lifetime; a failover target therefore performs

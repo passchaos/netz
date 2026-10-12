@@ -1030,6 +1030,10 @@ test "public modules are reachable" {
         netz.http1.runtime.VailTlsClientOptions,
         "tls12_ticket_resumption",
     ));
+    try std.testing.expect(@hasField(
+        netz.http1.runtime.VailTlsClientOptions,
+        "tls13_ticket_resumption",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
         "negotiatedTlsProtocol",
@@ -1037,6 +1041,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.Client,
         "takeTls12SessionTicket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http1.runtime.Client,
+        "takeTls13SessionTicket",
     ));
     try std.testing.expect(@hasDecl(
         netz.http1.runtime.RequestWriter,
@@ -6314,6 +6322,10 @@ test "public modules are reachable" {
         "tls12_ticket_resumption",
     ));
     try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ConnectOptions,
+        "tls13_ticket_resumption",
+    ));
+    try std.testing.expect(@hasField(
         netz.mqtt.tls_runtime.ListenOptions,
         "identity",
     ));
@@ -6333,6 +6345,10 @@ test "public modules are reachable" {
         netz.mqtt.tls_runtime.ListenOptions,
         "tls12_session_tickets",
     ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.tls_runtime.ListenOptions,
+        "tls13_session_tickets",
+    ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "peerCertificates",
@@ -6344,6 +6360,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,
         "takeTls12SessionTicket",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.Connection,
+        "takeTls13SessionTicket",
     ));
     try std.testing.expect(@hasDecl(
         netz.mqtt.runtime.Connection,

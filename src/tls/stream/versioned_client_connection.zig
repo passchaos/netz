@@ -31,6 +31,7 @@ pub const Error = std.mem.Allocator.Error ||
     CertificateBundle.RescanError ||
     record_io.Error ||
     vail.tls.versioned_client_connection.Error ||
+    vail.tls.ticket.Error ||
     vail.tls.tls12_client_connection.Error ||
     record_stream.Error ||
     tls12_record_stream.Error ||
@@ -64,6 +65,9 @@ pub const Options = struct {
     /// resumption ticket is always offered and requests renewal.
     request_tls12_session_ticket: bool = true,
     tls12_ticket_resumption: ?*const vail.tls.tls12_ticket.Cached = null,
+    /// Request and retain an RFC 8446 NewSessionTicket on TLS 1.3.
+    request_tls13_session_ticket: bool = true,
+    tls13_ticket_resumption: ?*const vail.tls.ticket.Cached = null,
     request_ocsp: bool = true,
     max_server_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
@@ -85,6 +89,8 @@ pub const VerifiedOptions = struct {
     protocol_policy: version.Policy = .tls12_and_tls13,
     request_tls12_session_ticket: bool = true,
     tls12_ticket_resumption: ?*const vail.tls.tls12_ticket.Cached = null,
+    request_tls13_session_ticket: bool = true,
+    tls13_ticket_resumption: ?*const vail.tls.ticket.Cached = null,
     max_server_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
 };
@@ -107,6 +113,18 @@ pub const Connection = struct {
         tls12: Tls12Exporter,
     };
 
+    const Tls13TicketContext = struct {
+        master_secret: vail.tls.secret.Secret,
+        transcript_after_client_finished: vail.tls.transcript.Digest,
+        server_name: []u8,
+
+        fn deinit(self: *Tls13TicketContext, allocator: std.mem.Allocator) void {
+            self.master_secret.deinit();
+            allocator.free(self.server_name);
+            self.* = undefined;
+        }
+    };
+
     allocator: std.mem.Allocator,
     io: std.Io,
     stream: net.Stream,
@@ -117,6 +135,8 @@ pub const Connection = struct {
     cipher_suite: version.NegotiatedCipherSuite,
     transcript_hash: vail.tls.secret.Hash,
     exporter: Exporter,
+    tls13_ticket_context: ?Tls13TicketContext = null,
+    tls13_session_ticket: ?vail.tls.ticket.Cached = null,
     tls12_session_ticket: ?vail.tls.tls12_ticket.Cached = null,
     resumed: bool,
 
@@ -171,6 +191,11 @@ pub const Connection = struct {
         }
         if (!options.protocol_policy.offersTls12() and
             options.tls12_ticket_resumption != null)
+        {
+            return error.InvalidProtocolPolicy;
+        }
+        if (!options.protocol_policy.offersTls13() and
+            options.tls13_ticket_resumption != null)
         {
             return error.InvalidProtocolPolicy;
         }
@@ -230,10 +255,22 @@ pub const Connection = struct {
         // 1.2 profile and harmless to TLS 1.3 peers.
         tls12_wire[options.tls12_cipher_suites.len] = 0x00ff;
 
-        const now_seconds: u64 = @intCast(@max(
+        const now_milliseconds: u64 = @intCast(@max(
             0,
-            std.Io.Timestamp.now(io, .real).toSeconds(),
+            std.Io.Timestamp.now(io, .real).toMilliseconds(),
         ));
+        const now_seconds = now_milliseconds / std.time.ms_per_s;
+        const tls13_resumption = if (options.tls13_ticket_resumption) |cached| blk: {
+            if (!std.mem.eql(u8, cached.server_name, options.server_name) or
+                !cachedAlpnOffered(cached.alpn, options.alpn_protocols))
+            {
+                return error.SessionContextMismatch;
+            }
+            break :blk try vail.tls.client_connection.ClientPsk.fromCached(
+                cached,
+                now_milliseconds,
+            );
+        } else null;
         const tls13_config = vail.tls.client_connection.Config{
             .allocator = allocator,
             .random = client_random,
@@ -256,6 +293,9 @@ pub const Connection = struct {
             .certificate_compression_algorithms = &.{},
             .server_verifier = options.server_verifier,
             .client_identity = options.client_identity,
+            .request_resumption = options.request_tls13_session_ticket or
+                options.tls13_ticket_resumption != null,
+            .resumption = tls13_resumption,
         };
         const tls12_config = vail.tls.tls12_client_connection.Config{
             .allocator = allocator,
@@ -363,6 +403,8 @@ pub const Connection = struct {
             stream,
             options.server_name,
             now_seconds,
+            options.request_tls13_session_ticket or
+                options.tls13_ticket_resumption != null,
             &established,
         );
     }
@@ -432,6 +474,8 @@ pub const Connection = struct {
             .protocol_policy = options.protocol_policy,
             .request_tls12_session_ticket = options.request_tls12_session_ticket,
             .tls12_ticket_resumption = options.tls12_ticket_resumption,
+            .request_tls13_session_ticket = options.request_tls13_session_ticket,
+            .tls13_ticket_resumption = options.tls13_ticket_resumption,
             .request_ocsp = options.request_ocsp,
             .max_server_handshake_size = options.max_server_handshake_size,
             .handshake_timeout = options.handshake_timeout,
@@ -457,6 +501,10 @@ pub const Connection = struct {
         }
         allocator.free(self.peer_certificate_chain);
         if (self.tls12_session_ticket) |*ticket| ticket.deinit();
+        if (self.tls13_session_ticket) |*ticket| ticket.deinit();
+        if (self.tls13_ticket_context) |*context| {
+            context.deinit(allocator);
+        }
         switch (self.exporter) {
             .tls13 => |*secret| secret.deinit(),
             .tls12 => |*state| {
@@ -504,6 +552,17 @@ pub const Connection = struct {
     ) ?vail.tls.tls12_ticket.Cached {
         const ticket = self.tls12_session_ticket;
         self.tls12_session_ticket = null;
+        return ticket;
+    }
+
+    /// Transfer the newest authenticated RFC 8446 ticket observed while
+    /// reading application traffic. The caller owns the returned cache entry.
+    pub fn takeTls13SessionTicket(
+        self: *Connection,
+    ) Error!?vail.tls.ticket.Cached {
+        try self.captureTls13SessionTicket();
+        const ticket = self.tls13_session_ticket;
+        self.tls13_session_ticket = null;
         return ticket;
     }
 
@@ -576,9 +635,10 @@ pub const Connection = struct {
     }
 
     pub fn read(self: *Connection, out: []u8) Error!usize {
-        return switch (self.records) {
+        const result = switch (self.records) {
             inline else => |*records| records.read(self.io, self.stream, out),
         };
+        return self.finishRead(result);
     }
 
     pub fn readWithDeadline(
@@ -586,7 +646,7 @@ pub const Connection = struct {
         out: []u8,
         deadline: std.Io.Clock.Timestamp,
     ) Error!usize {
-        return switch (self.records) {
+        const result = switch (self.records) {
             inline else => |*records| records.readWithDeadline(
                 self.io,
                 self.stream,
@@ -594,6 +654,54 @@ pub const Connection = struct {
                 deadline,
             ),
         };
+        return self.finishRead(result);
+    }
+
+    fn finishRead(self: *Connection, result: Error!usize) Error!usize {
+        const count = result catch |err| {
+            try self.captureTls13SessionTicket();
+            return err;
+        };
+        try self.captureTls13SessionTicket();
+        return count;
+    }
+
+    fn captureTls13SessionTicket(self: *Connection) Error!void {
+        const context = if (self.tls13_ticket_context) |*value|
+            value
+        else
+            return;
+        var message = switch (self.records) {
+            .tls13 => |*records| records.takeNewSessionTicketMessage() orelse
+                return,
+            .tls12 => return,
+        };
+        defer message.deinit(self.allocator);
+        var ticket = vail.tls.ticket.cache(
+            self.allocator,
+            message.items,
+            switch (self.records) {
+                .tls13 => |*records| records.read_keys.suite,
+                .tls12 => unreachable,
+            },
+            context.master_secret,
+            context.transcript_after_client_finished,
+            context.server_name,
+            self.selected_alpn orelse "",
+            @intCast(@max(
+                0,
+                std.Io.Timestamp.now(self.io, .real).toMilliseconds(),
+            )),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return,
+            else => {
+                self.records.tls13.failed = true;
+                return err;
+            },
+        };
+        errdefer ticket.deinit();
+        if (self.tls13_session_ticket) |*cached| cached.deinit();
+        self.tls13_session_ticket = ticket;
     }
 
     pub fn writeAll(self: *Connection, bytes: []const u8) Error!void {
@@ -674,6 +782,7 @@ fn fromEstablished(
     stream: net.Stream,
     server_identity: []const u8,
     now_seconds: u64,
+    retain_tls13_session_tickets: bool,
     established: *AutoClient.Established,
 ) Error!*Connection {
     const connection = try allocator.create(Connection);
@@ -687,19 +796,32 @@ fn fromEstablished(
             value.peer_certificate_chain = &.{};
             const cipher_suite = value.application.suite;
             const exporter = value.exporter_master_secret;
+            var ticket_context: ?Connection.Tls13TicketContext =
+                if (retain_tls13_session_tickets) .{
+                    .master_secret = value.master_secret,
+                    .transcript_after_client_finished = value.transcript_after_client_finished,
+                    .server_name = try allocator.dupe(u8, server_identity),
+                } else null;
+            errdefer if (ticket_context) |*context| {
+                context.deinit(allocator);
+            };
             var records = record_stream.Stream.init(
                 value.application.traffic.read.keys,
                 value.application.traffic.write.keys,
                 value.application.traffic.read.traffic_secret,
                 value.application.traffic.write.traffic_secret,
             );
+            records.read_sequence =
+                value.application.traffic.read.next_sequence_number;
+            records.write_sequence =
+                value.application.traffic.write.next_sequence_number;
             value.application.secrets_extracted = true;
             std.crypto.secureZero(
                 u8,
                 std.mem.asBytes(&value.application.traffic),
             );
             value.application.deinit();
-            value.master_secret.deinit();
+            if (!retain_tls13_session_tickets) value.master_secret.deinit();
             value.exporter_master_secret.deinit();
             if (value.local_application_settings) |settings| {
                 allocator.free(settings);
@@ -708,7 +830,11 @@ fn fromEstablished(
                 allocator.free(settings);
             }
             value.* = undefined;
-            records.allowNewSessionTickets();
+            if (retain_tls13_session_tickets) {
+                records.retainNewSessionTickets(allocator);
+            } else {
+                records.allowNewSessionTickets();
+            }
             break :blk .{
                 .allocator = allocator,
                 .io = io,
@@ -720,6 +846,8 @@ fn fromEstablished(
                 .cipher_suite = .fromTls13(cipher_suite),
                 .transcript_hash = cipher_suite.hash(),
                 .exporter = .{ .tls13 = exporter },
+                .tls13_ticket_context = ticket_context,
+                .tls13_session_ticket = null,
                 .tls12_session_ticket = null,
                 .resumed = resumed,
             };
@@ -761,6 +889,8 @@ fn fromEstablished(
                 .cipher_suite = .fromTls12(suite),
                 .transcript_hash = version.transcriptHash(suite),
                 .exporter = .{ .tls12 = exporter },
+                .tls13_ticket_context = null,
+                .tls13_session_ticket = null,
                 .tls12_session_ticket = session_ticket,
                 .resumed = resumed,
             };
@@ -768,6 +898,17 @@ fn fromEstablished(
     };
     established.* = undefined;
     return connection;
+}
+
+fn cachedAlpnOffered(
+    cached: []const u8,
+    offered: []const []const u8,
+) bool {
+    if (cached.len == 0) return offered.len == 0;
+    for (offered) |protocol| {
+        if (std.mem.eql(u8, cached, protocol)) return true;
+    }
+    return false;
 }
 
 fn driveAuto(

@@ -22,6 +22,7 @@ pub const Error = std.mem.Allocator.Error ||
     record_io.Error ||
     server_handshake.Error ||
     vail.tls.versioned_server_connection.Error ||
+    vail.tls.ticket.Error ||
     record_stream.Error ||
     tls12_record_stream.Error ||
     error{
@@ -33,6 +34,13 @@ pub const Error = std.mem.Allocator.Error ||
     };
 
 pub const Options = struct {
+    pub const Tls13SessionTicketPolicy = struct {
+        keyring: *const vail.tls.ticket_keyring.Keyring,
+        /// Stable identity bound into ticket AEAD associated data.
+        server_id: []const u8,
+        lifetime_seconds: u32 = 24 * 60 * 60,
+    };
+
     pub const Tls12SessionTicketPolicy = struct {
         keyring: *const vail.tls.ticket_keyring.Keyring,
         /// Stable identity bound into ticket AEAD associated data.
@@ -51,6 +59,7 @@ pub const Options = struct {
     max_client_handshake_size: usize = max_handshake_size,
     handshake_timeout: ?std.Io.Duration = null,
     client_auth: ?vail.tls.client_auth.ServerPolicy = null,
+    tls13_session_tickets: ?Tls13SessionTicketPolicy = null,
     tls12_session_tickets: ?Tls12SessionTicketPolicy = null,
     alpn_protocols: []const []const u8 = &.{},
     require_alpn: bool = true,
@@ -66,6 +75,16 @@ pub const Options = struct {
     }
 
     pub fn validateIdentity(self: Options) Error!void {
+        if (self.tls13_session_tickets) |tickets| {
+            if (!self.protocol_policy.offersTls13() or
+                tickets.server_id.len == 0 or
+                tickets.lifetime_seconds == 0 or
+                tickets.lifetime_seconds >
+                    vail.tls.ticket.max_lifetime_seconds)
+            {
+                return error.InvalidSessionTicketConfiguration;
+            }
+        }
         if (self.tls12_session_tickets) |tickets| {
             if (!self.protocol_policy.offersTls12() or
                 tickets.server_id.len == 0 or
@@ -78,7 +97,8 @@ pub const Options = struct {
         }
         var lease = try self.acquireIdentity();
         defer lease.deinit();
-        if (self.tls12_session_tickets != null and
+        if ((self.tls13_session_tickets != null or
+            self.tls12_session_tickets != null) and
             (lease.client_auth != null or self.client_auth != null))
         {
             return error.InvalidSessionTicketConfiguration;
@@ -178,7 +198,9 @@ pub const Connection = struct {
         defer identity_lease.deinit();
         const identity = identity_lease.identity;
         const client_auth = identity_lease.client_auth orelse options.client_auth;
-        if (options.tls12_session_tickets != null and client_auth != null) {
+        if ((options.tls13_session_tickets != null or
+            options.tls12_session_tickets != null) and client_auth != null)
+        {
             return error.InvalidSessionTicketConfiguration;
         }
 
@@ -238,6 +260,9 @@ pub const Connection = struct {
         const engine = try allocator.create(AutoServer);
         defer allocator.destroy(engine);
         defer std.crypto.secureZero(u8, std.mem.asBytes(engine));
+        const now = std.Io.Timestamp.now(io, .real);
+        const now_milliseconds: u64 = @intCast(@max(0, now.toMilliseconds()));
+        const now_seconds = now_milliseconds / std.time.ms_per_s;
         engine.initInto(.{
             .tls13 = .{
                 .allocator = allocator,
@@ -255,6 +280,14 @@ pub const Connection = struct {
                     .certificate_authorities = policy.certificate_authorities,
                 } else null,
                 .client_auth_policy = client_auth,
+                .resumption = if (options.tls13_session_tickets) |tickets|
+                    .{ .tickets = .{
+                        .keyring = tickets.keyring,
+                        .server_id = tickets.server_id,
+                        .now_ms = now_milliseconds,
+                    } }
+                else
+                    null,
             },
             .tls12 = .{
                 .allocator = allocator,
@@ -277,10 +310,7 @@ pub const Connection = struct {
                     .{
                         .keyring = tickets.keyring,
                         .server_id = tickets.server_id,
-                        .now_seconds = @intCast(@max(
-                            0,
-                            std.Io.Timestamp.now(io, .real).toSeconds(),
-                        )),
+                        .now_seconds = now_seconds,
                         .lifetime_seconds = tickets.lifetime_seconds,
                         .sealing_nonce = ticket_nonce,
                     }
@@ -320,6 +350,7 @@ pub const Connection = struct {
             io,
             stream,
             selected_alpn,
+            options.tls13_session_tickets,
             &established,
         );
     }
@@ -538,6 +569,7 @@ fn fromEstablished(
     io: std.Io,
     stream: net.Stream,
     selected_alpn: ?[]const u8,
+    tls13_session_tickets: ?Options.Tls13SessionTicketPolicy,
     established: *AutoServer.Established,
 ) Error!*Connection {
     const owned_alpn = if (selected_alpn) |protocol|
@@ -546,8 +578,39 @@ fn fromEstablished(
         null;
     errdefer if (owned_alpn) |protocol| allocator.free(protocol);
     const connection = try allocator.create(Connection);
+    errdefer allocator.destroy(connection);
     connection.* = switch (established.*) {
         .tls13 => |*value| blk: {
+            if (tls13_session_tickets) |tickets| {
+                var sealing_nonce: [vail.tls.ticket_keyring.nonce_len]u8 =
+                    undefined;
+                defer std.crypto.secureZero(u8, &sealing_nonce);
+                try std.Io.randomSecure(io, &sealing_nonce);
+                var ticket_nonce: [8]u8 = undefined;
+                defer std.crypto.secureZero(u8, &ticket_nonce);
+                try std.Io.randomSecure(io, &ticket_nonce);
+                var encoded_age_add: [4]u8 = undefined;
+                try std.Io.randomSecure(io, &encoded_age_add);
+                var encoded_ticket: [record_io.max_record_len]u8 = undefined;
+                const ticket_len = try value.sealNewSessionTicket(
+                    allocator,
+                    .{
+                        .keyring = tickets.keyring,
+                        .sealing_nonce = sealing_nonce,
+                        .server_id = tickets.server_id,
+                        .alpn = selected_alpn orelse "",
+                        .ticket_nonce = &ticket_nonce,
+                        .age_add = std.mem.readInt(u32, &encoded_age_add, .big),
+                        .issued_at_ms = @intCast(@max(
+                            0,
+                            std.Io.Timestamp.now(io, .real).toMilliseconds(),
+                        )),
+                        .lifetime_seconds = tickets.lifetime_seconds,
+                    },
+                    &encoded_ticket,
+                );
+                try record_io.writeAll(io, stream, encoded_ticket[0..ticket_len]);
+            }
             const resumed = value.resumed;
             const peer_certificate_chain = value.peer_certificate_chain;
             value.peer_certificate_chain = null;
@@ -559,6 +622,11 @@ fn fromEstablished(
                 value.application.traffic.read.traffic_secret,
                 value.application.traffic.write.traffic_secret,
             );
+            var transferred_records = records;
+            transferred_records.read_sequence =
+                value.application.traffic.read.next_sequence_number;
+            transferred_records.write_sequence =
+                value.application.traffic.write.next_sequence_number;
             value.application.secrets_extracted = true;
             std.crypto.secureZero(
                 u8,
@@ -578,7 +646,7 @@ fn fromEstablished(
                 .allocator = allocator,
                 .io = io,
                 .stream = stream,
-                .records = .{ .tls13 = records },
+                .records = .{ .tls13 = transferred_records },
                 .selected_alpn = owned_alpn,
                 .peer_certificate_chain = if (peer_certificate_chain) |chain|
                     @ptrCast(chain)

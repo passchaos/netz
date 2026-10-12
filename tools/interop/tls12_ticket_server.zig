@@ -1,13 +1,15 @@
-//! Two-connection TLS 1.2 server used by the OpenSSL RFC 5077 gate.
+//! Two-connection TLS 1.2/1.3 server used by the OpenSSL ticket gates.
 
 const std = @import("std");
 const netz = @import("netz");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 2) return error.InvalidArgument;
+    if (args.len < 2 or args.len > 3) return error.InvalidArgument;
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
+    const tls13 = args.len == 3 and std.mem.eql(u8, args[2], "tls13");
+    if (args.len == 3 and !tls13) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -31,8 +33,8 @@ pub fn main(init: std.process.Init) !void {
     );
     defer listener.deinit(io);
     std.debug.print(
-        "netz TLS 1.2 ticket server listening server_io=zio-std-io\n",
-        .{},
+        "netz TLS {s} ticket server listening server_io=zio-std-io\n",
+        .{if (tls13) "1.3" else "1.2"},
     );
 
     for (0..2) |index| {
@@ -50,29 +52,34 @@ pub fn main(init: std.process.Init) !void {
                         .key_pair = key_pair,
                     } },
                 },
-                .tls12_cipher_suites = &.{
-                    .ecdhe_ecdsa_aes_128_gcm_sha256,
-                },
-                .protocol_policy = .tls12_only,
+                .tls12_cipher_suites = &.{.ecdhe_ecdsa_aes_128_gcm_sha256},
+                .protocol_policy = if (tls13) .tls13_only else .tls12_only,
                 .alpn_protocols = &.{"http/1.1"},
-                .tls12_session_tickets = .{
+                .tls13_session_tickets = if (tls13) .{
                     .keyring = &keyring,
                     .server_id = "localhost",
                     .lifetime_seconds = 3600,
-                },
+                } else null,
+                .tls12_session_tickets = if (!tls13) .{
+                    .keyring = &keyring,
+                    .server_id = "localhost",
+                    .lifetime_seconds = 3600,
+                } else null,
             },
         );
         stream_owned = false;
         defer connection.deinit();
-        if (connection.negotiatedProtocol() != .tls12 or
+        const expected_protocol: netz.tls.stream.Protocol =
+            if (tls13) .tls13 else .tls12;
+        if (connection.negotiatedProtocol() != expected_protocol or
             connection.wasResumed() != (index == 1))
         {
             return error.InvalidSessionResumption;
         }
         try connection.writeAll("ticket-ok\n");
         std.debug.print(
-            "netz accepted OpenSSL TLS 1.2 handshake resumed={}\n",
-            .{connection.wasResumed()},
+            "netz accepted OpenSSL TLS {s} handshake resumed={}\n",
+            .{ if (tls13) "1.3" else "1.2", connection.wasResumed() },
         );
     }
 }

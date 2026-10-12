@@ -36,11 +36,14 @@ pub const VersionPolicy = @import("version.zig").Policy;
 pub const NegotiatedCipherSuite =
     @import("version.zig").NegotiatedCipherSuite;
 pub const Tls12CipherSuite = @import("vail").tls.tls12.Suite;
+pub const Tls13SessionTicket = @import("vail").tls.ticket.Cached;
 pub const Tls12SessionTicket = @import("vail").tls.tls12_ticket.Cached;
 pub const Tls12TicketKeyring = @import("vail").tls.ticket_keyring.Keyring;
 pub const tls12_ticket_key_len = @import("vail").tls.ticket_keyring.key_len;
 pub const Tls12ServerTicketPolicy =
     @import("versioned_server_connection.zig").Options.Tls12SessionTicketPolicy;
+pub const Tls13ServerTicketPolicy =
+    @import("versioned_server_connection.zig").Options.Tls13SessionTicketPolicy;
 pub const default_tls12_cipher_suites =
     &@import("version.zig").default_tls12_cipher_suites;
 

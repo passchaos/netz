@@ -13,7 +13,7 @@ const record_io = @import("record_io.zig");
 const net = std.Io.net;
 const tls_record = vail.tls.record;
 
-pub const Error = record_io.Error || tls_record.Error ||
+pub const Error = std.mem.Allocator.Error || record_io.Error || tls_record.Error ||
     vail.tls.secret.Error || error{
     ConnectionClosed,
     InvalidTlsAlert,
@@ -59,6 +59,9 @@ pub const Stream = struct {
     post_handshake_len: usize = 0,
     post_handshake_body_remaining: usize = 0,
     accept_new_session_tickets: bool = false,
+    session_ticket_allocator: ?std.mem.Allocator = null,
+    session_ticket_message: std.ArrayList(u8) = .empty,
+    session_ticket_ready: bool = false,
     session_tickets_discarded: u64 = 0,
     consecutive_peer_key_updates: usize = 0,
     // These counters can be inspected by an application thread while its sole
@@ -102,6 +105,9 @@ pub const Stream = struct {
         self.write_keys.deinit();
         self.read_traffic_secret.deinit();
         self.write_traffic_secret.deinit();
+        if (self.session_ticket_allocator) |allocator| {
+            self.session_ticket_message.deinit(allocator);
+        }
         std.crypto.secureZero(u8, &self.buffered_plaintext);
         std.crypto.secureZero(u8, &self.post_handshake);
         std.crypto.secureZero(u8, &self.pending_write);
@@ -114,6 +120,26 @@ pub const Stream = struct {
     /// not enable this and therefore reject client-sent tickets.
     pub fn allowNewSessionTickets(self: *Stream) void {
         self.accept_new_session_tickets = true;
+    }
+
+    /// Retain the newest complete authenticated NewSessionTicket for the
+    /// owning client connection. A later ticket replaces the unread one.
+    pub fn retainNewSessionTickets(
+        self: *Stream,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.accept_new_session_tickets = true;
+        self.session_ticket_allocator = allocator;
+    }
+
+    pub fn takeNewSessionTicketMessage(
+        self: *Stream,
+    ) ?std.ArrayList(u8) {
+        if (!self.session_ticket_ready) return null;
+        const message = self.session_ticket_message;
+        self.session_ticket_message = .empty;
+        self.session_ticket_ready = false;
+        return message;
     }
 
     pub fn discardedSessionTicketCount(self: *const Stream) u64 {
@@ -332,11 +358,21 @@ pub const Stream = struct {
                     self.post_handshake_body_remaining,
                     bytes.len - offset,
                 );
+                if (self.session_ticket_allocator) |allocator| {
+                    try self.session_ticket_message.appendSlice(
+                        allocator,
+                        bytes[offset..][0..count],
+                    );
+                }
                 self.post_handshake_body_remaining -= count;
                 offset += count;
                 if (self.post_handshake_body_remaining == 0) {
                     self.post_handshake_len = 0;
-                    self.session_tickets_discarded +|= 1;
+                    if (self.session_ticket_allocator != null) {
+                        self.session_ticket_ready = true;
+                    } else {
+                        self.session_tickets_discarded +|= 1;
+                    }
                 }
                 continue;
             }
@@ -362,6 +398,20 @@ pub const Stream = struct {
                     body_len > max_new_session_ticket_body_len)
                 {
                     return error.InvalidNewSessionTicket;
+                }
+                if (self.session_ticket_allocator) |allocator| {
+                    if (self.session_ticket_ready) {
+                        self.session_tickets_discarded +|= 1;
+                    }
+                    try self.session_ticket_message.ensureTotalCapacity(
+                        allocator,
+                        body_len + 4,
+                    );
+                    self.session_ticket_message.clearRetainingCapacity();
+                    self.session_ticket_message.appendSliceAssumeCapacity(
+                        self.post_handshake[0..4],
+                    );
+                    self.session_ticket_ready = false;
                 }
                 self.post_handshake_body_remaining = body_len;
                 continue;
@@ -1315,4 +1365,53 @@ test "TLS record stream client discards bounded fragmented NewSessionTicket" {
         error.InvalidNewSessionTicket,
         server_records.consumePostHandshake(undefined, undefined, ticket_and_update[0..18]),
     );
+}
+
+test "TLS record stream retains the newest complete NewSessionTicket" {
+    const suite = vail.tls.cipher_suite.Suite.aes_128_gcm_sha256;
+    const bytes = [_]u8{0x65} ** 32;
+    var traffic_secret = try vail.tls.secret.Secret.init(suite.hash(), &bytes);
+    defer traffic_secret.deinit();
+    var records = Stream.init(
+        try tls_record.Keys.derive(suite, traffic_secret),
+        try tls_record.Keys.derive(suite, traffic_secret),
+        traffic_secret,
+        traffic_secret,
+    );
+    defer records.deinit();
+    records.retainNewSessionTickets(std.testing.allocator);
+
+    const ticket_and_update = [_]u8{
+        handshake_type_new_session_ticket, 0, 0, 14,
+        0, 0, 0, 1, // lifetime
+        0, 0, 0, 2, // age_add
+        0, // nonce length
+        0, 1, 0xaa, // one-byte ticket
+        0,                         0, // extensions
+        handshake_type_key_update, 0,
+        0,                         1,
+        0,
+    };
+    try records.consumePostHandshake(
+        undefined,
+        undefined,
+        ticket_and_update[0..9],
+    );
+    try std.testing.expect(records.takeNewSessionTicketMessage() == null);
+    try records.consumePostHandshake(
+        undefined,
+        undefined,
+        ticket_and_update[9..],
+    );
+    var retained = records.takeNewSessionTicketMessage() orelse
+        return error.MissingSessionTicket;
+    defer retained.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(
+        u8,
+        ticket_and_update[0..18],
+        retained.items,
+    );
+    try std.testing.expect(records.takeNewSessionTicketMessage() == null);
+    try std.testing.expectEqual(@as(u64, 0), records.discardedSessionTicketCount());
+    try std.testing.expectEqual(@as(u64, 1), records.keyUpdateCounts().received);
 }

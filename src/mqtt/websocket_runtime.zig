@@ -603,6 +603,7 @@ pub const TlsServer = struct {
             .cipher_suites = options.cipher_suites,
             .tls12_cipher_suites = options.tls12_cipher_suites,
             .protocol_policy = options.protocol_policy,
+            .tls13_session_tickets = options.tls13_session_tickets,
             .tls12_session_tickets = options.tls12_session_tickets,
             .max_client_hello_size = options.max_client_hello_size,
             .max_client_handshake_size = options.max_client_handshake_size,
@@ -845,6 +846,7 @@ pub const TlsListenOptions = struct {
     tls12_cipher_suites: []const @import("vail").tls.tls12.Suite =
         tls_stream.default_tls12_cipher_suites,
     protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
+    tls13_session_tickets: ?tls_stream.Tls13ServerTicketPolicy = null,
     tls12_session_tickets: ?tls_stream.Tls12ServerTicketPolicy = null,
     max_client_hello_size: usize = 64 * 1024,
     max_client_handshake_size: usize = 256 * 1024,
@@ -2032,6 +2034,8 @@ pub const ConnectOptions = struct {
     protocol_policy: tls_stream.VersionPolicy = .tls13_only,
     request_tls12_session_ticket: bool = true,
     tls12_ticket_resumption: ?*const tls_stream.Tls12SessionTicket = null,
+    request_tls13_session_ticket: bool = true,
+    tls13_ticket_resumption: ?*const tls_stream.Tls13SessionTicket = null,
     max_server_handshake_size: usize = 256 * 1024,
     /// Absolute receive budget for the vail WSS client handshake.
     tls_handshake_timeout: ?std.Io.Duration = null,
@@ -2512,6 +2516,8 @@ fn websocketConnectOptions(
                 .protocol_policy = options.protocol_policy,
                 .request_tls12_session_ticket = options.request_tls12_session_ticket,
                 .tls12_ticket_resumption = options.tls12_ticket_resumption,
+                .request_tls13_session_ticket = options.request_tls13_session_ticket,
+                .tls13_ticket_resumption = options.tls13_ticket_resumption,
                 .max_server_handshake_size = options.max_server_handshake_size,
                 .handshake_timeout = options.tls_handshake_timeout,
             }

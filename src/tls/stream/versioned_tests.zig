@@ -286,6 +286,162 @@ test "TLS 1.2 RFC 5077 ticket resumes the authenticated session" {
     );
 }
 
+test "TLS 1.3 RFC 8446 ticket resumes the authenticated session" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var keyring = try @import("vail").tls.ticket_keyring.Keyring.init(.{
+        .id = 11,
+        .secret = [_]u8{0x6b} ** @import("vail").tls.ticket_keyring.key_len,
+    });
+    defer keyring.deinit();
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        listener: *std.Io.net.Server,
+        io: std.Io,
+        certificate: *const [tls_testing.certificate_der_len]u8,
+        key_pair: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+        keyring: *const @import("vail").tls.ticket_keyring.Keyring,
+        resumed: [3]bool = .{ false, false, false },
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            for (0..3) |index| {
+                const stream = shared.listener.accept(shared.io) catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                var stream_owned = true;
+                defer if (stream_owned) stream.close(shared.io);
+                const connection = server.Connection.init(
+                    std.testing.allocator,
+                    shared.io,
+                    stream,
+                    .{
+                        .identity = .{
+                            .certificate_chain = &.{shared.certificate},
+                            .signer = .{ .ecdsa_p256_sha256 = .{
+                                .key_pair = shared.key_pair,
+                            } },
+                        },
+                        .protocol_policy = .tls13_only,
+                        .alpn_protocols = &.{"h2"},
+                        .tls13_session_tickets = .{
+                            .keyring = shared.keyring,
+                            .server_id = "localhost",
+                            .lifetime_seconds = 3600,
+                        },
+                    },
+                ) catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                stream_owned = false;
+                defer connection.deinit();
+                shared.resumed[index] = connection.wasResumed();
+                var request: [4]u8 = undefined;
+                var offset: usize = 0;
+                while (offset < request.len) {
+                    const count = connection.read(request[offset..]) catch |err| {
+                        shared.err = err;
+                        return;
+                    };
+                    if (count == 0) {
+                        shared.err = error.ConnectionClosed;
+                        return;
+                    }
+                    offset += count;
+                }
+                connection.writeAll("pong") catch |err| {
+                    shared.err = err;
+                    return;
+                };
+            }
+        }
+    };
+    var shared = Shared{
+        .listener = &listener,
+        .io = io,
+        .certificate = &certificate_der,
+        .key_pair = key_pair,
+        .keyring = &keyring,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var cached: ?@import("vail").tls.ticket.Cached = null;
+    defer if (cached) |*ticket| ticket.deinit();
+    for (0..3) |index| {
+        if (index == 2) {
+            cached.?.identity[cached.?.identity.len - 1] ^= 1;
+        }
+        const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+        var stream_owned = true;
+        defer if (stream_owned) stream.close(io);
+        const connection = try client.Connection.init(allocator, io, stream, .{
+            .server_name = "localhost",
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .protocol_policy = .tls13_only,
+            .alpn_protocols = &.{"h2"},
+            .tls13_ticket_resumption = if (index == 0) null else &cached.?,
+        });
+        stream_owned = false;
+        defer connection.deinit();
+        try std.testing.expectEqual(index == 1, connection.wasResumed());
+        try connection.writeAll("ping");
+        var response: [4]u8 = undefined;
+        var offset: usize = 0;
+        while (offset < response.len) {
+            const count = try connection.read(response[offset..]);
+            if (count == 0) return error.ConnectionClosed;
+            offset += count;
+        }
+        try std.testing.expectEqualStrings("pong", &response);
+        if (try connection.takeTls13SessionTicket()) |renewed| {
+            if (cached) |*ticket| ticket.deinit();
+            cached = renewed;
+        }
+        try std.testing.expect(cached != null);
+        if (index == 0) {
+            try std.testing.expectEqualStrings("localhost", cached.?.server_name);
+            try std.testing.expectEqualStrings("h2", cached.?.alpn);
+            try std.testing.expectError(
+                error.ExpiredTicket,
+                cached.?.obfuscatedTicketAge(
+                    cached.?.received_at_ms +
+                        @as(u64, cached.?.lifetime_seconds) * std.time.ms_per_s + 1,
+                ),
+            );
+        }
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false },
+        &shared.resumed,
+    );
+}
+
 fn exerciseVersion(policy: version.Policy) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

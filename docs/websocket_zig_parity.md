@@ -92,6 +92,8 @@ binary echo regression covers the legacy-compatible path. QUIC-backed RFC
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.
+The same versioned WSS transport exposes RFC 8446 TLS 1.3 NewSessionTicket
+extraction and PSK-DHE resumption without enabling early data.
 End-to-end tests cover verified localhost CA/SAN, strict subprotocol selection,
 encrypted binary echo, public-client mTLS with server pin verification and
 application-visible client certificate chains, and the shared close/ownership

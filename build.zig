@@ -2214,6 +2214,19 @@ pub fn build(b: *std.Build) void {
     tls12_ticket_openssl_step.dependOn(&tls12_ticket_openssl.step);
     test_step.dependOn(&tls12_ticket_openssl.step);
 
+    const tls13_ticket_openssl = b.addSystemCommand(
+        &.{"tools/interop/tls12_ticket_openssl.sh"},
+    );
+    tls13_ticket_openssl.addArtifactArg(tls12_ticket_server);
+    tls13_ticket_openssl.addArtifactArg(tls12_ticket_client);
+    tls13_ticket_openssl.addArg("tls13");
+    const tls13_ticket_openssl_step = b.step(
+        "interop-tls13-ticket-openssl",
+        "Verify bidirectional TLS 1.3 session-ticket resumption with OpenSSL",
+    );
+    tls13_ticket_openssl_step.dependOn(&tls13_ticket_openssl.step);
+    test_step.dependOn(&tls13_ticket_openssl.step);
+
     const quic_peer_client = b.addExecutable(.{
         .name = "netz-quic-peer-client",
         .root_module = b.createModule(.{

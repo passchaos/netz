@@ -244,6 +244,9 @@ Current protocol coverage includes:
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in
   both the TLS client and server roles,
+  RFC 8446 TLS 1.3 PSK-DHE resumption with authenticated post-handshake
+  NewSessionTicket retention, identity/ALPN/age validation, renewed tickets,
+  and invalid-ticket fallback to a certificate-authenticated full handshake,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation

@@ -1034,6 +1034,14 @@ standard-library TLS path by default and selects the versioned Vail path with
 directions at a process boundary: OpenSSL resumes a ticket issued by the netz
 server, and the netz HTTP/1 client resumes a ticket issued by `openssl
 s_server` before completing another request.
+The versioned stream API also supports RFC 8446 TLS 1.3 PSK-DHE resumption.
+Clients retain the newest authenticated post-handshake NewSessionTicket with
+its resumption secret, server identity, ALPN, cipher hash and ticket age;
+servers issue a fresh stateless ticket after full and resumed handshakes and
+fall back to certificate authentication when an opaque ticket is invalid.
+`zig build interop-tls13-ticket-openssl -Doptimize=ReleaseSafe` verifies both
+endpoint-role directions against OpenSSL, including an HTTP/1 request after
+the resumed handshake. The existing TLS 1.2 gate remains separate.
 
 | Area | netz | hyper |
 | --- | --- | --- |

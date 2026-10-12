@@ -2980,6 +2980,12 @@ pub const Connection = struct {
         return self.transport.takeTls12SessionTicket();
     }
 
+    pub fn takeTls13SessionTicket(
+        self: *Connection,
+    ) Error!?tls_stream.Tls13SessionTicket {
+        return self.transport.takeTls13SessionTicket();
+    }
+
     /// Return authenticated TLS cipher-suite metadata for native TLS or
     /// vail-backed WSS. Other transports return null.
     pub fn negotiatedCipherSuite(
