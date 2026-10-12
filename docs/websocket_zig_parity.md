@@ -89,6 +89,10 @@ The vail-backed WSS client and server expose explicit TLS-1.2-only,
 TLS-1.3-only, and highest-version policies; a real TLS 1.2 ALPN Upgrade and
 binary echo regression covers the legacy-compatible path. QUIC-backed RFC
 9220 WebSocket remains TLS 1.3-only as required by QUIC.
+TLS 1.2 WSS clients select a configured identity only when its certificate
+type, signature algorithm, and issuing CA match CertificateRequest. P-521 is
+included in the supported signature set, and an unsuitable identity produces
+the required empty Certificate response instead of aborting optional mTLS.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.

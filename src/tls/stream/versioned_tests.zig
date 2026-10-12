@@ -124,6 +124,153 @@ test "versioned TLS stream refuses a disjoint version policy" {
     );
 }
 
+test "versioned TLS 1.2 client skips identity for unmatched CA" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const unrelated_ca_name = [_]u8{
+        0x30, 0x17, 0x31, 0x15, 0x30, 0x13, 0x06, 0x03,
+        0x55, 0x04, 0x03, 0x0c, 0x0c,
+    } ++ "Unrelated CA".*;
+    var listener = try (std.Io.net.IpAddress{ .ip4 = .loopback(0) }).listen(
+        io,
+        .{ .reuse_address = true },
+    );
+    defer listener.deinit(io);
+
+    const Shared = struct {
+        listener: *std.Io.net.Server,
+        io: std.Io,
+        certificate: *const [tls_testing.certificate_der_len]u8,
+        key_pair: std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair,
+        public_key: [
+            std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey
+                .uncompressed_sec1_encoded_length
+        ]u8,
+        authority: []const u8,
+        peer_sent_certificate: bool = true,
+        err: ?anyerror = null,
+
+        fn run(shared: *@This()) void {
+            const stream = shared.listener.accept(shared.io) catch |err| {
+                shared.err = err;
+                return;
+            };
+            var stream_owned = true;
+            defer if (stream_owned) stream.close(shared.io);
+            const connection = server.Connection.init(
+                std.testing.allocator,
+                shared.io,
+                stream,
+                .{
+                    .identity = .{
+                        .certificate_chain = &.{shared.certificate},
+                        .signer = .{ .ecdsa_p256_sha256 = .{
+                            .key_pair = shared.key_pair,
+                        } },
+                    },
+                    .tls12_cipher_suites = &.{
+                        .ecdhe_ecdsa_aes_128_gcm_sha256,
+                    },
+                    .protocol_policy = .tls12_only,
+                    .client_auth = .{
+                        .verifier = .{
+                            .pinned_ecdsa_p256_public_key = shared.public_key,
+                        },
+                        .certificate_authorities = &.{shared.authority},
+                        .requirement = .optional,
+                    },
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            stream_owned = false;
+            defer connection.deinit();
+            shared.peer_sent_certificate = connection.peerCertificates() != null;
+            var request: [4]u8 = undefined;
+            var offset: usize = 0;
+            while (offset < request.len) {
+                const count = connection.read(request[offset..]) catch |err| {
+                    shared.err = err;
+                    return;
+                };
+                if (count == 0) {
+                    shared.err = error.ConnectionClosed;
+                    return;
+                }
+                offset += count;
+            }
+            if (!std.mem.eql(u8, &request, "ping")) {
+                shared.err = error.InvalidPayload;
+                return;
+            }
+            connection.writeAll("pong") catch |err| {
+                shared.err = err;
+                return;
+            };
+        }
+    };
+    var shared = Shared{
+        .listener = &listener,
+        .io = io,
+        .certificate = &certificate_der,
+        .key_pair = key_pair,
+        .public_key = public_key,
+        .authority = &unrelated_ca_name,
+    };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const stream = try listener.socket.address.connect(io, .{ .mode = .stream });
+    var stream_owned = true;
+    defer if (stream_owned) stream.close(io);
+    const connection = try client.Connection.init(allocator, io, stream, .{
+        .server_name = "localhost",
+        .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        },
+        .client_identity = .{
+            .certificate_chain = &.{&public_key},
+            .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+        },
+        .tls12_cipher_suites = &.{
+            .ecdhe_ecdsa_aes_128_gcm_sha256,
+        },
+        .protocol_policy = .tls12_only,
+    });
+    stream_owned = false;
+    defer connection.deinit();
+    try std.testing.expectEqual(
+        version.Protocol.tls12,
+        connection.negotiatedProtocol(),
+    );
+    try connection.writeAll("ping");
+    var response: [4]u8 = undefined;
+    var response_offset: usize = 0;
+    while (response_offset < response.len) {
+        const count = try connection.read(response[response_offset..]);
+        if (count == 0) return error.ConnectionClosed;
+        response_offset += count;
+    }
+    try std.testing.expectEqualStrings("pong", &response);
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(!shared.peer_sent_certificate);
+}
+
 test "TLS 1.2 RFC 5077 ticket resumes the authenticated session" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

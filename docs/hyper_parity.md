@@ -1023,6 +1023,10 @@ The native vail-backed TCP transports now negotiate TLS 1.2 and TLS 1.3 with
 an explicit version policy. TLS 1.2 is limited to ECDHE+AEAD, requires Extended
 Master Secret and secure-renegotiation signaling, and is covered by HTTP/1 and
 HTTP/2 application round trips; QUIC/HTTP/3 remains TLS 1.3-only by protocol.
+TLS 1.2 client-certificate selection honors CertificateRequest certificate
+types, signature algorithms, and acceptable CA distinguished names; P-521 is
+advertised by compatible servers, while a client with no suitable identity
+sends the required empty Certificate message instead of aborting locally.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
 resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
 TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake

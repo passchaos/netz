@@ -2417,6 +2417,11 @@ profile is deliberately modern: ECDHE with AES-GCM or ChaCha20-Poly1305,
 mandatory Extended Master Secret and secure-renegotiation signaling, no CBC,
 static-RSA key exchange, or renegotiation. Listener `tls_version`/`ciphers` and
 bridge `bridge_tls_version`/`bridge_ciphers` map this policy explicitly.
+TLS 1.2 clients filter a configured identity against CertificateRequest's
+certificate types, signature algorithms, and acceptable CA distinguished
+names. Compatible P-521 identities are supported; when no identity is suitable
+the client sends an empty Certificate so optional mTLS can continue and
+required mTLS is rejected by the server at the protocol boundary.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
 interoperability covers both endpoint roles and good/missing/revoked OCSP.
 The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:
