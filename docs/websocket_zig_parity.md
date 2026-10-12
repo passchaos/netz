@@ -98,7 +98,7 @@ unmatched CA selection against an independent OpenSSL server. Server-side
 CertificateVerify validation rejects algorithms outside the advertised set.
 `interop-tls13-client-auth-openssl` verifies the same CA-aware identity
 selection and empty-certificate fallback for TLS 1.3; unknown request
-extensions remain forward-compatible.
+extensions remain forward-compatible while duplicate types are rejected.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.
