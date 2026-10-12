@@ -237,9 +237,7 @@ Current protocol coverage includes:
   staple validation across HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT-over-WSS,
   RFC 5077 TLS 1.2 stateless session tickets with identity/ALPN/lifetime-bound
   client caches, rotating server keyrings, unique per-connection nonces, and
-  authenticated invalid-ticket fallback to a full handshake; MQTT reconnect
-  clients retain the newest ticket, renew it across native TLS or WSS
-  connections, and discard it locally when its advertised lifetime expires;
+  authenticated invalid-ticket fallback to a full handshake;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in
@@ -248,7 +246,10 @@ Current protocol coverage includes:
   NewSessionTicket retention, identity/ALPN/age validation, renewed tickets,
   invalid-ticket fallback to a certificate-authenticated full handshake, and
   separate bounded HTTP/1 and HTTP/2 pool caches that resume after physical
-  connection retirement without enabling early data,
+  connection retirement; MQTT reconnect clients retain separate TLS 1.2 and
+  TLS 1.3 tickets, renew them across native TLS or WSS connections, and discard
+  them locally when their advertised lifetime expires, without enabling early
+  data,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation

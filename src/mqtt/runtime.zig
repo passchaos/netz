@@ -2445,6 +2445,18 @@ pub const ClientAuthHandler = struct {
     ) Error![]const mqtt.Property,
 };
 
+/// Borrowed TLS resumption inputs for one reconnect attempt. A connector may
+/// apply both so a highest-version client can resume with either server
+/// version without discarding the other protocol's cached state.
+pub const ClientTlsSessionTickets = struct {
+    tls12: ?*const tls_stream.Tls12SessionTicket = null,
+    tls13: ?*const tls_stream.Tls13SessionTicket = null,
+
+    pub fn any(self: ClientTlsSessionTickets) bool {
+        return self.tls12 != null or self.tls13 != null;
+    }
+};
+
 /// Type-erased transport opener for reconnecting MQTT clients. The connector
 /// owns only transport policy; the caller supplies the reconnect client's
 /// deeply-owned MQTT CONNECT options on every attempt. Its context must
@@ -2486,6 +2498,23 @@ pub const ClientConnector = struct {
         ticket: *const tls_stream.Tls12SessionTicket,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt = null,
+    /// Preferred hook for version-flexible TLS connectors. Legacy connectors
+    /// may keep implementing only the TLS 1.2 hook above.
+    connect_attempt_with_tls_tickets: ?*const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        tickets: ClientTlsSessionTickets,
+    ) Error!ConnectAttempt = null,
+    connect_attempt_with_tls_tickets_deadline: ?*const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        tickets: ClientTlsSessionTickets,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt = null,
 
     pub fn connectAttempt(
         self: ClientConnector,
@@ -2521,9 +2550,19 @@ pub const ClientConnector = struct {
         options: ConnectOptions,
         ticket: *const tls_stream.Tls12SessionTicket,
     ) Error!ConnectAttempt {
-        const connect = self.connect_attempt_with_tls12_ticket orelse
-            return self.connectAttempt(allocator, io, options);
-        return connect(self.context, allocator, io, options, ticket);
+        if (self.connect_attempt_with_tls12_ticket) |connect| {
+            return connect(self.context, allocator, io, options, ticket);
+        }
+        if (self.connect_attempt_with_tls_tickets) |connect| {
+            return connect(
+                self.context,
+                allocator,
+                io,
+                options,
+                .{ .tls12 = ticket },
+            );
+        }
+        return self.connectAttempt(allocator, io, options);
     }
 
     pub fn connectAttemptWithTls12TicketAndDeadline(
@@ -2535,19 +2574,96 @@ pub const ClientConnector = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
         _ = try deadline_policy.usableAwake(io, deadline);
-        const connect = self.connect_attempt_with_tls12_ticket_deadline orelse
+        if (self.connect_attempt_with_tls12_ticket_deadline) |connect| {
+            return connect(
+                self.context,
+                allocator,
+                io,
+                options,
+                ticket,
+                deadline,
+            );
+        }
+        if (self.connect_attempt_with_tls_tickets_deadline) |connect| {
+            return connect(
+                self.context,
+                allocator,
+                io,
+                options,
+                .{ .tls12 = ticket },
+                deadline,
+            );
+        }
+        return self.connectAttemptWithDeadline(
+            allocator,
+            io,
+            options,
+            deadline,
+        );
+    }
+
+    pub fn connectAttemptWithTlsTickets(
+        self: ClientConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        tickets: ClientTlsSessionTickets,
+    ) Error!ConnectAttempt {
+        if (!tickets.any()) return self.connectAttempt(allocator, io, options);
+        if (self.connect_attempt_with_tls_tickets) |connect| {
+            return connect(self.context, allocator, io, options, tickets);
+        }
+        if (tickets.tls12) |ticket| {
+            return self.connectAttemptWithTls12Ticket(
+                allocator,
+                io,
+                options,
+                ticket,
+            );
+        }
+        return self.connectAttempt(allocator, io, options);
+    }
+
+    pub fn connectAttemptWithTlsTicketsAndDeadline(
+        self: ClientConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        tickets: ClientTlsSessionTickets,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        if (!tickets.any()) {
             return self.connectAttemptWithDeadline(
                 allocator,
                 io,
                 options,
                 deadline,
             );
-        return connect(
-            self.context,
+        }
+        if (self.connect_attempt_with_tls_tickets_deadline) |connect| {
+            return connect(
+                self.context,
+                allocator,
+                io,
+                options,
+                tickets,
+                deadline,
+            );
+        }
+        if (tickets.tls12) |ticket| {
+            return self.connectAttemptWithTls12TicketAndDeadline(
+                allocator,
+                io,
+                options,
+                ticket,
+                deadline,
+            );
+        }
+        return self.connectAttemptWithDeadline(
             allocator,
             io,
             options,
-            ticket,
             deadline,
         );
     }

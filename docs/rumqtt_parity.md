@@ -2424,12 +2424,12 @@ servers use an application-owned bounded keyring and generate a unique sealing
 nonce per connection, while clients can transfer an owned ticket cache into a
 later connection. Cached state is bound to the server identity, ALPN, cipher
 suite, and lifetime; an unauthentic ticket falls back to a full handshake.
-The reconnect client owns the newest ticket independently of each short-lived
-Network Connection and supplies it only through ticket-aware native TLS/WSS
-connectors. A renewed ticket replaces and securely destroys the prior cache;
-an expired cache is destroyed before dialing, while an unauthentic ticket is
-replaced after the server's full-handshake fallback, so neither stale form can
-poison later reconnect attempts. The shared stream's bidirectional
+The reconnect client owns the newest TLS 1.2 ticket independently of each
+short-lived Network Connection and supplies it only through ticket-aware
+native TLS/WSS connectors. A renewed ticket replaces and securely destroys the
+prior cache; an expired cache is destroyed before dialing, while an
+unauthentic ticket is replaced after the server's full-handshake fallback, so
+neither stale form can poison later reconnect attempts. The shared stream's bidirectional
 `interop-tls12-ticket-openssl` process gate independently proves both netz
 client and netz server resumption against OpenSSL rather than relying only on
 self-interoperability.
@@ -2437,12 +2437,16 @@ The versioned stream additionally exposes RFC 8446 TLS 1.3 PSK-DHE tickets:
 post-handshake messages are authenticated and retained instead of discarded,
 and the server issues a fresh stateless ticket after either a full or resumed
 handshake. The bidirectional `interop-tls13-ticket-openssl` gate validates
-both endpoint roles against OpenSSL. Early data remains disabled, so MQTT
-CONNECT ordering is unchanged.
-Configured TLS bridges use the same reconnect-owned ticket lifecycle. Before a
-multi-address attempt, the connector validates the cached ticket against the
-selected endpoint hostname and lifetime; a failover target therefore performs
-a full handshake instead of receiving another host's resumption state.
+both endpoint roles against OpenSSL. MQTT reconnect now owns, ages, renews, and
+reuses these TLS 1.3 tickets across both native TLS and WSS connections. Its
+connector contract carries TLS 1.2 and TLS 1.3 state together, preserving
+version fallback without sharing ticket state between protocols. Early data
+remains disabled, so MQTT CONNECT ordering is unchanged.
+Configured TLS bridges use the same reconnect-owned lifecycle for both ticket
+versions. Before a multi-address attempt, the connector validates each cached
+ticket against the selected endpoint hostname and lifetime; a failover target
+therefore performs a full handshake instead of receiving another host's
+resumption state.
 Configured MQTT TLS and WSS listeners can enable the same behavior with
 `tls12_session_tickets true`, an explicit
 `tls12_session_ticket_server_id`, and a bounded

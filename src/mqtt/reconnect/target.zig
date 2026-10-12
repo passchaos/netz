@@ -8,7 +8,6 @@
 const std = @import("std");
 const redirect = @import("../redirect.zig");
 const runtime = @import("../runtime.zig");
-const tls_stream = @import("../../tls/mod.zig").stream;
 
 const net = std.Io.net;
 
@@ -59,7 +58,7 @@ pub const Target = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         options: runtime.ConnectOptions,
-        tls12_ticket: ?*const tls_stream.Tls12SessionTicket,
+        tls_tickets: runtime.ClientTlsSessionTickets,
     ) runtime.Error!runtime.ConnectAttempt {
         return switch (self) {
             .tcp => |address| runtime.Client.connectAttempt(
@@ -81,15 +80,12 @@ pub const Target = union(enum) {
                 uri,
                 options,
             ),
-            .connector => |connector| if (tls12_ticket) |ticket|
-                connector.connectAttemptWithTls12Ticket(
-                    allocator,
-                    io,
-                    options,
-                    ticket,
-                )
-            else
-                connector.connectAttempt(allocator, io, options),
+            .connector => |connector| connector.connectAttemptWithTlsTickets(
+                allocator,
+                io,
+                options,
+                tls_tickets,
+            ),
         };
     }
 
@@ -98,7 +94,7 @@ pub const Target = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         options: runtime.ConnectOptions,
-        tls12_ticket: ?*const tls_stream.Tls12SessionTicket,
+        tls_tickets: runtime.ClientTlsSessionTickets,
         deadline: std.Io.Clock.Timestamp,
     ) runtime.Error!runtime.ConnectAttempt {
         return switch (self) {
@@ -124,21 +120,14 @@ pub const Target = union(enum) {
                 options,
                 deadline,
             ),
-            .connector => |connector| if (tls12_ticket) |ticket|
-                connector.connectAttemptWithTls12TicketAndDeadline(
-                    allocator,
-                    io,
-                    options,
-                    ticket,
-                    deadline,
-                )
-            else
-                connector.connectAttemptWithDeadline(
-                    allocator,
-                    io,
-                    options,
-                    deadline,
-                ),
+            .connector => |connector| connector
+                .connectAttemptWithTlsTicketsAndDeadline(
+                allocator,
+                io,
+                options,
+                tls_tickets,
+                deadline,
+            ),
         };
     }
 };

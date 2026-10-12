@@ -22,8 +22,8 @@ const ConfiguredConnector = struct {
             .context = self,
             .connect_attempt = connectAttempt,
             .connect_attempt_deadline = connectAttemptWithDeadline,
-            .connect_attempt_with_tls12_ticket = connectAttemptWithTls12Ticket,
-            .connect_attempt_with_tls12_ticket_deadline = connectAttemptWithTls12TicketAndDeadline,
+            .connect_attempt_with_tls_tickets = connectAttemptWithTlsTickets,
+            .connect_attempt_with_tls_tickets_deadline = connectAttemptWithTlsTicketsAndDeadline,
         };
     }
 
@@ -38,7 +38,7 @@ const ConfiguredConnector = struct {
             allocator,
             io,
             mqtt_options,
-            null,
+            .{},
             null,
         );
     }
@@ -55,34 +55,34 @@ const ConfiguredConnector = struct {
             allocator,
             io,
             mqtt_options,
-            null,
+            .{},
             deadline,
         );
     }
 
-    fn connectAttemptWithTls12Ticket(
+    fn connectAttemptWithTlsTickets(
         context: *anyopaque,
         allocator: std.mem.Allocator,
         io: std.Io,
         mqtt_options: mqtt.runtime.ConnectOptions,
-        ticket: *const netz.tls.stream.Tls12SessionTicket,
+        tickets: mqtt.runtime.ClientTlsSessionTickets,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
         return self.connectAttemptMaybeBefore(
             allocator,
             io,
             mqtt_options,
-            ticket,
+            tickets,
             null,
         );
     }
 
-    fn connectAttemptWithTls12TicketAndDeadline(
+    fn connectAttemptWithTlsTicketsAndDeadline(
         context: *anyopaque,
         allocator: std.mem.Allocator,
         io: std.Io,
         mqtt_options: mqtt.runtime.ConnectOptions,
-        ticket: *const netz.tls.stream.Tls12SessionTicket,
+        tickets: mqtt.runtime.ClientTlsSessionTickets,
         deadline: std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
@@ -90,7 +90,7 @@ const ConfiguredConnector = struct {
             allocator,
             io,
             mqtt_options,
-            ticket,
+            tickets,
             deadline,
         );
     }
@@ -100,7 +100,7 @@ const ConfiguredConnector = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         mqtt_options: mqtt.runtime.ConnectOptions,
-        tls12_ticket: ?*const netz.tls.stream.Tls12SessionTicket,
+        tls_tickets: mqtt.runtime.ClientTlsSessionTickets,
         deadline: ?std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const index, const endpoint = self.takeEndpoint();
@@ -112,7 +112,7 @@ const ConfiguredConnector = struct {
             io,
             endpoint,
             options,
-            tls12_ticket,
+            tls_tickets,
             deadline,
         ) catch |err| {
             self.noteAttempt(index, false, io);
@@ -133,7 +133,7 @@ const ConfiguredConnector = struct {
                 io,
                 endpoint,
                 options,
-                tls12_ticket,
+                tls_tickets,
                 deadline,
             ) catch |err| {
                 self.noteAttempt(index, false, io);
@@ -150,15 +150,20 @@ const ConfiguredConnector = struct {
         io: std.Io,
         endpoint: mqtt.broker_config.BridgeEndpoint,
         mqtt_options: mqtt.runtime.ConnectOptions,
-        tls12_ticket: ?*const netz.tls.stream.Tls12SessionTicket,
+        tls_tickets: mqtt.runtime.ClientTlsSessionTickets,
         deadline: ?std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         if (self.tls_options) |configured| {
             var options = reconnectTlsOptions(configured, mqtt_options);
-            if (tls12TicketForEndpoint(io, endpoint, tls12_ticket)) |ticket| {
+            if (tls12TicketForEndpoint(io, endpoint, tls_tickets.tls12)) |ticket| {
                 options.tls12_ticket_resumption = ticket;
-            } else if (tls12_ticket != null) {
+            } else if (tls_tickets.tls12 != null) {
                 options.tls12_ticket_resumption = null;
+            }
+            if (tls13TicketForEndpoint(io, endpoint, tls_tickets.tls13)) |ticket| {
+                options.tls13_ticket_resumption = ticket;
+            } else if (tls_tickets.tls13 != null) {
+                options.tls13_ticket_resumption = null;
             }
             if (self.source.bind_address) |local_address| {
                 return if (deadline) |absolute|
@@ -308,6 +313,21 @@ fn tls12TicketForEndpoint(
         std.Io.Timestamp.now(io, .real).toSeconds(),
     ));
     cached.validate(now_seconds, endpoint.host) catch return null;
+    return cached;
+}
+
+fn tls13TicketForEndpoint(
+    io: std.Io,
+    endpoint: mqtt.broker_config.BridgeEndpoint,
+    ticket: ?*const netz.tls.stream.Tls13SessionTicket,
+) ?*const netz.tls.stream.Tls13SessionTicket {
+    const cached = ticket orelse return null;
+    if (!std.mem.eql(u8, cached.server_name, endpoint.host)) return null;
+    const now_ms: u64 = @intCast(@max(
+        0,
+        std.Io.Timestamp.now(io, .real).toMilliseconds(),
+    ));
+    _ = cached.obfuscatedTicketAge(now_ms) catch return null;
     return cached;
 }
 
@@ -1038,7 +1058,7 @@ test "configured bidirectional bridge never falls back from private mode" {
             .client_id = "required-private",
             .bridge_mode = true,
         },
-        null,
+        .{},
         null,
     );
     defer attempt.deinit(allocator);
@@ -1051,7 +1071,9 @@ test "configured bidirectional bridge never falls back from private mode" {
     if (peer.err) |err| return err;
 }
 
-test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
+fn testConfiguredBridgeResumesTicketOnlyForMatchingEndpoint(
+    comptime protocol_policy: netz.tls.stream.VersionPolicy,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1066,9 +1088,9 @@ test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
     );
     const key_pair = try netz.tls.testing.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
-    var keyring = try netz.tls.stream.Tls12TicketKeyring.init(.{
+    var keyring = try netz.tls.stream.Tls13TicketKeyring.init(.{
         .id = 37,
-        .secret = [_]u8{0x37} ** netz.tls.stream.tls12_ticket_key_len,
+        .secret = [_]u8{0x37} ** netz.tls.stream.tls13_ticket_key_len,
     });
     defer keyring.deinit();
     var server = try mqtt.tls_runtime.Server.listen(
@@ -1080,13 +1102,18 @@ test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
                 .certificate_chain = &.{&certificate_der},
                 .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
             },
-            .protocol_policy = .tls12_only,
+            .protocol_policy = protocol_policy,
             .alpn_protocols = &.{"mqtt"},
-            .tls12_session_tickets = .{
+            .tls12_session_tickets = if (protocol_policy == .tls12_only) .{
                 .keyring = &keyring,
                 .server_id = "localhost",
                 .lifetime_seconds = 3600,
-            },
+            } else null,
+            .tls13_session_tickets = if (protocol_policy == .tls13_only) .{
+                .keyring = &keyring,
+                .server_id = "localhost",
+                .lifetime_seconds = 3600,
+            } else null,
         },
     );
     defer server.deinit();
@@ -1138,7 +1165,7 @@ test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
                 .pinned_ecdsa_p256_public_key = public_key,
             },
             .alpn_protocols = &.{"mqtt"},
-            .protocol_policy = .tls12_only,
+            .protocol_policy = protocol_policy,
         },
     };
     var shutdown: std.Io.Event = .unset;
@@ -1156,17 +1183,31 @@ test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
     defer client.deinit();
     _ = try client.connectWithTimeout(.fromSeconds(2));
     try std.testing.expect(!client.connection().?.wasTlsSessionResumed().?);
-    const ticket = &client.tls12_session_ticket.?;
-    try std.testing.expect(tls12TicketForEndpoint(
-        io,
-        .{ .host = "localhost", .port = source.port },
-        ticket,
-    ) != null);
-    try std.testing.expect(tls12TicketForEndpoint(
-        io,
-        .{ .host = "other.example", .port = source.port },
-        ticket,
-    ) == null);
+    if (protocol_policy == .tls12_only) {
+        const ticket = &client.tls12_session_ticket.?;
+        try std.testing.expect(tls12TicketForEndpoint(
+            io,
+            .{ .host = "localhost", .port = source.port },
+            ticket,
+        ) != null);
+        try std.testing.expect(tls12TicketForEndpoint(
+            io,
+            .{ .host = "other.example", .port = source.port },
+            ticket,
+        ) == null);
+    } else {
+        const ticket = &client.tls13_session_ticket.?;
+        try std.testing.expect(tls13TicketForEndpoint(
+            io,
+            .{ .host = "localhost", .port = source.port },
+            ticket,
+        ) != null);
+        try std.testing.expect(tls13TicketForEndpoint(
+            io,
+            .{ .host = "other.example", .port = source.port },
+            ticket,
+        ) == null);
+    }
     try client.disconnect(0);
     _ = try client.connectWithTimeout(.fromSeconds(2));
     try std.testing.expect(client.connection().?.wasTlsSessionResumed().?);
@@ -1176,6 +1217,14 @@ test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
     joined = true;
     if (peer.err) |err| return err;
     try std.testing.expectEqualSlices(bool, &.{ false, true }, &peer.resumed);
+}
+
+test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
+    try testConfiguredBridgeResumesTicketOnlyForMatchingEndpoint(.tls12_only);
+}
+
+test "configured bridge resumes TLS 1.3 ticket only for matching endpoint" {
+    try testConfiguredBridgeResumesTicketOnlyForMatchingEndpoint(.tls13_only);
 }
 
 test "configured bridge maps Mosquitto remote protocol limits" {

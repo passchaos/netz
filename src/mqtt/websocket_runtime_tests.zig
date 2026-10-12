@@ -1336,7 +1336,9 @@ test "MQTT reconnect client reuses WebSocket connector" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
+fn testReconnectClientAutomaticallyResumesWssTicket(
+    comptime protocol_policy: tls_stream.VersionPolicy,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1351,9 +1353,9 @@ test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
     );
     const key_pair = try tls_testing.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
-    var keyring = try tls_stream.Tls12TicketKeyring.init(.{
+    var keyring = try tls_stream.Tls13TicketKeyring.init(.{
         .id = 19,
-        .secret = [_]u8{0x39} ** tls_stream.tls12_ticket_key_len,
+        .secret = [_]u8{0x39} ** tls_stream.tls13_ticket_key_len,
     });
     defer keyring.deinit();
     var server = try mqtt_ws.TlsServer.listen(
@@ -1371,13 +1373,18 @@ test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
             .tls12_cipher_suites = &.{
                 .ecdhe_ecdsa_aes_128_gcm_sha256,
             },
-            .protocol_policy = .tls12_only,
+            .protocol_policy = protocol_policy,
             .alpn_protocols = &.{"http/1.1"},
-            .tls12_session_tickets = .{
+            .tls12_session_tickets = if (protocol_policy == .tls12_only) .{
                 .keyring = &keyring,
                 .server_id = "localhost",
                 .lifetime_seconds = 3600,
-            },
+            } else null,
+            .tls13_session_tickets = if (protocol_policy == .tls13_only) .{
+                .keyring = &keyring,
+                .server_id = "localhost",
+                .lifetime_seconds = 3600,
+            } else null,
         },
     );
     defer server.deinit();
@@ -1430,7 +1437,7 @@ test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
             .tls12_cipher_suites = &.{
                 .ecdhe_ecdsa_aes_128_gcm_sha256,
             },
-            .protocol_policy = .tls12_only,
+            .protocol_policy = protocol_policy,
         },
     };
     var shutdown: std.Io.Event = .unset;
@@ -1463,6 +1470,14 @@ test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqualSlices(bool, &.{ false, true }, &shared.resumed);
+}
+
+test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
+    try testReconnectClientAutomaticallyResumesWssTicket(.tls12_only);
+}
+
+test "MQTT reconnect client automatically resumes TLS 1.3 WSS tickets" {
+    try testReconnectClientAutomaticallyResumesWssTicket(.tls13_only);
 }
 
 test "MQTT WebSocket server requires mqtt subprotocol" {

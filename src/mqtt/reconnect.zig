@@ -1,4 +1,4 @@
-//! Stateful cleartext MQTT client reconnection.
+//! Stateful transport-agnostic MQTT client reconnection.
 //!
 //! The packet runtime intentionally represents one Network Connection. This
 //! layer owns the state that must outlive that transport: copied CONNECT
@@ -1129,6 +1129,7 @@ pub const Client = struct {
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
     tls12_session_ticket: ?tls_stream.Tls12SessionTicket = null,
+    tls13_session_ticket: ?tls_stream.Tls13SessionTicket = null,
     reconnect_requested: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
@@ -1354,6 +1355,7 @@ pub const Client = struct {
     pub fn deinit(self: *Client) void {
         if (self.connection_state) |*active| active.close();
         if (self.tls12_session_ticket) |*ticket| ticket.deinit();
+        if (self.tls13_session_ticket) |*ticket| ticket.deinit();
         for (self.subscriptions.items) |*subscription| {
             subscription.deinit(self.allocator);
         }
@@ -1422,7 +1424,11 @@ pub const Client = struct {
             }
             try self.waitForScheduledAttempt(deadline);
 
-            var attempt = self.connectAttemptBefore(deadline) catch |err| {
+            const tls_tickets = self.usableTlsSessionTickets();
+            var attempt = self.connectAttemptBefore(
+                deadline,
+                tls_tickets,
+            ) catch |err| {
                 if (err == error.Timeout) return err;
                 if (!retryableConnectError(err)) return err;
                 failed_attempts += 1;
@@ -1442,11 +1448,25 @@ pub const Client = struct {
             };
             if (!attempt.accepted()) {
                 self.rememberTls12SessionTicket(&attempt);
+                self.rememberTls13SessionTicket(
+                    &attempt,
+                    tls_tickets.tls13 != null,
+                ) catch |err| {
+                    attempt.deinit(self.allocator);
+                    return err;
+                };
                 attempt.deinit(self.allocator);
                 return error.ConnectRefused;
             }
             var result = try attempt.requireAccepted();
             self.rememberTls12SessionTicketFromConnection(&result.connection);
+            self.rememberTls13SessionTicketFromConnection(
+                &result.connection,
+                tls_tickets.tls13 != null,
+            ) catch |err| {
+                result.deinit(self.allocator);
+                return err;
+            };
             const session_present = result.connack.connack.session_present;
             result.connack.deinit(self.allocator);
             self.connection_state = result.connection;
@@ -1500,29 +1520,35 @@ pub const Client = struct {
         }
     }
 
-    fn connectAttempt(self: *Client) runtime.Error!runtime.ConnectAttempt {
-        return self.target.connectAttempt(
-            self.allocator,
-            self.io,
-            self.options.value,
-            self.usableTls12SessionTicket(),
-        );
-    }
-
     fn connectAttemptBefore(
         self: *Client,
         deadline: ?std.Io.Clock.Timestamp,
+        tickets: runtime.ClientTlsSessionTickets,
     ) runtime.Error!runtime.ConnectAttempt {
         return if (deadline) |absolute|
             self.target.connectAttemptWithDeadline(
                 self.allocator,
                 self.io,
                 self.options.value,
-                self.usableTls12SessionTicket(),
+                tickets,
                 absolute,
             )
         else
-            self.connectAttempt();
+            self.target.connectAttempt(
+                self.allocator,
+                self.io,
+                self.options.value,
+                tickets,
+            );
+    }
+
+    fn usableTlsSessionTickets(
+        self: *Client,
+    ) runtime.ClientTlsSessionTickets {
+        return .{
+            .tls12 = self.usableTls12SessionTicket(),
+            .tls13 = self.usableTls13SessionTicket(),
+        };
     }
 
     fn usableTls12SessionTicket(
@@ -1544,6 +1570,25 @@ pub const Client = struct {
             self.tls12_session_ticket = null;
             return null;
         }
+        return ticket;
+    }
+
+    fn usableTls13SessionTicket(
+        self: *Client,
+    ) ?*const tls_stream.Tls13SessionTicket {
+        const ticket = if (self.tls13_session_ticket) |*cached|
+            cached
+        else
+            return null;
+        const now_ms: u64 = @intCast(@max(
+            0,
+            std.Io.Timestamp.now(self.io, .real).toMilliseconds(),
+        ));
+        _ = ticket.obfuscatedTicketAge(now_ms) catch {
+            ticket.deinit();
+            self.tls13_session_ticket = null;
+            return null;
+        };
         return ticket;
     }
 
@@ -1575,11 +1620,52 @@ pub const Client = struct {
         }
     }
 
+    fn rememberTls13SessionTicket(
+        self: *Client,
+        attempt: *runtime.ConnectAttempt,
+        offered_ticket: bool,
+    ) runtime.Error!void {
+        const active_connection = if (attempt.connection) |*active|
+            active
+        else
+            return;
+        try self.rememberTls13SessionTicketFromConnection(
+            active_connection,
+            offered_ticket,
+        );
+    }
+
+    fn rememberTls13SessionTicketFromConnection(
+        self: *Client,
+        active_connection: *runtime.Connection,
+        offered_ticket: bool,
+    ) runtime.Error!void {
+        if (try active_connection.takeTls13SessionTicket()) |ticket| {
+            if (self.tls13_session_ticket) |*cached| cached.deinit();
+            self.tls13_session_ticket = ticket;
+            return;
+        }
+        if (offered_ticket and
+            active_connection.negotiatedTlsProtocol() == .tls13 and
+            !(active_connection.wasTlsSessionResumed() orelse false))
+        {
+            if (self.tls13_session_ticket) |*cached| cached.deinit();
+            self.tls13_session_ticket = null;
+        }
+    }
+
     /// Close only the current transport. Durable outgoing QoS state remains
     /// owned by this client and is marked for retransmission on the next
     /// successful connection.
     pub fn disconnectTransport(self: *Client) void {
         if (self.connection_state) |*active| {
+            self.rememberTls13SessionTicketFromConnection(
+                active,
+                false,
+            ) catch {
+                if (self.tls13_session_ticket) |*ticket| ticket.deinit();
+                self.tls13_session_ticket = null;
+            };
             self.retry_schedule.noteDisconnected(
                 self.policy,
                 std.Io.Clock.awake.now(self.io),

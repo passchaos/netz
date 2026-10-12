@@ -359,6 +359,140 @@ test "MQTT TLS 1.2 RFC 5077 ticket survives direct and reconnect lifecycles" {
     );
 }
 
+test "MQTT reconnect client renews and validates TLS 1.3 tickets" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [tls_test.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_test.certificate_base64,
+    );
+    const key_pair = try tls_test.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var keyring = try tls_stream.Tls13TicketKeyring.init(.{
+        .id = 13,
+        .secret = [_]u8{0x6d} ** tls_stream.tls13_ticket_key_len,
+    });
+    defer keyring.deinit();
+    var server = try mqtt_tls.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{
+                    .key_pair = key_pair,
+                } },
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .protocol_policy = .tls13_only,
+            .tls13_session_tickets = .{
+                .keyring = &keyring,
+                .server_id = "localhost",
+                .lifetime_seconds = 3600,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *mqtt_tls.Server,
+        resumed: [5]bool = .{ false, false, false, false, false },
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..self.resumed.len) |index| {
+                var accepted = try self.server.accept(.{
+                    .protocol = .v5,
+                    .session_present = index != 0,
+                });
+                defer accepted.deinit(self.server.allocator);
+                if (accepted.connection.negotiatedTlsProtocol() != .tls13) {
+                    return error.InvalidProtocolVersion;
+                }
+                self.resumed[index] =
+                    accepted.connection.wasTlsSessionResumed() orelse
+                    return error.MissingTlsMetadata;
+                try accepted.connection.readPingReq();
+                try accepted.connection.writePingResp();
+                var disconnect = try accepted.connection.readDisconnect();
+                disconnect.deinit(self.server.allocator);
+            }
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var connector = mqtt_tls.ReconnectConnector{
+        .address = server.address(),
+        .tls_host = "localhost",
+        .options = .{
+            .mqtt = .{ .client_id = "connector-placeholder" },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .protocol_policy = .tls13_only,
+        },
+    };
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector.connector(),
+        .{
+            .protocol = .v5,
+            .client_id = "mqtt-tls13-reconnect",
+            .clean_start = false,
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+
+    var client_resumed: [5]bool = undefined;
+    for (0..client_resumed.len) |index| {
+        if (index == 2) {
+            const identity = client.tls13_session_ticket.?.identity;
+            identity[identity.len - 1] ^= 1;
+        } else if (index == 4) {
+            client.tls13_session_ticket.?.received_at_ms = 0;
+        }
+        _ = if (index % 2 == 0)
+            try client.connect()
+        else
+            try client.connectWithTimeout(.fromSeconds(10));
+        client_resumed[index] =
+            client.connection().?.wasTlsSessionResumed().?;
+        try client.connection().?.ping();
+        try client.disconnect(0);
+    }
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    const expected = [_]bool{ false, true, false, true, false };
+    try std.testing.expectEqualSlices(bool, &expected, &client_resumed);
+    try std.testing.expectEqualSlices(bool, &expected, &shared.resumed);
+}
+
 test "MQTT TLS explicitly selects vail with ordinary CA verification" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

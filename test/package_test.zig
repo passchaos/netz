@@ -5767,6 +5767,18 @@ test "public modules are reachable" {
         "connectAttemptWithTls12TicketAndDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime,
+        "ClientTlsSessionTickets",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.ClientConnector,
+        "connectAttemptWithTlsTickets",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.runtime.ClientConnector,
+        "connectAttemptWithTlsTicketsAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.mqtt.reconnect.Client,
         "connectWithDeadline",
     ));
