@@ -1073,6 +1073,9 @@ its resumption secret, server identity, ALPN, cipher hash and ticket age;
 ticket extension parsing covers the complete 16-bit namespace, rejects
 duplicates, recognized misplaced extensions and the RFC-forbidden 65,535-byte
 extension vector, while ignoring genuinely unknown extensions;
+the stream-TLS codec preserves the server's exact RFC 8446
+`max_early_data_size`, including finite and zero values, rather than imposing
+QUIC's sentinel rule;
 servers issue a fresh stateless ticket after full and resumed handshakes and
 fall back to certificate authentication when an opaque ticket is invalid.
 Both HTTP pools collect those post-handshake tickets after response traffic

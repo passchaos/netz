@@ -734,8 +734,11 @@ the dispatcher's owned Initial event, so the first packet is not reread from the
 shared socket. At the QUIC layer, subsequent Initial/Retry/0-RTT/Handshake
 datagrams can now be routed by the sole socket owner into a bounded per-handshake
 inbox, and a real handshake regression verifies completion and promotion to the
-established CID router without competing socket readers. HTTP/3 now exposes
-source-aware Initial acceptance. WebTransport additionally exposes a split
+established CID router without competing socket readers. RFC 9001 ticket
+validation remains separate from the shared TLS codec: every present QUIC
+`max_early_data_size` must be `0xffffffff`, while finite TLS limits remain valid
+for stream transports. HTTP/3 now exposes source-aware Initial acceptance.
+WebTransport additionally exposes a split
 `HandshakeAdmission`: the caller completes QUIC/TLS from an inbox, promotes its
 connection, injects routed 1-RTT packets, and non-blockingly polls for the
 Extended CONNECT request. HTTP/3's bounded handshake supervisor owns worker
