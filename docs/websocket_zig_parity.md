@@ -103,7 +103,9 @@ the complete 16-bit namespace without an arbitrary count ceiling. Repeated
 signature-algorithm values are accepted in TLS 1.2/1.3 ClientHello and TLS 1.3
 CertificateRequest vectors. A present certificate-authorities extension must
 contain at least one non-empty DistinguishedName, and the initial handshake
-requires an empty CertificateRequest context.
+requires an empty CertificateRequest context. TLS 1.3 OID filters additionally
+constrain client leaf Key Usage and Extended Key Usage; duplicate or malformed
+recognized filters are rejected while unrecognized OIDs remain ignorable.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.

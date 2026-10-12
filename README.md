@@ -251,6 +251,9 @@ Current protocol coverage includes:
   repeated signature-algorithm values remain acceptable in TLS 1.2/1.3 ClientHello
   and TLS 1.3 CertificateRequest vectors, while a present certificate-authorities
   extension must contain at least one non-empty DistinguishedName;
+  TLS 1.3 OID filters enforce Key Usage and Extended Key Usage subsets on the
+  client leaf, reject malformed or repeated recognized filters and prohibited
+  anyExtendedKeyUsage requests, and ignore unrecognized extension OIDs;
   both peers reject a non-empty CertificateRequest context during the initial
   TLS 1.3 handshake, reserving it for post-handshake authentication;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new

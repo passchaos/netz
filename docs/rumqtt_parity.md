@@ -2434,7 +2434,11 @@ without an arbitrary count ceiling. Repeated signature-algorithm values remain
 acceptable in TLS 1.2/1.3 ClientHello and TLS 1.3 CertificateRequest vectors.
 A present certificate-authorities extension must contain at least one non-empty
 DistinguishedName; omitting it permits any issuer. Non-empty request contexts
-are rejected during the initial handshake and remain reserved for post-handshake auth.
+are rejected during the initial handshake and remain reserved for post-handshake
+auth. TLS 1.3 servers can additionally send OID filters; clients enforce Key
+Usage and Extended Key Usage subsets on the leaf, reject repeated or malformed
+recognized filters and prohibited anyExtendedKeyUsage requests, and ignore
+unrecognized OIDs.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
 interoperability covers both endpoint roles and good/missing/revoked OCSP.
 The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:
