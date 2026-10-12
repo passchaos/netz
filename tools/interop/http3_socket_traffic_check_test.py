@@ -66,7 +66,14 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
         )
         return client, server
 
-    def verify_pair(self, client: pathlib.Path, server: pathlib.Path) -> None:
+    def verify_pair(
+        self,
+        client: pathlib.Path,
+        server: pathlib.Path,
+        *,
+        client_binary_sha256: str = "a" * 64,
+        server_binary_sha256: str = "b" * 64,
+    ) -> None:
         CHECK.verify(
             role_pair="quic-go-client+netz-server",
             mode="download",
@@ -79,6 +86,8 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
             quic_version=2,
             client_log=client,
             server_log=server,
+            client_binary_sha256=client_binary_sha256,
+            server_binary_sha256=server_binary_sha256,
         )
 
     def test_complete_pair_is_accepted_and_summarized(self) -> None:
@@ -94,6 +103,8 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
                 "netz_max_pacing_rate_bytes_per_second=0",
                 output.getvalue(),
             )
+            self.assertIn(f"client_binary_sha256={'a' * 64}", output.getvalue())
+            self.assertIn(f"server_binary_sha256={'b' * 64}", output.getvalue())
 
     def test_wrong_netz_pacing_rate_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -107,6 +118,14 @@ class Http3SocketTrafficCheckTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "pacing_rate"):
                 self.verify_pair(client, server)
+
+    def test_invalid_binary_hash_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "client binary SHA-256"):
+                self.verify_pair(
+                    *self.write_pair(directory),
+                    client_binary_sha256="not-a-sha256",
+                )
 
     def test_missing_endpoint_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

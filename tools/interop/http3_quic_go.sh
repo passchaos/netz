@@ -259,13 +259,18 @@ PY
 
   check_socket_traffic() {
     if [[ $socket_traffic != true ]]; then return; fi
+    local client_binary_sha256 server_binary_sha256
+    client_binary_sha256=$(sha256sum "$4" | awk '{print $1}')
+    server_binary_sha256=$(sha256sum "$5" | awk '{print $1}')
     python3 "$netz_root/tools/interop/http3_socket_traffic_check.py" \
       --role-pair="$1" --mode="$benchmark_mode" \
       --warmup="$warmup" --iterations="$iterations" \
       --streams="$streams" --body-bytes="$body_bytes" \
       --chunk-bytes="$chunk_bytes" --stream-window="$stream_window" \
       --netz-max-pacing-rate-bytes-per-second="$netz_max_pacing_rate_bytes_per_second" \
-      --quic-version="$version" --client-log="$2" --server-log="$3"
+      --quic-version="$version" --client-log="$2" --server-log="$3" \
+      --client-binary-sha256="$client_binary_sha256" \
+      --server-binary-sha256="$server_binary_sha256"
   }
 
   check_memory() {
@@ -435,7 +440,8 @@ PY
         --timeout-ms="$timeout_ms" --client-log="$pair_dir/netz-client.log" \
         --server-log="$pair_dir/netz-server.log"
       check_socket_traffic netz-client+netz-server \
-        "$pair_dir/netz-client.log" "$pair_dir/netz-server.log"
+        "$pair_dir/netz-client.log" "$pair_dir/netz-server.log" \
+        "$client" "$server"
       check_memory --role-pair=netz-client+netz-server \
         --sender="$sender_role" --streams="$streams" \
         --mode="$benchmark_mode" --body-bytes="$body_bytes" \
@@ -493,7 +499,8 @@ PY
       --client-log="$pair_dir/netz-client.log" \
       --server-log="$pair_dir/quic-go-server.log"
     check_socket_traffic netz-client+quic-go-server \
-      "$pair_dir/netz-client.log" "$pair_dir/quic-go-server.log"
+      "$pair_dir/netz-client.log" "$pair_dir/quic-go-server.log" \
+      "$client" "$work/quic-go-http3-bench"
     check_memory --role-pair=netz-client+quic-go-server \
       --sender="$sender_role" \
       --streams="$streams" --mode="$benchmark_mode" --body-bytes="$body_bytes" \
@@ -547,7 +554,8 @@ PY
       --client-log="$pair_dir/quic-go-client.log" \
       --server-log="$pair_dir/netz-server.log"
     check_socket_traffic quic-go-client+netz-server \
-      "$pair_dir/quic-go-client.log" "$pair_dir/netz-server.log"
+      "$pair_dir/quic-go-client.log" "$pair_dir/netz-server.log" \
+      "$work/quic-go-http3-bench" "$server"
     check_memory --role-pair=quic-go-client+netz-server \
       --sender="$sender_role" \
       --streams="$streams" --mode="$benchmark_mode" --body-bytes="$body_bytes" \

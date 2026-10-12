@@ -741,7 +741,8 @@ evidence and their throughput samples are deliberately marked
 Add `--netz-max-pacing-rate-bytes-per-second=N` to apply an explicit positive
 rate ceiling to the netz endpoint in each role pair. The paired quic-go process
 does not apply that ceiling, but records it as experiment metadata; zero in an
-output record means the option was not set.
+output record means the option was not set. The comparison summary includes
+both endpoint executable SHA-256 values for fixed-binary repetitions.
 
 The QUIC examples are preconfigured-key transport smoke tests that bypass TLS
 so individual 1-RTT features are easy to inspect:

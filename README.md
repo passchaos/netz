@@ -1939,7 +1939,9 @@ netz explicit-allocator and Go runtime-heap telemetry.
 pacing ceiling to netz endpoints only. Every config and socket-traffic record
 includes `netz_max_pacing_rate_bytes_per_second`; zero means the default
 unlimited ceiling. This keeps rate-controlled loss experiments explicit and
-does not change normal benchmark or library defaults.
+does not change normal benchmark or library defaults. Socket-traffic comparison
+records also bind both endpoint executable SHA-256 values so repeated runs can
+prove that their binaries stayed fixed.
 An independent `--capture` run uses a Linux `AF_PACKET/SOCK_DGRAM` socket on
 `lo` to capture both mixed role pairs by their unique server ports. It requires
 `CAP_NET_RAW`, a third CPU, and enough `net.core.rmem_max` for the requested

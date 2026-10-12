@@ -2404,7 +2404,9 @@ selected role pair; quic-go keeps its own pacing policy and carries the value
 only as paired-run metadata. Config, socket-traffic, transport-stat, and
 packet-drop records store the exact value, with `0` meaning the option was not
 set. This makes capped and uncapped evidence distinguishable without changing
-the production or benchmark default.
+the production or benchmark default. Each socket-traffic comparison also
+records the client and server executable SHA-256 values so AB/BA repetitions
+can reject binary drift instead of inferring stability from source state.
 
 A ReleaseSafe v1 socket-traffic smoke with one warmup, one measured round,
 four 64-KiB streams, and a 1-MiB/s netz ceiling completed both mixed role

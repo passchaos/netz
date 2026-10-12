@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -53,6 +54,8 @@ def verify(
     client_log: Path,
     server_log: Path,
     netz_max_pacing_rate_bytes_per_second: int = 0,
+    client_binary_sha256: str | None = None,
+    server_binary_sha256: str | None = None,
 ) -> None:
     endpoints = {
         "netz-client+quic-go-server": {"client": "netz", "server": "quic-go"},
@@ -67,6 +70,12 @@ def verify(
         raise ValueError("invalid QUIC version")
     if not 0 <= netz_max_pacing_rate_bytes_per_second <= (1 << 64) - 1:
         raise ValueError("invalid netz maximum pacing rate")
+    for role, digest in (
+        ("client", client_binary_sha256),
+        ("server", server_binary_sha256),
+    ):
+        if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"invalid {role} binary SHA-256")
 
     endpoint_io = {
         role: "zio-std-io" if implementation == "netz" else "quic-go-netpoll"
@@ -277,6 +286,8 @@ def verify(
                 f"quic_go_dropped_other={drops['dropped_other']}",
                 "netz_max_pacing_rate_bytes_per_second="
                 f"{netz_max_pacing_rate_bytes_per_second}",
+                f"client_binary_sha256={client_binary_sha256 or 'unrecorded'}",
+                f"server_binary_sha256={server_binary_sha256 or 'unrecorded'}",
                 f"client_to_server_observation_delta_datagrams={c2s_datagram_delta}",
                 f"client_to_server_observation_delta_bytes={c2s_byte_delta}",
                 f"server_to_client_observation_delta_datagrams={s2c_datagram_delta}",
@@ -307,6 +318,8 @@ def main() -> None:
     )
     parser.add_argument("--client-log", type=Path, required=True)
     parser.add_argument("--server-log", type=Path, required=True)
+    parser.add_argument("--client-binary-sha256", required=True)
+    parser.add_argument("--server-binary-sha256", required=True)
     args = parser.parse_args()
     verify(
         role_pair=args.role_pair,
@@ -323,6 +336,8 @@ def main() -> None:
         netz_max_pacing_rate_bytes_per_second=(
             args.netz_max_pacing_rate_bytes_per_second
         ),
+        client_binary_sha256=args.client_binary_sha256,
+        server_binary_sha256=args.server_binary_sha256,
     )
 
 
