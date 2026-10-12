@@ -96,6 +96,8 @@ the required empty Certificate response instead of aborting optional mTLS.
 The shared `interop-tls12-client-auth-openssl` gate verifies both matching and
 unmatched CA selection against an independent OpenSSL server. Server-side
 CertificateVerify validation rejects algorithms outside the advertised set.
+`interop-tls13-client-auth-openssl` verifies the same CA-aware identity
+selection and empty-certificate fallback for TLS 1.3.
 WSS callers can also transfer an RFC 5077 TLS 1.2 ticket between connections;
 the server policy uses an application-owned rotating keyring and reports
 whether the handshake resumed.

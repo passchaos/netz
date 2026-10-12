@@ -238,12 +238,13 @@ Current protocol coverage includes:
   RFC 5077 TLS 1.2 stateless session tickets with identity/ALPN/lifetime-bound
   client caches, rotating server keyrings, unique per-connection nonces, and
   authenticated invalid-ticket fallback to a full handshake;
-  TLS 1.2 clients select certificates against the requested certificate type,
-  signature algorithms, and acceptable CA names, including P-521, and send an
-  empty Certificate when no configured identity is suitable; an OpenSSL
-  process gate verifies both matching-certificate and optional unmatched-CA
-  handshakes, while servers reject CertificateVerify algorithms outside the
-  exact set they advertised;
+  TLS 1.2/1.3 clients select certificates against the requested signature
+  algorithms, certificate-chain constraints, and acceptable CA names; TLS 1.2
+  additionally checks the requested certificate type and supports P-521. Both
+  versions send an empty Certificate when no configured identity is suitable;
+  OpenSSL process gates verify matching-certificate and optional unmatched-CA
+  handshakes, while TLS 1.2 servers reject CertificateVerify algorithms outside
+  the exact set they advertised;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in

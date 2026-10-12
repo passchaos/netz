@@ -1032,6 +1032,9 @@ both branches against an independent OpenSSL server: a matching CA receives
 the configured certificate, while an unmatched CA completes optional mTLS
 without one. Servers validate the client's CertificateVerify algorithm against
 the same list emitted in CertificateRequest.
+The corresponding `interop-tls13-client-auth-openssl` gate applies the same
+matching/unmatched CA selection check to TLS 1.3; its parser retains the
+CertificateRequest CA vector instead of treating it as syntax-only data.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
 resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
 TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake

@@ -2,6 +2,21 @@
 set -euo pipefail
 
 netz_client=${1:?netz client executable path}
+mode=${2:-tls12}
+case "$mode" in
+  tls12)
+    tls_label='1.2'
+    openssl_tls=(-tls1_2 -cipher ECDHE-ECDSA-AES128-GCM-SHA256)
+    ;;
+  tls13)
+    tls_label='1.3'
+    openssl_tls=(-tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256)
+    ;;
+  *)
+    echo "unsupported TLS client-auth mode: $mode" >&2
+    exit 2
+    ;;
+esac
 work=$(mktemp -d)
 server_pid=
 cleanup() {
@@ -65,8 +80,7 @@ run_case() {
     -accept "$port" \
     -cert "$work/cert.pem" \
     -key "$work/key.pem" \
-    -tls1_2 \
-    -cipher ECDHE-ECDSA-AES128-GCM-SHA256 \
+    "${openssl_tls[@]}" \
     -alpn http/1.1 \
     -verify 1 \
     -verify_return_error \
@@ -89,16 +103,16 @@ run_case() {
   done
   grep -Fq ACCEPT "$work/openssl-$name.log"
 
-  "$netz_client" "$port" "$work/cert.pem" "$expectation" \
+  "$netz_client" "$port" "$work/cert.pem" "$expectation" "$mode" \
     >"$work/netz-$name.log" 2>&1
   wait "$server_pid"
   server_pid=
   grep -Fq \
-    "netz TLS 1.2 client certificate selection=$expectation server=openssl client_io=zio-std-io status=200" \
+    "netz TLS $tls_label client certificate selection=$expectation server=openssl client_io=zio-std-io status=200" \
     "$work/netz-$name.log"
 }
 
 run_case matching "$work/cert.pem" present
 run_case unmatched "$work/requested-ca.pem" absent
 
-echo 'OpenSSL/netz TLS 1.2 matching/unmatched CertificateRequest selection passed'
+echo "OpenSSL/netz TLS $tls_label matching/unmatched CertificateRequest selection passed"

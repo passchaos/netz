@@ -2245,6 +2245,7 @@ pub fn build(b: *std.Build) void {
         &.{"tools/interop/tls12_client_auth_openssl.sh"},
     );
     tls12_client_auth_openssl.addArtifactArg(tls12_client_auth_client);
+    tls12_client_auth_openssl.addArg("tls12");
     const tls12_client_auth_openssl_step = b.step(
         "interop-tls12-client-auth-openssl",
         "Verify matching/unmatched TLS 1.2 client identity selection against OpenSSL",
@@ -2253,6 +2254,20 @@ pub fn build(b: *std.Build) void {
         &tls12_client_auth_openssl.step,
     );
     test_step.dependOn(&tls12_client_auth_openssl.step);
+
+    const tls13_client_auth_openssl = b.addSystemCommand(
+        &.{"tools/interop/tls12_client_auth_openssl.sh"},
+    );
+    tls13_client_auth_openssl.addArtifactArg(tls12_client_auth_client);
+    tls13_client_auth_openssl.addArg("tls13");
+    const tls13_client_auth_openssl_step = b.step(
+        "interop-tls13-client-auth-openssl",
+        "Verify matching/unmatched TLS 1.3 client identity selection against OpenSSL",
+    );
+    tls13_client_auth_openssl_step.dependOn(
+        &tls13_client_auth_openssl.step,
+    );
+    test_step.dependOn(&tls13_client_auth_openssl.step);
 
     const tls13_ticket_openssl = b.addSystemCommand(
         &.{"tools/interop/tls12_ticket_openssl.sh"},

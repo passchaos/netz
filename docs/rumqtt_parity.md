@@ -2426,6 +2426,8 @@ The `interop-tls12-client-auth-openssl` process gate independently verifies
 both a matching certificate and an unmatched optional-mTLS request through
 the same shared stream used by MQTT TLS and WSS. The server rejects a client
 CertificateVerify algorithm it did not advertise.
+The matching `interop-tls13-client-auth-openssl` gate verifies that TLS 1.3
+uses the same CA-aware selection and empty-certificate fallback.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
 interoperability covers both endpoint roles and good/missing/revoked OCSP.
 The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:
