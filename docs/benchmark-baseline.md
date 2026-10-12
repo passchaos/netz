@@ -2085,15 +2085,61 @@ noise and is not presented as a general speed claim. A separate same-binary,
 order-alternated five-pair policy comparison then changed the benchmark-only
 sub-64-MiB multi-stream chunk from 3,000 to 5,000 bytes. Upload medians moved
 from 139 to 197 MiB/s (1.417x, 5/5 wins) and download from 82 to 103 MiB/s
-(1.256x, 5/5 wins). The 64-MiB benchmark retains its separately established
-6,000-byte policy, and production's conservative 1,024-byte default remains
-unchanged for standard 1,200-byte paths. Final five-sample 5,000-byte runs
+(1.256x, 5/5 wins). The 64-MiB benchmark retained its separately established
+6,000-byte policy, and production's conservative 1,024-byte default remained
+unchanged at that point. The direction-aware production result below
+supersedes both benchmark-only policies. Final five-sample 5,000-byte runs
 verified 83,886,080 bytes and status total 4,000 in each direction: upload
 mean 203.28 MiB/s (19.57% standard deviation, 129.76–235.07) and download mean
 113.54 MiB/s (0.82%, 111.96–114.69).
 `--verbose` prints per-iteration throughput lines (`[iter N]`) for diagnosing
 long or stuck multi-iteration runs. `--trace-iteration` additionally prints
 coarse lifecycle stages (bind, connect, transfer, join) for each iteration.
+
+#### Direction-aware paced request and response defaults (2026-10-12)
+
+The paced helper default is now resolved by endpoint role: clients use a
+5,000-byte logical request-body batch and servers use an 8,000-byte logical
+response/push-body batch. A non-zero `paced_body_chunk_bytes` remains an
+explicit override. This distinction matters because a same-binary CPU-0 scan
+of the four-stream 16-MiB upload shape measured the following means:
+
+| Logical chunk bytes | 1,024 | 3,000 | 4,000 | 5,000 | 6,000 | 7,000 | 8,000 |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| Upload mean MiB/s | 68.73 | 205.30 | 207.82 | 216.28 | 189.22 | 181.04 | 190.37 |
+
+Using 8,000 for both directions therefore regressed a seven-pair upload
+control by 11.55%. The role split retains the measured request optimum instead
+of hiding that regression behind the download gain. Congestion, connection and
+stream flow control, STREAM frame sizing, and the actual datagram limit still
+cap each emitted packet. A direct regression verifies that the 8,000-byte
+logical response default becomes 1,136 bytes of body capacity for a standard
+1,200-byte datagram and remains 8,000 bytes for an 8,192-byte datagram.
+
+The final evidence uses independently compiled ReleaseFast binaries, pins
+every run to CPU 0, warms each binary once per shape, and alternates AB/BA order
+within each pair. The baseline is clean `162dc380cd796025b22bb872db9c6c130ab9ffcb`
+with SHA-256
+`f59cdfdda5a161ee8ddf747b1e4855e22a4b3a3afaf8d212b6c4ecb850a35579`;
+the direction-aware candidate SHA-256 is
+`86e70110399ace34a9380bdf522605aa51d8356a6e7b2745225869449658fb11`.
+Every sample completed the exact byte count and four status-200 responses.
+
+| Shape | Baseline samples (MiB/s) | Candidate samples (MiB/s) | Means and population CV | Mean paired change |
+|---|---|---|---|---:|
+| 16 MiB download, 4 streams | 141.83, 128.45, 139.71, 143.04, 142.36, 142.45, 143.78 | 225.08, 209.68, 221.97, 222.56, 225.41, 224.21, 224.22 | 140.23 (3.53%) to 221.88 (2.30%) | +58.30% |
+| 64 MiB download, 4 streams | 145.64, 146.50, 146.99, 148.01, 147.76 | 203.35, 202.38, 202.68, 203.17, 203.68 | 146.98 (0.58%) to 203.05 (0.23%) | +38.15% |
+| 16 MiB upload control, 4 streams | 208.84, 207.00, 217.80, 207.45, 206.78, 206.36, 206.93 | 207.06, 208.22, 211.52, 207.64, 208.19, 209.68, 208.17 | 208.74 (1.81%) to 208.64 (0.66%) | -0.02% |
+
+The upload control's seven paired changes span -2.88% to +1.61%; its -0.02%
+mean is noise-level, while every download pair improves materially. The exact
+fixed-binary command shapes were:
+
+```sh
+taskset -c 0 ./bench-http3 --mode=download --streams=4 --body-bytes=16777216 --iterations=1
+taskset -c 0 ./bench-http3 --mode=download --streams=4 --body-bytes=67108864 --iterations=1
+taskset -c 0 ./bench-http3 --mode=upload --streams=4 --body-bytes=16777216 --iterations=1
+```
 
 A 2026-09-15 ReleaseFast migration smoke ran 20 cleartext requests, one
 four-stream 64-KiB upload, one matching download, 1,000 iterations of each

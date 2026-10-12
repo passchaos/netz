@@ -298,6 +298,10 @@ const writeDataFrame = body_sender.writeDataFrame;
 const BodyPartCursor = body_sender.BodyPartCursor;
 const max_paced_body_part_descriptors =
     body_sender.max_paced_body_part_descriptors;
+pub const default_paced_request_body_chunk_bytes =
+    body_sender.default_paced_request_body_chunk_bytes;
+pub const default_paced_response_body_chunk_bytes =
+    body_sender.default_paced_response_body_chunk_bytes;
 const pacedBodyChunkLimit = body_sender.pacedBodyChunkLimit;
 const responseBodySendCapacity = body_sender.responseBodySendCapacity;
 const pacedProtectedBodyChunkLimit = body_sender.pacedProtectedBodyChunkLimit;
@@ -3578,11 +3582,11 @@ pub const HandshakeSessionOptions = struct {
     max_priority_updates: usize = http3.default_max_priority_updates,
     /// Maximum HTTP/3 DATA bytes one paced helper attempt may hand to QUIC.
     ///
-    /// The default remains conservative for callers using the standard 1200B
-    /// path MTU. Loopback/high-throughput callers can raise this together with
-    /// `max_stream_frame_data`, `max_frames_per_packet`, and the handshake
-    /// one_rtt max datagram size to reduce ACK/flow-control pump iterations.
-    paced_body_chunk_bytes: usize = 1024,
+    /// Zero selects the direction-aware default: 5,000 bytes for client
+    /// request bodies and 8,000 bytes for server response and push bodies.
+    /// Congestion, flow-control, STREAM-frame, and actual datagram limits still
+    /// cap every packet. A non-zero value overrides the role-specific default.
+    paced_body_chunk_bytes: usize = 0,
     /// Experimental DATA-frame send path that emits the DATA prefix from
     /// per-packet scratch and borrows immutable application body slices until
     /// QUIC takes stable recovery ownership. Multi-stream batches keep one
@@ -5911,52 +5915,56 @@ pub const HandshakeServerSession = struct {
         established: quic.handshake.EstablishedConnection,
         options: HandshakeSessionOptions,
     ) Error!HandshakeServerSession {
-        try validateHandshakeSessionOptions(options);
+        const resolved_options = resolvePacedBodyChunkBytes(
+            options,
+            default_paced_response_body_chunk_bytes,
+        );
+        try validateHandshakeSessionOptions(resolved_options);
         if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
         const max_capacity = std.math.cast(
             usize,
-            options.local_settings.qpack_max_table_capacity,
+            resolved_options.local_settings.qpack_max_table_capacity,
         ) orelse return error.InvalidSetting;
         const allocator = established.connection.endpoint.allocator;
         return .{
             .established = established,
-            .options = options,
+            .options = resolved_options,
             .control = try .init(.{
-                .max_priority_updates = options.max_priority_updates,
+                .max_priority_updates = resolved_options.max_priority_updates,
             }),
             .qpack_decode = .init(
                 allocator,
                 max_capacity,
-                options.max_stream_buffer,
+                resolved_options.max_stream_buffer,
             ),
             .qpack_encode = .initAwaitingPeerSettings(
                 allocator,
-                options.max_stream_buffer,
+                resolved_options.max_stream_buffer,
             ),
             .request_streams = .init(
                 allocator,
-                options.max_stream_buffer,
-                options.max_concurrent_request_streams,
+                resolved_options.max_stream_buffer,
+                resolved_options.max_concurrent_request_streams,
             ),
             .streaming_requests = .init(
                 allocator,
-                options.max_concurrent_request_streams,
-                options.max_stream_buffer,
-                options.local_settings,
+                resolved_options.max_concurrent_request_streams,
+                resolved_options.max_stream_buffer,
+                resolved_options.local_settings,
                 .request,
             ),
             .receive_packets = .{
-                .max_datagrams = options.max_receive_batch_datagrams,
+                .max_datagrams = resolved_options.max_receive_batch_datagrams,
             },
             .request_lifecycle = .init(allocator),
             .connect_datagrams = .init(allocator, .{
-                .max_associations = options.max_concurrent_request_streams,
-                .max_queued_per_association = options.max_queued_connect_datagrams,
-                .max_queued_bytes_per_association = options.max_queued_connect_datagram_bytes,
+                .max_associations = resolved_options.max_concurrent_request_streams,
+                .max_queued_per_association = resolved_options.max_queued_connect_datagrams,
+                .max_queued_bytes_per_association = resolved_options.max_queued_connect_datagram_bytes,
             }),
             .outbound_bodies = .init(
                 allocator,
-                options.max_concurrent_request_streams,
+                resolved_options.max_concurrent_request_streams,
             ),
         };
     }
@@ -11431,11 +11439,15 @@ pub const HandshakeClient = struct {
         options: HandshakeSessionOptions,
         accepted_early_request: ?*const PreparedEarlyRequest,
     ) Error!HandshakeClient {
-        try validateHandshakeSessionOptions(options);
+        const resolved_options = resolvePacedBodyChunkBytes(
+            options,
+            default_paced_request_body_chunk_bytes,
+        );
+        try validateHandshakeSessionOptions(resolved_options);
         if (!http3.isHttp3Alpn(established.alpn)) return error.InvalidAlpn;
         const max_capacity = std.math.cast(
             usize,
-            options.local_settings.qpack_max_table_capacity,
+            resolved_options.local_settings.qpack_max_table_capacity,
         ) orelse return error.InvalidSetting;
         const transport_next_stream_id = std.math.cast(
             u62,
@@ -11466,54 +11478,54 @@ pub const HandshakeClient = struct {
             .peer = peer,
             .allocator = allocator,
             .established = established,
-            .options = options,
+            .options = resolved_options,
             .control = try .init(.{
-                .max_priority_updates = options.max_priority_updates,
+                .max_priority_updates = resolved_options.max_priority_updates,
             }),
             .qpack_decode = .init(
                 allocator,
                 max_capacity,
-                options.max_stream_buffer,
+                resolved_options.max_stream_buffer,
             ),
             .qpack_encode = .initAwaitingPeerSettings(
                 allocator,
-                options.max_stream_buffer,
+                resolved_options.max_stream_buffer,
             ),
             .response_streams = .init(
                 allocator,
-                options.max_stream_buffer,
-                options.max_concurrent_request_streams,
+                resolved_options.max_stream_buffer,
+                resolved_options.max_concurrent_request_streams,
             ),
             .streaming_responses = .initWithInformationalLimit(
                 allocator,
-                options.max_concurrent_request_streams,
-                options.max_stream_buffer,
-                options.max_informational_responses,
-                options.local_settings,
+                resolved_options.max_concurrent_request_streams,
+                resolved_options.max_stream_buffer,
+                resolved_options.max_informational_responses,
+                resolved_options.local_settings,
                 .response,
             ),
             .push_streams = .initWithInformationalLimit(
                 allocator,
-                options.max_concurrent_request_streams,
-                options.max_stream_buffer,
-                options.max_informational_responses,
-                options.local_settings,
+                resolved_options.max_concurrent_request_streams,
+                resolved_options.max_stream_buffer,
+                resolved_options.max_informational_responses,
+                resolved_options.local_settings,
             ),
             .receive_packets = .{
-                .max_datagrams = options.max_receive_batch_datagrams,
+                .max_datagrams = resolved_options.max_receive_batch_datagrams,
             },
             .request_lifecycle = .init(
                 allocator,
-                options.max_concurrent_request_streams,
+                resolved_options.max_concurrent_request_streams,
             ),
             .connect_datagrams = .init(allocator, .{
-                .max_associations = options.max_concurrent_request_streams,
-                .max_queued_per_association = options.max_queued_connect_datagrams,
-                .max_queued_bytes_per_association = options.max_queued_connect_datagram_bytes,
+                .max_associations = resolved_options.max_concurrent_request_streams,
+                .max_queued_per_association = resolved_options.max_queued_connect_datagrams,
+                .max_queued_bytes_per_association = resolved_options.max_queued_connect_datagram_bytes,
             }),
             .outbound_bodies = .init(
                 allocator,
-                options.max_concurrent_request_streams,
+                resolved_options.max_concurrent_request_streams,
             ),
             .next_stream_id = transport_next_stream_id,
         };
@@ -23563,6 +23575,41 @@ fn validateHandshakeSessionOptions(options: HandshakeSessionOptions) Error!void 
     );
     try receive_policy.validateMaxDatagrams(
         options.max_receive_batch_datagrams,
+    );
+}
+
+fn resolvePacedBodyChunkBytes(
+    options: HandshakeSessionOptions,
+    default_chunk_bytes: usize,
+) HandshakeSessionOptions {
+    var resolved = options;
+    if (resolved.paced_body_chunk_bytes == 0) {
+        resolved.paced_body_chunk_bytes = default_chunk_bytes;
+    }
+    return resolved;
+}
+
+test "HTTP/3 handshake sessions resolve direction-aware paced body defaults" {
+    try std.testing.expectEqual(
+        default_paced_request_body_chunk_bytes,
+        resolvePacedBodyChunkBytes(
+            .{},
+            default_paced_request_body_chunk_bytes,
+        ).paced_body_chunk_bytes,
+    );
+    try std.testing.expectEqual(
+        default_paced_response_body_chunk_bytes,
+        resolvePacedBodyChunkBytes(
+            .{},
+            default_paced_response_body_chunk_bytes,
+        ).paced_body_chunk_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 4096),
+        resolvePacedBodyChunkBytes(
+            .{ .paced_body_chunk_bytes = 4096 },
+            default_paced_response_body_chunk_bytes,
+        ).paced_body_chunk_bytes,
     );
 }
 

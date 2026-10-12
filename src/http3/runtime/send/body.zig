@@ -14,6 +14,13 @@ const OutboundBodySet = outbound_body.Set;
 const ProtectedSendState = protected_send_module.State;
 const BodyChunk = body_batch.Chunk;
 pub const max_paced_body_part_descriptors: usize = 128;
+/// One paced request helper call may submit several packet-sized STREAM
+/// fragments. Five kilobytes keeps concurrent upload streams moving without
+/// returning to the old one-packet-per-helper-turn behavior.
+pub const default_paced_request_body_chunk_bytes: usize = 5000;
+/// Response batches benefit from filling a common jumbo loopback datagram.
+/// Ordinary 1200-byte paths remain capped by their actual packet budget below.
+pub const default_paced_response_body_chunk_bytes: usize = 8000;
 
 /// Cursor over borrowed body slices for one packet-sized HTTP/3 DATA
 /// contribution. It splits only descriptors, never payload bytes into owned
@@ -153,10 +160,9 @@ pub fn pacedBodyChunkLimit(options: anytype) usize {
     // `sendConnectionFrames` packs only `max_frames_per_packet` of them into
     // one QUIC packet. Keep the DATA chunk within that per-packet frame budget
     // and leave a conservative allowance for HTTP/3 DATA framing, STREAM frame
-    // prefixes, packet number, and AEAD overhead. The option defaults to 1 KiB
-    // for compatibility with the standard 1200B path-MTU configuration, while
-    // benchmarks can raise it once their handshake 1-RTT datagram size is also
-    // raised.
+    // prefixes, packet number, and AEAD overhead. The default logical batch is
+    // larger than one standard-MTU packet; the actual datagram and congestion
+    // budgets below still bound each emitted packet independently.
     const frame_budget = options.max_stream_frame_data *|
         @max(@as(usize, 1), options.max_frames_per_packet);
     const data_budget = if (frame_budget > paced_body_frame_overhead_margin)

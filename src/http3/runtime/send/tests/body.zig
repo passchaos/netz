@@ -85,6 +85,49 @@ test "HTTP/3 response capacity accounts separately for flow and packet overhead"
     );
 }
 
+test "HTTP/3 direction-aware paced defaults adapt to the packet budget" {
+    const options = .{
+        .max_stream_frame_data = @as(usize, 1200),
+        .max_frames_per_packet = @as(usize, 8),
+        .paced_body_chunk_bytes = body_sender.default_paced_response_body_chunk_bytes,
+    };
+    const chunk_limit = body_sender.pacedBodyChunkLimit(options);
+    try std.testing.expectEqual(
+        body_sender.default_paced_response_body_chunk_bytes,
+        chunk_limit,
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1136),
+        body_sender.responseBodySendCapacity(
+            body_sender.default_paced_response_body_chunk_bytes,
+            std.math.maxInt(usize),
+            std.math.maxInt(usize),
+            std.math.maxInt(usize),
+            1200,
+            chunk_limit,
+        ),
+    );
+    try std.testing.expectEqual(
+        body_sender.default_paced_response_body_chunk_bytes,
+        body_sender.responseBodySendCapacity(
+            body_sender.default_paced_response_body_chunk_bytes,
+            std.math.maxInt(usize),
+            std.math.maxInt(usize),
+            std.math.maxInt(usize),
+            8192,
+            chunk_limit,
+        ),
+    );
+    try std.testing.expectEqual(
+        body_sender.default_paced_request_body_chunk_bytes,
+        body_sender.pacedBodyChunkLimit(.{
+            .max_stream_frame_data = @as(usize, 1200),
+            .max_frames_per_packet = @as(usize, 8),
+            .paced_body_chunk_bytes = body_sender.default_paced_request_body_chunk_bytes,
+        }),
+    );
+}
+
 test "HTTP/3 body batch validates transport progress before commit" {
     try std.testing.expect(body_sender.batchProgressIsValid(0, 0, 4));
     try std.testing.expect(body_sender.batchProgressIsValid(2, 4, 4));

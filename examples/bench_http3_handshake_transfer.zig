@@ -28,15 +28,14 @@ const single_stream_paced_body_chunk_bytes: usize = 7200;
 // upload benchmark over 4096 on loopback while avoiding the instability seen
 // with larger 12000-byte datagrams.
 const multi_stream_one_rtt_datagram_size: usize = 8192;
-// Five 16-MiB four-stream order-alternated pairs beat the previous 3000-byte
-// value in both directions. Keep the separately tuned 64-MiB path below.
-const multi_stream_paced_body_chunk_bytes: usize = 5000;
-// ACK-driven loss repair removed the old false 3200-byte stability ceiling.
-// The larger packet wins on quicz-shaped 64 MiB runs, while 5000 bytes is the
-// measured choice for shorter transfers. Keep the benchmark default adaptive
-// rather than regressing one shape to optimize another.
-const large_multi_stream_body_bytes: usize = 64 * 1024 * 1024;
-const large_multi_stream_paced_body_chunk_bytes: usize = 6000;
+// The transport still caps each packet by congestion, flow-control, and the
+// negotiated datagram size. Requests retain the measured concurrent-upload
+// optimum while responses fill the 8-KiB datagram without crossing the
+// empirically unstable 8,100-byte edge.
+const multi_stream_request_paced_body_chunk_bytes: usize =
+    netz.http3.runtime.default_paced_request_body_chunk_bytes;
+const multi_stream_response_paced_body_chunk_bytes: usize =
+    netz.http3.runtime.default_paced_response_body_chunk_bytes;
 // Both endpoints run in this process while the host caps UDP receive buffers
 // at 212,992 bytes. Let the client drain after a small, fixed packet budget.
 // Counting socket-visible packets avoids the old 64KiB interval becoming
@@ -116,7 +115,8 @@ pub fn main(init: std.process.Init) !void {
         \\  body batch: {}
         \\  GRO receive: {}
         \\  1-RTT datagram bytes: {d}
-        \\  paced body chunk bytes: {d}
+        \\  request paced body chunk bytes: {d}
+        \\  response paced body chunk bytes: {d}
         \\  flow control bytes: {d}
         \\  server ACK-eliciting threshold: {d}
         \\  iterations: {d}
@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
         \\  bytes/s: {d}
         \\  MiB/s: {d}
         \\
-    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", transferEndpointDatagramSize(config), config.receive_batch_datagrams, responseSchedulerDelayPackets(config), bodyBatchEnabled(config), config.enable_gro_receive, transferOneRttDatagramSize(config), transferPacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
+    , .{ @tagName(config.mode), config.streams, if (config.mode == .download and config.streams > 1) "RFC 9218" else "single-stream/application", if (config.aggregate_upload) "aggregate" else "streaming", transferEndpointDatagramSize(config), config.receive_batch_datagrams, responseSchedulerDelayPackets(config), bodyBatchEnabled(config), config.enable_gro_receive, transferOneRttDatagramSize(config), transferRequestPacedBodyChunkBytes(config), transferResponsePacedBodyChunkBytes(config), transferFlowControlBytes(config), config.ack_eliciting_threshold, config.iterations, config.body_bytes, bytes_total, status_total, if (config.iterations == 0) 0 else elapsed / config.iterations, bytes_per_second, bytes_per_second / (1024 * 1024) });
     const summary = summarizeThroughput(throughput_samples);
     std.debug.print(
         "  mean MiB/s: {d:.2}\n" ++
@@ -221,7 +221,10 @@ fn runIteration(
 ) !IterationResult {
     const endpoint_datagram_size = transferEndpointDatagramSize(config);
     const one_rtt_datagram_size = transferOneRttDatagramSize(config);
-    const paced_body_chunk_bytes = transferPacedBodyChunkBytes(config);
+    const request_paced_body_chunk_bytes =
+        transferRequestPacedBodyChunkBytes(config);
+    const response_paced_body_chunk_bytes =
+        transferResponsePacedBodyChunkBytes(config);
     const stream_buffer = transferStreamBufferBytes(config);
     const transport_parameters = transferTransportParameters(config);
     // Every DATA contribution has private prefix storage in both the single-
@@ -257,7 +260,7 @@ fn runIteration(
                 .max_receive_batch_datagrams = config.receive_batch_datagrams,
                 .max_stream_buffer = stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
-                .paced_body_chunk_bytes = paced_body_chunk_bytes,
+                .paced_body_chunk_bytes = response_paced_body_chunk_bytes,
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
                 .response_scheduler_batch_delay_packets = responseSchedulerDelayPackets(config),
                 .response_scheduler_batch_delay_ns = if (config.mode == .download and config.streams > 1) multi_stream_response_batch_delay_ns else 0,
@@ -397,7 +400,7 @@ fn runIteration(
                 .max_receive_batch_datagrams = config.receive_batch_datagrams,
                 .max_stream_buffer = stream_buffer,
                 .max_stream_frame_data = config.max_stream_frame_data,
-                .paced_body_chunk_bytes = paced_body_chunk_bytes,
+                .paced_body_chunk_bytes = request_paced_body_chunk_bytes,
                 .enable_data_prefix_fast_path = enable_data_prefix_fast_path,
                 .max_concurrent_request_streams = max_streams,
             },
@@ -759,7 +762,7 @@ fn sendUploadBodies(
         @memset(next_trace.?, per_stream_trace_step);
     }
     var finished_count: usize = 0;
-    const paced_chunk_bytes = transferPacedBodyChunkBytes(config);
+    const paced_chunk_bytes = transferRequestPacedBodyChunkBytes(config);
     while (finished_count < streams) {
         var round_pending = false;
         for (stream_ids, 0..) |stream_id, index| {
@@ -1009,14 +1012,20 @@ fn transferOneRttDatagramSize(config: Config) usize {
         if (config.streams == 1) single_stream_one_rtt_datagram_size else multi_stream_one_rtt_datagram_size;
 }
 
-fn transferPacedBodyChunkBytes(config: Config) usize {
+fn transferRequestPacedBodyChunkBytes(config: Config) usize {
     return config.paced_body_chunk_bytes orelse
         if (config.streams == 1)
             single_stream_paced_body_chunk_bytes
-        else if (config.body_bytes >= large_multi_stream_body_bytes)
-            large_multi_stream_paced_body_chunk_bytes
         else
-            multi_stream_paced_body_chunk_bytes;
+            multi_stream_request_paced_body_chunk_bytes;
+}
+
+fn transferResponsePacedBodyChunkBytes(config: Config) usize {
+    return config.paced_body_chunk_bytes orelse
+        if (config.streams == 1)
+            single_stream_paced_body_chunk_bytes
+        else
+            multi_stream_response_paced_body_chunk_bytes;
 }
 
 fn transferRoundRobinChunkBytes(config: Config) usize {
