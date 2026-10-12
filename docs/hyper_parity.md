@@ -1024,12 +1024,13 @@ an explicit version policy. TLS 1.2 is limited to ECDHE+AEAD, requires Extended
 Master Secret and secure-renegotiation signaling, and is covered by HTTP/1 and
 HTTP/2 application round trips; QUIC/HTTP/3 remains TLS 1.3-only by protocol.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
-resumption status. HTTP/1 and HTTP/2 pools keep a bounded, identity-and-port
-scoped ticket cache: each concurrent handshake receives an owned clone, new
-tickets replace old state securely, expired entries are pruned before dialing,
-and zero cache capacity explicitly disables retention. HTTP/1 keeps its
-standard-library TLS path by default and selects the versioned Vail path with
-`client_pool.Options.vail_tls`; HTTP/2 already uses that versioned path.
+resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
+TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake
+receives an owned clone, new tickets replace old state securely, expired
+entries are pruned before dialing, and zero cache capacity explicitly disables
+retention. HTTP/1 keeps its standard-library TLS path by default and selects
+the versioned Vail path with `client_pool.Options.vail_tls`; HTTP/2 already uses
+that versioned path.
 `zig build interop-tls12-ticket-openssl -Doptimize=ReleaseSafe` verifies both
 directions at a process boundary: OpenSSL resumes a ticket issued by the netz
 server, and the netz HTTP/1 client resumes a ticket issued by `openssl
@@ -1039,6 +1040,9 @@ Clients retain the newest authenticated post-handshake NewSessionTicket with
 its resumption secret, server identity, ALPN, cipher hash and ticket age;
 servers issue a fresh stateless ticket after full and resumed handshakes and
 fall back to certificate authentication when an opaque ticket is invalid.
+Both HTTP pools collect those post-handshake tickets after response traffic
+and automatically resume after idle eviction or non-reusable connection
+retirement; forced-retirement tests cover TLS 1.2 and TLS 1.3 independently.
 `zig build interop-tls13-ticket-openssl -Doptimize=ReleaseSafe` verifies both
 endpoint-role directions against OpenSSL, including an HTTP/1 request after
 the resumed handshake. The existing TLS 1.2 gate remains separate.

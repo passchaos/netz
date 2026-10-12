@@ -246,7 +246,9 @@ Current protocol coverage includes:
   both the TLS client and server roles,
   RFC 8446 TLS 1.3 PSK-DHE resumption with authenticated post-handshake
   NewSessionTicket retention, identity/ALPN/age validation, renewed tickets,
-  and invalid-ticket fallback to a certificate-authenticated full handshake,
+  invalid-ticket fallback to a certificate-authenticated full handshake, and
+  separate bounded HTTP/1 and HTTP/2 pool caches that resume after physical
+  connection retirement without enabling early data,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation

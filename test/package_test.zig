@@ -2,6 +2,14 @@ const std = @import("std");
 const netz = @import("netz");
 
 test "public modules are reachable" {
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream,
+        "Tls13TicketKeyring",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.tls.stream,
+        "tls13_ticket_key_len",
+    ));
     try std.testing.expect(@hasDecl(netz, "runtime"));
     try std.testing.expect(@hasDecl(netz, "stream"));
     inline for (&.{ "connect", "io", "socket_options", "tls" }) |decl|
@@ -429,6 +437,10 @@ test "public modules are reachable" {
         netz.http1.client_pool.Options,
         "max_tls12_session_tickets",
     ));
+    try std.testing.expect(@hasField(
+        netz.http1.client_pool.Options,
+        "max_tls13_session_tickets",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http1.client_pool.Pool,
         "connectionCount",
@@ -456,6 +468,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(
         netz.http2.client_pool.Options,
         "max_tls12_session_tickets",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http2.client_pool.Options,
+        "max_tls13_session_tickets",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.client_pool.Pool,

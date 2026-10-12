@@ -1008,7 +1008,9 @@ test "HTTP/1 client pool reuses verified TLS connection" {
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
 }
 
-test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
+fn testTlsTicketResumptionAfterRetirement(
+    comptime protocol_policy: tls_stream.VersionPolicy,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1024,9 +1026,9 @@ test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
     );
     const key_pair = try tls_testing.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
-    var keyring = try tls_stream.Tls12TicketKeyring.init(.{
+    var keyring = try tls_stream.Tls13TicketKeyring.init(.{
         .id = 29,
-        .secret = [_]u8{0x29} ** tls_stream.tls12_ticket_key_len,
+        .secret = [_]u8{0x29} ** tls_stream.tls13_ticket_key_len,
     });
     defer keyring.deinit();
     var server = try runtime.TlsServer.listen(
@@ -1038,13 +1040,18 @@ test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
                 .certificate_chain = &.{&certificate_der},
                 .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
             },
-            .protocol_policy = .tls12_only,
+            .protocol_policy = protocol_policy,
             .alpn_protocols = &.{"http/1.1"},
-            .tls12_session_tickets = .{
+            .tls12_session_tickets = if (protocol_policy == .tls12_only) .{
                 .keyring = &keyring,
                 .server_id = "127.0.0.1",
                 .lifetime_seconds = 3600,
-            },
+            } else null,
+            .tls13_session_tickets = if (protocol_policy == .tls13_only) .{
+                .keyring = &keyring,
+                .server_id = "127.0.0.1",
+                .lifetime_seconds = 3600,
+            } else null,
         },
     );
     defer server.deinit();
@@ -1087,7 +1094,7 @@ test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
                 .pinned_ecdsa_p256_public_key = public_key,
             },
             .alpn_protocols = &.{"http/1.1"},
-            .protocol_policy = .tls12_only,
+            .protocol_policy = protocol_policy,
         },
     });
     defer pool.deinit();
@@ -1108,6 +1115,14 @@ test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqualSlices(bool, &.{ false, true }, &shared.resumed);
+}
+
+test "HTTP/1 client pool resumes TLS 1.2 ticket after retirement" {
+    try testTlsTicketResumptionAfterRetirement(.tls12_only);
+}
+
+test "HTTP/1 client pool resumes TLS 1.3 ticket after retirement" {
+    try testTlsTicketResumptionAfterRetirement(.tls13_only);
 }
 
 test "HTTP/1 client pool discards TLS-buffered unsolicited response" {

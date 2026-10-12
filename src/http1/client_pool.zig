@@ -38,6 +38,9 @@ pub const Options = struct {
     /// Maximum cached RFC 5077 TLS 1.2 tickets across HTTPS authorities.
     /// Zero disables automatic ticket retention and resumption.
     max_tls12_session_tickets: usize = 32,
+    /// Maximum cached RFC 8446 TLS 1.3 tickets across HTTPS authorities.
+    /// Zero disables automatic ticket retention and resumption.
+    max_tls13_session_tickets: usize = 32,
 };
 
 const Transport = enum { cleartext, tls };
@@ -67,6 +70,7 @@ pub const Pool = struct {
     connections: usize = 0,
     capacity_waiters: fifo_admission.Queue = .{},
     tls12_tickets: tls_ticket_cache.Cache,
+    tls13_tickets: tls_ticket_cache.Tls13Cache,
     closed: bool = false,
 
     pub fn init(
@@ -89,6 +93,11 @@ pub const Pool = struct {
                 io,
                 options.max_tls12_session_tickets,
             ),
+            .tls13_tickets = .init(
+                allocator,
+                io,
+                options.max_tls13_session_tickets,
+            ),
         };
     }
 
@@ -101,6 +110,7 @@ pub const Pool = struct {
         std.debug.assert(self.capacity_waiters.count() == 0);
         self.idle.deinit(self.allocator);
         self.tls12_tickets.deinit();
+        self.tls13_tickets.deinit();
         self.* = undefined;
     }
 
@@ -116,6 +126,7 @@ pub const Pool = struct {
         self.capacity_waiters.notifyAll(self.io);
         self.mutex.unlock(self.io);
         self.tls12_tickets.clear();
+        self.tls13_tickets.clear();
     }
 
     pub fn requestUri(
@@ -497,9 +508,24 @@ pub const Pool = struct {
         else
             null;
         defer if (tls12_ticket) |*ticket| ticket.deinit();
+        var tls13_ticket = if (transport == .tls and
+            self.options.vail_tls != null and
+            self.options.vail_tls.?.protocol_policy.offersTls13() and
+            self.options.vail_tls.?.request_tls13_session_ticket)
+            try self.tls13_tickets.cloneFor(
+                endpoint.tls_host,
+                endpoint.port,
+                realNowMilliseconds(self.io),
+            )
+        else
+            null;
+        defer if (tls13_ticket) |*ticket| ticket.deinit();
         var vail_tls_options = self.options.vail_tls;
         if (tls12_ticket) |*ticket| {
             vail_tls_options.?.tls12_ticket_resumption = ticket;
+        }
+        if (tls13_ticket) |*ticket| {
+            vail_tls_options.?.tls13_ticket_resumption = ticket;
         }
 
         var client = switch (transport) {
@@ -631,6 +657,20 @@ pub const Pool = struct {
         errdefer client.close();
         if (transport == .tls and vail_tls_options != null) {
             self.rememberTls12SessionTicket(endpoint, &client);
+            const remembered_tls13_ticket = try self.rememberTls13SessionTicket(
+                endpoint.tls_host,
+                endpoint.port,
+                &client,
+            );
+            if (!remembered_tls13_ticket and tls13_ticket != null and
+                client.negotiatedTlsProtocol() == .tls13 and
+                !(client.wasTlsSessionResumed() orelse false))
+            {
+                _ = self.tls13_tickets.remove(
+                    endpoint.tls_host,
+                    endpoint.port,
+                );
+            }
         }
         const tls_host = try self.allocator.dupe(u8, endpoint.tls_host);
         connection_reserved = false;
@@ -668,8 +708,35 @@ pub const Pool = struct {
         }
     }
 
+    fn rememberTls13SessionTicket(
+        self: *Pool,
+        tls_host: []const u8,
+        port: u16,
+        client: *runtime.Client,
+    ) tls_stream.Error!bool {
+        if (try client.takeTls13SessionTicket()) |ticket| {
+            self.tls13_tickets.store(
+                tls_host,
+                port,
+                ticket,
+                realNowMilliseconds(self.io),
+            );
+            return true;
+        }
+        return false;
+    }
+
     fn release(self: *Pool, slot_value: Slot, reusable: bool) void {
         var slot = slot_value;
+        if (slot.transport == .tls and self.options.vail_tls != null) {
+            _ = self.rememberTls13SessionTicket(
+                slot.tls_host,
+                slot.port,
+                &slot.client,
+            ) catch {
+                _ = self.tls13_tickets.remove(slot.tls_host, slot.port);
+            };
+        }
         if (!reusable or self.options.max_idle_connections == 0 or
             self.options.max_idle_per_authority == 0)
         {
@@ -864,6 +931,10 @@ fn retryableStaleConnectionError(err: anyerror) bool {
 
 fn realNowSeconds(io: std.Io) u64 {
     return @intCast(@max(0, std.Io.Timestamp.now(io, .real).toSeconds()));
+}
+
+fn realNowMilliseconds(io: std.Io) u64 {
+    return @intCast(@max(0, std.Io.Timestamp.now(io, .real).toMilliseconds()));
 }
 
 test "HTTP/1 client pool validates idle limits" {
