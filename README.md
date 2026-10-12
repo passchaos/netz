@@ -248,6 +248,8 @@ Current protocol coverage includes:
   CertificateRequest extensions for forward compatibility while still
   rejecting every duplicate extension type across the complete 16-bit namespace
   without an arbitrary count ceiling, as well as malformed known extensions;
+  repeated signature-algorithm values remain acceptable in TLS 1.2/1.3 ClientHello
+  and TLS 1.3 CertificateRequest vectors;
   both peers reject a non-empty CertificateRequest context during the initial
   TLS 1.3 handshake, reserving it for post-handshake authentication;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
