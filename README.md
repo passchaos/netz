@@ -247,6 +247,8 @@ Current protocol coverage includes:
   the exact set they advertised. TLS 1.3 clients ignore unknown
   CertificateRequest extensions for forward compatibility while still
   rejecting every duplicate extension type and malformed known extensions;
+  both peers reject a non-empty CertificateRequest context during the initial
+  TLS 1.3 handshake, reserving it for post-handshake authentication;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in

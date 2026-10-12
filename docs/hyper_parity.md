@@ -1036,7 +1036,8 @@ The corresponding `interop-tls13-client-auth-openssl` gate applies the same
 matching/unmatched CA selection check to TLS 1.3; its parser retains the
 CertificateRequest CA vector instead of treating it as syntax-only data and
 ignores unknown extensions while rejecting duplicate types and preserving
-strict validation of known ones.
+strict validation of known ones. Initial-handshake CertificateRequest messages
+must carry an empty request context in both client and server paths.
 The same stream layer exposes RFC 5077 TLS 1.2 stateless tickets and explicit
 resumption status. HTTP/1 and HTTP/2 pools keep separate bounded TLS 1.2 and
 TLS 1.3 identity-and-port scoped ticket caches: each concurrent handshake
