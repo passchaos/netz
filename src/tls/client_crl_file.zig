@@ -225,20 +225,11 @@ pub fn parse(
         );
         errdefer allocator.free(crl_der);
 
-        var matched: ?vail.x509.crl.List = null;
-        for (client_cas.certificates) |ca_der| {
-            const candidate = vail.x509.crl.parseAndVerify(
-                crl_der,
-                ca_der,
-                now_seconds,
-            ) catch |err| switch (err) {
-                error.IssuerMismatch => continue,
-                else => return error.InvalidCrl,
-            };
-            if (matched != null) return error.DuplicateCrlIssuer;
-            matched = candidate;
-        }
-        const list = matched orelse return error.MissingCrlIssuer;
+        const list = try parseWithConfiguredSigner(
+            crl_der,
+            client_cas,
+            now_seconds,
+        );
         for (lists.items) |existing| {
             if (!std.mem.eql(
                 u8,
@@ -278,14 +269,14 @@ pub fn parse(
         allocator,
         owned_lists,
         combined_lists,
-        client_cas.certificates,
+        client_cas,
         now_seconds,
     );
     errdefer allocator.free(indirect_lists);
     const indirect_combined_lists = try authorizeIndirectCombinedLists(
         allocator,
         combined_lists,
-        client_cas.certificates,
+        client_cas,
         now_seconds,
     );
     errdefer allocator.free(indirect_combined_lists);
@@ -299,11 +290,44 @@ pub fn parse(
     };
 }
 
+fn parseWithConfiguredSigner(
+    crl_der: []const u8,
+    client_cas: *const client_ca_file.File,
+    now_seconds: i64,
+) Error!vail.x509.crl.List {
+    var matched: ?vail.x509.crl.List = null;
+    for (client_cas.certificates) |certificate| {
+        const candidate = vail.x509.crl.parseAndVerify(
+            crl_der,
+            certificate,
+            now_seconds,
+        ) catch |err| switch (err) {
+            error.IssuerMismatch => continue,
+            else => return error.InvalidCrl,
+        };
+        if (matched != null) return error.DuplicateCrlIssuer;
+        matched = candidate;
+    }
+    for (client_cas.crl_signers) |certificate| {
+        const candidate = vail.x509.crl.parseAndVerify(
+            crl_der,
+            certificate,
+            now_seconds,
+        ) catch |err| switch (err) {
+            error.IssuerMismatch => continue,
+            else => return error.InvalidCrl,
+        };
+        if (matched != null) return error.DuplicateCrlIssuer;
+        matched = candidate;
+    }
+    return matched orelse error.MissingCrlIssuer;
+}
+
 fn authorizeIndirectLists(
     allocator: std.mem.Allocator,
     lists: []const vail.x509.crl.List,
     combined_lists: []const vail.x509.crl.CombinedList,
-    certificate_issuers: []const []const u8,
+    client_cas: *const client_ca_file.File,
     now_seconds: i64,
 ) Error![]vail.x509.crl.AuthorizedIndirectList {
     var authorized: std.ArrayList(
@@ -314,13 +338,16 @@ fn authorizeIndirectLists(
         if (!list.isIndirect() or list.isDelta() or
             isCombinedBase(combined_lists, list)) continue;
         var matched = false;
-        for (certificate_issuers) |issuer| {
-            const candidate = vail.x509.crl.AuthorizedIndirectList.init(
+        for (client_cas.certificates) |issuer| {
+            const candidate = authorizeIndirectList(
+                allocator,
                 list,
                 issuer,
+                client_cas,
                 now_seconds,
             ) catch |err| switch (err) {
                 error.InvalidIssuer => continue,
+                error.OutOfMemory => return error.OutOfMemory,
                 else => return error.InvalidCrl,
             };
             try authorized.append(allocator, candidate);
@@ -334,7 +361,7 @@ fn authorizeIndirectLists(
 fn authorizeIndirectCombinedLists(
     allocator: std.mem.Allocator,
     combined_lists: []const vail.x509.crl.CombinedList,
-    certificate_issuers: []const []const u8,
+    client_cas: *const client_ca_file.File,
     now_seconds: i64,
 ) Error![]vail.x509.crl.AuthorizedIndirectCombinedList {
     var authorized: std.ArrayList(
@@ -344,22 +371,146 @@ fn authorizeIndirectCombinedLists(
     for (combined_lists) |combined| {
         if (!combined.base.isIndirect()) continue;
         var matched = false;
-        for (certificate_issuers) |issuer| {
-            const candidate =
-                vail.x509.crl.AuthorizedIndirectCombinedList.init(
-                    combined,
-                    issuer,
-                    now_seconds,
-                ) catch |err| switch (err) {
-                    error.InvalidIssuer => continue,
-                    else => return error.InvalidCrl,
-                };
+        for (client_cas.certificates) |issuer| {
+            const candidate = authorizeIndirectCombinedList(
+                allocator,
+                combined,
+                issuer,
+                client_cas,
+                now_seconds,
+            ) catch |err| switch (err) {
+                error.InvalidIssuer => continue,
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.InvalidCrl,
+            };
             try authorized.append(allocator, candidate);
             matched = true;
         }
         if (!matched) return error.MissingCrlIssuer;
     }
     return authorized.toOwnedSlice(allocator);
+}
+
+fn authorizeIndirectList(
+    allocator: std.mem.Allocator,
+    list: vail.x509.crl.List,
+    certificate_issuer_der: []const u8,
+    client_cas: *const client_ca_file.File,
+    now_seconds: i64,
+) !vail.x509.crl.AuthorizedIndirectList {
+    return authorizeIndirect(
+        vail.x509.crl.AuthorizedIndirectList,
+        allocator,
+        list,
+        list.issuer_certificate_der,
+        certificate_issuer_der,
+        client_cas,
+        now_seconds,
+    );
+}
+
+fn authorizeIndirectCombinedList(
+    allocator: std.mem.Allocator,
+    combined: vail.x509.crl.CombinedList,
+    certificate_issuer_der: []const u8,
+    client_cas: *const client_ca_file.File,
+    now_seconds: i64,
+) !vail.x509.crl.AuthorizedIndirectCombinedList {
+    return authorizeIndirect(
+        vail.x509.crl.AuthorizedIndirectCombinedList,
+        allocator,
+        combined,
+        combined.base.issuer_certificate_der,
+        certificate_issuer_der,
+        client_cas,
+        now_seconds,
+    );
+}
+
+fn authorizeIndirect(
+    comptime Authorized: type,
+    allocator: std.mem.Allocator,
+    value: anytype,
+    signer_certificate_der: []const u8,
+    certificate_issuer_der: []const u8,
+    client_cas: *const client_ca_file.File,
+    now_seconds: i64,
+) !Authorized {
+    const direct: ?Authorized = Authorized.init(
+        value,
+        certificate_issuer_der,
+        now_seconds,
+    ) catch |err| switch (err) {
+        error.InvalidIssuer => null,
+        else => return err,
+    };
+    if (direct) |authorized| return authorized;
+
+    var signer_chain_storage: [client_ca_file.max_certificates][]const u8 = undefined;
+    const signer_chain = certificateChain(
+        client_cas,
+        signer_certificate_der,
+        certificate_issuer_der,
+        &signer_chain_storage,
+    );
+    const same_branch: ?Authorized = Authorized.initWithSignerChain(
+        allocator,
+        value,
+        certificate_issuer_der,
+        signer_chain,
+        now_seconds,
+        .{},
+        .{},
+    ) catch |err| switch (err) {
+        error.InvalidIssuer => null,
+        else => return err,
+    };
+    if (same_branch) |authorized| return authorized;
+
+    for (client_cas.certificates) |trust_anchor| {
+        if (std.mem.eql(u8, trust_anchor, certificate_issuer_der)) continue;
+        var issuer_chain_storage: [client_ca_file.max_certificates][]const u8 = undefined;
+        const issuer_chain = certificateChain(
+            client_cas,
+            certificate_issuer_der,
+            trust_anchor,
+            &issuer_chain_storage,
+        );
+        const shared_anchor: Authorized = Authorized.initWithTrustAnchor(
+            allocator,
+            value,
+            certificate_issuer_der,
+            issuer_chain,
+            signer_chain,
+            trust_anchor,
+            now_seconds,
+            .{},
+            .{},
+        ) catch |err| switch (err) {
+            error.InvalidIssuer => continue,
+            else => return err,
+        };
+        return shared_anchor;
+    }
+    return error.InvalidIssuer;
+}
+
+fn certificateChain(
+    client_cas: *const client_ca_file.File,
+    leaf: []const u8,
+    excluded_anchor: []const u8,
+    storage: *[client_ca_file.max_certificates][]const u8,
+) []const []const u8 {
+    var len: usize = 0;
+    storage[len] = leaf;
+    len += 1;
+    for (client_cas.certificates) |certificate| {
+        if (std.mem.eql(u8, certificate, leaf) or
+            std.mem.eql(u8, certificate, excluded_anchor)) continue;
+        storage[len] = certificate;
+        len += 1;
+    }
+    return storage[0..len];
 }
 
 fn isCombinedBase(
@@ -786,6 +937,110 @@ test "client CRL file applies a direct delta over its base" {
     try std.testing.expectError(
         error.DuplicateCrlNumber,
         parse(allocator, duplicate_delta_source, &cas, now),
+    );
+}
+
+test "client CRL file authorizes multi-hop indirect signer chains" {
+    const allocator = std.testing.allocator;
+    const vectors = vail.x509.testing.path_vectors;
+    const now = 1_790_848_300;
+    const root = decodeHexFixture(vectors.multihop_crl_root_hex);
+    const intermediate = decodeHexFixture(
+        vectors.multihop_crl_intermediate_hex,
+    );
+    const signer = decodeHexFixture(vectors.multihop_crl_signer_hex);
+    const target = decodeHexFixture(vectors.multihop_crl_target_hex);
+    const target_ca = decodeHexFixture(vectors.multihop_crl_target_ca_hex);
+    const sibling_target = decodeHexFixture(
+        vectors.multihop_crl_sibling_target_hex,
+    );
+    const mismatched_target = decodeHexFixture(
+        vectors.indirect_crl_delegated_target_hex,
+    );
+    const base_der = decodeHexFixture(vectors.multihop_crl_base_hex);
+    const delta_der = decodeHexFixture(vectors.multihop_crl_delta_hex);
+
+    const root_pem = try encodePemForTest(allocator, "CERTIFICATE", &root);
+    defer allocator.free(root_pem);
+    const intermediate_pem = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &intermediate,
+    );
+    defer allocator.free(intermediate_pem);
+    const signer_pem = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &signer,
+    );
+    defer allocator.free(signer_pem);
+    const target_ca_pem = try encodePemForTest(
+        allocator,
+        "CERTIFICATE",
+        &target_ca,
+    );
+    defer allocator.free(target_ca_pem);
+    const ca_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ root_pem, intermediate_pem, signer_pem, target_ca_pem },
+    );
+    defer allocator.free(ca_source);
+    var cas = try client_ca_file.parse(allocator, ca_source, now);
+    defer cas.deinit();
+    try std.testing.expectEqual(@as(usize, 3), cas.certificates.len);
+    try std.testing.expectEqual(@as(usize, 1), cas.crl_signers.len);
+    try std.testing.expectEqual(@as(usize, 3), cas.authorities().len);
+    try std.testing.expectEqual(@as(usize, 3), cas.bundle.map.count());
+
+    const base_pem = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &base_der,
+    );
+    defer allocator.free(base_pem);
+    const delta_pem = try encodePemForTest(
+        allocator,
+        "X509 CRL",
+        &delta_der,
+    );
+    defer allocator.free(delta_pem);
+    const crl_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ base_pem, delta_pem },
+    );
+    defer allocator.free(crl_source);
+    var crls = try parse(allocator, crl_source, &cas, now);
+    defer crls.deinit();
+    try crls.verifyLeaf(&target);
+    try crls.verifyLeaf(&sibling_target);
+    const verifier = Verifier{
+        .trust = cas.verifier(now),
+        .crls = &crls,
+    };
+    try verifier.verify(.{ .server_name = null, .chain = &.{&target} });
+    try verifier.verify(.{ .server_name = null, .chain = &.{&sibling_target} });
+    try std.testing.expectError(
+        error.CrlNotFound,
+        crls.verifyLeaf(&mismatched_target),
+    );
+
+    const incomplete_ca_source = try std.mem.concat(
+        allocator,
+        u8,
+        &.{ root_pem, signer_pem, target_ca_pem },
+    );
+    defer allocator.free(incomplete_ca_source);
+    var incomplete_cas = try client_ca_file.parse(
+        allocator,
+        incomplete_ca_source,
+        now,
+    );
+    defer incomplete_cas.deinit();
+    try std.testing.expectError(
+        error.MissingCrlIssuer,
+        parse(allocator, crl_source, &incomplete_cas, now),
     );
 }
 

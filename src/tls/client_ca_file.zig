@@ -1,7 +1,9 @@
 //! Strict owned CA bundles for TLS client-certificate authentication.
 //!
-//! Every input certificate must be a currently valid CA for the clientAuth
-//! purpose. The exact DER Name of each CA is retained for CertificateRequest.
+//! Every trust anchor must be a currently valid CA for the clientAuth purpose.
+//! Additional non-CA certificates are retained only when they are valid CRL
+//! signers, and are never advertised in CertificateRequest or trusted as
+//! client-certificate issuers.
 
 const std = @import("std");
 const vail = @import("vail");
@@ -25,6 +27,7 @@ pub const Error = std.mem.Allocator.Error || error{
 pub const File = struct {
     allocator: std.mem.Allocator,
     certificates: [][]const u8,
+    crl_signers: [][]const u8 = &.{},
     certificate_authorities: [][]const u8,
     bundle: Certificate.Bundle,
 
@@ -35,6 +38,10 @@ pub const File = struct {
             self.allocator.free(@constCast(certificate));
         }
         self.allocator.free(self.certificates);
+        for (self.crl_signers) |certificate| {
+            self.allocator.free(@constCast(certificate));
+        }
+        self.allocator.free(self.crl_signers);
         self.* = undefined;
     }
 
@@ -108,6 +115,11 @@ pub fn parse(
     errdefer for (certificates.items) |certificate| {
         allocator.free(@constCast(certificate));
     };
+    var crl_signers: std.ArrayList([]const u8) = .empty;
+    defer crl_signers.deinit(allocator);
+    errdefer for (crl_signers.items) |certificate| {
+        allocator.free(@constCast(certificate));
+    };
     var authorities: std.ArrayList([]const u8) = .empty;
     defer authorities.deinit(allocator);
     var bundle: Certificate.Bundle = .empty;
@@ -138,7 +150,7 @@ pub fn parse(
             }
         }
         const encoded_end = body_end orelse return error.InvalidPem;
-        if (certificates.items.len == max_certificates) {
+        if (certificates.items.len + crl_signers.items.len == max_certificates) {
             return error.TooManyCertificates;
         }
         const certificate = try decodePemBody(
@@ -148,7 +160,14 @@ pub fn parse(
         errdefer allocator.free(certificate);
         const parsed = parseCertificate(certificate) catch
             return error.InvalidCertificateAuthority;
-        vail.x509.trust.validateClientCertificateAuthority(
+        const is_client_ca = blk: {
+            vail.x509.trust.validateClientCertificateAuthority(
+                certificate,
+                now_seconds,
+            ) catch break :blk false;
+            break :blk true;
+        };
+        if (!is_client_ca) vail.x509.trust.validateCertificateRevocationListSigner(
             certificate,
             now_seconds,
         ) catch return error.InvalidCertificateAuthority;
@@ -160,6 +179,19 @@ pub fn parse(
                 existing_parsed.subject(),
                 parsed.subject(),
             )) return error.DuplicateCertificateAuthority;
+        }
+        for (crl_signers.items) |existing| {
+            const existing_parsed = parseCertificate(existing) catch
+                unreachable;
+            if (std.mem.eql(
+                u8,
+                existing_parsed.subject(),
+                parsed.subject(),
+            )) return error.DuplicateCertificateAuthority;
+        }
+        if (!is_client_ca) {
+            try crl_signers.append(allocator, certificate);
+            continue;
         }
         const authority = fullSubjectName(certificate) catch
             return error.InvalidCertificateAuthority;
@@ -201,11 +233,19 @@ pub fn parse(
         }
         allocator.free(owned_certificates);
     }
+    const owned_crl_signers = try crl_signers.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_crl_signers) |certificate| {
+            allocator.free(@constCast(certificate));
+        }
+        allocator.free(owned_crl_signers);
+    }
     const owned_authorities = try authorities.toOwnedSlice(allocator);
     errdefer allocator.free(owned_authorities);
     return .{
         .allocator = allocator,
         .certificates = owned_certificates,
+        .crl_signers = owned_crl_signers,
         .certificate_authorities = owned_authorities,
         .bundle = bundle,
     };

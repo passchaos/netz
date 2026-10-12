@@ -3209,11 +3209,14 @@ that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Listener
 topology, anonymous policy, limits, and persistence settings still require
 restart.
-Delegated indirect-CRL signer chains remain an explicit gap. Broker plugins are
-intentionally outside the target scope and are not counted as a standards gap.
-CA-signed indirect CRLs are accepted only after signer authorization, and a
-leaf receives coverage only when its CRL distribution point names that CRL
-issuer with matching scope and reasons. `use_identity_as_username`
+Broker plugins are intentionally outside the target scope and are not counted
+as a standards gap. CA files may contain non-CA certificates whose KeyUsage
+authorizes `cRLSign`; these are retained separately from client trust anchors
+and CertificateRequest names. Direct and multi-hop delegated indirect CRLs are
+accepted only after the signer path reaches the certificate issuer or a shared
+configured trust anchor. A leaf receives coverage only when its CRL
+distribution point names that CRL issuer with matching scope and reasons.
+`use_identity_as_username`
 strictly extracts one owned UTF-8 Subject CN before every broker/listener
 authorization callback; `use_subject_as_username` uses the complete Subject in
 OpenSSL's RFC 2253 form, including reverse RDN order and escaping. Both ignore

@@ -264,8 +264,10 @@ Current protocol coverage includes:
   1024-4096-bit RSA PKCS#1 v1.5 SHA-256 PEM CRL loading, including
   issuer/cRLSign, signature, update-window, extension and leaf-serial
   validation before bind, plus RFC 5280 base/delta composition with newest
-  compatible-delta selection and `removeFromCRL` handling, and CA-signed
-  indirect CRLs with mandatory leaf `cRLIssuer`/distribution-point matching
+  compatible-delta selection and `removeFromCRL` handling, and direct or
+  multi-hop delegated indirect CRLs with mandatory signer authorization,
+  shared-trust-anchor validation, and leaf `cRLIssuer`/distribution-point
+  matching
 - Caller-supplied bounded caching of successful X.509 bundle verification for
   repeated exact hostname/DER chains; per-connection CertificateVerify remains
   mandatory, and replacing the trust bundle or time snapshot requires replacing
