@@ -6868,6 +6868,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "enable_pacing"));
     try std.testing.expect(@hasField(
         netz.quic.handshake.OneRttConfig,
+        "max_pacing_rate_bytes_per_second",
+    ));
+    try std.testing.expect(@hasField(
+        netz.quic.handshake.OneRttConfig,
         "enable_spin_bit",
     ));
     try std.testing.expect(@hasField(netz.quic.handshake.OneRttConfig, "max_receive_window"));
@@ -6916,6 +6920,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_hystart"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "enable_pacing"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "pacing_max_burst_packets"));
+    try std.testing.expect(@hasField(
+        netz.quic.one_rtt.ConnectionConfig,
+        "max_pacing_rate_bytes_per_second",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "maxPacingRateBytesPerSecond",
+    ));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "local_min_ack_delay"));
     try std.testing.expect(@hasField(netz.quic.one_rtt.ConnectionConfig, "peer_min_ack_delay"));
     try std.testing.expect(@hasField(netz.quic.TransportParameters, "min_ack_delay"));
@@ -7234,6 +7246,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic.hystart, "State"));
     try std.testing.expect(@hasDecl(netz.quic, "pacing"));
     try std.testing.expect(@hasDecl(netz.quic.pacing, "Pacer"));
+    try std.testing.expect(@hasDecl(
+        netz.quic.pacing.Pacer,
+        "initWithRateLimit",
+    ));
     try std.testing.expect(@hasDecl(netz.quic.path_validation, "State"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "pendingChallengeCount"));
     try std.testing.expect(@hasDecl(netz.quic.path_validation.State, "receiveResponseValidated"));

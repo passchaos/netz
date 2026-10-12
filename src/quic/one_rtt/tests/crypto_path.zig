@@ -2790,7 +2790,7 @@ test "QUIC 1-RTT migration resets path state and validates on PATH_RESPONSE" {
     );
     try std.testing.expectEqual(quic.pacing.Pacer.init(true, quic.pmtu.min_udp_payload_size, quic.pacing.Pacer.default_max_burst_packets).maxBurstSize(), connection.pacer.maxBurstSize());
     try std.testing.expectEqual(connection.pacer.maxBurstSize(), connection.pacer.budget);
-    try std.testing.expectEqual(@as(?u64, null), connection.pacer.last_sent_time_ns);
+    try std.testing.expectEqual(@as(?u64, null), connection.pacer.lastSentTimeNs());
     try std.testing.expect(!connection.rtt_stats.has_measurement);
     try std.testing.expectEqual(@as(u8, 0), connection.ptoBackoffCount());
     try std.testing.expectEqual(@as(?u64, null), connection.pacing_blocked_until_ns);
@@ -5702,7 +5702,7 @@ test "QUIC 1-RTT QUIC-LB issuance rolls back when sending fails" {
     defer connection.deinit();
     const before = connection.local_connection_ids;
     connection.pacer.budget = 0;
-    connection.pacer.last_sent_time_ns = 0;
+    connection.pacer.setLastSentTimeNs(0);
     connection.rtt_stats.has_measurement = true;
     connection.rtt_stats.smoothed_rtt = 100_000_000;
 

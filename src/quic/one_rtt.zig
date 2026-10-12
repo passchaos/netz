@@ -342,6 +342,9 @@ pub const ConnectionConfig = struct {
     enable_hystart: bool = true,
     enable_pacing: bool = true,
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
+    /// Optional hard ceiling for pacing credit, in bytes per second. Null
+    /// keeps the congestion-derived rate; zero allows only reset bursts.
+    max_pacing_rate_bytes_per_second: ?u64 = null,
     /// Optional per-connection PTO jitter percentage (0...50). Zero preserves
     /// exact RFC PTO calculations and does not request entropy.
     pto_jitter_percentage: u8 = 0,
@@ -1337,10 +1340,11 @@ pub const Connection = struct {
                 config.congestion_algorithm,
                 config.enable_hystart,
             ),
-            .pacer = .init(
+            .pacer = .initWithRateLimit(
                 config.enable_pacing,
                 if (config.enable_pmtud) quic.pmtu.min_udp_payload_size else send_buffer_capacity,
                 config.pacing_max_burst_packets,
+                config.max_pacing_rate_bytes_per_second,
             ),
             .rtt_stats = .init(std.math.mul(u64, config.peer_max_ack_delay_ms, 1_000_000) catch quic.rtt.default_max_ack_delay_ns),
             .ecn_path = .init(config.automatic_ecn_policy),
@@ -4603,6 +4607,12 @@ pub const Connection = struct {
 
     pub fn pacingEnabled(self: Connection) bool {
         return self.pacer.enabled;
+    }
+
+    /// Returns the configured hard pacing ceiling in bytes per second.
+    /// Null means pacing follows only the congestion-derived rate.
+    pub fn maxPacingRateBytesPerSecond(self: Connection) ?u64 {
+        return self.pacer.maxPacingRateBytesPerSecond();
     }
 
     pub fn pacingBudgetAt(self: Connection, now_ns: u64) usize {
@@ -16365,7 +16375,7 @@ pub const testing = struct {
         now_ns: u64,
     ) void {
         connection.pacer.budget = 0;
-        connection.pacer.last_sent_time_ns = now_ns;
+        connection.pacer.setLastSentTimeNs(now_ns);
     }
 
     pub fn setPacingBudgetAt(
@@ -16374,7 +16384,7 @@ pub const testing = struct {
         now_ns: u64,
     ) void {
         connection.pacer.budget = budget;
-        connection.pacer.last_sent_time_ns = now_ns;
+        connection.pacer.setLastSentTimeNs(now_ns);
         connection.pacing_blocked_until_ns = null;
     }
 

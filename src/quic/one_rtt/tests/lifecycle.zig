@@ -63,6 +63,41 @@ test "QUIC 1-RTT validates configured stream-count limits" {
     );
 }
 
+test "QUIC 1-RTT installs maximum pacing rate" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe2} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "paced-local",
+        .peer_connection_id = "paced-peer",
+        .max_pacing_rate_bytes_per_second = 10_000,
+    });
+    defer connection.deinit();
+
+    try std.testing.expectEqual(
+        @as(?u64, 10_000),
+        connection.maxPacingRateBytesPerSecond(),
+    );
+    one_rtt.testing.exhaustPacingAt(&connection, 0);
+    try std.testing.expectEqual(
+        @as(usize, 10),
+        connection.pacingBudgetAt(1_000_000),
+    );
+}
+
 test "QUIC 1-RTT stateless reset enters draining" {
     const allocator = std.testing.allocator;
 
@@ -1849,7 +1884,7 @@ test "QUIC 1-RTT PTO batch sends pacing-limited prefix" {
         .payload = first_candidate.payload,
     });
     client.pacer.budget = first_probe_packet_len;
-    client.pacer.last_sent_time_ns = 0;
+    client.pacer.setLastSentTimeNs(0);
 
     try std.testing.expectEqual(@as(usize, 1), try client.retransmitPtoProbesAt(0, 2));
     try std.testing.expectEqual(@as(u8, 1), client.ptoBackoffCount());
@@ -2181,7 +2216,7 @@ test "QUIC 1-RTT stateful batch stops at pacing deadline" {
         .payload = &.{0},
     });
     client.pacer.budget = packet_len;
-    client.pacer.last_sent_time_ns = 0;
+    client.pacer.setLastSentTimeNs(0);
 
     const packets = [_][]const quic.Frame{ &ping, &ping };
     const result = try client.sendManyProgressAt(&packets, 0);

@@ -221,6 +221,9 @@ pub const OneRttConfig = struct {
     enable_hystart: bool = true,
     enable_pacing: bool = true,
     pacing_max_burst_packets: usize = quic.pacing.Pacer.default_max_burst_packets,
+    /// Optional hard ceiling for pacing credit, in bytes per second. Null
+    /// keeps the congestion-derived rate; zero allows only reset bursts.
+    max_pacing_rate_bytes_per_second: ?u64 = null,
     /// Randomize established-connection PTOs by up to this percentage. Valid
     /// values are 0...50; zero is deterministic and consumes no entropy.
     pto_jitter_percentage: u8 = 0,
@@ -308,6 +311,7 @@ pub const OneRttConfig = struct {
             .enable_hystart = self.enable_hystart,
             .enable_pacing = self.enable_pacing,
             .pacing_max_burst_packets = self.pacing_max_burst_packets,
+            .max_pacing_rate_bytes_per_second = self.max_pacing_rate_bytes_per_second,
             .pto_jitter_percentage = self.pto_jitter_percentage,
             .enable_spin_bit = self.enable_spin_bit,
             .automatic_ecn_policy = self.automatic_ecn_policy,
@@ -5092,6 +5096,54 @@ test "QUIC handshake one-RTT config propagates DATAGRAM queue capacity" {
         .{},
     );
     try std.testing.expectEqual(@as(usize, 64), burst.max_datagram_queue_items);
+}
+
+test "QUIC handshake one-RTT config propagates pacing policy" {
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xa3} ** quic.protection.secret_len,
+    );
+    const defaults = (OneRttConfig{}).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .client,
+        .{},
+        .{},
+    );
+    try std.testing.expect(defaults.enable_pacing);
+    try std.testing.expectEqual(
+        quic.pacing.Pacer.default_max_burst_packets,
+        defaults.pacing_max_burst_packets,
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        defaults.max_pacing_rate_bytes_per_second,
+    );
+
+    const configured = (OneRttConfig{
+        .enable_pacing = false,
+        .pacing_max_burst_packets = 3,
+        .max_pacing_rate_bytes_per_second = 750_000,
+    }).apply(
+        .version_1,
+        .{ .ip4 = .loopback(443) },
+        keys,
+        keys,
+        "local",
+        "peer",
+        .server,
+        .{},
+        .{},
+    );
+    try std.testing.expect(!configured.enable_pacing);
+    try std.testing.expectEqual(@as(usize, 3), configured.pacing_max_burst_packets);
+    try std.testing.expectEqual(
+        @as(?u64, 750_000),
+        configured.max_pacing_rate_bytes_per_second,
+    );
 }
 
 test "QUIC server transport parameters bind reset token to local CID" {

@@ -36,12 +36,12 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
             @sizeOf(AcceptedProtectedSession),
         );
         try std.testing.expectEqual(
-            @as(usize, 17_320),
+            @as(usize, 17_336),
             @sizeOf(AcceptedHandshakeSession),
         );
         try std.testing.expectEqual(@as(usize, 7_352), @sizeOf(ClientSession));
         try std.testing.expectEqual(
-            @as(usize, 17_864),
+            @as(usize, 17_880),
             @sizeOf(HandshakeClientSession),
         );
         try std.testing.expectEqual(

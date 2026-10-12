@@ -2754,7 +2754,7 @@ test "QUIC 1-RTT ACK-driven recovery defers transactionally when paced" {
     // can identify loss but cannot immediately send a repair. A retryable
     // pacing result must not consume packet number 5 or an AEAD nonce.
     client.pacer.budget = 0;
-    client.pacer.last_sent_time_ns = std.math.maxInt(u64);
+    client.pacer.setLastSentTimeNs(std.math.maxInt(u64));
     const next_packet_number = client.next_packet_number;
     const encrypted_packets = client.encryptedPacketsWithCurrentKeys();
     var ack = try client.receivePacketServicingTimers();
@@ -3018,13 +3018,13 @@ test "QUIC 1-RTT connection applies persistent congestion response" {
     client.congestion.congestion_window = 24_000;
     client.congestion.slow_start_threshold = 24_000;
     client.pacer.budget = 0;
-    client.pacer.last_sent_time_ns = 1_300_000_000;
+    client.pacer.setLastSentTimeNs(1_300_000_000);
     try server.sendAck(0);
 
     var ack = try client.receivePacketAt(1_400_000_000);
     defer ack.deinit(allocator);
     try std.testing.expectEqual(client.pacer.maxBurstSize(), client.pacer.budget);
-    try std.testing.expectEqual(@as(?u64, null), client.pacer.last_sent_time_ns);
+    try std.testing.expectEqual(@as(?u64, null), client.pacer.lastSentTimeNs());
     try std.testing.expect(try client.retransmitTimeThresholdLoss(1_400_000_000, client.rtt_stats.lossDelay()));
 
     try std.testing.expect(client.sent.packets.items[1].lost);
@@ -4671,8 +4671,9 @@ test "QUIC bounded stream open does not outwait pacing deadline" {
     );
     connection.pacer.budget = 0;
     const now = std.Io.Clock.awake.now(io).nanoseconds;
-    connection.pacer.last_sent_time_ns =
-        std.math.cast(u64, @max(now, 0)) orelse std.math.maxInt(u64);
+    connection.pacer.setLastSentTimeNs(
+        std.math.cast(u64, @max(now, 0)) orelse std.math.maxInt(u64),
+    );
     const before = connection.stats();
     try std.testing.expectError(
         error.Timeout,
