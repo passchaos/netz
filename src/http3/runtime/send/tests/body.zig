@@ -36,7 +36,7 @@ test "HTTP/3 response capacity accounts separately for flow and packet overhead"
         body_sender.responseBodySendCapacity(256, 512, 256, 512, 1200, 1024),
     );
     try std.testing.expectEqual(
-        @as(usize, 192),
+        @as(usize, 0),
         body_sender.responseBodySendCapacity(256, 512, 512, 256, 1200, 1024),
     );
     try std.testing.expectEqual(
@@ -46,6 +46,16 @@ test "HTTP/3 response capacity accounts separately for flow and packet overhead"
     try std.testing.expectEqual(
         @as(usize, 1024),
         body_sender.responseBodySendCapacity(2048, 4096, 4096, 4096, 1200, 1024),
+    );
+    // Do not fragment a full logical contribution solely to consume the
+    // current congestion-window tail. The caller will pump an ACK and retry.
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        body_sender.responseBodySendCapacity(2048, 4096, 4096, 1152, 1280, 1152),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 1152),
+        body_sender.responseBodySendCapacity(2048, 4096, 4096, 1280, 1280, 1152),
     );
     // Crossing QUIC varint's one-byte payload-length boundary needs one more
     // flow-control byte for the DATA frame header.

@@ -1999,6 +1999,21 @@ This closes the identified internal server-download packet-fill default gap;
 cross-stack results remain same-application-shape until a new capture proves
 wire-shape equivalence.
 
+The response scheduler now also refuses to turn only the transient tail of a
+congestion window into a short DATA packet. A diagnostic 1,280-byte-MTU run had
+shown 833-, 48-, and 208-byte body contributions whenever congestion credit
+fell below the otherwise usable 1,152-byte contribution. Flow-control-limited
+chunks and final tails still progress immediately. Fixed ReleaseFast AB/BA
+runs improved four-stream download throughput by 63.25% at a standard
+1,200-byte datagram, 64.15% at the cross-stack-shaped 1,280-byte datagram,
+31.66% for the default 8-KiB/16-MiB shape, and 40.63% for the default
+8-KiB/64-MiB shape. The single-stream download and multi-stream upload controls
+were noise-level at +0.45% and +0.41%. A certificate-verifying quic-go v0.59.0
+gate then completed five samples in both download role pairings with exact
+bytes, checksums, stream counts, and statuses. A new privileged capture is
+still required to replace the pre-change 1,125-byte packet-size distribution;
+the current process cannot open AF_PACKET and has no passwordless sudo.
+
 ## Next recommended work
 
 The Quinn full-handshake matrix now removes its certificate-wire confounder:

@@ -2141,6 +2141,53 @@ taskset -c 0 ./bench-http3 --mode=download --streams=4 --body-bytes=67108864 --i
 taskset -c 0 ./bench-http3 --mode=upload --streams=4 --body-bytes=16777216 --iterations=1
 ```
 
+#### Avoiding congestion-tail response fragments (2026-10-12)
+
+The next response-scheduler change stops treating a transient remainder in the
+congestion window as a useful body-chunk size. Before the change, a short
+instrumented 1,280-byte-MTU run observed full 1,152-byte contributions followed
+by 833-, 48-, and 208-byte contributions when congestion credit fell to 897,
+112, and 272 bytes. The scheduler now computes the useful contribution from
+the body tail, stream/connection flow credit, logical chunk, and datagram
+budget first. If congestion is the only smaller budget, it pumps peer ACKs and
+replans instead of emitting a fragment; a genuine flow-control boundary or the
+final body tail still sends immediately.
+
+This behavior addresses a pre-change capture signature rather than relying on
+throughput alone. In the verified v1 four-stream download artifact
+`zig-out/http3-captures/run.ELJ1qP`, the netz server sent 115,030 datagrams and
+101,857 of them were 1,125 bytes. The quic-go server sent 102,139 datagrams and
+92,710 were 1,188 bytes. Netz also emitted 8,684 sender datagrams between 81
+and 999 bytes, versus 77 for quic-go. A fresh kernel capture remains required
+to quantify the final wire distribution because the current process lacks
+`CAP_NET_RAW`; the existing artifact and temporary capacity trace establish
+the optimization target, while the fixed-binary results below establish its
+causal throughput effect.
+
+The baseline is clean commit
+`bf4ff97cb00ee2df41cc8a43ddb64d17aa615fda` with binary SHA-256
+`86e70110399ace34a9380bdf522605aa51d8356a6e7b2745225869449658fb11`.
+The candidate SHA-256 is
+`10527318f19c22e2e546a651e437ea1d5a743650375ca7b6e011a685fdbc1920`.
+Every shape was warmed once per binary, pinned to CPU 0, and alternated AB/BA.
+
+| Shape | Baseline mean (CV) | Candidate mean (CV) | Mean paired change |
+|---|---:|---:|---:|
+| 16 MiB download, 4 streams, 1,200-byte datagram | 32.19 MiB/s (0.74%) | 52.55 MiB/s (2.19%) | +63.25%, 7/7 wins |
+| 16 MiB download, 4 streams, 1,280-byte datagram and 1,152-byte chunk | 32.74 MiB/s (0.49%) | 53.75 MiB/s (0.63%) | +64.15%, 7/7 wins |
+| 16 MiB download, 4 streams, default 8-KiB datagram | 222.26 MiB/s (2.55%) | 292.42 MiB/s (1.80%) | +31.66%, 7/7 wins |
+| 64 MiB download, 4 streams, default 8-KiB datagram | 204.15 MiB/s (0.15%) | 287.10 MiB/s (0.52%) | +40.63%, 5/5 wins |
+| 16 MiB download, 1 stream, default 8-KiB datagram | 270.94 MiB/s (1.28%) | 272.10 MiB/s (0.99%) | +0.45%, noise-level |
+| 16 MiB upload, 4 streams, default 8-KiB datagram | 217.23 MiB/s (1.29%) | 218.07 MiB/s (0.50%) | +0.41%, noise-level |
+
+The certificate-verifying quic-go v0.59.0 download gate subsequently completed
+all five samples in both endpoint-role pairings with four streams, exact
+16,777,216-byte aggregate bodies, checksum 2,139,095,040, four finished
+streams, and status 200. This is interoperability evidence only; it is not a
+matched baseline/candidate throughput comparison. Unit coverage fixes the
+policy boundary: congestion-only partial credit returns zero, while partial
+flow credit and the final body tail remain sendable.
+
 A 2026-09-15 ReleaseFast migration smoke ran 20 cleartext requests, one
 four-stream 64-KiB upload, one matching download, 1,000 iterations of each
 QPACK scenario, and the default one-million-iteration Capsule workload. Every

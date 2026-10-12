@@ -184,16 +184,16 @@ pub fn responseBodySendCapacity(
     chunk_limit: usize,
 ) usize {
     if (remaining == 0) return 0;
-    // Congestion credit counts encoded QUIC frames, and the datagram budget
-    // additionally counts packet protection. Keep the conservative packet
-    // margin on those limits. The paced chunk limit has already reserved the
-    // same margin from its frame/datagram budget, so do not subtract it twice.
-    const packet_credit = @min(congestion, datagram_size);
-    if (packet_credit <= paced_body_frame_overhead_margin) return 0;
+    // Compute the useful body contribution without letting a transient tail
+    // of congestion credit fragment an otherwise full packet. The batch send
+    // path can then submit every complete packet that fits and wait for an ACK
+    // before replanning. Flow-control-limited contributions and the final body
+    // tail still make immediate progress because they reduce the desired size.
+    if (datagram_size <= paced_body_frame_overhead_margin) return 0;
     const body_limit = @min(
         remaining,
         chunk_limit,
-        packet_credit - paced_body_frame_overhead_margin,
+        datagram_size - paced_body_frame_overhead_margin,
     );
     // QUIC connection and stream flow control count only STREAM data. For an
     // HTTP/3 body that is the DATA frame header plus application bytes, not
@@ -201,7 +201,17 @@ pub fn responseBodySendCapacity(
     // here would classify usable small window updates as blocked and could
     // wait forever for credit that a peer grants only after consuming those
     // bytes.
-    return dataFrameBodyCapacity(body_limit, @min(connection, stream));
+    const desired = dataFrameBodyCapacity(
+        body_limit,
+        @min(connection, stream),
+    );
+    if (desired == 0 or
+        congestion <= paced_body_frame_overhead_margin or
+        congestion - paced_body_frame_overhead_margin < desired)
+    {
+        return 0;
+    }
+    return desired;
 }
 
 fn dataFrameBodyCapacity(body_limit: usize, flow_credit: usize) usize {
