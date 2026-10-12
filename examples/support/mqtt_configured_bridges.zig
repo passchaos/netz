@@ -22,6 +22,8 @@ const ConfiguredConnector = struct {
             .context = self,
             .connect_attempt = connectAttempt,
             .connect_attempt_deadline = connectAttemptWithDeadline,
+            .connect_attempt_with_tls12_ticket = connectAttemptWithTls12Ticket,
+            .connect_attempt_with_tls12_ticket_deadline = connectAttemptWithTls12TicketAndDeadline,
         };
     }
 
@@ -32,7 +34,13 @@ const ConfiguredConnector = struct {
         mqtt_options: mqtt.runtime.ConnectOptions,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
-        return self.connectAttemptMaybeBefore(allocator, io, mqtt_options, null);
+        return self.connectAttemptMaybeBefore(
+            allocator,
+            io,
+            mqtt_options,
+            null,
+            null,
+        );
     }
 
     fn connectAttemptWithDeadline(
@@ -47,6 +55,42 @@ const ConfiguredConnector = struct {
             allocator,
             io,
             mqtt_options,
+            null,
+            deadline,
+        );
+    }
+
+    fn connectAttemptWithTls12Ticket(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt.runtime.ConnectOptions,
+        ticket: *const netz.tls.stream.Tls12SessionTicket,
+    ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
+        const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
+        return self.connectAttemptMaybeBefore(
+            allocator,
+            io,
+            mqtt_options,
+            ticket,
+            null,
+        );
+    }
+
+    fn connectAttemptWithTls12TicketAndDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: mqtt.runtime.ConnectOptions,
+        ticket: *const netz.tls.stream.Tls12SessionTicket,
+        deadline: std.Io.Clock.Timestamp,
+    ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
+        const self: *ConfiguredConnector = @ptrCast(@alignCast(context));
+        return self.connectAttemptMaybeBefore(
+            allocator,
+            io,
+            mqtt_options,
+            ticket,
             deadline,
         );
     }
@@ -56,6 +100,7 @@ const ConfiguredConnector = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         mqtt_options: mqtt.runtime.ConnectOptions,
+        tls12_ticket: ?*const netz.tls.stream.Tls12SessionTicket,
         deadline: ?std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         const index, const endpoint = self.takeEndpoint();
@@ -67,6 +112,7 @@ const ConfiguredConnector = struct {
             io,
             endpoint,
             options,
+            tls12_ticket,
             deadline,
         ) catch |err| {
             self.noteAttempt(index, false, io);
@@ -87,6 +133,7 @@ const ConfiguredConnector = struct {
                 io,
                 endpoint,
                 options,
+                tls12_ticket,
                 deadline,
             ) catch |err| {
                 self.noteAttempt(index, false, io);
@@ -103,10 +150,16 @@ const ConfiguredConnector = struct {
         io: std.Io,
         endpoint: mqtt.broker_config.BridgeEndpoint,
         mqtt_options: mqtt.runtime.ConnectOptions,
+        tls12_ticket: ?*const netz.tls.stream.Tls12SessionTicket,
         deadline: ?std.Io.Clock.Timestamp,
     ) mqtt.runtime.Error!mqtt.runtime.ConnectAttempt {
         if (self.tls_options) |configured| {
-            const options = reconnectTlsOptions(configured, mqtt_options);
+            var options = reconnectTlsOptions(configured, mqtt_options);
+            if (tls12TicketForEndpoint(io, endpoint, tls12_ticket)) |ticket| {
+                options.tls12_ticket_resumption = ticket;
+            } else if (tls12_ticket != null) {
+                options.tls12_ticket_resumption = null;
+            }
             if (self.source.bind_address) |local_address| {
                 return if (deadline) |absolute|
                     mqtt.tls_runtime.Client.connectHostAttemptBoundWithDeadline(
@@ -243,6 +296,20 @@ const ConfiguredConnector = struct {
         return true;
     }
 };
+
+fn tls12TicketForEndpoint(
+    io: std.Io,
+    endpoint: mqtt.broker_config.BridgeEndpoint,
+    ticket: ?*const netz.tls.stream.Tls12SessionTicket,
+) ?*const netz.tls.stream.Tls12SessionTicket {
+    const cached = ticket orelse return null;
+    const now_seconds: u64 = @intCast(@max(
+        0,
+        std.Io.Timestamp.now(io, .real).toSeconds(),
+    ));
+    cached.validate(now_seconds, endpoint.host) catch return null;
+    return cached;
+}
 
 fn reconnectTlsOptions(
     configured: mqtt.tls_runtime.ConnectOptions,
@@ -972,6 +1039,7 @@ test "configured bidirectional bridge never falls back from private mode" {
             .bridge_mode = true,
         },
         null,
+        null,
     );
     defer attempt.deinit(allocator);
     try std.testing.expect(!attempt.accepted());
@@ -981,6 +1049,133 @@ test "configured bidirectional bridge never falls back from private mode" {
     thread.join();
     joined = true;
     if (peer.err) |err| return err;
+}
+
+test "configured bridge resumes TLS 1.2 ticket only for matching endpoint" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var keyring = try netz.tls.stream.Tls12TicketKeyring.init(.{
+        .id = 37,
+        .secret = [_]u8{0x37} ** netz.tls.stream.tls12_ticket_key_len,
+    });
+    defer keyring.deinit();
+    var server = try mqtt.tls_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+            .protocol_policy = .tls12_only,
+            .alpn_protocols = &.{"mqtt"},
+            .tls12_session_tickets = .{
+                .keyring = &keyring,
+                .server_id = "localhost",
+                .lifetime_seconds = 3600,
+            },
+        },
+    );
+    defer server.deinit();
+
+    const Peer = struct {
+        server: *mqtt.tls_runtime.Server,
+        resumed: [2]bool = .{ false, false },
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            for (0..2) |index| {
+                var accepted = try self.server.accept(.{ .protocol = .v5 });
+                defer accepted.deinit(self.server.allocator);
+                self.resumed[index] =
+                    accepted.connection.wasTlsSessionResumed() orelse
+                    return error.MissingTlsMetadata;
+                var disconnect = try accepted.connection.readDisconnect();
+                disconnect.deinit(self.server.allocator);
+            }
+        }
+    };
+    var peer = Peer{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var name = "tls-ticket".*;
+    var host = "localhost".*;
+    const source = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .port = server.address().ip4.port,
+        .rules = &.{},
+        .protocol = .v5,
+        .try_private = false,
+    };
+    var connector = ConfiguredConnector{
+        .source = &source,
+        .tls_options = .{
+            .mqtt = .{ .client_id = "placeholder" },
+            .use_vail = true,
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .protocol_policy = .tls12_only,
+        },
+    };
+    var shutdown: std.Io.Event = .unset;
+    var client = try mqtt.reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector.connector(),
+        .{ .protocol = .v5, .client_id = "configured-ticket" },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+        },
+        &shutdown,
+    );
+    defer client.deinit();
+    _ = try client.connectWithTimeout(.fromSeconds(2));
+    try std.testing.expect(!client.connection().?.wasTlsSessionResumed().?);
+    const ticket = &client.tls12_session_ticket.?;
+    try std.testing.expect(tls12TicketForEndpoint(
+        io,
+        .{ .host = "localhost", .port = source.port },
+        ticket,
+    ) != null);
+    try std.testing.expect(tls12TicketForEndpoint(
+        io,
+        .{ .host = "other.example", .port = source.port },
+        ticket,
+    ) == null);
+    try client.disconnect(0);
+    _ = try client.connectWithTimeout(.fromSeconds(2));
+    try std.testing.expect(client.connection().?.wasTlsSessionResumed().?);
+    try client.disconnect(0);
+
+    thread.join();
+    joined = true;
+    if (peer.err) |err| return err;
+    try std.testing.expectEqualSlices(bool, &.{ false, true }, &peer.resumed);
 }
 
 test "configured bridge maps Mosquitto remote protocol limits" {

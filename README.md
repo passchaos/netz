@@ -1024,7 +1024,9 @@ Current protocol coverage includes:
   upstream Session/authentication settings, bounded
   reconnect policy, vail-backed TLS 1.2/1.3 with CA/hostname verification,
   explicit minimum-version policy, separate ordered TLS 1.2/TLS 1.3
-  cipher-suite policy, required stapled-OCSP validation,
+  cipher-suite policy, required stapled-OCSP validation, and automatic
+  RFC 5077 ticket reuse on same-host TLS 1.2 bridge reconnects without
+  leaking tickets across multi-address failover targets,
   and optional encrypted-key mTLS,
   primary-preferred and round-robin multi-address
   failover, retained local/remote connection-state notifications,

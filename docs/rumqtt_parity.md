@@ -2433,6 +2433,10 @@ poison later reconnect attempts. The shared stream's bidirectional
 `interop-tls12-ticket-openssl` process gate independently proves both netz
 client and netz server resumption against OpenSSL rather than relying only on
 self-interoperability.
+Configured TLS bridges use the same reconnect-owned ticket lifecycle. Before a
+multi-address attempt, the connector validates the cached ticket against the
+selected endpoint hostname and lifetime; a failover target therefore performs
+a full handshake instead of receiving another host's resumption state.
 Configured MQTT TLS and WSS listeners can enable the same behavior with
 `tls12_session_tickets true`, an explicit
 `tls12_session_ticket_server_id`, and a bounded
