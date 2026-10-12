@@ -240,7 +240,9 @@ Current protocol coverage includes:
   authenticated invalid-ticket fallback to a full handshake;
   TLS 1.2 clients select certificates against the requested certificate type,
   signature algorithms, and acceptable CA names, including P-521, and send an
-  empty Certificate when no configured identity is suitable;
+  empty Certificate when no configured identity is suitable; an OpenSSL
+  process gate verifies both matching-certificate and optional unmatched-CA
+  handshakes;
   HTTP/1 and HTTP/2 pools use a bounded identity-and-port cache to resume new
   connections after idle eviction or non-reusable connection retirement;
   a bidirectional OpenSSL process gate verifies ticket resumption with netz in

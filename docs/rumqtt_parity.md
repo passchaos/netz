@@ -2422,6 +2422,9 @@ certificate types, signature algorithms, and acceptable CA distinguished
 names. Compatible P-521 identities are supported; when no identity is suitable
 the client sends an empty Certificate so optional mTLS can continue and
 required mTLS is rejected by the server at the protocol boundary.
+The `interop-tls12-client-auth-openssl` process gate independently verifies
+both a matching certificate and an unmatched optional-mTLS request through
+the same shared stream used by MQTT TLS and WSS.
 HTTP/1, HTTP/2, WSS, and MQTT round-trip tests force TLS 1.2, while OpenSSL
 interoperability covers both endpoint roles and good/missing/revoked OCSP.
 The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:

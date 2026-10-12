@@ -2230,6 +2230,30 @@ pub fn build(b: *std.Build) void {
     tls12_ticket_openssl_step.dependOn(&tls12_ticket_openssl.step);
     test_step.dependOn(&tls12_ticket_openssl.step);
 
+    const tls12_client_auth_client = b.addExecutable(.{
+        .name = "netz-tls12-client-auth-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/tls12_client_auth_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const tls12_client_auth_openssl = b.addSystemCommand(
+        &.{"tools/interop/tls12_client_auth_openssl.sh"},
+    );
+    tls12_client_auth_openssl.addArtifactArg(tls12_client_auth_client);
+    const tls12_client_auth_openssl_step = b.step(
+        "interop-tls12-client-auth-openssl",
+        "Verify matching/unmatched TLS 1.2 client identity selection against OpenSSL",
+    );
+    tls12_client_auth_openssl_step.dependOn(
+        &tls12_client_auth_openssl.step,
+    );
+    test_step.dependOn(&tls12_client_auth_openssl.step);
+
     const tls13_ticket_openssl = b.addSystemCommand(
         &.{"tools/interop/tls12_ticket_openssl.sh"},
     );
