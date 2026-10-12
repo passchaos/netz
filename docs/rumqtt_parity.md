@@ -2452,8 +2452,11 @@ interoperability covers both endpoint roles and good/missing/revoked OCSP.
 The shared stream also exposes RFC 5077 TLS 1.2 ticket issuance and resumption:
 servers use an application-owned bounded keyring and generate a unique sealing
 nonce per connection, while clients can transfer an owned ticket cache into a
-later connection. Cached state is bound to the server identity, ALPN, cipher
-suite, and lifetime; an unauthentic ticket falls back to a full handshake.
+later connection. TLS 1.3 ticket extension parsing covers the complete 16-bit
+namespace, rejects duplicates, recognized misplaced extensions and the
+RFC-forbidden 65,535-byte vector, while ignoring genuinely unknown extensions.
+Cached state is bound to the server identity, ALPN, cipher suite, and lifetime;
+an unauthentic ticket falls back to a full handshake.
 The reconnect client owns the newest TLS 1.2 ticket independently of each
 short-lived Network Connection and supplies it only through ticket-aware
 native TLS/WSS connectors. A renewed ticket replaces and securely destroys the

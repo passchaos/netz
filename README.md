@@ -270,7 +270,9 @@ Current protocol coverage includes:
   both the TLS client and server roles,
   RFC 8446 TLS 1.3 PSK-DHE resumption with authenticated post-handshake
   NewSessionTicket retention, identity/ALPN/age validation, renewed tickets,
-  invalid-ticket fallback to a certificate-authenticated full handshake, and
+  full-namespace extension duplicate detection, strict extension placement and
+  vector bounds with unknown-extension tolerance, invalid-ticket fallback to a
+  certificate-authenticated full handshake, and
   separate bounded HTTP/1 and HTTP/2 pool caches that resume after physical
   connection retirement; MQTT reconnect clients retain separate TLS 1.2 and
   TLS 1.3 tickets, renew them across native TLS or WSS connections, and discard
