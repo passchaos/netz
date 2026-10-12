@@ -2467,6 +2467,25 @@ pub const ClientConnector = struct {
         options: ConnectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt = null,
+    /// Optional transport hook used by the reconnecting client to carry an
+    /// owned RFC 5077 ticket across successive TLS 1.2 Network Connections.
+    /// Connectors for non-TLS transports may omit it and retain the ordinary
+    /// `connect_attempt` path.
+    connect_attempt_with_tls12_ticket: ?*const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+    ) Error!ConnectAttempt = null,
+    connect_attempt_with_tls12_ticket_deadline: ?*const fn (
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt = null,
 
     pub fn connectAttempt(
         self: ClientConnector,
@@ -2493,6 +2512,44 @@ pub const ClientConnector = struct {
         const connect = self.connect_attempt_deadline orelse
             return error.ConnectorDeadlineUnsupported;
         return connect(self.context, allocator, io, options, deadline);
+    }
+
+    pub fn connectAttemptWithTls12Ticket(
+        self: ClientConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+    ) Error!ConnectAttempt {
+        const connect = self.connect_attempt_with_tls12_ticket orelse
+            return self.connectAttempt(allocator, io, options);
+        return connect(self.context, allocator, io, options, ticket);
+    }
+
+    pub fn connectAttemptWithTls12TicketAndDeadline(
+        self: ClientConnector,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        options: ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        const connect = self.connect_attempt_with_tls12_ticket_deadline orelse
+            return self.connectAttemptWithDeadline(
+                allocator,
+                io,
+                options,
+                deadline,
+            );
+        return connect(
+            self.context,
+            allocator,
+            io,
+            options,
+            ticket,
+            deadline,
+        );
     }
 };
 

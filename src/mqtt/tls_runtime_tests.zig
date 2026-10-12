@@ -168,7 +168,7 @@ test "MQTT TLS negotiates configured ALPN without client authentication" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT TLS 1.2 resumes RFC 5077 ticket across MQTT 5 traffic" {
+test "MQTT TLS 1.2 RFC 5077 ticket survives direct and reconnect lifecycles" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -214,11 +214,11 @@ test "MQTT TLS 1.2 resumes RFC 5077 ticket across MQTT 5 traffic" {
 
     const Shared = struct {
         server: *mqtt_tls.Server,
-        resumed: [2]bool = .{ false, false },
+        resumed: [6]bool = .{ false, false, false, false, false, false },
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
-            for (0..2) |index| {
+            for (0..6) |index| {
                 var accepted = shared.server.accept(.{ .protocol = .v5 }) catch |err| {
                     shared.err = err;
                     return;
@@ -301,10 +301,62 @@ test "MQTT TLS 1.2 resumes RFC 5077 ticket across MQTT 5 traffic" {
         try client.disconnect(0);
     }
 
+    var connector = mqtt_tls.ReconnectConnector{
+        .address = server.address(),
+        .tls_host = "localhost",
+        .options = .{
+            .mqtt = .{ .client_id = "connector-placeholder" },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"mqtt"},
+            .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+        },
+    };
+    var shutdown: std.Io.Event = .unset;
+    var reconnecting = try reconnect.Client.initConnector(
+        allocator,
+        io,
+        connector.connector(),
+        .{
+            .protocol = .v5,
+            .client_id = "mqtt-tls12-reconnect",
+        },
+        .{
+            .initial_delay = .fromMilliseconds(1),
+            .max_delay = .fromMilliseconds(1),
+        },
+        &shutdown,
+    );
+    defer reconnecting.deinit();
+    for (0..4) |index| {
+        if (index == 2) {
+            const storage = reconnecting.tls12_session_ticket.?.ticket_storage;
+            storage[storage.len - 1] ^= 1;
+        } else if (index == 3) {
+            reconnecting.tls12_session_ticket.?.session.created_at_seconds = 0;
+        }
+        _ = try reconnecting.connect();
+        try std.testing.expectEqual(
+            index == 1,
+            reconnecting.connection().?.wasTlsSessionResumed().?,
+        );
+        try reconnecting.connection().?.ping();
+        try reconnecting.disconnect(0);
+    }
+
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
-    try std.testing.expectEqualSlices(bool, &.{ false, true }, &shared.resumed);
+    try std.testing.expectEqualSlices(
+        bool,
+        &.{ false, true, false, true, false, false },
+        &shared.resumed,
+    );
 }
 
 test "MQTT TLS explicitly selects vail with ordinary CA verification" {

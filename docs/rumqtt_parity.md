@@ -2424,6 +2424,12 @@ servers use an application-owned bounded keyring and generate a unique sealing
 nonce per connection, while clients can transfer an owned ticket cache into a
 later connection. Cached state is bound to the server identity, ALPN, cipher
 suite, and lifetime; an unauthentic ticket falls back to a full handshake.
+The reconnect client owns the newest ticket independently of each short-lived
+Network Connection and supplies it only through ticket-aware native TLS/WSS
+connectors. A renewed ticket replaces and securely destroys the prior cache;
+an expired cache is destroyed before dialing, while an unauthentic ticket is
+replaced after the server's full-handshake fallback, so neither stale form can
+poison later reconnect attempts.
 
 `mqtt.tls_runtime.Client` accepts host names, literal addresses with an explicit
 TLS identity, and `mqtts://`/`ssl://` URIs (default port 8883). It reuses the

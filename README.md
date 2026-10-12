@@ -237,7 +237,9 @@ Current protocol coverage includes:
   staple validation across HTTP/1, HTTP/2, WSS, MQTT TLS, and MQTT-over-WSS,
   RFC 5077 TLS 1.2 stateless session tickets with identity/ALPN/lifetime-bound
   client caches, rotating server keyrings, unique per-connection nonces, and
-  authenticated invalid-ticket fallback to a full handshake,
+  authenticated invalid-ticket fallback to a full handshake; MQTT reconnect
+  clients retain the newest ticket, renew it across native TLS or WSS
+  connections, and discard it locally when its advertised lifetime expires,
   RFC 8446 TLS 1.3 post-handshake KeyUpdate with reciprocal-update
   handling and bounded peer control bursts, and vectored plaintext writes that
   coalesce protocol slices into bounded TLS records without a heap concatenation

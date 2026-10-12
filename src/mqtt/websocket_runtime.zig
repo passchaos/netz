@@ -2048,6 +2048,8 @@ pub const ReconnectConnector = struct {
             .context = self,
             .connect_attempt = connectAttempt,
             .connect_attempt_deadline = connectAttemptWithDeadline,
+            .connect_attempt_with_tls12_ticket = connectAttemptWithTls12Ticket,
+            .connect_attempt_with_tls12_ticket_deadline = connectAttemptWithTls12TicketAndDeadline,
         };
     }
 
@@ -2079,6 +2081,48 @@ pub const ReconnectConnector = struct {
             io,
             self.uri,
             reconnectOptions(self.options, mqtt_options),
+            deadline,
+        );
+    }
+
+    fn connectAttemptWithTls12Ticket(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *ReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectUriAttempt(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptionsWithTls12Ticket(
+                self.options,
+                mqtt_options,
+                ticket,
+            ),
+        );
+    }
+
+    fn connectAttemptWithTls12TicketAndDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *ReconnectConnector = @ptrCast(@alignCast(context));
+        return Client.connectUriAttemptWithDeadline(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptionsWithTls12Ticket(
+                self.options,
+                mqtt_options,
+                ticket,
+            ),
             deadline,
         );
     }
@@ -2152,6 +2196,8 @@ pub const TlsHostReconnectConnector = struct {
             .context = self,
             .connect_attempt = connectAttempt,
             .connect_attempt_deadline = connectAttemptWithDeadline,
+            .connect_attempt_with_tls12_ticket = connectAttemptWithTls12Ticket,
+            .connect_attempt_with_tls12_ticket_deadline = connectAttemptWithTls12TicketAndDeadline,
         };
     }
 
@@ -2191,6 +2237,53 @@ pub const TlsHostReconnectConnector = struct {
             deadline,
         );
     }
+
+    fn connectAttemptWithTls12Ticket(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsHostReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectTlsHostAttempt(
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptionsWithTls12Ticket(
+                self.options,
+                mqtt_options,
+                ticket,
+            ),
+        );
+    }
+
+    fn connectAttemptWithTls12TicketAndDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsHostReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectTlsHostAttemptWithDeadline(
+            allocator,
+            io,
+            self.host,
+            self.port,
+            reconnectOptionsWithTls12Ticket(
+                self.options,
+                mqtt_options,
+                ticket,
+            ),
+            deadline,
+        );
+    }
 };
 
 /// Borrowed fixed-address WSS target with independent certificate identity.
@@ -2208,6 +2301,8 @@ pub const TlsAddressReconnectConnector = struct {
             .context = self,
             .connect_attempt = connectAttempt,
             .connect_attempt_deadline = connectAttemptWithDeadline,
+            .connect_attempt_with_tls12_ticket = connectAttemptWithTls12Ticket,
+            .connect_attempt_with_tls12_ticket_deadline = connectAttemptWithTls12TicketAndDeadline,
         };
     }
 
@@ -2247,6 +2342,53 @@ pub const TlsAddressReconnectConnector = struct {
             deadline,
         );
     }
+
+    fn connectAttemptWithTls12Ticket(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsAddressReconnectConnector = @ptrCast(
+            @alignCast(context),
+        );
+        return Client.connectTlsAddressAttempt(
+            allocator,
+            io,
+            self.address,
+            self.tls_host,
+            reconnectOptionsWithTls12Ticket(
+                self.options,
+                mqtt_options,
+                ticket,
+            ),
+        );
+    }
+
+    fn connectAttemptWithTls12TicketAndDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        ticket: *const tls_stream.Tls12SessionTicket,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *TlsAddressReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectTlsAddressAttemptWithDeadline(
+            allocator,
+            io,
+            self.address,
+            self.tls_host,
+            reconnectOptionsWithTls12Ticket(
+                self.options,
+                mqtt_options,
+                ticket,
+            ),
+            deadline,
+        );
+    }
 };
 
 fn reconnectOptions(
@@ -2257,6 +2399,16 @@ fn reconnectOptions(
     const network_connect_timeout = options.mqtt.network_connect_timeout;
     options.mqtt = mqtt_options;
     options.mqtt.network_connect_timeout = network_connect_timeout;
+    return options;
+}
+
+fn reconnectOptionsWithTls12Ticket(
+    configured: ConnectOptions,
+    mqtt_options: runtime.ConnectOptions,
+    ticket: *const tls_stream.Tls12SessionTicket,
+) ConnectOptions {
+    var options = reconnectOptions(configured, mqtt_options);
+    options.tls12_ticket_resumption = ticket;
     return options;
 }
 

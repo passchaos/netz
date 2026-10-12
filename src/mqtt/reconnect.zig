@@ -18,6 +18,7 @@ const owned_subscription = @import("reconnect/subscription.zig");
 const session_snapshot = @import("reconnect/snapshot.zig");
 const reconnect_target = @import("reconnect/target.zig");
 const backoff = @import("reconnect/backoff.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
 
 const net = std.Io.net;
 
@@ -1127,6 +1128,7 @@ pub const Client = struct {
     subscriptions: std.ArrayList(OwnedSubscription) = .empty,
     keep_alive_deadline: ?std.Io.Timestamp = null,
     ping_response_deadline: ?std.Io.Timestamp = null,
+    tls12_session_ticket: ?tls_stream.Tls12SessionTicket = null,
     reconnect_requested: std.atomic.Value(bool) = .init(false),
 
     pub fn init(
@@ -1351,6 +1353,7 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         if (self.connection_state) |*active| active.close();
+        if (self.tls12_session_ticket) |*ticket| ticket.deinit();
         for (self.subscriptions.items) |*subscription| {
             subscription.deinit(self.allocator);
         }
@@ -1438,10 +1441,12 @@ pub const Client = struct {
                 continue;
             };
             if (!attempt.accepted()) {
+                self.rememberTls12SessionTicket(&attempt);
                 attempt.deinit(self.allocator);
                 return error.ConnectRefused;
             }
             var result = try attempt.requireAccepted();
+            self.rememberTls12SessionTicketFromConnection(&result.connection);
             const session_present = result.connack.connack.session_present;
             result.connack.deinit(self.allocator);
             self.connection_state = result.connection;
@@ -1500,6 +1505,7 @@ pub const Client = struct {
             self.allocator,
             self.io,
             self.options.value,
+            self.usableTls12SessionTicket(),
         );
     }
 
@@ -1512,10 +1518,61 @@ pub const Client = struct {
                 self.allocator,
                 self.io,
                 self.options.value,
+                self.usableTls12SessionTicket(),
                 absolute,
             )
         else
             self.connectAttempt();
+    }
+
+    fn usableTls12SessionTicket(
+        self: *Client,
+    ) ?*const tls_stream.Tls12SessionTicket {
+        const ticket = if (self.tls12_session_ticket) |*cached|
+            cached
+        else
+            return null;
+        const now_seconds: u64 = @intCast(@max(
+            0,
+            std.Io.Timestamp.now(self.io, .real).toSeconds(),
+        ));
+        if (now_seconds < ticket.session.created_at_seconds or
+            now_seconds - ticket.session.created_at_seconds >=
+                ticket.session.lifetime_seconds)
+        {
+            ticket.deinit();
+            self.tls12_session_ticket = null;
+            return null;
+        }
+        return ticket;
+    }
+
+    fn rememberTls12SessionTicket(
+        self: *Client,
+        attempt: *runtime.ConnectAttempt,
+    ) void {
+        const active_connection = if (attempt.connection) |*active|
+            active
+        else
+            return;
+        self.rememberTls12SessionTicketFromConnection(active_connection);
+    }
+
+    fn rememberTls12SessionTicketFromConnection(
+        self: *Client,
+        active_connection: *runtime.Connection,
+    ) void {
+        if (active_connection.takeTls12SessionTicket()) |ticket| {
+            if (self.tls12_session_ticket) |*cached| cached.deinit();
+            self.tls12_session_ticket = ticket;
+            return;
+        }
+        if (active_connection.negotiatedTlsProtocol() == .tls12 and
+            !(active_connection.wasTlsSessionResumed() orelse false))
+        {
+            if (self.tls12_session_ticket) |*cached| cached.deinit();
+            self.tls12_session_ticket = null;
+        }
     }
 
     /// Close only the current transport. Durable outgoing QoS state remains

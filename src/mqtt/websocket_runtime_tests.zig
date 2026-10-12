@@ -4,6 +4,7 @@ const runtime = @import("runtime.zig");
 const mqtt_ws = @import("websocket_runtime.zig");
 const reconnect = @import("reconnect.zig");
 const websocket_runtime = @import("../websocket/mod.zig").runtime;
+const tls_stream = @import("../tls/mod.zig").stream;
 const tls_testing = @import("../tls/testing.zig");
 
 const max_packet_size: usize = 4096;
@@ -1335,7 +1336,7 @@ test "MQTT reconnect client reuses WebSocket connector" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT reconnect client reuses authenticated WSS connector" {
+test "MQTT reconnect client automatically resumes TLS 1.2 WSS tickets" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1349,6 +1350,12 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
         tls_testing.certificate_base64,
     );
     const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    var keyring = try tls_stream.Tls12TicketKeyring.init(.{
+        .id = 19,
+        .secret = [_]u8{0x39} ** tls_stream.tls12_ticket_key_len,
+    });
+    defer keyring.deinit();
     var server = try mqtt_ws.TlsServer.listen(
         allocator,
         io,
@@ -1361,12 +1368,23 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
                 } },
             },
             .cipher_suites = &.{.aes_128_gcm_sha256},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
+            .alpn_protocols = &.{"http/1.1"},
+            .tls12_session_tickets = .{
+                .keyring = &keyring,
+                .server_id = "localhost",
+                .lifetime_seconds = 3600,
+            },
         },
     );
     defer server.deinit();
 
     const Shared = struct {
         server: *mqtt_ws.TlsServer,
+        resumed: [2]bool = .{ false, false },
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -1376,13 +1394,18 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
         }
 
         fn runFallible(self: *@This()) !void {
-            var first = try self.server.accept(.{ .protocol = .v5 });
-            first.deinit(self.server.allocator);
-            var second = try self.server.accept(.{
-                .protocol = .v5,
-                .session_present = true,
-            });
-            defer second.deinit(self.server.allocator);
+            for (0..2) |index| {
+                var accepted = try self.server.accept(.{
+                    .protocol = .v5,
+                    .session_present = index != 0,
+                });
+                defer accepted.deinit(self.server.allocator);
+                self.resumed[index] =
+                    accepted.connection.wasTlsSessionResumed() orelse
+                    return error.MissingTlsMetadata;
+                var disconnect = try accepted.connection.readDisconnect();
+                disconnect.deinit(self.server.allocator);
+            }
         }
     };
     var shared = Shared{ .server = &server };
@@ -1390,8 +1413,6 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
     var joined = false;
     defer if (!joined) thread.join();
 
-    var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
-    defer ca_bundle.deinit(allocator);
     const uri = try std.fmt.allocPrint(
         allocator,
         "wss://localhost:{d}/mqtt",
@@ -1402,10 +1423,14 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
         .uri = uri,
         .options = .{
             .mqtt = .{ .client_id = "connector-placeholder" },
-            .tls = .{ .ca_bundle = .{
-                .bundle = &ca_bundle,
-                .lock = &ca_lock,
-            } },
+            .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+            .alpn_protocols = &.{"http/1.1"},
+            .tls12_cipher_suites = &.{
+                .ecdhe_ecdsa_aes_128_gcm_sha256,
+            },
+            .protocol_policy = .tls12_only,
         },
     };
     var shutdown: std.Io.Event = .unset;
@@ -1425,19 +1450,19 @@ test "MQTT reconnect client reuses authenticated WSS connector" {
         &shutdown,
     );
     defer client.deinit();
-    var first = (try client.pollWithTimeout(.fromSeconds(10))) orelse
-        return error.TestExpectedConnectEvent;
-    defer first.deinit(allocator);
-    try std.testing.expect(first == .connected);
-    var second = (try client.pollWithTimeout(.fromSeconds(10))) orelse
-        return error.TestExpectedReconnectEvent;
-    defer second.deinit(allocator);
-    try std.testing.expect(second == .connected);
-    try std.testing.expect(second.connected.session_present);
+    const first = try client.connectWithTimeout(.fromSeconds(10));
+    try std.testing.expect(!first.session_present);
+    try std.testing.expect(!client.connection().?.wasTlsSessionResumed().?);
+    try client.disconnect(0);
+    const second = try client.connectWithTimeout(.fromSeconds(10));
+    try std.testing.expect(second.session_present);
+    try std.testing.expect(client.connection().?.wasTlsSessionResumed().?);
+    try client.disconnect(0);
 
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqualSlices(bool, &.{ false, true }, &shared.resumed);
 }
 
 test "MQTT WebSocket server requires mqtt subprotocol" {
