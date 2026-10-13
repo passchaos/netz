@@ -321,3 +321,98 @@ test "MQTT client validates Assigned Client Identifier against CONNECT" {
     joined = true;
     if (shared.err) |err| return err;
 }
+
+test "MQTT 3.1 CONNACK mode separates standard and Mosquitto sessions" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const Case = struct {
+        server_mode: runtime.V31ConnAckMode,
+        client_mode: runtime.V31ConnAckMode,
+        raw_flags: u8,
+        session_present: bool,
+    };
+    const cases = [_]Case{
+        .{
+            .server_mode = .strict,
+            .client_mode = .strict,
+            .raw_flags = 0,
+            .session_present = false,
+        },
+        .{
+            .server_mode = .mosquitto,
+            .client_mode = .strict,
+            .raw_flags = 1,
+            .session_present = false,
+        },
+        .{
+            .server_mode = .mosquitto,
+            .client_mode = .mosquitto,
+            .raw_flags = 1,
+            .session_present = true,
+        },
+        .{
+            .server_mode = .strict,
+            .client_mode = .mosquitto,
+            .raw_flags = 0,
+            .session_present = false,
+        },
+    };
+
+    for (cases) |case| {
+        var server = try runtime.Server.listen(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{},
+        );
+        defer server.deinit();
+        const Shared = struct {
+            server: *runtime.Server,
+            mode: runtime.V31ConnAckMode,
+            err: ?anyerror = null,
+
+            fn run(self: *@This()) void {
+                var accepted = self.server.accept(.{
+                    .protocol = .v3_1,
+                    .v3_1_connack_mode = self.mode,
+                    .session_present = true,
+                }) catch |err| {
+                    self.err = err;
+                    return;
+                };
+                accepted.deinit(self.server.allocator);
+            }
+        };
+        var shared = Shared{ .server = &server, .mode = case.server_mode };
+        const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+        var attempt = try runtime.Client.connectAttempt(
+            allocator,
+            io,
+            server.address(),
+            .{
+                .protocol = .v3_1,
+                .client_id = "v31-connack-mode",
+                .clean_start = false,
+                .v3_1_connack_mode = case.client_mode,
+                .limits = .{ .max_packet_size = 4096 },
+            },
+        );
+        defer attempt.deinit(allocator);
+        try std.testing.expect(attempt.accepted());
+        try std.testing.expectEqual(
+            case.raw_flags,
+            attempt.connack.connack.v3_1_acknowledgement_flags,
+        );
+        try std.testing.expectEqual(
+            case.session_present,
+            attempt.connack.connack.session_present,
+        );
+
+        thread.join();
+        if (shared.err) |err| return err;
+    }
+}

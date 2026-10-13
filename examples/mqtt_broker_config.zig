@@ -423,6 +423,7 @@ pub fn run(
     const max_inflight_messages = config.effectiveMaxInflightMessages();
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
+        .v3_1_connack_mode = .mosquitto,
         .max_outgoing_inflight = max_inflight_messages,
         .retain_available = config.retain_available,
         .allow_zero_length_client_id = config.allow_zero_length_client_id,

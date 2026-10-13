@@ -13,6 +13,7 @@ const Config = struct {
     max_session_inflight_payload_bytes: usize = 0,
     max_outgoing_inflight: u16 = 64,
     strict_utf8: bool = false,
+    mqtt31_session_present_extension: bool = false,
     connect_timeout_ms: ?u32 = null,
     max_packet_size: usize = 16 * 1024 * 1024,
     max_payload_size: usize = 0,
@@ -262,6 +263,10 @@ pub fn main(init: std.process.Init) !void {
             },
             .accept = .{
                 .strict_utf8 = config.strict_utf8,
+                .v3_1_connack_mode = if (config.mqtt31_session_present_extension)
+                    .mosquitto
+                else
+                    .strict,
                 .reason_code = config.connack_reason,
                 .server_reference = config.server_reference,
                 .connect_timeout = if (config.connect_timeout_ms) |milliseconds|
@@ -501,6 +506,12 @@ fn parseArgs(
             );
         } else if (std.mem.eql(u8, arg, "--strict-utf8")) {
             config.strict_utf8 = true;
+        } else if (std.mem.eql(
+            u8,
+            arg,
+            "--mqtt31-session-present-extension",
+        )) {
+            config.mqtt31_session_present_extension = true;
         } else if (std.mem.startsWith(
             u8,
             arg,

@@ -1350,6 +1350,10 @@ fn remoteConnectOptions(
         .protocol = source.protocol,
         .client_id = source.clientId(),
         .bridge_mode = source.usesPrivateBridgeMode(),
+        .v3_1_connack_mode = if (source.protocol == .v3_1)
+            .mosquitto
+        else
+            .strict,
         .clean_start = source.clean_session,
         .keep_alive_seconds = source.keep_alive_seconds,
         .properties = properties,
@@ -2130,6 +2134,10 @@ test "configured bridge maps Mosquitto remote protocol limits" {
     const options = remoteConnectOptions(&source, &.{});
     try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1_1, options.protocol);
     try std.testing.expect(options.bridge_mode);
+    try std.testing.expectEqual(
+        mqtt.runtime.V31ConnAckMode.strict,
+        options.v3_1_connack_mode,
+    );
     try std.testing.expectEqual(@as(?u16, 7), options.receive_maximum);
     try std.testing.expectEqual(@as(u16, 3), options.topic_alias_maximum);
     try std.testing.expectEqual(@as(u16, 3), options.max_outgoing_topic_aliases);
@@ -2161,6 +2169,12 @@ test "configured bridge maps Mosquitto remote protocol limits" {
     var v5 = source;
     v5.protocol = .v5;
     try std.testing.expect(!remoteConnectOptions(&v5, &.{}).bridge_mode);
+    var v31 = source;
+    v31.protocol = .v3_1;
+    try std.testing.expectEqual(
+        mqtt.runtime.V31ConnAckMode.mosquitto,
+        remoteConnectOptions(&v31, &.{}).v3_1_connack_mode,
+    );
 }
 
 test "configured bridge rejects an empty explicit CA file" {

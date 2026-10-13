@@ -60,6 +60,11 @@ pub const disconnectReasonForProtocolViolation =
     protocol_error.disconnectReason;
 pub const TcpKeepAlive = socket_options.TcpKeepAlive;
 
+/// MQTT 3.1 reserves the complete CONNACK acknowledgement byte. Mosquitto
+/// uses bit 0 as the later Session Present field; callers must opt into that
+/// extension explicitly on both client and server boundaries.
+pub const V31ConnAckMode = enum { strict, mosquitto };
+
 pub const Limits = struct {
     max_packet_size: usize = 16 * 1024 * 1024,
     /// Maximum interleaved Control Packets retained while a synchronous client
@@ -1013,6 +1018,7 @@ pub const AcceptOptions = struct {
     /// the underlying TCP/TLS/WebSocket transport is established. A null value
     /// preserves unbounded behavior; zero fails before reading.
     connect_timeout: ?std.Io.Duration = null,
+    v3_1_connack_mode: V31ConnAckMode = .strict,
     session_present: bool = false,
     reason_code: u8 = 0,
     assigned_client_identifier: ?[]const u8 = null,
@@ -1239,7 +1245,12 @@ pub const PendingAcceptedClient = struct {
             property_count += 1;
         }
         const connack_options: ConnAckOptions = .{
-            .session_present = resolved.session_present,
+            .v3_1_connack_mode = resolved.v3_1_connack_mode,
+            .session_present = if (self.connection.protocol == .v3_1 and
+                resolved.v3_1_connack_mode == .strict)
+                false
+            else
+                resolved.session_present,
             .reason_code = resolved.reason_code,
             .properties = properties[0..property_count],
             .max_outgoing_inflight = resolved.max_outgoing_inflight,
@@ -2384,6 +2395,9 @@ pub const ConnectOptions = struct {
     /// Emit Mosquitto's private bridge marker for MQTT 3.1/3.1.1;
     /// configured one-way reconnectors may retry without it after refusal.
     bridge_mode: bool = false,
+    /// Interpret Mosquitto's non-standard MQTT 3.1 CONNACK bit 0 as Session
+    /// Present. Strict mode follows the original specification and ignores it.
+    v3_1_connack_mode: V31ConnAckMode = .strict,
     /// Reject discouraged C0/C1 control characters in every UTF-8 Encoded
     /// String received from the broker. The base wire codec always rejects
     /// MQTT-forbidden NUL and Unicode noncharacters.
@@ -2738,6 +2752,7 @@ fn validateAssignedClientIdentifierForConnect(
 }
 
 pub const ConnAckOptions = struct {
+    v3_1_connack_mode: V31ConnAckMode = .strict,
     session_present: bool = false,
     reason_code: u8 = 0,
     properties: []const mqtt.Property = &.{},
@@ -3744,6 +3759,15 @@ pub const Connection = struct {
                         packet.bytes,
                     );
                     errdefer value.deinit(allocator);
+                    if (self.protocol == .v3_1 and
+                        options.v3_1_connack_mode == .mosquitto)
+                    {
+                        value.session_present =
+                            value.mosquittoV31SessionPresent();
+                        if (value.session_present and value.reason_code != 0) {
+                            return error.InvalidFlags;
+                        }
+                    }
                     try self.validateIncomingProperties(value.properties);
                     if (options.clean_start and value.session_present) {
                         return error.InvalidFlags;
@@ -4046,7 +4070,14 @@ pub const Connection = struct {
         }
         var fixed_storage: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
         self.write_scratch.clearRetainingCapacity();
-        const bytes = if (properties.items.len == 0)
+        const bytes = if (self.protocol == .v3_1 and
+            options.v3_1_connack_mode == .mosquitto)
+            try mqtt.ConnAck.writeMosquittoV31Into(
+                &fixed_storage,
+                options.session_present,
+                options.reason_code,
+            )
+        else if (properties.items.len == 0)
             try mqtt.ConnAck.writeNoPropertiesInto(
                 &fixed_storage,
                 self.protocol,

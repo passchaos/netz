@@ -149,3 +149,62 @@ test "MQTT 3.1 duplicate QoS control flags remain version scoped" {
         ),
     );
 }
+
+test "MQTT 3.1 CONNACK flags separate standard and Mosquitto semantics" {
+    const allocator = std.testing.allocator;
+
+    // MQTT 3.1 marks both fixed-header flags and its acknowledgement byte as
+    // unused. Preserve the latter for explicit extensions without assigning
+    // Session Present semantics in the standard codec.
+    var connack = try mqtt.ConnAck.parse(
+        allocator,
+        .v3_1,
+        &.{ 0x2f, 0x02, 0xff, 0x00 },
+    );
+    defer connack.deinit(allocator);
+    try std.testing.expect(!connack.session_present);
+    try std.testing.expectEqual(
+        @as(u8, 0xff),
+        connack.v3_1_acknowledgement_flags,
+    );
+    try std.testing.expect(connack.mosquittoV31SessionPresent());
+    try std.testing.expectError(
+        error.InvalidFlags,
+        mqtt.ConnAck.parse(
+            allocator,
+            .v3_1_1,
+            &.{ 0x2f, 0x02, 0xff, 0x00 },
+        ),
+    );
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try mqtt.ConnAck.write(&encoded, allocator, .v3_1, false, 0, &.{});
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x20, 0x02, 0x00, 0x00 },
+        encoded.items,
+    );
+    try std.testing.expectError(
+        error.InvalidFlags,
+        mqtt.ConnAck.write(&encoded, allocator, .v3_1, true, 0, &.{}),
+    );
+
+    encoded.clearRetainingCapacity();
+    try mqtt.ConnAck.writeMosquittoV31(&encoded, allocator, true, 0);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x20, 0x02, 0x01, 0x00 },
+        encoded.items,
+    );
+    var direct: [mqtt.ConnAck.no_properties_max_len]u8 = undefined;
+    try std.testing.expectEqualSlices(
+        u8,
+        encoded.items,
+        try mqtt.ConnAck.writeMosquittoV31Into(&direct, true, 0),
+    );
+    try std.testing.expectError(
+        error.InvalidFlags,
+        mqtt.ConnAck.writeMosquittoV31Into(&direct, true, 2),
+    );
+}

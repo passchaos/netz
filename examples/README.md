@@ -263,7 +263,10 @@ attempt remains immediate. MQTT 3.1.1 is the bridge default;
 a username. When `remote_clientid` is omitted, the unique connection name is
 used as the stable Client ID. MQTT 3.1 remote Client IDs must contain 1-23
 characters, so longer connection names require an explicit shorter
-`remote_clientid`. `bridge_receive_maximum` is the non-zero MQTT 5
+`remote_clientid`. Configured MQTT 3.1 bridges explicitly enable Mosquitto's
+non-standard CONNACK Session Present bit; low-level clients remain strict by
+default because the original 3.1 acknowledgement byte is wholly reserved.
+`bridge_receive_maximum` is the non-zero MQTT 5
 Receive Maximum and defaults to the effective global `max_inflight_messages`
 (including its zero-as-65,535 spelling). `bridge_max_topic_alias` defaults to
 10, may be zero to disable aliases, and bounds both the CONNECT advertisement

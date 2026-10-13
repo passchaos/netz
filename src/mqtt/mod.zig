@@ -1583,7 +1583,13 @@ fn validateConnectFlags(protocol: ProtocolVersion, flags: u8) Error!void {
 }
 
 pub const ConnAck = struct {
+    /// Standard Session Present for MQTT 3.1.1/5. MQTT 3.1 has no such field;
+    /// use `mosquittoV31SessionPresent` only when that extension was selected.
     session_present: bool,
+    /// Raw MQTT 3.1 Topic Name Compression Response byte. The original
+    /// protocol marks every bit reserved and unused, so strict callers ignore
+    /// it while compatibility code can inspect the Mosquitto bit-0 extension.
+    v3_1_acknowledgement_flags: u8 = 0,
     reason_code: u8,
     properties: []Property = &.{},
 
@@ -1599,14 +1605,22 @@ pub const ConnAck = struct {
     pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!ConnAck {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .connack) return error.InvalidPacketType;
-        try validateControlFlags(fixed);
+        if (protocol != .v3_1) try validateControlFlags(fixed);
         try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const ack_flags = try cursor.readByte();
-        if ((ack_flags & 0xfe) != 0) return error.InvalidFlags;
+        if (protocol != .v3_1 and (ack_flags & 0xfe) != 0) {
+            return error.InvalidFlags;
+        }
         const reason_code = try cursor.readByte();
         try validateConnAckReason(protocol, reason_code);
-        try validateConnAckSessionPresent((ack_flags & 0x01) != 0, reason_code);
+        if (protocol != .v3_1) {
+            try validateConnAckSessionPresent(
+                protocol,
+                (ack_flags & 0x01) != 0,
+                reason_code,
+            );
+        }
         const props = if (protocol == .v5) try parsePropertiesFor(
             allocator,
             &cursor,
@@ -1615,10 +1629,20 @@ pub const ConnAck = struct {
         errdefer allocator.free(props);
         if (cursor.remaining() != 0) return error.InvalidPacketType;
         return .{
-            .session_present = (ack_flags & 0x01) != 0,
+            .session_present = protocol != .v3_1 and
+                (ack_flags & 0x01) != 0,
+            .v3_1_acknowledgement_flags = if (protocol == .v3_1)
+                ack_flags
+            else
+                0,
             .reason_code = reason_code,
             .properties = props,
         };
+    }
+
+    /// Interpret Mosquitto's non-standard MQTT 3.1 Session Present bit.
+    pub fn mosquittoV31SessionPresent(self: ConnAck) bool {
+        return (self.v3_1_acknowledgement_flags & 0x01) != 0;
     }
 
     pub fn write(
@@ -1632,7 +1656,11 @@ pub const ConnAck = struct {
         const original_len = list.items.len;
         errdefer list.items.len = original_len;
         try validateConnAckReason(protocol, reason_code);
-        try validateConnAckSessionPresent(session_present, reason_code);
+        try validateConnAckSessionPresent(
+            protocol,
+            session_present,
+            reason_code,
+        );
         const properties_len = if (protocol == .v5) blk: {
             try validatePropertiesFor(.connack, properties);
             break :blk try propertiesEncodedLen(properties);
@@ -1669,7 +1697,11 @@ pub const ConnAck = struct {
         reason_code: u8,
     ) Error![]u8 {
         try validateConnAckReason(protocol, reason_code);
-        try validateConnAckSessionPresent(session_present, reason_code);
+        try validateConnAckSessionPresent(
+            protocol,
+            session_present,
+            reason_code,
+        );
 
         storage[0] = @as(u8, @intFromEnum(PacketType.connack)) << 4;
         storage[1] = if (protocol == .v5) 3 else 2;
@@ -1679,6 +1711,43 @@ pub const ConnAck = struct {
             storage[4] = 0;
             return storage;
         }
+        return storage[0..4];
+    }
+
+    /// Encode Mosquitto's bit-0 Session Present extension for MQTT 3.1.
+    pub fn writeMosquittoV31(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        session_present: bool,
+        reason_code: u8,
+    ) Error!void {
+        const original_len = list.items.len;
+        errdefer list.items.len = original_len;
+        try validateConnAckReason(.v3_1, reason_code);
+        if (session_present and reason_code != 0) return error.InvalidFlags;
+        try writeFixedHeaderAssumeCapacity(
+            list,
+            allocator,
+            .connack,
+            0,
+            2,
+        );
+        list.appendAssumeCapacity(@intFromBool(session_present));
+        list.appendAssumeCapacity(reason_code);
+    }
+
+    /// Caller-buffer form of `writeMosquittoV31`.
+    pub fn writeMosquittoV31Into(
+        storage: *[no_properties_max_len]u8,
+        session_present: bool,
+        reason_code: u8,
+    ) Error![]u8 {
+        try validateConnAckReason(.v3_1, reason_code);
+        if (session_present and reason_code != 0) return error.InvalidFlags;
+        storage[0] = @as(u8, @intFromEnum(PacketType.connack)) << 4;
+        storage[1] = 2;
+        storage[2] = @intFromBool(session_present);
+        storage[3] = reason_code;
         return storage[0..4];
     }
 };
@@ -2781,10 +2850,16 @@ pub const Auth = struct {
     }
 };
 
-fn validateConnAckSessionPresent(session_present: bool, reason_code: u8) Error!void {
-    // MQTT 3.1/3.1.1/5 require Session Present to be 0 when the connection is
-    // refused.  Accepting `session_present=true` on failures lets clients
-    // mistakenly resume state after a rejected CONNECT.
+fn validateConnAckSessionPresent(
+    protocol: ProtocolVersion,
+    session_present: bool,
+    reason_code: u8,
+) Error!void {
+    // MQTT 3.1's acknowledgement byte is wholly reserved and has no standard
+    // Session Present bit. The explicit Mosquitto encoder handles its extension.
+    if (protocol == .v3_1 and session_present) return error.InvalidFlags;
+    // MQTT 3.1.1/5 require Session Present to be 0 when the connection is
+    // refused. Accepting it on failures can resume state after a rejected CONNECT.
     if (session_present and reason_code != 0) return error.InvalidFlags;
 }
 

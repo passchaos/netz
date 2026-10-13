@@ -122,6 +122,16 @@ Tests exercise both directions over one live remote Session, prove that the
 inbound message is absent from the local outbound source, and recreate the
 bridge between remote QoS 2 PUBREC and PUBREL to verify durable recovery and
 exactly-once local admission.
+
+MQTT 3.1's CONNACK acknowledgement byte predates Session Present and is wholly
+reserved by the original specification. Low-level netz clients and servers
+therefore default to strict mode: parsers preserve the raw byte but do not
+assign Session semantics, and servers emit zero. `V31ConnAckMode.mosquitto`
+explicitly enables Mosquitto's de-facto bit-0 Session Present extension.
+Mosquitto-style configured listeners and MQTT 3.1 configured bridges select
+that mode so persistent-session interoperability remains intentional rather
+than silently masquerading as standard MQTT 3.1 behavior.
+
 The automated in-process integration tests include a real hostname-authenticated
 TLS 1.3 bridge using a local CA and `HostReconnectConnector`; it injects an
 upstream QoS 1 publication and observes that the remote PUBACK follows completed

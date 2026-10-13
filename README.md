@@ -998,7 +998,8 @@ Current protocol coverage includes:
   Remaining Length, UTF-8 string, and Binary Data primitives, CONNECT/CONNACK with Last Will,
   version-scoped Client Identifier rules (including MQTT 3.1's 1-23-character
   bound), legacy PUBREL/SUBSCRIBE/UNSUBSCRIBE retransmission DUP flags,
-  username/password flag validation and payload support, PUBLISH,
+  strict MQTT 3.1 reserved CONNACK handling with an explicit Mosquitto
+  Session Present extension mode, username/password flag validation and payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH

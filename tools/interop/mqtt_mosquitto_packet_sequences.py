@@ -1078,7 +1078,9 @@ def main() -> None:
             args.broker,
             connections=1 + helper_connections,
             ignore_errors=True,
-            extra_args=PACKET_SEQUENCE_BROKER_ARGS,
+            extra_args=PACKET_SEQUENCE_BROKER_ARGS + (
+                "--mqtt31-session-present-extension",
+            ),
         ) as broker:
             run_sequence(broker, sequence, index, mqtt_packets)
 
