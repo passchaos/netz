@@ -1092,6 +1092,8 @@ Current protocol coverage includes:
   reconnect attempts, and crash-safe QoS 2 state,
   listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
   PBES2-encrypted PKCS#8 keys with file-backed passwords, and
+  ordered OpenSSL-style `ciphers` and `ciphers_tls1.3` policies on both TLS
+  and WSS listeners,
   opt-in TLS 1.2 stateless tickets with per-listener process-lifetime keys,
   explicit server-identity binding, and bounded lifetime,
   optional/required

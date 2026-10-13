@@ -3503,6 +3503,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         "bind_interface lo\n"
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
+        "ciphers_tls1.3 TLS_AES_256_GCM_SHA384\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
@@ -3512,6 +3513,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         "websockets_origin https://secure.example\n"
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
+        "ciphers_tls1.3 TLS_AES_256_GCM_SHA384\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
     )
@@ -3535,6 +3537,8 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
                 "-connect",
                 f"127.0.0.1:{tls_port}",
                 "-tls1_3",
+                "-ciphersuites",
+                "TLS_AES_256_GCM_SHA384",
                 "-servername",
                 "localhost",
                 "-CAfile",
@@ -3567,6 +3571,11 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
             origin="https://secure.example",
         )
         clients.append(websocket)
+        if websocket.cipher()[0] != "TLS_AES_256_GCM_SHA384":
+            raise AssertionError(
+                "configured WSS TLS 1.3 cipher mismatch: "
+                f"got {websocket.cipher()[0]}"
+            )
         send_websocket_binary(websocket, connect_packet("wss-config"))
         if connack_reason(read_websocket_binary(websocket)) != 0:
             raise AssertionError("configured WSS CONNECT failed")

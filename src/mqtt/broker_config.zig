@@ -57,6 +57,7 @@ pub const Listener = struct {
     cafile: []u8 = &.{},
     capath: []u8 = &.{},
     crlfile: []u8 = &.{},
+    tls13_cipher_suites: []tls_cipher_suites.Suite = &.{},
     tls12_cipher_suites: []tls_cipher_suites.Tls12Suite = &.{},
     tls_protocol_policy: tls_stream.VersionPolicy = .tls12_and_tls13,
     tls12_session_tickets: bool = false,
@@ -98,6 +99,9 @@ pub const Listener = struct {
         if (self.cafile.len != 0) allocator.free(self.cafile);
         if (self.capath.len != 0) allocator.free(self.capath);
         if (self.crlfile.len != 0) allocator.free(self.crlfile);
+        if (self.tls13_cipher_suites.len != 0) {
+            allocator.free(self.tls13_cipher_suites);
+        }
         if (self.tls12_cipher_suites.len != 0) {
             allocator.free(self.tls12_cipher_suites);
         }
@@ -272,6 +276,7 @@ const ListenerSeen = struct {
     cafile: bool = false,
     capath: bool = false,
     crlfile: bool = false,
+    ciphers_tls13: bool = false,
     ciphers: bool = false,
     tls_version: bool = false,
     tls12_session_tickets: bool = false,
@@ -668,6 +673,13 @@ fn parseSources(
                 } else if (std.mem.eql(u8, directive, "crlfile")) {
                     try markOnce(&seen.crlfile);
                     listener.crlfile = try parseOneOwned(allocator, &words);
+                } else if (std.mem.eql(u8, directive, "ciphers_tls1.3")) {
+                    try markOnce(&seen.ciphers_tls13);
+                    listener.tls13_cipher_suites =
+                        try tls_cipher_suites.parseOpenSslList(
+                            allocator,
+                            try parseOne(&words),
+                        );
                 } else if (std.mem.eql(u8, directive, "ciphers")) {
                     try markOnce(&seen.ciphers);
                     listener.tls12_cipher_suites =
@@ -885,7 +897,9 @@ fn parseSources(
         {
             return error.TlsIdentityIncomplete;
         }
-        if ((seen.tls_version or listener.tls12_cipher_suites.len != 0) and
+        if ((seen.tls_version or
+            listener.tls13_cipher_suites.len != 0 or
+            listener.tls12_cipher_suites.len != 0) and
             !listener.usesTls())
         {
             return error.TlsIdentityIncomplete;
@@ -1046,6 +1060,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "cafile") or
         std.mem.eql(u8, value, "capath") or
         std.mem.eql(u8, value, "crlfile") or
+        std.mem.eql(u8, value, "ciphers_tls1.3") or
         std.mem.eql(u8, value, "ciphers") or
         std.mem.eql(u8, value, "tls_version") or
         std.mem.eql(u8, value, "tls12_session_tickets") or
@@ -1257,6 +1272,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\certfile server-chain.pem
         \\keyfile server-key.pem
         \\keyfile_password_file server-key.password
+        \\ciphers_tls1.3 TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384
         \\cafile client-ca.pem
         \\crlfile clients.crl
         \\require_certificate true
@@ -1346,6 +1362,11 @@ test "MQTT broker config parses owned multi-listener policy" {
     try std.testing.expectEqualStrings(
         "server-key.password",
         config.listeners[1].keyfile_password_file,
+    );
+    try std.testing.expectEqualSlices(
+        tls_cipher_suites.Suite,
+        &.{ .chacha20_poly1305_sha256, .aes_256_gcm_sha384 },
+        config.listeners[1].tls13_cipher_suites,
     );
     try std.testing.expectEqualStrings(
         "client-ca.pem",
@@ -2994,6 +3015,13 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         error.DirectiveRequiresListener,
         parse(allocator, "tls_version tlsv1.2\nlistener 1883"),
     );
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(
+            allocator,
+            "ciphers_tls1.3 TLS_AES_128_GCM_SHA256\nlistener 1883",
+        ),
+    );
     var tls12_listener = try parse(allocator,
         \\listener 8883
         \\certfile server.pem
@@ -3029,6 +3057,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\certfile server.pem
         \\keyfile server.key
         \\tls_version tlsv1.3
+        \\ciphers_tls1.3 TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256
         \\tls13_session_tickets true
         \\tls13_session_ticket_server_id mqtt.example
         \\tls13_session_ticket_lifetime 1800
@@ -3038,6 +3067,11 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     try std.testing.expectEqual(
         tls_stream.VersionPolicy.tls13_only,
         tls13_listener.listeners[0].tls_protocol_policy,
+    );
+    try std.testing.expectEqualSlices(
+        tls_cipher_suites.Suite,
+        &.{ .aes_256_gcm_sha384, .aes_128_gcm_sha256 },
+        tls13_listener.listeners[0].tls13_cipher_suites,
     );
     try std.testing.expect(tls13_listener.listeners[0].tls13_session_tickets);
     try std.testing.expectEqualStrings(
@@ -3144,6 +3178,35 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\tls_version tlsv1.1
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.TlsIdentityIncomplete,
+        parse(allocator,
+            \\listener 1883
+            \\ciphers_tls1.3 TLS_AES_128_GCM_SHA256
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.UnsupportedCipherSuite,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\ciphers_tls1.3 DEFAULT
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 8883
+            \\certfile server.pem
+            \\keyfile server.key
+            \\ciphers_tls1.3 TLS_AES_128_GCM_SHA256
+            \\ciphers_tls1.3 TLS_AES_256_GCM_SHA384
             \\allow_anonymous true
         ),
     );

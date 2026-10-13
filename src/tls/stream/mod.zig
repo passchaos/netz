@@ -48,6 +48,8 @@ pub const Tls13ServerTicketPolicy =
     @import("versioned_server_connection.zig").Options.Tls13SessionTicketPolicy;
 pub const default_tls12_cipher_suites =
     &@import("version.zig").default_tls12_cipher_suites;
+pub const default_tls13_cipher_suites =
+    &@import("vail").tls.cipher_suite.default_preference;
 
 pub const Error = @import("versioned_client_connection.zig").Error ||
     @import("versioned_server_connection.zig").Error;
