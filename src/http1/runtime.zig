@@ -267,6 +267,47 @@ fn connectProxyUriBefore(
     return client;
 }
 
+fn connectTunnelViaProxyBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    proxy_uri: []const u8,
+    target: []const u8,
+    proxy_options: ProxyOptions,
+    limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!net.Stream {
+    try http1.validateConnectTarget(target);
+    var client = try connectProxyUriBefore(
+        allocator,
+        io,
+        proxy_uri,
+        limits,
+        deadline,
+    );
+    var client_owned = true;
+    defer if (client_owned) client.close();
+    const tunnel = if (deadline) |absolute|
+        try client.openConnectTunnelWithDeadline(
+            target,
+            proxy_options.headers,
+            absolute,
+        )
+    else
+        try client.openConnectTunnel(target, proxy_options.headers);
+    if (tunnel.inbuf.items.len != 0 or tunnel.tls_conn != null or
+        tunnel.tls_vail_conn != null or tunnel.tls_server_conn != null)
+    {
+        return error.InvalidResponse;
+    }
+    const stream = client.stream;
+    if (client.default_host) |host| allocator.free(host);
+    client.inbuf.deinit(allocator);
+    client.write_scratch.deinit(allocator);
+    client = undefined;
+    client_owned = false;
+    return stream;
+}
+
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     /// Maximum request fields accepted by connection-owning `serve*` helpers.
@@ -3959,6 +4000,71 @@ pub const Client = struct {
             request_options,
             proxy_options,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Establish a raw TCP tunnel through a cleartext HTTP proxy and transfer
+    /// ownership to the caller. CONNECT response parsing must end at an empty
+    /// boundary; any suffix is rejected because it arrived before the upper
+    /// protocol could send its first bytes and cannot be authenticated.
+    pub fn connectTunnelViaProxyUri(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        target: []const u8,
+        proxy_options: ProxyOptions,
+        limits: Limits,
+    ) Error!net.Stream {
+        return connectTunnelViaProxyBefore(
+            allocator,
+            io,
+            proxy_uri,
+            target,
+            proxy_options,
+            limits,
+            null,
+        );
+    }
+
+    pub fn connectTunnelViaProxyUriWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        target: []const u8,
+        proxy_options: ProxyOptions,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!net.Stream {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return connectTunnelViaProxyBefore(
+            allocator,
+            io,
+            proxy_uri,
+            target,
+            proxy_options,
+            limits,
+            deadline,
+        );
+    }
+
+    pub fn connectTunnelViaProxyUriWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        target: []const u8,
+        proxy_options: ProxyOptions,
+        limits: Limits,
+        timeout: std.Io.Duration,
+    ) Error!net.Stream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectTunnelViaProxyUriWithDeadline(
+            allocator,
+            io,
+            proxy_uri,
+            target,
+            proxy_options,
+            limits,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
 

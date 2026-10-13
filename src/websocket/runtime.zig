@@ -1999,6 +1999,7 @@ pub const PendingUpgrade = struct {
 
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
 pub const StapledOcspPolicy = tls_client_identity.StapledOcspPolicy;
+pub const HttpProxyOptions = http1_runtime.ProxyOptions;
 
 /// Result of an HTTP/1 Upgrade attempt before a non-101 response is mapped to
 /// the compatibility `InvalidResponse` error. Rejection status, headers,
@@ -3061,6 +3062,148 @@ pub const Client = struct {
         return connectUriTls(allocator, io, uri_text, options, .{});
     }
 
+    /// Establish WS/WSS through a cleartext HTTP proxy. Both schemes use
+    /// CONNECT so the WebSocket opening handshake remains end-to-end; WSS then
+    /// authenticates TLS on the tunneled stream. Proxy-only headers are never
+    /// included in the Upgrade request.
+    pub fn connectUriViaProxy(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!Connection {
+        var attempt = try connectUriViaProxyAttemptBefore(
+            allocator,
+            io,
+            proxy_uri,
+            uri_text,
+            options,
+            proxy_options,
+            tls_options,
+            null,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriViaProxyAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+    ) Error!ConnectAttempt {
+        var attempt = try connectUriViaProxyAttemptBefore(
+            allocator,
+            io,
+            proxy_uri,
+            uri_text,
+            options,
+            proxy_options,
+            tls_options,
+            null,
+        );
+        return closeRejectedAttempt(&attempt);
+    }
+
+    pub fn connectUriViaProxyWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var attempt = try connectUriViaProxyAttemptBefore(
+            allocator,
+            io,
+            proxy_uri,
+            uri_text,
+            options,
+            proxy_options,
+            tls_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriViaProxyAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        var attempt = try connectUriViaProxyAttemptBefore(
+            allocator,
+            io,
+            proxy_uri,
+            uri_text,
+            options,
+            proxy_options,
+            tls_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return closeRejectedAttempt(&attempt);
+    }
+
+    pub fn connectUriViaProxyWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriViaProxyWithDeadline(
+            allocator,
+            io,
+            proxy_uri,
+            uri_text,
+            options,
+            proxy_options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn connectUriViaProxyAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriViaProxyAttemptWithDeadline(
+            allocator,
+            io,
+            proxy_uri,
+            uri_text,
+            options,
+            proxy_options,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn connectUriTls(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -3406,6 +3549,107 @@ pub const Client = struct {
             connect_options,
             deadline,
         );
+        stream_owned = false;
+        return attempt;
+    }
+
+    fn connectUriViaProxyAttemptBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        proxy_options: HttpProxyOptions,
+        tls_options: http1_runtime.TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const is_ws = std.ascii.eqlIgnoreCase(uri.scheme, "ws");
+        const is_wss = std.ascii.eqlIgnoreCase(uri.scheme, "wss");
+        if (!is_ws and !is_wss) return error.UnsupportedScheme;
+        if ((options.tls_identity != null or options.vail_tls != null) and
+            !is_wss)
+        {
+            return error.UnsupportedScheme;
+        }
+        const target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(target);
+        var endpoint = try http1_runtime.uriEndpoint(
+            allocator,
+            uri,
+            if (is_wss) 443 else 80,
+        );
+        defer endpoint.deinit();
+        const connect_target = try std.fmt.allocPrint(
+            allocator,
+            "{s}:{d}",
+            .{ endpoint.host_storage, endpoint.port },
+        );
+        defer allocator.free(connect_target);
+        const http_limits = http1_runtime.Limits{
+            .max_head_bytes = options.limits.max_head_bytes,
+            .max_body_bytes = options.limits.max_rejection_body_bytes,
+            .response_head_timeout = options.limits.http1_handshake_timeout,
+            .max_informational_responses = options.limits.max_informational_responses,
+            .connect_timeout = options.connect_timeout,
+            .tcp_nodelay = options.tcp_nodelay,
+        };
+        const stream = if (deadline) |absolute|
+            try http1_runtime.Client.connectTunnelViaProxyUriWithDeadline(
+                allocator,
+                io,
+                proxy_uri,
+                connect_target,
+                proxy_options,
+                http_limits,
+                absolute,
+            )
+        else
+            try http1_runtime.Client.connectTunnelViaProxyUri(
+                allocator,
+                io,
+                proxy_uri,
+                connect_target,
+                proxy_options,
+                http_limits,
+            );
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        var connect_options = options;
+        connect_options.target = target;
+        if (connect_options.host.len == 0) {
+            connect_options.host = endpoint.authority;
+        }
+        if (is_wss) {
+            stream_owned = false;
+            return connectTlsStreamAttemptMaybeBefore(
+                allocator,
+                io,
+                stream,
+                endpoint.tls_host,
+                endpoint.port,
+                connect_options,
+                tls_options,
+                deadline,
+            );
+        }
+        const attempt = if (deadline) |absolute|
+            try connectStreamAttemptBefore(
+                allocator,
+                io,
+                stream,
+                null,
+                connect_options,
+                absolute,
+            )
+        else
+            try connectStreamAttempt(
+                allocator,
+                io,
+                stream,
+                null,
+                connect_options,
+            );
         stream_owned = false;
         return attempt;
     }
@@ -16390,6 +16634,7 @@ test {
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
+    _ = @import("runtime/proxy_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/handshake_header_tests.zig");
 }

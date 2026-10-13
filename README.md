@@ -983,7 +983,10 @@ Current protocol coverage includes:
   opening-handshake deadlines, shared absolute TLS 1.3 handshake budgets for
   WSS listeners and client-identity connections, and a `std.Io.async` concurrent
   server helper, `ws://`/`wss://` URI helpers with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support plus
-  Host/port synthesis, shared verified TLS client transport plus opt-in
+  Host/port synthesis, and cleartext HTTP-proxy CONNECT helpers for both WS and
+  WSS whose caller-owned deadline spans proxy DNS/TCP, CONNECT, origin TLS and
+  Upgrade while proxy-only headers remain isolated from the origin handshake,
+  shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
   optional client authentication and concurrent serving, and RFC 8441
   WebSocket-over-HTTP/2 adapters with per-stream two-phase server admission and
@@ -2155,6 +2158,30 @@ defer ws.close();
 try ws.sendText("hello");
 var frame = try ws.receiveFrame();
 defer frame.deinit(allocator);
+```
+
+WS and WSS can use the same end-to-end Upgrade through a cleartext HTTP
+CONNECT proxy. Proxy headers are sent only on CONNECT; application headers stay
+on the origin Upgrade request:
+
+```zig
+var ws = try netz.websocket.runtime.Client.connectUriViaProxyWithTimeout(
+    allocator,
+    io,
+    "http://proxy.example:8080",
+    "wss://origin.example/chat",
+    .{ .extra_headers = &.{.{
+        .name = "Authorization",
+        .value = "Bearer origin-token",
+    }} },
+    .{ .headers = &.{.{
+        .name = "Proxy-Authorization",
+        .value = "Basic cHJveHktdXNlcjpwYXNz",
+    }} },
+    .{},
+    .fromSeconds(10),
+);
+defer ws.close();
 ```
 
 Servers can inspect and reject the HTTP Upgrade before sending 101:
