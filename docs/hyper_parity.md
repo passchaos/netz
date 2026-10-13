@@ -1427,10 +1427,13 @@ reservation queues and indexes now use the same lazy ownership model; clients
 that advertise `SETTINGS_ENABLE_PUSH=0` and servers that never initiate push do
 not allocate it. Inbound SETTINGS validation follows RFC 9113's role asymmetry:
 clients accept a server's explicit `SETTINGS_ENABLE_PUSH=0` but reject `1`,
-while servers accept either valid client value. RFC 9218 update and
-idle-reservation indexes are also retained
-only after the first priority operation; the ordinary stream lifecycle takes a
-null-state fast path. On 64-bit targets these changes reduce
+while servers accept either valid client value. Initial and established
+SETTINGS paths now emit a connection-level GOAWAY before failing: an oversized
+`SETTINGS_INITIAL_WINDOW_SIZE` uses `FLOW_CONTROL_ERROR`, while invalid boolean,
+frame-size, role, and irreversible extension values use `PROTOCOL_ERROR`. RFC
+9218 update and idle-reservation indexes are also retained only after the first
+priority operation; the ordinary stream lifecycle takes a null-state fast path.
+On 64-bit targets these changes reduce
 `runtime.Connection` from 2,496 to 1,840 bytes: 80 bytes from peer metadata,
 112 bytes after alignment from the cold decoder, 160 bytes from batch staging,
 160 bytes from push state, 112 bytes after alignment from priority state, and

@@ -782,7 +782,12 @@ pub const Server = struct {
             return error.UnexpectedFrame;
         }
         if (!std.mem.eql(u8, advertised_settings, client_settings.frame.payload)) return error.InvalidFrame;
-        const peer_settings = try http2.parseSettings(self.allocator, client_settings.frame.payload);
+        const peer_settings = try parsePeerSettingsTransport(
+            self.allocator,
+            transport,
+            client_settings.frame.payload,
+            handshake_deadline,
+        );
         defer self.allocator.free(peer_settings);
 
         try writeInitialSettingsTransport(
@@ -1129,9 +1134,11 @@ fn acceptConnectionTransportMaybeBefore(
     {
         return error.UnexpectedFrame;
     }
-    const peer_settings = try http2.parseSettings(
+    const peer_settings = try parsePeerSettingsTransport(
         allocator,
+        transport,
         client_settings.frame.payload,
+        deadline,
     );
     defer allocator.free(peer_settings);
 
@@ -2854,12 +2861,10 @@ pub const Client = struct {
                 try connection.applySettingsAck();
             } else {
                 saw_server_settings = true;
-                const settings = try http2.parseSettings(
-                    connection.allocator,
+                try connection.applyPeerSettingsPayload(
                     frame.frame.payload,
+                    deadline,
                 );
-                defer connection.allocator.free(settings);
-                try connection.applySettings(settings);
                 try writeFrameTransport(
                     connection.allocator,
                     connection.transportForIo(),
@@ -13833,9 +13838,7 @@ pub const Connection = struct {
                 if ((frame.header.flags & flag_ack) != 0) {
                     try self.applySettingsAck();
                 } else {
-                    const settings = try http2.parseSettings(self.allocator, frame.payload);
-                    defer self.allocator.free(settings);
-                    try self.applySettings(settings);
+                    try self.applyPeerSettingsPayload(frame.payload, null);
                     try self.writeControlFrameUntil(
                         .settings,
                         flag_ack,
@@ -14999,6 +15002,41 @@ pub const Connection = struct {
             }
         }
         self.peer_initial_settings_applied = true;
+    }
+
+    fn applyPeerSettingsPayload(
+        self: *Connection,
+        payload: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        const settings = http2.parseSettings(
+            self.allocator,
+            payload,
+        ) catch |err| {
+            self.reportPeerSettingsFailure(payload, err, deadline);
+            return err;
+        };
+        defer self.allocator.free(settings);
+        self.applySettings(settings) catch |err| {
+            self.reportPeerSettingsFailure(payload, err, deadline);
+            return err;
+        };
+    }
+
+    fn reportPeerSettingsFailure(
+        self: *Connection,
+        payload: []const u8,
+        err: anyerror,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) void {
+        const code = settingsFailureErrorCode(payload, err) orelse return;
+        self.sendGoAwayUntil(
+            self.lastPeerProcessedStreamId(),
+            code,
+            "settings-value",
+            deadline,
+        ) catch {};
+        self.aggregate_timeout_unusable = true;
     }
 
     fn storeAlternativeService(
@@ -18619,6 +18657,58 @@ fn readHandshakeFrameTransportWithDeadline(
                 transport,
                 value.error_code,
                 "frame-envelope",
+                deadline,
+            ) catch {};
+        }
+        return err;
+    };
+}
+
+fn settingsFailureErrorCode(
+    payload: []const u8,
+    err: anyerror,
+) ?http2.ErrorCode {
+    if (err == error.FlowControlViolation) return .flow_control_error;
+    if (err != error.InvalidSetting) return null;
+    if (payload.len % 6 != 0) return .frame_size_error;
+
+    var offset: usize = 0;
+    while (offset < payload.len) : (offset += 6) {
+        const id: http2.SettingId = @enumFromInt(std.mem.readInt(
+            u16,
+            payload[offset..][0..2],
+            .big,
+        ));
+        const value = std.mem.readInt(
+            u32,
+            payload[offset + 2 ..][0..4],
+            .big,
+        );
+        http2.validateSetting(id, value) catch {
+            return if (id == .initial_window_size)
+                .flow_control_error
+            else
+                .protocol_error;
+        };
+    }
+    // Role constraints and irreversible extension settings are validated only
+    // while applying otherwise well-formed values.
+    return .protocol_error;
+}
+
+fn parsePeerSettingsTransport(
+    allocator: std.mem.Allocator,
+    transport: RuntimeTransport,
+    payload: []const u8,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]http2.Setting {
+    return http2.parseSettings(allocator, payload) catch |err| {
+        if (settingsFailureErrorCode(payload, err)) |code| {
+            writeConnectionErrorGoAwayTransportUntil(
+                allocator,
+                transport,
+                code,
+                "settings-value",
                 deadline,
             ) catch {};
         }
@@ -24763,11 +24853,13 @@ test "HTTP/2 aggregate batch does not reset an already peer-reset member" {
     if (shared.err) |err| return err;
 }
 
-fn expectClientEnvelopeGoAway(
+fn expectClientConnectionErrorGoAway(
     frame_type: http2.FrameType,
     stream_id: u31,
     payload: []const u8,
+    expected_client_error: anyerror,
     expected_code: http2.ErrorCode,
+    expected_debug_data: []const u8,
 ) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -24787,6 +24879,7 @@ fn expectClientEnvelopeGoAway(
         stream_id: u31,
         payload: []const u8,
         expected_code: http2.ErrorCode,
+        expected_debug_data: []const u8,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -24819,7 +24912,7 @@ fn expectClientEnvelopeGoAway(
             );
             try std.testing.expectEqual(@as(u31, 0), goaway.goaway.last_stream_id);
             try std.testing.expectEqualStrings(
-                "frame-envelope",
+                shared.expected_debug_data,
                 goaway.goaway.debug_data,
             );
         }
@@ -24831,6 +24924,7 @@ fn expectClientEnvelopeGoAway(
         .stream_id = stream_id,
         .payload = payload,
         .expected_code = expected_code,
+        .expected_debug_data = expected_debug_data,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
@@ -24840,7 +24934,7 @@ fn expectClientEnvelopeGoAway(
         .max_frame_payload = 4096,
     });
     defer client.close();
-    try std.testing.expectError(error.InvalidFrame, client.request(.{
+    try std.testing.expectError(expected_client_error, client.request(.{
         .path = "/invalid-frame-envelope",
         .authority = "localhost",
     }));
@@ -24852,10 +24946,24 @@ fn expectClientEnvelopeGoAway(
 }
 
 test "HTTP/2 client maps SETTINGS on a stream to PROTOCOL_ERROR GOAWAY" {
-    try expectClientEnvelopeGoAway(.settings, 1, &.{}, .protocol_error);
+    try expectClientConnectionErrorGoAway(
+        .settings,
+        1,
+        &.{},
+        error.InvalidFrame,
+        .protocol_error,
+        "frame-envelope",
+    );
 }
 
-test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
+fn expectServerInitialConnectionErrorGoAway(
+    frame_type: http2.FrameType,
+    stream_id: u31,
+    payload_bytes: []const u8,
+    expected_server_error: anyerror,
+    expected_code: http2.ErrorCode,
+    expected_debug_data: []const u8,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -24870,6 +24978,7 @@ test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
 
     const Shared = struct {
         server: *Server,
+        expected_server_error: anyerror,
         err: ?anyerror = null,
 
         fn run(shared: *@This()) void {
@@ -24878,12 +24987,15 @@ test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
                 connection.close();
                 shared.err = error.TestUnexpectedResult;
             } else |err| {
-                if (err != error.InvalidFrame) shared.err = err;
+                if (err != shared.expected_server_error) shared.err = err;
             }
         }
     };
 
-    var shared = Shared{ .server = &server };
+    var shared = Shared{
+        .server = &server,
+        .expected_server_error = expected_server_error,
+    };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
     var joined = false;
     defer if (!joined) thread.join();
@@ -24891,7 +25003,15 @@ test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
     const stream = try server.address().connect(io, .{ .mode = .stream });
     defer stream.close(io);
     try writeAll(io, stream, http2.connection_preface);
-    try writeFrame(allocator, io, stream, .settings, 0, 1, &.{});
+    try writeFrame(
+        allocator,
+        io,
+        stream,
+        frame_type,
+        0,
+        stream_id,
+        payload_bytes,
+    );
 
     var goaway = try readFrame(allocator, io, stream, .{});
     defer goaway.deinit(allocator);
@@ -24901,22 +25021,90 @@ test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
     );
     const payload = try http2.GoAwayPayload.parse(goaway.frame);
     try std.testing.expectEqual(
-        http2.ErrorCode.protocol_error,
+        expected_code,
         payload.error_code,
     );
-    try std.testing.expectEqualStrings("frame-envelope", payload.debug_data);
+    try std.testing.expectEqualStrings(expected_debug_data, payload.debug_data);
 
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 server maps invalid initial SETTINGS envelope to GOAWAY" {
+    try expectServerInitialConnectionErrorGoAway(
+        .settings,
+        1,
+        &.{},
+        error.InvalidFrame,
+        .protocol_error,
+        "frame-envelope",
+    );
+}
+
+test "HTTP/2 server maps invalid initial window setting to FLOW_CONTROL_ERROR" {
+    var payload: [6]u8 = undefined;
+    std.mem.writeInt(
+        u16,
+        payload[0..2],
+        @intFromEnum(http2.SettingId.initial_window_size),
+        .big,
+    );
+    std.mem.writeInt(u32, payload[2..6], 0x8000_0000, .big);
+    try expectServerInitialConnectionErrorGoAway(
+        .settings,
+        0,
+        &payload,
+        error.InvalidSetting,
+        .flow_control_error,
+        "settings-value",
+    );
+}
+
+test "HTTP/2 client maps invalid peer settings to precise GOAWAY codes" {
+    var initial_window: [6]u8 = undefined;
+    std.mem.writeInt(
+        u16,
+        initial_window[0..2],
+        @intFromEnum(http2.SettingId.initial_window_size),
+        .big,
+    );
+    std.mem.writeInt(u32, initial_window[2..6], 0x8000_0000, .big);
+    try expectClientConnectionErrorGoAway(
+        .settings,
+        0,
+        &initial_window,
+        error.InvalidSetting,
+        .flow_control_error,
+        "settings-value",
+    );
+
+    var enable_push: [6]u8 = undefined;
+    std.mem.writeInt(
+        u16,
+        enable_push[0..2],
+        @intFromEnum(http2.SettingId.enable_push),
+        .big,
+    );
+    std.mem.writeInt(u32, enable_push[2..6], 1, .big);
+    try expectClientConnectionErrorGoAway(
+        .settings,
+        0,
+        &enable_push,
+        error.InvalidSetting,
+        .protocol_error,
+        "settings-value",
+    );
+}
+
 test "HTTP/2 client maps malformed PING length to FRAME_SIZE_ERROR GOAWAY" {
-    try expectClientEnvelopeGoAway(
+    try expectClientConnectionErrorGoAway(
         .ping,
         0,
         &.{ 0, 1, 2, 3, 4, 5, 6 },
+        error.InvalidFrame,
         .frame_size_error,
+        "frame-envelope",
     );
 }
 
