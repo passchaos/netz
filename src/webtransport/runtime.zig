@@ -14,6 +14,7 @@ const session_control = @import("runtime/session_control.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream/batch.zig");
+const stream_association = @import("runtime/stream_association.zig");
 const development_stream = @import("runtime/development_stream.zig");
 
 test "WebTransport sessions keep inbound and outbound close storage compact" {
@@ -113,6 +114,10 @@ pub const OriginPolicy = connect_headers.OriginPolicy;
 pub const Limits = struct {
     http3: http3.runtime.Limits = .{},
     max_session_streams: usize = 128,
+    /// Concurrent Sessions admitted on one HTTP/3 connection by
+    /// `EndpointServer`. Standalone owning Session adapters remain limited to
+    /// one and reject larger values during construction.
+    max_sessions_per_connection: usize = 1,
     /// Browser-origin admission. By default, absent Origin is accepted for
     /// native clients and an explicit Origin must match the CONNECT target.
     origin_policy: OriginPolicy = .same_origin_or_absent,
@@ -1782,13 +1787,60 @@ pub const HandshakeServer = struct {
         limits: Limits,
         options: http3.runtime.HandshakeServerOptions,
     ) Error!HandshakeServer {
+        if (limits.max_sessions_per_connection != 1) {
+            return error.InvalidSessionState;
+        }
+        return bindWithSessionCapacity(
+            allocator,
+            io,
+            bind_address,
+            limits,
+            options,
+            1,
+        );
+    }
+
+    /// Bind an HTTP/3 server for `EndpointServer`, which retains each
+    /// connection and can independently route the configured Session count.
+    pub fn bindForEndpoint(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        limits: Limits,
+        options: http3.runtime.HandshakeServerOptions,
+    ) Error!HandshakeServer {
+        const capacity = std.math.cast(
+            u64,
+            limits.max_sessions_per_connection,
+        ) orelse return error.IntegerOverflow;
+        if (capacity == 0 or capacity > quic.varint.max_value) {
+            return error.InvalidSessionState;
+        }
+        return bindWithSessionCapacity(
+            allocator,
+            io,
+            bind_address,
+            limits,
+            options,
+            capacity,
+        );
+    }
+
+    fn bindWithSessionCapacity(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        bind_address: net.IpAddress,
+        limits: Limits,
+        options: http3.runtime.HandshakeServerOptions,
+        capacity: u64,
+    ) Error!HandshakeServer {
         return .{
             .h3 = try .bind(
                 allocator,
                 io,
                 bind_address,
                 limits.http3,
-                webTransportHandshakeServerOptions(options),
+                try webTransportHandshakeServerOptions(options, capacity),
             ),
             .limits = limits,
         };
@@ -2774,6 +2826,13 @@ pub const EndpointSessionEvent = union(enum) {
     }
 };
 
+/// Stable identity of one WebTransport Session within a dispatcher-owned
+/// HTTP/3 connection. Session IDs are unique only inside their connection.
+pub const EndpointSessionKey = struct {
+    handle: quic.endpoint_dispatcher.ConnectionHandle,
+    session_id: webtransport.SessionId,
+};
+
 pub const EndpointServerEvent = union(enum) {
     connected: quic.endpoint_dispatcher.ConnectionHandle,
     closed: struct {
@@ -2787,6 +2846,7 @@ pub const EndpointServerEvent = union(enum) {
     session_request: quic.endpoint_dispatcher.ConnectionHandle,
     session_event: struct {
         handle: quic.endpoint_dispatcher.ConnectionHandle,
+        session_id: webtransport.SessionId,
         event: EndpointSessionEvent,
     },
     unrouted: quic.endpoint_dispatcher.Event,
@@ -2826,14 +2886,15 @@ pub const ServeOptions = struct {
     stream_buffer_size: usize = 16 * 1024,
 };
 
-/// Multi-connection WebTransport server with one UDP receive owner.
+/// Multi-connection, multi-Session WebTransport server with one UDP receive
+/// owner.
 ///
 /// HTTP/3 retains stable heap-backed sessions and owns every dispatcher
 /// registration. This wrapper stores only protocol state keyed by the same
 /// handle, so admission and acceptance never move a registered QUIC
 /// connection. Applications inspect a `session_request`, then call `accept` or
-/// `reject`; accepted sessions subsequently yield stream, DATAGRAM and Capsule
-/// events from `receive`.
+/// `reject`; accepted sessions are keyed by connection plus CONNECT stream and
+/// subsequently yield isolated stream, DATAGRAM and Capsule events.
 pub const EndpointServer = struct {
     allocator: std.mem.Allocator,
     limits: Limits,
@@ -2843,17 +2904,24 @@ pub const EndpointServer = struct {
         *EndpointPendingSession,
     ) = .empty,
     sessions: std.AutoHashMapUnmanaged(
-        quic.endpoint_dispatcher.ConnectionHandle,
+        EndpointSessionKey,
         *EndpointAcceptedSession,
     ) = .empty,
-    /// Handle that most recently produced an application event. The next
+    /// Session that most recently produced an application event. The next
     /// poll starts after it in the hash table's current iteration order, so a
     /// continuously ready stream or DATAGRAM cannot starve another accepted
     /// session. Handles remain stable across rehashes; if this one is removed,
     /// the poller simply falls back to a complete scan.
-    last_session_event_handle: ?quic.endpoint_dispatcher.ConnectionHandle =
-        null,
-    rejected: std.AutoHashMapUnmanaged(
+    last_session_event_key: ?EndpointSessionKey = null,
+    /// Additional CONNECT that exceeded the configured active capacity but
+    /// whose H3_REQUEST_REJECTED cancellation was temporarily paced.
+    request_rejection_pending: std.AutoHashMapUnmanaged(
+        quic.endpoint_dispatcher.ConnectionHandle,
+        u62,
+    ) = .empty,
+    /// Connections whose most recent Session was rejected and which currently
+    /// have no active Session key. They remain eligible for a later CONNECT.
+    idle_connections: std.AutoHashMapUnmanaged(
         quic.endpoint_dispatcher.ConnectionHandle,
         void,
     ) = .empty,
@@ -2886,7 +2954,8 @@ pub const EndpointServer = struct {
             self.allocator.destroy(value.*);
         }
         self.sessions.deinit(self.allocator);
-        self.rejected.deinit(self.allocator);
+        self.idle_connections.deinit(self.allocator);
+        self.request_rejection_pending.deinit(self.allocator);
         self.h3.deinit();
         self.* = undefined;
     }
@@ -2904,7 +2973,7 @@ pub const EndpointServer = struct {
     }
 
     pub fn rejectedSessionCount(self: *const EndpointServer) usize {
-        return self.rejected.count();
+        return self.idle_connections.count();
     }
 
     pub fn pendingSession(
@@ -2918,7 +2987,31 @@ pub const EndpointServer = struct {
         self: *EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) ?*EndpointAcceptedSession {
-        return self.sessions.get(handle);
+        const key = self.firstSessionKey(handle) orelse return null;
+        return self.sessions.get(key);
+    }
+
+    pub fn sessionById(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        session_id: webtransport.SessionId,
+    ) ?*EndpointAcceptedSession {
+        return self.sessions.get(.{
+            .handle = handle,
+            .session_id = session_id,
+        });
+    }
+
+    pub fn sessionCountForConnection(
+        self: *const EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) usize {
+        var count: usize = 0;
+        var iterator = self.sessions.keyIterator();
+        while (iterator.next()) |key| {
+            count += @intFromBool(key.handle == handle);
+        }
+        return count;
     }
 
     pub fn accept(
@@ -2939,6 +3032,11 @@ pub const EndpointServer = struct {
             source.request.request,
             source.limits.origin_policy,
         );
+        if (self.sessionCountForConnection(handle) >=
+            self.limits.max_sessions_per_connection)
+        {
+            return error.InvalidSessionState;
+        }
         // Reserve every allocation before emitting status 200. Once the peer
         // observes acceptance this state transition must be infallible.
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);
@@ -2979,7 +3077,11 @@ pub const EndpointServer = struct {
         const removed_entry = self.pending.fetchRemove(handle) orelse
             unreachable;
         const removed = removed_entry.value;
-        const slot = self.sessions.getOrPutAssumeCapacity(handle);
+        const key = EndpointSessionKey{
+            .handle = handle,
+            .session_id = removed.session_id,
+        };
+        const slot = self.sessions.getOrPutAssumeCapacity(key);
         std.debug.assert(!slot.found_existing);
         accepted.* = .{
             .handle = handle,
@@ -2991,6 +3093,7 @@ pub const EndpointServer = struct {
             .control = control,
         };
         slot.value_ptr.* = accepted;
+        _ = self.idle_connections.remove(handle);
         self.allocator.destroy(removed);
         self.h3.dispatcher.refreshConnectionTimer(handle) catch |err| {
             std.debug.panic(
@@ -3011,7 +3114,10 @@ pub const EndpointServer = struct {
         try validateAdditionalConnectHeaders(response_headers, .response);
         const source = self.pending.get(handle) orelse
             return error.InvalidSessionState;
-        try self.rejected.ensureUnusedCapacity(self.allocator, 1);
+        const becomes_idle = self.sessionCountForConnection(handle) == 0;
+        if (becomes_idle) {
+            try self.idle_connections.ensureUnusedCapacity(self.allocator, 1);
+        }
         const response_result = source.h3.trySendResponseLiteral(source.session_id.value, .{
             .status = status,
             .headers = response_headers,
@@ -3025,7 +3131,9 @@ pub const EndpointServer = struct {
         const removed = self.pending.fetchRemove(handle).?.value;
         removed.request.deinit(self.allocator);
         self.allocator.destroy(removed);
-        self.rejected.putAssumeCapacityNoClobber(handle, {});
+        if (becomes_idle) {
+            self.idle_connections.putAssumeCapacity(handle, {});
+        }
         self.h3.dispatcher.refreshConnectionTimer(handle) catch |err| {
             std.debug.panic(
                 "WebTransport endpoint lost registered timer after rejection: {s}",
@@ -3038,20 +3146,83 @@ pub const EndpointServer = struct {
         self: *EndpointServer,
         handle: quic.endpoint_dispatcher.ConnectionHandle,
     ) bool {
-        if (self.sessions.fetchRemove(handle)) |removed_value| {
-            const removed = removed_value.value;
+        while (self.firstSessionKey(handle)) |key| {
+            const removed = self.sessions.fetchRemove(key).?.value;
             removed.deinit(self.allocator);
             self.allocator.destroy(removed);
-        } else if (self.pending.fetchRemove(handle)) |removed_value| {
+        }
+        if (self.pending.fetchRemove(handle)) |removed_value| {
             const removed = removed_value.value;
             removed.request.deinit(self.allocator);
             self.allocator.destroy(removed);
         }
-        _ = self.rejected.remove(handle);
-        if (self.last_session_event_handle == handle) {
-            self.last_session_event_handle = null;
+        _ = self.request_rejection_pending.remove(handle);
+        _ = self.idle_connections.remove(handle);
+        if (self.last_session_event_key) |key| {
+            if (key.handle == handle) self.last_session_event_key = null;
         }
         return self.h3.removeConnection(handle);
+    }
+
+    /// Remove one accepted Session while retaining its HTTP/3 connection and
+    /// sibling Sessions. This releases its DATAGRAM association and stream
+    /// registry, allowing a later CONNECT to reuse the advertised capacity.
+    pub fn removeSession(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        session_id: webtransport.SessionId,
+    ) EndpointServerError!bool {
+        const key = EndpointSessionKey{
+            .handle = handle,
+            .session_id = session_id,
+        };
+        if (!self.sessions.contains(key)) return false;
+        const becomes_idle = self.sessionCountForConnection(handle) == 1;
+        if (becomes_idle) {
+            try self.idle_connections.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const removed = self.sessions.fetchRemove(key).?.value;
+        removed.deinit(self.allocator);
+        self.allocator.destroy(removed);
+        if (becomes_idle) self.idle_connections.putAssumeCapacity(handle, {});
+        if (self.last_session_event_key) |last| {
+            if (std.meta.eql(last, key)) self.last_session_event_key = null;
+        }
+        return true;
+    }
+
+    fn firstSessionKey(
+        self: *const EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) ?EndpointSessionKey {
+        var iterator = self.sessions.keyIterator();
+        while (iterator.next()) |key| {
+            if (key.handle == handle) return key.*;
+        }
+        return null;
+    }
+
+    fn sessionLookup(
+        self: *const EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+    ) stream_association.SessionLookup {
+        return .{
+            .context = self,
+            .scope = @intCast(handle),
+            .containsFn = endpointContainsSession,
+        };
+    }
+
+    fn endpointContainsSession(
+        context: *const anyopaque,
+        scope: u64,
+        session_id: u62,
+    ) bool {
+        const self: *const EndpointServer = @ptrCast(@alignCast(context));
+        return self.sessions.contains(.{
+            .handle = @intCast(scope),
+            .session_id = .init(session_id),
+        });
     }
 
     /// Run the endpoint-owned receive loop until `shutdown` is set. The
@@ -3115,7 +3286,10 @@ pub const EndpointServer = struct {
                     );
                 },
                 .session_event => |*value| {
-                    const active = self.session(value.handle) orelse
+                    const active = self.sessionById(
+                        value.handle,
+                        value.session_id,
+                    ) orelse
                         return error.InvalidSessionState;
                     try handler(context, self, .{ .session_event = .{
                         .session = active,
@@ -3173,6 +3347,7 @@ pub const EndpointServer = struct {
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointServerEvent {
         if (stream_buffer.len == 0) return error.BufferTooShort;
+        if (try self.pollBufferedSessionRequest()) |event| return event;
         if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
 
         const event_value = (try self.h3.receiveTransportOnce(
@@ -3196,6 +3371,7 @@ pub const EndpointServer = struct {
             self.h3.server.quic_server.endpoint.io,
             deadline,
         );
+        if (try self.pollBufferedSessionRequest()) |event| return event;
         if (try self.pollAcceptedSessions(stream_buffer)) |event| return event;
         while (true) {
             const transport_event = try self.h3.receiveTransportWithDeadline(
@@ -3206,6 +3382,7 @@ pub const EndpointServer = struct {
                 transport_event,
                 stream_buffer,
             )) |event| return event;
+            if (try self.pollBufferedSessionRequest()) |event| return event;
             if (try self.pollAcceptedSessions(stream_buffer)) |event| {
                 return event;
             }
@@ -3223,18 +3400,22 @@ pub const EndpointServer = struct {
             .connected => |handle| return .{ .connected = handle },
             .closed => |closed| {
                 const handle = closed.handle;
-                if (self.sessions.fetchRemove(handle)) |removed_value| {
-                    const removed = removed_value.value;
+                while (self.firstSessionKey(handle)) |key| {
+                    const removed = self.sessions.fetchRemove(key).?.value;
                     removed.deinit(self.allocator);
                     self.allocator.destroy(removed);
-                } else if (self.pending.fetchRemove(handle)) |removed_value| {
+                }
+                if (self.pending.fetchRemove(handle)) |removed_value| {
                     const removed = removed_value.value;
                     removed.request.deinit(self.allocator);
                     self.allocator.destroy(removed);
                 }
-                _ = self.rejected.remove(handle);
-                if (self.last_session_event_handle == handle) {
-                    self.last_session_event_handle = null;
+                _ = self.request_rejection_pending.remove(handle);
+                _ = self.idle_connections.remove(handle);
+                if (self.last_session_event_key) |key| {
+                    if (key.handle == handle) {
+                        self.last_session_event_key = null;
+                    }
                 }
                 return .{ .closed = .{
                     .handle = handle,
@@ -3280,36 +3461,88 @@ pub const EndpointServer = struct {
         packet: *const quic.one_rtt.ReceivedPacket,
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointServerEvent {
-        if (self.sessions.get(handle)) |session_value| {
-            try session_value.h3.processDetachedRequestPacket(
-                session_value.session_id.value,
-                packet,
-            );
-            _ = try rejectAdditionalEndpointRequestsOnce(session_value);
-            return self.pollAcceptedSessions(stream_buffer);
-        }
-        if (self.pending.get(handle)) |pending_value| {
-            try pending_value.h3.processRequestPacket(packet);
-            return null;
-        }
-        if (self.rejected.contains(handle)) {
-            const h3 = self.h3.session(handle) orelse
-                return error.InvalidSessionState;
-            try h3.processRequestPacket(packet);
-            while (try h3.pollRequestEventOnce()) |ignored_value| {
-                var ignored = ignored_value;
-                ignored.deinit(self.allocator);
-            }
-            return null;
-        }
         const h3 = self.h3.session(handle) orelse
             return error.InvalidSessionState;
         try h3.processRequestPacket(packet);
+        if (try self.pollNewSessionRequest(handle, h3)) |event| return event;
+        return self.pollAcceptedSessions(stream_buffer);
+    }
+
+    fn pollBufferedSessionRequest(
+        self: *EndpointServer,
+    ) EndpointServerError!?EndpointServerEvent {
+        var session_keys = self.sessions.keyIterator();
+        while (session_keys.next()) |key| {
+            const h3 = self.h3.session(key.handle) orelse
+                return error.InvalidSessionState;
+            if (try self.pollNewSessionRequest(key.handle, h3)) |event| {
+                return event;
+            }
+        }
+        var idle = self.idle_connections.keyIterator();
+        while (idle.next()) |handle| {
+            const h3 = self.h3.session(handle.*) orelse
+                return error.InvalidSessionState;
+            if (try self.pollNewSessionRequest(handle.*, h3)) |event| {
+                return event;
+            }
+        }
+        return null;
+    }
+
+    fn pollNewSessionRequest(
+        self: *EndpointServer,
+        handle: quic.endpoint_dispatcher.ConnectionHandle,
+        h3: *http3.runtime.HandshakeServerSession,
+    ) EndpointServerError!?EndpointServerEvent {
+        if (self.pending.contains(handle)) return null;
+        if (self.request_rejection_pending.get(handle)) |stream_id| {
+            h3.tryCancelRequest(
+                stream_id,
+                http3.ApplicationErrorCode.request_rejected,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => {
+                    _ = self.request_rejection_pending.remove(handle);
+                    return err;
+                },
+            };
+            _ = self.request_rejection_pending.remove(handle);
+        }
         const request = (try pollEndpointConnectHead(h3)) orelse
             return null;
-        errdefer {
-            var owned = request.request;
-            owned.deinit(self.allocator);
+        var owned_request = request.request;
+        errdefer owned_request.deinit(self.allocator);
+        if (self.sessionCountForConnection(handle) >=
+            self.limits.max_sessions_per_connection)
+        {
+            try self.request_rejection_pending.ensureUnusedCapacity(
+                self.allocator,
+                1,
+            );
+            self.request_rejection_pending.putAssumeCapacity(
+                handle,
+                request.session_id.value,
+            );
+            h3.tryCancelRequest(
+                request.session_id.value,
+                http3.ApplicationErrorCode.request_rejected,
+            ) catch |err| switch (err) {
+                error.PacingLimited,
+                error.CongestionLimited,
+                error.FlowControlBlocked,
+                => return null,
+                else => {
+                    _ = self.request_rejection_pending.remove(handle);
+                    return err;
+                },
+            };
+            _ = self.request_rejection_pending.remove(handle);
+            owned_request.deinit(self.allocator);
+            return null;
         }
         const pending = try self.allocator.create(EndpointPendingSession);
         errdefer self.allocator.destroy(pending);
@@ -3318,11 +3551,13 @@ pub const EndpointServer = struct {
         pending.* = .{
             .handle = handle,
             .h3 = h3,
-            .request = request.request,
+            .request = owned_request,
             .session_id = request.session_id,
             .limits = self.limits,
         };
+        owned_request = undefined;
         slot.value_ptr.* = pending;
+        _ = self.idle_connections.remove(handle);
         return .{ .session_request = handle };
     }
 
@@ -3332,7 +3567,7 @@ pub const EndpointServer = struct {
     ) EndpointServerError!?EndpointServerEvent {
         return self.pollAcceptedSessionsWith(
             stream_buffer,
-            {},
+            self,
             pollEndpointSessionEntry,
         );
     }
@@ -3344,26 +3579,27 @@ pub const EndpointServer = struct {
         comptime poll: anytype,
     ) EndpointServerError!?EndpointServerEvent {
         return round_robin.poll(
-            quic.endpoint_dispatcher.ConnectionHandle,
+            EndpointSessionKey,
             @TypeOf(self.sessions),
             EndpointServerEvent,
             &self.sessions,
-            &self.last_session_event_handle,
+            &self.last_session_event_key,
             .{ .stream_buffer = stream_buffer, .context = context },
             struct {
                 fn run(
                     poll_context: anytype,
-                    handle: quic.endpoint_dispatcher.ConnectionHandle,
+                    key: EndpointSessionKey,
                     accepted_ptr: **EndpointAcceptedSession,
                 ) EndpointServerError!?EndpointServerEvent {
                     const event = (try poll(
                         poll_context.context,
-                        handle,
+                        key,
                         accepted_ptr.*,
                         poll_context.stream_buffer,
                     )) orelse return null;
                     return .{ .session_event = .{
-                        .handle = handle,
+                        .handle = key.handle,
+                        .session_id = key.session_id,
                         .event = event,
                     } };
                 }
@@ -3372,12 +3608,16 @@ pub const EndpointServer = struct {
     }
 
     fn pollEndpointSessionEntry(
-        _: void,
-        _: quic.endpoint_dispatcher.ConnectionHandle,
+        server: *EndpointServer,
+        _: EndpointSessionKey,
         accepted: *EndpointAcceptedSession,
         stream_buffer: []u8,
     ) EndpointServerError!?EndpointSessionEvent {
-        var event = pollEndpointSession(accepted, stream_buffer) catch |err| {
+        var event = pollEndpointSession(
+            accepted,
+            stream_buffer,
+            server.sessionLookup(accepted.handle),
+        ) catch |err| {
             // A failing protocol poll can still queue transport control or
             // close frames. Preserve its error while ensuring the shared
             // endpoint observes the resulting recovery deadline.
@@ -3401,14 +3641,14 @@ pub const EndpointServer = struct {
 
             fn poll(
                 self: *const ReadyProbe,
-                handle: quic.endpoint_dispatcher.ConnectionHandle,
+                key: EndpointSessionKey,
                 _: *EndpointAcceptedSession,
                 _: []u8,
             ) Error!?EndpointSessionEvent {
                 if (std.mem.indexOfScalar(
                     quic.endpoint_dispatcher.ConnectionHandle,
                     self.ready,
-                    handle,
+                    key.handle,
                 ) == null) return null;
                 return .{ .session = .draining };
             }
@@ -3438,12 +3678,22 @@ pub const EndpointServer = struct {
             accepted: *EndpointAcceptedSession,
             stream_buffer: []u8,
         ) EndpointServerError!?EndpointSessionEvent {
-            return pollEndpointSessionEntry(
-                {},
-                accepted.handle,
+            _ = try rejectAdditionalEndpointRequestsOnce(accepted);
+            var event = pollEndpointSession(
                 accepted,
                 stream_buffer,
-            );
+                null,
+            ) catch |err| {
+                try accepted.refreshTimer();
+                return err;
+            };
+            errdefer if (event) |*owned| {
+                owned.deinit(
+                    accepted.h3.established.connection.endpoint.allocator,
+                );
+            };
+            try accepted.refreshTimer();
+            return event;
         }
 
         pub fn processAcceptedPacket(
@@ -3462,8 +3712,8 @@ pub const EndpointServer = struct {
     fn pollEndpointSession(
         target: *EndpointAcceptedSession,
         stream_buffer: []u8,
+        sessions: ?stream_association.SessionLookup,
     ) Error!?EndpointSessionEvent {
-        _ = try rejectAdditionalEndpointRequestsOnce(target);
         // Accepted sessions remain in the endpoint map until the application
         // removes their connection. Once the peer terminal event has been
         // delivered, do not poll stream/DATAGRAM APIs whose association is no
@@ -3500,12 +3750,22 @@ pub const EndpointServer = struct {
             };
         if (close_progress == .submitted) return null;
         if (target.control.terminal_reported) return null;
-        if (try incremental_stream.pollOnce(
-            &target.h3.established.connection,
-            &target.streams,
-            target.session_id,
-            stream_buffer,
-        )) |event| {
+        const stream_event = if (sessions) |known|
+            try incremental_stream.pollOnceShared(
+                &target.h3.established.connection,
+                &target.streams,
+                target.session_id,
+                stream_buffer,
+                known,
+            )
+        else
+            try incremental_stream.pollOnce(
+                &target.h3.established.connection,
+                &target.streams,
+                target.session_id,
+                stream_buffer,
+            );
+        if (stream_event) |event| {
             return .{ .stream = event };
         }
         if (try target.h3.pollConnectDatagram(
@@ -13657,9 +13917,15 @@ fn webTransportProtectedConfig(config: http3.runtime.ProtectedConfig) http3.runt
     return out;
 }
 
-fn webTransportHandshakeServerOptions(options: http3.runtime.HandshakeServerOptions) http3.runtime.HandshakeServerOptions {
+fn webTransportHandshakeServerOptions(
+    options: http3.runtime.HandshakeServerOptions,
+    max_sessions: u64,
+) Error!http3.runtime.HandshakeServerOptions {
     var out = options;
-    out.session.local_settings = webtransport.defaultSettings(out.session.local_settings);
+    out.session.local_settings = try webtransport.settingsWithSessionCapacity(
+        out.session.local_settings,
+        max_sessions,
+    );
     return out;
 }
 

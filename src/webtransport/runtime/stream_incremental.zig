@@ -104,6 +104,7 @@ pub fn readId(
             out,
             false,
             &transport_progressed,
+            null,
         )) |event| return event;
         try serviceReceive(connection);
     }
@@ -136,6 +137,7 @@ pub fn readIdWithDeadline(
             out,
             false,
             &transport_progressed,
+            null,
         )) |event| return event;
         try serviceReceiveWithDeadline(connection, deadline);
     }
@@ -158,6 +160,117 @@ fn serviceReceiveWithDeadline(
     _ = try connection.servicePacketBatchServicingTimersDeadline(
         deadline,
     );
+}
+
+test "WebTransport shared endpoint leaves sibling Session stream for owner" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var receiver = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer receiver.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0x8c} ** quic.protection.secret_len,
+    );
+    var connection = try quic.one_rtt.Connection.init(&receiver, .{
+        .peer = receiver.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "wt-shared-server",
+        .peer_connection_id = "wt-shared-client",
+        .local_endpoint = .server,
+        .initial_receive_max_streams_bidi = 3,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    const first_id: webtransport.SessionId = .init(0);
+    const second_id: webtransport.SessionId = .init(4);
+    var first = try webtransport.StreamRegistry.init(
+        allocator,
+        first_id,
+        .server,
+        .{ .max_peer_bidi = 1 },
+    );
+    defer first.deinit();
+    var second = try webtransport.StreamRegistry.init(
+        allocator,
+        second_id,
+        .server,
+        .{ .max_peer_bidi = 1 },
+    );
+    defer second.deinit();
+
+    var prefix_storage: [16]u8 = undefined;
+    const prefix = try webtransport.BidirectionalStreamHeader.writeInto(
+        &prefix_storage,
+        second_id,
+    );
+    var bytes_storage: [32]u8 = undefined;
+    const bytes = bytes_storage[0 .. prefix.len + "second".len];
+    @memcpy(bytes[0..prefix.len], prefix);
+    @memcpy(bytes[prefix.len..], "second");
+    try quic.one_rtt.testing.applyReceivedFrames(
+        &connection,
+        0,
+        &.{.{ .stream = .{
+            .stream_id = 8,
+            .data = bytes,
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+
+    const Known = struct {
+        ids: []const u62,
+
+        fn contains(
+            context: *const anyopaque,
+            _: u64,
+            session_id: u62,
+        ) bool {
+            const self: *const @This() = @ptrCast(@alignCast(context));
+            return std.mem.indexOfScalar(u62, self.ids, session_id) != null;
+        }
+    };
+    const known_ids = [_]u62{ first_id.value, second_id.value };
+    const known = Known{ .ids = &known_ids };
+    const lookup = association.SessionLookup{
+        .context = &known,
+        .scope = 0,
+        .containsFn = Known.contains,
+    };
+    var out: [16]u8 = undefined;
+    try std.testing.expect((try pollOnceShared(
+        &connection,
+        &first,
+        first_id,
+        &out,
+        lookup,
+    )) == null);
+    try std.testing.expect(connection.sendStreamStats(8) == null or
+        connection.sendStreamStats(8).?.reset == null);
+    try std.testing.expect(
+        connection.recvStreamStats(8).?.stop_sending_sent == null,
+    );
+
+    const event = (try pollOnceShared(
+        &connection,
+        &second,
+        second_id,
+        &out,
+        lookup,
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(event == .data);
+    try std.testing.expectEqual(@as(u62, 8), event.data.stream_id);
+    try std.testing.expectEqualStrings("second", out[0..event.data.bytes]);
+    try std.testing.expect(event.data.fin);
 }
 
 test "WebTransport incremental poll rejects wrong-session bidi before sibling" {
@@ -584,7 +697,7 @@ pub fn poll(
     session_id: webtransport.SessionId,
     out: []u8,
 ) Error!?Read {
-    return pollInternal(connection, registry, session_id, out, false);
+    return pollInternal(connection, registry, session_id, out, false, null);
 }
 
 /// Poll one buffered stream event without waiting for receive-credit pacing.
@@ -596,7 +709,26 @@ pub fn pollOnce(
     session_id: webtransport.SessionId,
     out: []u8,
 ) Error!?Read {
-    return pollInternal(connection, registry, session_id, out, true);
+    return pollInternal(connection, registry, session_id, out, true, null);
+}
+
+/// Shared-endpoint counterpart that preserves streams associated with another
+/// accepted Session instead of rejecting them as unknown to this registry.
+pub fn pollOnceShared(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    out: []u8,
+    sessions: association.SessionLookup,
+) Error!?Read {
+    return pollInternal(
+        connection,
+        registry,
+        session_id,
+        out,
+        true,
+        sessions,
+    );
 }
 
 fn pollInternal(
@@ -605,6 +737,7 @@ fn pollInternal(
     session_id: webtransport.SessionId,
     out: []u8,
     single_attempt: bool,
+    sessions: ?association.SessionLookup,
 ) Error!?Read {
     const drained = try association.drainAbandonedReceives(
         connection,
@@ -630,6 +763,7 @@ fn pollInternal(
                 out,
                 single_attempt,
                 &transport_progressed,
+                sessions,
             )) |event| return event;
             if (single_attempt and transport_progressed) return null;
         }
@@ -655,6 +789,7 @@ fn pollInternal(
                 out,
                 single_attempt,
                 &transport_progressed,
+                sessions,
             )) |event| return event;
             if (single_attempt and transport_progressed) return null;
         }
@@ -671,6 +806,7 @@ fn pollStreamId(
     out: []u8,
     single_attempt: bool,
     transport_progressed: *bool,
+    sessions: ?association.SessionLookup,
 ) Error!?Read {
     // Association-prefix parsing, rather than numeric guesses, distinguishes
     // HTTP/3 critical/push streams from WebTransport.
@@ -683,6 +819,7 @@ fn pollStreamId(
         out,
         single_attempt,
         transport_progressed,
+        sessions,
     ) orelse return null;
     registry.incremental_poll_cursor = switch (event) {
         inline else => |value| value.stream_id,
@@ -698,6 +835,7 @@ fn pollStream(
     out: []u8,
     single_attempt: bool,
     transport_progressed: *bool,
+    sessions: ?association.SessionLookup,
 ) Error!?Read {
     // A session can mix whole-stream and incremental consumption as long as a
     // single receive direction never changes mode. Skip streams claimed by
@@ -707,13 +845,23 @@ fn pollStream(
         if (registered.receive_mode == .whole) return null;
     }
     const identification = (if (single_attempt)
-        association.identifyClassifiedOnce(
-            connection,
-            registry,
-            session_id,
-            stream_id,
-            .incremental,
-        )
+        if (sessions) |known|
+            association.identifyClassifiedOnceShared(
+                connection,
+                registry,
+                session_id,
+                stream_id,
+                .incremental,
+                known,
+            )
+        else
+            association.identifyClassifiedOnce(
+                connection,
+                registry,
+                session_id,
+                stream_id,
+                .incremental,
+            )
     else
         association.identifyClassified(
             connection,

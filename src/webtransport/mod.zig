@@ -9,6 +9,7 @@ pub const runtime = @import("runtime.zig");
 pub const Error = wire.Error || error{
     BufferTooShort,
     InvalidSessionId,
+    InvalidSessionState,
     InvalidCapsule,
     InvalidStreamType,
     InvalidStreamState,
@@ -346,14 +347,24 @@ pub fn datagramsEnabled(settings: http3.Settings) bool {
 }
 
 pub fn defaultSettings(settings: http3.Settings) http3.Settings {
+    return settingsWithSessionCapacity(settings, 1) catch unreachable;
+}
+
+/// Apply WebTransport capability settings while advertising the exact number
+/// of concurrent Sessions this endpoint can independently route on one HTTP/3
+/// connection. `max_sessions` must be a non-zero QUIC varint.
+pub fn settingsWithSessionCapacity(
+    settings: http3.Settings,
+    max_sessions: u64,
+) Error!http3.Settings {
+    if (max_sessions == 0 or max_sessions > quic.varint.max_value) {
+        return error.InvalidSessionState;
+    }
     var out = settings;
     out.enable_connect_protocol = true;
     out.h3_datagram = true;
     out.enable_webtransport = true;
-    // The stateful WebTransport adapters currently own one session per HTTP/3
-    // connection. Advertise exactly that capacity so a peer never relies on a
-    // larger setting that the runtime cannot route independently.
-    out.webtransport_max_sessions = 1;
+    out.webtransport_max_sessions = max_sessions;
     if (out.webtransport_initial_max_data == 0) out.webtransport_initial_max_data = default_initial_max_data;
     if (out.webtransport_initial_max_streams_uni == 0) out.webtransport_initial_max_streams_uni = default_initial_max_streams_uni;
     if (out.webtransport_initial_max_streams_bidi == 0) out.webtransport_initial_max_streams_bidi = default_initial_max_streams_bidi;
@@ -754,6 +765,22 @@ test "WebTransport settings negotiation and datagram budget" {
     try std.testing.expectEqual(
         @as(u64, 1),
         clamped.webtransport_max_sessions,
+    );
+    const multiplexed = try settingsWithSessionCapacity(.{}, 8);
+    try std.testing.expectEqual(
+        @as(u64, 8),
+        multiplexed.webtransport_max_sessions,
+    );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        settingsWithSessionCapacity(.{}, 0),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        settingsWithSessionCapacity(
+            .{},
+            @as(u64, quic.varint.max_value) + 1,
+        ),
     );
     const peer = http3.Settings{
         .enable_connect_protocol = true,

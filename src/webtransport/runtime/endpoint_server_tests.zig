@@ -25,6 +25,12 @@ test "WebTransport endpoint server exposes stable session API" {
     ));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "accept"));
     try std.testing.expect(@hasDecl(runtime.EndpointServer, "reject"));
+    try std.testing.expect(@hasDecl(runtime.EndpointServer, "sessionById"));
+    try std.testing.expect(@hasDecl(runtime.EndpointServer, "removeSession"));
+    try std.testing.expect(@hasDecl(
+        runtime.HandshakeServer,
+        "bindForEndpoint",
+    ));
     try std.testing.expect(@hasDecl(
         runtime.EndpointAcceptedSession,
         "remoteAddressValidated",
@@ -81,6 +87,51 @@ test "WebTransport endpoint server exposes stable session API" {
         http3.runtime.EndpointServer,
         "promotedSession",
     ));
+}
+
+test "WebTransport endpoint session capacity is explicit and bounded" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const address = net.IpAddress{ .ip4 = .loopback(0) };
+    const options = http3.runtime.HandshakeServerOptions{
+        .handshake = .{ .local_connection_id = "wt-capacity-config" },
+    };
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        runtime.HandshakeServer.bind(
+            allocator,
+            io,
+            address,
+            .{ .max_sessions_per_connection = 2 },
+            options,
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidSessionState,
+        runtime.HandshakeServer.bindForEndpoint(
+            allocator,
+            io,
+            address,
+            .{ .max_sessions_per_connection = 0 },
+            options,
+        ),
+    );
+    if (@bitSizeOf(usize) > 62) {
+        try std.testing.expectError(
+            error.InvalidSessionState,
+            runtime.HandshakeServer.bindForEndpoint(
+                allocator,
+                io,
+                address,
+                .{
+                    .max_sessions_per_connection = @as(usize, @intCast(quic.varint.max_value)) + 1,
+                },
+                options,
+            ),
+        );
+    }
 }
 
 test "WebTransport endpoint accepted session forwards authenticated metadata" {
@@ -953,10 +1004,15 @@ test "WebTransport endpoint server rotates ready sessions fairly" {
     var accepted_storage: [3]runtime.EndpointAcceptedSession = undefined;
     defer endpoint.sessions.clearRetainingCapacity();
     const handles = [_]quic.endpoint_dispatcher.ConnectionHandle{ 11, 22, 33 };
+    var keys: [handles.len]runtime.EndpointSessionKey = undefined;
     for (handles, 0..) |handle, index| {
+        keys[index] = .{
+            .handle = handle,
+            .session_id = .init(@intCast(index * 4)),
+        };
         try endpoint.sessions.put(
             allocator,
-            handle,
+            keys[index],
             &accepted_storage[index],
         );
     }
@@ -1005,8 +1061,12 @@ test "WebTransport endpoint server rotates ready sessions fairly" {
     // than suppressing ready sessions until another insertion reshuffles the
     // hash table.
     const stale = order[2];
-    try std.testing.expect(endpoint.sessions.remove(stale));
-    endpoint.last_session_event_handle = stale;
+    var stale_key: runtime.EndpointSessionKey = undefined;
+    for (keys) |key| {
+        if (key.handle == stale) stale_key = key;
+    }
+    try std.testing.expect(endpoint.sessions.remove(stale_key));
+    endpoint.last_session_event_key = stale_key;
     const after_removal =
         (try runtime.EndpointServer.testing.pollReadySessionHandle(
             &endpoint,
@@ -1224,7 +1284,10 @@ test "WebTransport endpoint server owns concurrent real sessions" {
             },
             .session_event => |*value| switch (value.event) {
                 .datagram => |datagram| {
-                    const accepted = endpoint.session(value.handle) orelse
+                    const accepted = endpoint.sessionById(
+                        value.handle,
+                        value.session_id,
+                    ) orelse
                         return error.TestUnexpectedResult;
                     const expected = if (std.mem.eql(
                         u8,
@@ -1249,7 +1312,10 @@ test "WebTransport endpoint server owns concurrent real sessions" {
                     if (stream != .data) {
                         return error.TestUnexpectedResult;
                     }
-                    const accepted = endpoint.session(value.handle) orelse
+                    const accepted = endpoint.sessionById(
+                        value.handle,
+                        value.session_id,
+                    ) orelse
                         return error.TestUnexpectedResult;
                     const is_one = std.mem.eql(
                         u8,
@@ -1282,7 +1348,10 @@ test "WebTransport endpoint server owns concurrent real sessions" {
                     {
                         return error.TestUnexpectedResult;
                     }
-                    const accepted = endpoint.session(value.handle) orelse
+                    const accepted = endpoint.sessionById(
+                        value.handle,
+                        value.session_id,
+                    ) orelse
                         return error.TestUnexpectedResult;
                     const expected = if (std.mem.eql(
                         u8,
@@ -1314,6 +1383,359 @@ test "WebTransport endpoint server owns concurrent real sessions" {
         try std.testing.expect(endpoint.removeConnection(handle));
     }
     try std.testing.expectEqual(@as(usize, 0), endpoint.connectionCount());
+}
+
+test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const client_settings = webtransport.defaultSettings(.{});
+    const limits = runtime.Limits{
+        .http3 = .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .max_session_streams = 8,
+        .max_sessions_per_connection = 2,
+    };
+    var server = try runtime.HandshakeServer.bindForEndpoint(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{
+            .handshake = .{
+                .local_connection_id = "wt-multi-template",
+                .random = [_]u8{0x91} ** 32,
+                .x25519_secret_key = [_]u8{0x92} ** 32,
+                .handshake_recovery = .{
+                    .initial_pto_ms = 20,
+                    .max_pto_ms = 40,
+                    .max_duration_ms = 2_000,
+                },
+            },
+        },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{
+        .max_pending_handshakes = 1,
+        .inbox_capacity = 8,
+        .handshake_timeout_ms = 2_000,
+    });
+    defer endpoint.deinit();
+
+    const Shared = struct {
+        io: std.Io,
+        address: net.IpAddress,
+        limits: http3.runtime.Limits,
+        settings: http3.Settings,
+        done: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var h3 = try http3.runtime.HandshakeClient.connect(
+                allocator,
+                self.io,
+                .{ .ip4 = .loopback(0) },
+                self.address,
+                self.limits,
+                .{
+                    .handshake = .{
+                        .original_destination_connection_id = "wt-multi-origin",
+                        .local_connection_id = "wt-multi-client",
+                        .server_name = "localhost",
+                        .random = [_]u8{0x93} ** 32,
+                        .x25519_secret_key = [_]u8{0x94} ** 32,
+                        .handshake_recovery = .{
+                            .initial_pto_ms = 20,
+                            .max_pto_ms = 40,
+                            .max_duration_ms = 2_000,
+                        },
+                    },
+                    .session = .{ .local_settings = self.settings },
+                },
+            );
+            defer h3.deinit();
+            const headers = [_]http3.Qpack.HeaderField{
+                .{ .name = ":protocol", .value = "webtransport" },
+                http3.capsule.protocol_header,
+            };
+            const session_ids = [_]u62{
+                try h3.startRequest(.{
+                    .method = "CONNECT",
+                    .path = "/first",
+                    .scheme = "https",
+                    .authority = "localhost",
+                    .headers = &headers,
+                }, null),
+                try h3.startRequest(.{
+                    .method = "CONNECT",
+                    .path = "/second",
+                    .scheme = "https",
+                    .authority = "localhost",
+                    .headers = &headers,
+                }, null),
+            };
+            try std.testing.expectEqualSlices(u62, &.{ 0, 4 }, &session_ids);
+            const excess_session_id = try h3.startRequest(.{
+                .method = "CONNECT",
+                .path = "/excess",
+                .scheme = "https",
+                .authority = "localhost",
+                .headers = &headers,
+            }, null);
+            try std.testing.expectEqual(@as(u62, 8), excess_session_id);
+            const deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                .clock = .awake,
+                .raw = .fromSeconds(5),
+            });
+            for (session_ids) |session_id| {
+                var accepted = false;
+                while (!accepted) {
+                    var event = (try h3.receiveResponseEventWithDeadline(
+                        session_id,
+                        deadline,
+                    )) orelse continue;
+                    defer event.deinit(allocator);
+                    switch (event) {
+                        .head => |head| {
+                            if (head != .response or
+                                head.response.status != 200)
+                            {
+                                return error.TestUnexpectedResult;
+                            }
+                            accepted = true;
+                        },
+                        else => {},
+                    }
+                }
+                try h3.detachResponseStream(session_id);
+            }
+            try std.testing.expectEqual(
+                @as(u64, 2),
+                h3.control.settings.peer.webtransport_max_sessions,
+            );
+            while (true) {
+                const maybe_event = h3.receiveResponseEventWithDeadline(
+                    excess_session_id,
+                    deadline,
+                ) catch |err| {
+                    try std.testing.expectEqual(error.RequestRejected, err);
+                    break;
+                };
+                if (maybe_event) |event_value| {
+                    var event = event_value;
+                    defer event.deinit(allocator);
+                    return error.TestUnexpectedResult;
+                }
+            }
+
+            try h3.sendConnectDatagram(session_ids[0], "first");
+            try h3.sendConnectDatagram(session_ids[1], "second");
+            var received = [_]bool{ false, false };
+            while (!received[0] or !received[1]) {
+                var progressed = false;
+                for (session_ids, 0..) |session_id, index| {
+                    if (received[index]) continue;
+                    if (try h3.pollConnectDatagram(session_id)) |value| {
+                        var datagram = value;
+                        defer datagram.deinit(allocator);
+                        const expected = if (index == 0)
+                            "echo-first"
+                        else
+                            "echo-second";
+                        try std.testing.expectEqualStrings(
+                            expected,
+                            datagram.payload,
+                        );
+                        received[index] = true;
+                        progressed = true;
+                    }
+                }
+                if (!progressed) {
+                    try h3.receiveDetachedResponseProgressWithDeadline(
+                        session_ids[0],
+                        deadline,
+                    );
+                }
+            }
+
+            var first_prefix_storage: [16]u8 = undefined;
+            const first_prefix = try webtransport.BidirectionalStreamHeader
+                .writeInto(&first_prefix_storage, .init(session_ids[0]));
+            var second_prefix_storage: [16]u8 = undefined;
+            const second_prefix = try webtransport.BidirectionalStreamHeader
+                .writeInto(&second_prefix_storage, .init(session_ids[1]));
+            try h3.established.connection.send(&.{
+                .{ .stream = .{
+                    .stream_id = 12,
+                    .data = first_prefix,
+                } },
+                .{ .stream = .{
+                    .stream_id = 12,
+                    .offset = first_prefix.len,
+                    .data = "stream-first",
+                    .fin = true,
+                } },
+                .{ .stream = .{
+                    .stream_id = 16,
+                    .data = second_prefix,
+                } },
+                .{ .stream = .{
+                    .stream_id = 16,
+                    .offset = second_prefix.len,
+                    .data = "stream-second",
+                    .fin = true,
+                } },
+            });
+
+            for (session_ids, 0..) |session_id, index| {
+                var capsule: std.ArrayList(u8) = .empty;
+                defer capsule.deinit(allocator);
+                try (webtransport.Capsule{ .close_session = .{
+                    .code = @intCast(71 + index),
+                    .reason = if (index == 0) "first" else "second",
+                } }).write(&capsule, allocator);
+                try h3.sendRequestBody(session_id, capsule.items, true);
+            }
+            try self.done.wait(self.io);
+        }
+    };
+    var shared = Shared{
+        .io = io,
+        .address = server.address(),
+        .limits = limits.http3,
+        .settings = client_settings,
+    };
+    const client_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shared.done.set(io);
+        client_thread.join();
+    };
+
+    const versions = [_]u32{
+        quic.Version.version_1.wireValue(),
+        quic.Version.version_2.wireValue(),
+    };
+    var accepted_count: usize = 0;
+    var datagram_count: usize = 0;
+    var stream_count: usize = 0;
+    var close_count: usize = 0;
+    var connection_handle: ?quic.endpoint_dispatcher.ConnectionHandle = null;
+    var stream_buffer: [64]u8 = undefined;
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .clock = .awake,
+        .raw = .fromSeconds(8),
+    });
+    while (accepted_count != 2 or datagram_count != 2 or
+        stream_count != 2 or close_count != 2)
+    {
+        var event = try endpoint.receiveWithDeadline(
+            &versions,
+            deadline,
+            &stream_buffer,
+        );
+        defer event.deinit(allocator);
+        switch (event) {
+            .connected => |handle| connection_handle = handle,
+            .closed => return error.TestUnexpectedResult,
+            .handshake_failed => |failure| return failure.err,
+            .session_request => |handle| {
+                if (connection_handle) |expected| {
+                    try std.testing.expectEqual(expected, handle);
+                } else {
+                    connection_handle = handle;
+                }
+                const pending = endpoint.pendingSession(handle) orelse
+                    return error.TestUnexpectedResult;
+                const path = pending.path();
+                try std.testing.expect(
+                    std.mem.eql(u8, path, "/first") or
+                        std.mem.eql(u8, path, "/second"),
+                );
+                _ = try endpoint.accept(handle);
+                accepted_count += 1;
+            },
+            .session_event => |*value| {
+                const accepted = endpoint.sessionById(
+                    value.handle,
+                    value.session_id,
+                ) orelse return error.TestUnexpectedResult;
+                const is_first = std.mem.eql(
+                    u8,
+                    accepted.request.request.path,
+                    "/first",
+                );
+                switch (value.event) {
+                    .datagram => |datagram| {
+                        try std.testing.expectEqualStrings(
+                            if (is_first) "first" else "second",
+                            datagram.datagram.payload,
+                        );
+                        try accepted.trySendDatagramWithTimeout(
+                            if (is_first) "echo-first" else "echo-second",
+                            .fromSeconds(1),
+                        );
+                        datagram_count += 1;
+                    },
+                    .stream => |stream| {
+                        if (stream != .data or !stream.data.fin) {
+                            return error.TestUnexpectedResult;
+                        }
+                        try std.testing.expectEqualStrings(
+                            if (is_first) "stream-first" else "stream-second",
+                            stream_buffer[0..stream.data.bytes],
+                        );
+                        stream_count += 1;
+                    },
+                    .session => |session| {
+                        if (session != .closed) {
+                            return error.TestUnexpectedResult;
+                        }
+                        try std.testing.expectEqual(
+                            @as(u32, if (is_first) 71 else 72),
+                            session.closed.code,
+                        );
+                        try std.testing.expectEqualStrings(
+                            if (is_first) "first" else "second",
+                            session.closed.reason,
+                        );
+                        close_count += 1;
+                    },
+                }
+            },
+            .unrouted => return error.TestUnexpectedResult,
+        }
+    }
+    const handle = connection_handle orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), endpoint.sessionCount());
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        endpoint.sessionCountForConnection(handle),
+    );
+    shared.done.set(io);
+    client_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expect(try endpoint.removeSession(handle, .init(0)));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        endpoint.sessionCountForConnection(handle),
+    );
+    try std.testing.expect(try endpoint.removeSession(handle, .init(4)));
+    try std.testing.expectEqual(@as(usize, 0), endpoint.sessionCount());
+    try std.testing.expectEqual(@as(usize, 1), endpoint.connectionCount());
+    try std.testing.expect(endpoint.removeConnection(handle));
 }
 
 test "WebTransport endpoint serve loop shuts down from a session event" {

@@ -1216,6 +1216,11 @@ Current protocol coverage includes:
   protected runtime that uses QUIC 1-RTT DATAGRAM send/receive queues with
   WebTransport payload-size accounting, owning and caller-buffer batch receive
   helpers with exact partial progress and non-consuming short-buffer retry,
+  plus an authenticated `EndpointServer` with configurable non-zero
+  per-connection Session capacity: connection+Session composite routing keeps
+  CONNECT control, DATAGRAM, associated streams and CLOSE metadata isolated,
+  while excess CONNECTs receive `H3_REQUEST_REJECTED`; the default and every
+  standalone owning adapter remain honest one-Session endpoints,
   modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with

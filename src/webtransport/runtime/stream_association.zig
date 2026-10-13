@@ -13,6 +13,20 @@ pub const Identification = union(enum) {
     unclaimed,
 };
 
+/// Type-erased lookup used by a shared HTTP/3 endpoint to distinguish a
+/// stream for another accepted WebTransport Session from an unknown Session.
+/// The former must remain untouched for its owner; the latter is rejected with
+/// WT_BUFFERED_STREAM_REJECTED as before.
+pub const SessionLookup = struct {
+    context: *const anyopaque,
+    scope: u64,
+    containsFn: *const fn (*const anyopaque, u64, u62) bool,
+
+    pub fn contains(self: SessionLookup, session_id: u62) bool {
+        return self.containsFn(self.context, self.scope, session_id);
+    }
+};
+
 /// Request transport-state reclamation while retaining WebTransport's
 /// session-lifetime registry entry and counters.
 pub fn requestTransportRetirement(
@@ -143,6 +157,7 @@ pub fn identifyClassified(
         stream_id,
         receive_mode,
         false,
+        null,
     );
 }
 
@@ -182,6 +197,29 @@ pub fn identifyClassifiedOnce(
         stream_id,
         receive_mode,
         true,
+        null,
+    );
+}
+
+/// Shared-endpoint form that leaves streams for another accepted Session
+/// unclaimed so its own registry can classify them later in the same poll
+/// cycle.
+pub fn identifyClassifiedOnceShared(
+    connection: *quic.one_rtt.Connection,
+    registry: *webtransport.StreamRegistry,
+    session_id: webtransport.SessionId,
+    stream_id: u62,
+    receive_mode: webtransport.ReceiveMode,
+    sessions: SessionLookup,
+) Error!Identification {
+    return identifyInternal(
+        connection,
+        registry,
+        session_id,
+        stream_id,
+        receive_mode,
+        true,
+        sessions,
     );
 }
 
@@ -263,6 +301,7 @@ fn identifyInternal(
     stream_id: u62,
     receive_mode: webtransport.ReceiveMode,
     single_attempt: bool,
+    sessions: ?SessionLookup,
 ) Error!Identification {
     std.debug.assert(receive_mode != .unset);
     const direction: webtransport.StreamDirection =
@@ -299,6 +338,11 @@ fn identifyInternal(
                             else => return err,
                         };
                 if (parsed.session_id.value != session_id.value) {
+                    if (sessions) |known| {
+                        if (known.contains(parsed.session_id.value)) {
+                            return .unclaimed;
+                        }
+                    }
                     const progressed = try rejectWrongSession(
                         connection,
                         stream_id,
@@ -324,6 +368,13 @@ fn identifyInternal(
                 if (parsed.session_id == null or
                     parsed.session_id.?.value != session_id.value)
                 {
+                    if (parsed.session_id) |other| {
+                        if (sessions) |known| {
+                            if (known.contains(other.value)) {
+                                return .unclaimed;
+                            }
+                        }
+                    }
                     const progressed = try rejectWrongSession(
                         connection,
                         stream_id,
