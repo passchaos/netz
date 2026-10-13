@@ -900,67 +900,38 @@ fn serveWithManagement(
                     }
                 }
                 if (ReloadSignal.take()) {
-                    var reloaded_config = mqtt.broker_config.load(
+                    switch (reloadConfiguredState(
                         allocator,
                         io,
-                        std.Io.Dir.cwd(),
                         config_path,
-                    ) catch |err| {
-                        std.debug.print(
-                            "netz MQTT configuration reload failed: " ++
+                        broker,
+                        bridges,
+                        security,
+                        identities,
+                    )) {
+                        .failure => |failure| std.debug.print(
+                            "netz MQTT {s} reload failed: " ++
                                 "error={s} server_io=zio-std-io\n",
-                            .{@errorName(err)},
-                        );
-                        try select.concurrent(
-                            .signal_poll,
-                            waitInterval,
-                            .{ io, checkpoint_signal_poll_interval },
-                        );
-                        continue;
-                    };
-                    defer reloaded_config.deinit(allocator);
-                    if (security) |policy| {
-                        reloadSecurityAndIdentities(
-                            broker,
-                            policy,
-                            identities orelse unreachable,
-                        ) catch |err| {
+                            .{
+                                @tagName(failure.component),
+                                @errorName(failure.err),
+                            },
+                        ),
+                        .success => |security_reloaded| {
+                            if (security_reloaded) {
+                                std.debug.print(
+                                    "netz MQTT security reload completed: " ++
+                                        "source=SIGHUP server_io=zio-std-io\n",
+                                    .{},
+                                );
+                            }
                             std.debug.print(
-                                "netz MQTT security reload failed: " ++
-                                    "error={s} server_io=zio-std-io\n",
-                                .{@errorName(err)},
+                                "netz MQTT bridge reload staged: " ++
+                                    "source=SIGHUP server_io=zio-std-io\n",
+                                .{},
                             );
-                            try select.concurrent(
-                                .signal_poll,
-                                waitInterval,
-                                .{ io, checkpoint_signal_poll_interval },
-                            );
-                            continue;
-                        };
-                        std.debug.print(
-                            "netz MQTT security reload completed: " ++
-                                "source=SIGHUP server_io=zio-std-io\n",
-                            .{},
-                        );
+                        },
                     }
-                    bridges.reload(reloaded_config.bridges) catch |err| {
-                        std.debug.print(
-                            "netz MQTT bridge reload failed: " ++
-                                "error={s} server_io=zio-std-io\n",
-                            .{@errorName(err)},
-                        );
-                        try select.concurrent(
-                            .signal_poll,
-                            waitInterval,
-                            .{ io, checkpoint_signal_poll_interval },
-                        );
-                        continue;
-                    };
-                    std.debug.print(
-                        "netz MQTT bridge reload staged: " ++
-                            "source=SIGHUP server_io=zio-std-io\n",
-                        .{},
-                    );
                 }
                 try select.concurrent(
                     .signal_poll,
@@ -984,21 +955,84 @@ fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {
     return false;
 }
 
-fn reloadSecurityAndIdentities(
+const ReloadComponent = enum {
+    configuration,
+    bridge,
+    security,
+};
+
+const ReloadOutcome = union(enum) {
+    success: bool,
+    failure: struct {
+        component: ReloadComponent,
+        err: anyerror,
+    },
+};
+
+fn reloadConfiguredState(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config_path: []const u8,
     broker: *mqtt.broker.Broker,
-    security: *reloadable_security.Security,
-    identities: *reloadable_identity.Set,
-) !void {
-    var prepared_security = try security.prepareReload();
+    bridges: *configured_bridges.Set,
+    security: ?*reloadable_security.Security,
+    identities: ?*reloadable_identity.Set,
+) ReloadOutcome {
+    var reloaded_config = mqtt.broker_config.load(
+        allocator,
+        io,
+        std.Io.Dir.cwd(),
+        config_path,
+    ) catch |err| return .{ .failure = .{
+        .component = .configuration,
+        .err = err,
+    } };
+    defer reloaded_config.deinit(allocator);
+    var prepared_bridges = bridges.prepareReload(
+        reloaded_config.bridges,
+    ) catch |err| return .{ .failure = .{
+        .component = .bridge,
+        .err = err,
+    } };
+    defer prepared_bridges.deinit();
+
+    const policy = security orelse {
+        const bridge_commit = bridges.submitPreparedReload(
+            &prepared_bridges,
+        ) catch |err| return .{ .failure = .{
+            .component = .bridge,
+            .err = err,
+        } };
+        bridge_commit.commit();
+        return .{ .success = false };
+    };
+    var prepared_security = policy.prepareReload() catch |err|
+        return .{ .failure = .{
+            .component = .security,
+            .err = err,
+        } };
     defer prepared_security.deinit();
-    var prepared_identities = try identities.prepareReload();
+    const identity_set = identities orelse unreachable;
+    var prepared_identities = identity_set.prepareReload() catch |err|
+        return .{ .failure = .{
+            .component = .security,
+            .err = err,
+        } };
     defer prepared_identities.deinit();
-    security.lock.lockUncancelable(security.io);
-    var retired_security = security.swapPreparedReload(&prepared_security);
-    var retired_identities = identities.swapPreparedReload(
+    const bridge_commit = bridges.submitPreparedReload(
+        &prepared_bridges,
+    ) catch |err| return .{ .failure = .{
+        .component = .bridge,
+        .err = err,
+    } };
+
+    policy.lock.lockUncancelable(policy.io);
+    var retired_security = policy.swapPreparedReload(&prepared_security);
+    var retired_identities = identity_set.swapPreparedReload(
         &prepared_identities,
     );
-    security.lock.unlock(security.io);
+    policy.lock.unlock(policy.io);
+    bridge_commit.commit();
     _ = broker.disconnectUnauthorizedConnections(.{
         .context = &retired_security,
         .still_authorized = reloadable_security.RetiredReload
@@ -1006,6 +1040,7 @@ fn reloadSecurityAndIdentities(
     });
     retired_security.deinit();
     retired_identities.deinit();
+    return .{ .success = true };
 }
 
 const Service = union(enum) {

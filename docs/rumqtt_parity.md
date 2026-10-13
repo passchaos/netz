@@ -308,8 +308,11 @@ The configured bridge runtime deep-copies complete validated bridge records,
 including rules, secondary endpoints, credentials, TLS paths and cipher lists,
 into move-stable generation entries. Linux `SIGHUP` reparses the complete
 configuration and fully constructs every replacement generation before changing
-the running bridge set. Missing or invalid configuration and TLS resources leave
-the old generations untouched. New and removed bridge names take effect
+the running bridge set. The bridge supervisor reserves all required slot
+capacity, then waits behind a commit gate while password/ACL/CRL state and
+TLS/WSS identities are also prepared. A failure in any subsystem leaves every
+active bridge, security policy, and identity generation untouched. New and
+removed bridge names take effect
 immediately; an existing bridge with `bridge_reload_type immediate` reconnects
 at once, while the default `lazy` policy preserves its established connection
 and adopts the newest pending generation only at its next natural disconnected
@@ -320,7 +323,8 @@ derived from Mosquitto's `06-bridge-config-reload.py` at source revision
 `5cd2546511596a269dbf53f85858c623b09ebdd6` (file SHA-256
 `6ad3507ff44b52ab06794335e5eca0071d633ffb38584aaea0d5a21ca4d1f997`) and
 extends it with invalid-parse and failed-TLS-staging rollback, repeated-lazy,
-bridge removal/addition, and local-client continuity checks.
+bridge removal/addition, cross-subsystem rollback, and local-client continuity
+checks.
 
 TLS and WSS listeners expose the matching `ciphers_tls1.3` directive alongside
 their existing TLS 1.2 `ciphers` policy. The ordered list is deep-owned by the
@@ -3249,11 +3253,12 @@ duplicate-subject and oversized directories fail closed; the process gate
 proves two independent directory CAs, an untrusted client, rehash links, and
 multi-listener startup atomicity. WebSocket `capath` is rejected explicitly,
 matching Mosquitto's documented unsupported transport without silently ignoring
-the setting. On Linux, `SIGHUP` atomically reloads the password, ACL, server
-certificate/private key/password, client CA bundle/directory, and CRL file contents named
-by the initial configuration.
-Every replacement is parsed before any active set changes; any missing or
-invalid file preserves the complete old policy and server identities. Existing
+the setting. On Linux, `SIGHUP` atomically prepares bridge definitions together
+with the password, ACL, server certificate/private key/password, client CA
+bundle/directory, and CRL file contents named by the initial configuration.
+Every replacement and bridge slot reservation succeeds before the shared commit
+gate opens; any missing or invalid file preserves the complete old bridge,
+policy, and server-identity generations. Existing
 clients immediately use new ACL rules. After a successful password-file swap,
 the broker compares the old and new parsed credential for each established
 username: unchanged credentials stay online, while removed or modified entries

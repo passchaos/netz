@@ -722,9 +722,11 @@ const Slot = struct {
     }
 };
 
-const PreparedReload = struct {
+pub const PreparedReload = struct {
     allocator: std.mem.Allocator,
     slots: []?*Slot,
+    commit: *std.Io.Event,
+    owned: bool = true,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -734,6 +736,9 @@ const PreparedReload = struct {
         persistence_path: ?[]const u8,
         activate_local_sources: bool,
     ) !PreparedReload {
+        const commit = try allocator.create(std.Io.Event);
+        errdefer allocator.destroy(commit);
+        commit.* = .unset;
         const slots = try allocator.alloc(?*Slot, configured.len);
         @memset(slots, null);
         errdefer allocator.free(slots);
@@ -755,15 +760,21 @@ const PreparedReload = struct {
             slot.* = try Slot.create(allocator, io, entry);
             initialized += 1;
         }
-        return .{ .allocator = allocator, .slots = slots };
+        return .{
+            .allocator = allocator,
+            .slots = slots,
+            .commit = commit,
+        };
     }
 
-    fn deinit(self: *PreparedReload) void {
+    pub fn deinit(self: *PreparedReload) void {
+        if (!self.owned) return;
         for (self.slots) |maybe_slot| {
             if (maybe_slot) |slot| slot.deinit();
         }
         self.allocator.free(self.slots);
-        self.* = undefined;
+        self.allocator.destroy(self.commit);
+        self.owned = false;
     }
 
     fn find(self: *const PreparedReload, name: []const u8) ?usize {
@@ -781,6 +792,15 @@ const PreparedReload = struct {
     }
 };
 
+pub const ReloadCommit = struct {
+    io: std.Io,
+    event: *std.Io.Event,
+
+    pub fn commit(self: ReloadCommit) void {
+        self.event.set(self.io);
+    }
+};
+
 pub const Set = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -790,6 +810,7 @@ pub const Set = struct {
     /// and replaced without signaling the listener/broker shutdown event.
     shutdown: *std.Io.Event,
     slots: std.ArrayList(*Slot),
+    slots_mutex: std.Io.Mutex = .init,
     reload_storage: []PreparedReload,
     reload_queue: std.Io.Queue(PreparedReload),
     failure_mutex: std.Io.Mutex = .init,
@@ -866,6 +887,8 @@ pub const Set = struct {
     }
 
     fn requestActiveStops(self: *Set) void {
+        self.slots_mutex.lockUncancelable(self.io);
+        defer self.slots_mutex.unlock(self.io);
         for (self.slots.items) |slot| slot.requestActiveStop();
     }
 
@@ -940,14 +963,8 @@ pub const Set = struct {
                         else => return err,
                     };
                     defer prepared.deinit();
-                    self.applyReload(&prepared, &workers) catch |err| {
-                        std.debug.print(
-                            "netz MQTT bridge reload failed: error={s}\n",
-                            .{@errorName(err)},
-                        );
-                        try select.concurrent(.reload, receiveReload, .{self});
-                        continue;
-                    };
+                    try prepared.commit.wait(self.io);
+                    self.applyReload(&prepared, &workers);
                     std.debug.print(
                         "netz MQTT bridge reload committed\n",
                         .{},
@@ -990,7 +1007,17 @@ pub const Set = struct {
         self: *Set,
         configured: []const mqtt.broker_config.Bridge,
     ) anyerror!void {
-        var prepared = try PreparedReload.init(
+        var prepared = try self.prepareReload(configured);
+        defer prepared.deinit();
+        const commit_token = try self.submitPreparedReload(&prepared);
+        commit_token.commit();
+    }
+
+    pub fn prepareReload(
+        self: *Set,
+        configured: []const mqtt.broker_config.Bridge,
+    ) anyerror!PreparedReload {
+        return PreparedReload.init(
             self.allocator,
             self.io,
             self.local,
@@ -998,19 +1025,34 @@ pub const Set = struct {
             self.persistence_path,
             false,
         );
-        errdefer prepared.deinit();
-        try self.reload_queue.putOne(self.io, prepared);
+    }
+
+    pub fn submitPreparedReload(
+        self: *Set,
+        prepared: *PreparedReload,
+    ) anyerror!ReloadCommit {
+        std.debug.assert(prepared.owned);
+        self.slots_mutex.lockUncancelable(self.io);
+        self.slots.ensureUnusedCapacity(
+            self.allocator,
+            prepared.slots.len,
+        ) catch |err| {
+            self.slots_mutex.unlock(self.io);
+            return err;
+        };
+        self.slots_mutex.unlock(self.io);
+        try self.reload_queue.putOne(self.io, prepared.*);
+        prepared.owned = false;
+        return .{ .io = self.io, .event = prepared.commit };
     }
 
     fn applyReload(
         self: *Set,
         prepared: *PreparedReload,
         workers: *std.Io.Group,
-    ) std.mem.Allocator.Error!void {
-        try self.slots.ensureUnusedCapacity(
-            self.allocator,
-            prepared.slots.len,
-        );
+    ) void {
+        self.slots_mutex.lockUncancelable(self.io);
+        defer self.slots_mutex.unlock(self.io);
         const existing_count = self.slots.items.len;
         for (self.slots.items[0..existing_count]) |slot| {
             if (prepared.find(slot.name)) |index| {
@@ -1048,10 +1090,14 @@ pub const Set = struct {
     /// snapshot. Persistent Sessions retain retransmittable work; clean
     /// Sessions remove their routes and queued deliveries.
     pub fn disconnectLocalSources(self: *Set) void {
+        self.slots_mutex.lockUncancelable(self.io);
+        defer self.slots_mutex.unlock(self.io);
         for (self.slots.items) |slot| slot.disconnectLocalSource();
     }
 
     fn requestPrimaryFailback(self: *Set) void {
+        self.slots_mutex.lockUncancelable(self.io);
+        defer self.slots_mutex.unlock(self.io);
         const now_ns: i64 = @intCast(
             std.Io.Clock.awake.now(self.io).nanoseconds,
         );

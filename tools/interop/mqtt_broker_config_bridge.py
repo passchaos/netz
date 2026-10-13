@@ -616,6 +616,8 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         "max_connections 4\n"
     )
     local_config = directory / "bridge-reload-local.conf"
+    acl_file = directory / "bridge-reload.acl"
+    acl_file.write_text("topic readwrite #\n")
 
     def write_local(
         generation: str,
@@ -625,6 +627,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         client_id: str = "configured-reload-bridge",
     ) -> None:
         local_config.write_text(
+            f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
             "allow_anonymous true\n"
             "max_connections 4\n"
@@ -703,6 +706,30 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         )
 
         write_local("two", "immediate")
+        acl_file.write_text("unsupported directive\n")
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "security reload failed: error=InvalidDirective",
+            1,
+        )
+        expect_no_publish(observer, "failed cross-subsystem reload")
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            2,
+            b"security-rollback",
+            1,
+            topic="remote/one/security-rollback",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"security-rollback",
+            expected_topic="local/one/security-rollback",
+        )
+
+        acl_file.write_text("topic readwrite #\n")
         os.kill(local.pid, signal.SIGHUP)
         _wait_for_log_count(
             local,
@@ -715,7 +742,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         ping(subscriber)
         _publish_message(
             publisher,
-            2,
+            3,
             b"immediate-generation",
             1,
             topic="remote/two/value",
@@ -738,7 +765,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         ping(subscriber)
         _publish_message(
             publisher,
-            3,
+            4,
             b"lazy-old-generation",
             1,
             topic="remote/two/still-active",
@@ -760,7 +787,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         expect_no_publish(observer, "superseded lazy bridge reload")
         _publish_message(
             publisher,
-            4,
+            5,
             b"lazy-still-old-generation",
             1,
             topic="remote/two/still-active-again",
@@ -792,7 +819,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         publisher = _connect_client(upstream_port, "bridge-reload-publisher-2")
         _publish_message(
             publisher,
-            5,
+            6,
             b"lazy-new-generation",
             1,
             topic="remote/latest/value",
@@ -804,6 +831,10 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         )
 
         missing_ca = directory / "missing-bridge-reload-ca.pem"
+        acl_file.write_text(
+            "topic read nowhere/#\n"
+            "topic write nowhere/#\n"
+        )
         local_config.write_text(
             f"listener {local_port} 127.0.0.1\n"
             "allow_anonymous true\n"
@@ -824,7 +855,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         ping(subscriber)
         _publish_message(
             publisher,
-            6,
+            7,
             b"staging-rollback",
             1,
             topic="remote/latest/staging-rollback",
@@ -853,7 +884,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         ping(subscriber)
         _publish_message(
             publisher,
-            7,
+            8,
             b"rollback-generation",
             1,
             topic="remote/latest/rollback",
@@ -864,6 +895,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
             expected_topic="local/latest/rollback",
         )
 
+        acl_file.write_text("topic readwrite #\n")
         local_config.write_text(
             f"listener {local_port} 127.0.0.1\n"
             "allow_anonymous true\n"
@@ -880,7 +912,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         ping(subscriber)
         _publish_message(
             publisher,
-            8,
+            9,
             b"removed-generation",
             1,
             topic="remote/latest/removed",
@@ -906,7 +938,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         ping(subscriber)
         _publish_message(
             publisher,
-            9,
+            10,
             b"added-generation",
             1,
             topic="remote/four/value",
