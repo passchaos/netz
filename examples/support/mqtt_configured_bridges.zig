@@ -405,6 +405,9 @@ pub const Set = struct {
     /// Stable, Set-local cancellation boundary. Bridge tasks can be stopped
     /// and replaced without signaling the listener/broker shutdown event.
     shutdown: *std.Io.Event,
+    /// Each bridge keeps a stable cancellation address so a future reload can
+    /// retire one generation without disturbing unrelated bridge tasks.
+    bridge_shutdowns: []std.Io.Event,
     /// Runtime-owned configuration backing connector callbacks and reconnect
     /// policy. Keeping this independent from the parser document permits a
     /// future reload supervisor to stage a replacement Set transactionally.
@@ -422,6 +425,12 @@ pub const Set = struct {
         const shutdown = try allocator.create(std.Io.Event);
         errdefer allocator.destroy(shutdown);
         shutdown.* = .unset;
+        const bridge_shutdowns = try allocator.alloc(
+            std.Io.Event,
+            configured.len,
+        );
+        errdefer allocator.free(bridge_shutdowns);
+        @memset(bridge_shutdowns, .unset);
         const owned_configured = try allocator.alloc(
             mqtt.broker_config.Bridge,
             configured.len,
@@ -460,9 +469,14 @@ pub const Set = struct {
                 values[initialized].deinit();
             }
         }
-        for (owned_configured, values, connector_resources) |*source, *bridge, *resources| {
+        for (
+            owned_configured,
+            values,
+            connector_resources,
+            bridge_shutdowns,
+        ) |*source, *bridge, *resources, *bridge_shutdown| {
             if (source.hasOutbound()) {
-                bridge.* = .{ .outbound = try initOutbound(allocator, io, local, source, resources, shutdown, persistence_path) };
+                bridge.* = .{ .outbound = try initOutbound(allocator, io, local, source, resources, bridge_shutdown, persistence_path) };
                 initialized += 1;
                 continue;
             }
@@ -545,7 +559,7 @@ pub const Set = struct {
                     local,
                     resources.connector.connector(),
                     options,
-                    shutdown,
+                    bridge_shutdown,
                 );
             } else try mqtt.bridge.Bridge.initHostMany(
                 allocator,
@@ -554,7 +568,7 @@ pub const Set = struct {
                 source.host,
                 source.port,
                 options,
-                shutdown,
+                bridge_shutdown,
             ) };
             initialized += 1;
         }
@@ -562,6 +576,7 @@ pub const Set = struct {
             .allocator = allocator,
             .io = io,
             .shutdown = shutdown,
+            .bridge_shutdowns = bridge_shutdowns,
             .configured = owned_configured,
             .values = values,
             .connector_resources = connector_resources,
@@ -580,6 +595,7 @@ pub const Set = struct {
         }
         self.allocator.free(self.connector_resources);
         self.allocator.free(self.values);
+        self.allocator.free(self.bridge_shutdowns);
         for (self.configured) |*configured| {
             configured.deinit(self.allocator);
         }
@@ -591,11 +607,22 @@ pub const Set = struct {
     /// Wake every bridge run loop without affecting listeners or other broker
     /// work. The owner must await/cancel those tasks before calling `deinit`.
     pub fn requestStop(self: *Set) void {
+        for (self.bridge_shutdowns) |*bridge_shutdown| {
+            bridge_shutdown.set(self.io);
+        }
         self.shutdown.set(self.io);
     }
 
     pub fn stopRequested(self: *const Set) bool {
         return self.shutdown.isSet();
+    }
+
+    pub fn requestBridgeStop(self: *Set, index: usize) void {
+        self.bridge_shutdowns[index].set(self.io);
+    }
+
+    pub fn bridgeStopRequested(self: *const Set, index: usize) bool {
+        return self.bridge_shutdowns[index].isSet();
     }
 
     const BridgeRunResult = struct {
@@ -1309,6 +1336,55 @@ test "configured bridge supervisor stops without listener cancellation" {
     joined = true;
     if (task.err) |err| return err;
     try std.testing.expect(!listener_shutdown.isSet());
+}
+
+test "configured bridge entries have independent cancellation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var first_name = "first".*;
+    var second_name = "second".*;
+    var first_host = "first.example".*;
+    var second_host = "second.example".*;
+    var first_filter = "first/#".*;
+    var second_filter = "second/#".*;
+    var first_rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &first_filter,
+        .qos = .at_most_once,
+    }};
+    var second_rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &second_filter,
+        .qos = .at_most_once,
+    }};
+    const configured = [_]mqtt.broker_config.Bridge{
+        .{
+            .name = &first_name,
+            .host = &first_host,
+            .rules = &first_rules,
+        },
+        .{
+            .name = &second_name,
+            .host = &second_host,
+            .rules = &second_rules,
+        },
+    };
+    var bridges = try Set.init(
+        allocator,
+        io,
+        &broker,
+        &configured,
+        null,
+    );
+    defer bridges.deinit();
+
+    try std.testing.expect(!bridges.stopRequested());
+    try std.testing.expect(!bridges.bridgeStopRequested(0));
+    try std.testing.expect(!bridges.bridgeStopRequested(1));
+    bridges.requestBridgeStop(0);
+    try std.testing.expect(!bridges.stopRequested());
+    try std.testing.expect(bridges.bridgeStopRequested(0));
+    try std.testing.expect(!bridges.bridgeStopRequested(1));
 }
 
 test "configured bidirectional bridge never falls back from private mode" {
