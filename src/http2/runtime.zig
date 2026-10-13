@@ -10571,8 +10571,9 @@ pub const Connection = struct {
     fn peerPushEnabled(self: Connection) bool {
         // Absence of SETTINGS_ENABLE_PUSH means enabled by default for clients.
         // We initialize this true on server connections and update it when
-        // client SETTINGS arrive.
-        return self.peer_enable_push;
+        // client SETTINGS arrive. A server peer can never receive pushes, and
+        // RFC 9113 defines its initial value as equivalent to zero.
+        return self.role == .server and self.peer_enable_push;
     }
 
     pub fn serveOne(
@@ -14976,10 +14977,12 @@ pub const Connection = struct {
                 },
                 .enable_push => {
                     if (setting.value > 1) return error.InvalidSetting;
-                    // RFC 9113 forbids SETTINGS_ENABLE_PUSH in server SETTINGS.
-                    // Clients can send 0 to disable server push; a server-to-client
-                    // occurrence is a connection-level protocol error.
-                    if (self.role == .client) return error.InvalidSetting;
+                    // RFC 9113 allows a server to send the setting explicitly
+                    // with value 0; only server-to-client value 1 is a
+                    // connection-level protocol error.
+                    if (self.role == .client and setting.value == 1) {
+                        return error.InvalidSetting;
+                    }
                     self.peer_enable_push = setting.value == 1;
                 },
                 .enable_connect_protocol => {
@@ -21599,7 +21602,6 @@ test "HTTP/2 wait helpers reject unbuffered application frames" {
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
-
     const data_frame = http2.Frame{
         .header = .{ .length = 1, .frame_type = .data, .flags = 0, .stream_id = 1 },
         .payload = "x",
@@ -34398,10 +34400,15 @@ test "HTTP/2 public peer capabilities track SETTINGS updates" {
                 client_settings.frame.header.flags & flag_ack,
             );
 
-            try self.writeSettingsUpdate(stream, &.{.{
-                .id = .max_concurrent_streams,
-                .value = 3,
-            }});
+            try self.writeSettingsUpdate(stream, &.{
+                .{
+                    .id = .max_concurrent_streams,
+                    .value = 3,
+                },
+                // RFC 9113 permits a server to make its effective zero value
+                // explicit; the client must reject only value 1.
+                .{ .id = .enable_push, .value = 0 },
+            });
             try writeFrame(
                 self.allocator,
                 self.io,
@@ -34928,6 +34935,7 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         connection.hpack_decoder.deinit(std.testing.allocator);
         connection.hpack_encoder.deinit(std.testing.allocator);
     }
+    try std.testing.expect(!connection.peerPushEnabled());
 
     try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
         .{ .id = .max_frame_size, .value = default_max_frame_size - 1 },
@@ -34938,15 +34946,21 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
     try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
         .{ .id = .initial_window_size, .value = @as(u32, std.math.maxInt(i31)) + 1 },
     }));
-    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+    try connection.applySettings(&.{
         .{ .id = .enable_push, .value = 0 },
+        .{ .id = .no_rfc7540_priorities, .value = 1 },
+    });
+    try std.testing.expect(!connection.peer_enable_push);
+    try std.testing.expect(connection.peer_no_rfc7540_priorities);
+    try std.testing.expectError(error.InvalidSetting, connection.applySettings(&.{
+        .{ .id = .enable_push, .value = 1 },
     }));
+    try std.testing.expect(!connection.peer_enable_push);
 
     try connection.applySettings(&.{
         .{ .id = .max_frame_size, .value = 32_768 },
         .{ .id = .max_concurrent_streams, .value = 7 },
         .{ .id = .header_table_size, .value = 128 },
-        .{ .id = .no_rfc7540_priorities, .value = 1 },
     });
     try std.testing.expectEqual(@as(usize, 32_768), connection.peer_max_frame_size);
     try std.testing.expectEqual(
@@ -34988,6 +35002,9 @@ test "HTTP/2 runtime validates SETTINGS frame-size and window bounds" {
         server_connection.hpack_encoder.deinit(std.testing.allocator);
     }
     try server_connection.applySettings(&.{.{ .id = .enable_push, .value = 0 }});
+    try std.testing.expect(!server_connection.peer_enable_push);
+    try server_connection.applySettings(&.{.{ .id = .enable_push, .value = 1 }});
+    try std.testing.expect(server_connection.peer_enable_push);
     try std.testing.expectError(error.InvalidSetting, server_connection.applySettings(&.{
         .{ .id = .enable_push, .value = 2 },
     }));

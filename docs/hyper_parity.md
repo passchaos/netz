@@ -1425,7 +1425,10 @@ two-phase graceful shutdown and the second HPACK encoder used only for
 transactional batch writes are likewise allocated on first use. Server-push
 reservation queues and indexes now use the same lazy ownership model; clients
 that advertise `SETTINGS_ENABLE_PUSH=0` and servers that never initiate push do
-not allocate it. RFC 9218 update and idle-reservation indexes are also retained
+not allocate it. Inbound SETTINGS validation follows RFC 9113's role asymmetry:
+clients accept a server's explicit `SETTINGS_ENABLE_PUSH=0` but reject `1`,
+while servers accept either valid client value. RFC 9218 update and
+idle-reservation indexes are also retained
 only after the first priority operation; the ordinary stream lifecycle takes a
 null-state fast path. On 64-bit targets these changes reduce
 `runtime.Connection` from 2,496 to 1,840 bytes: 80 bytes from peer metadata,
