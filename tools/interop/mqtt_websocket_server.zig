@@ -17,6 +17,12 @@ pub fn main(init: std.process.Init) !void {
     const protocol: netz.mqtt.ProtocolVersion = if (std.mem.eql(
         u8,
         args[2],
+        "v31",
+    ))
+        .v3_1
+    else if (std.mem.eql(
+        u8,
+        args[2],
         "v311",
     ))
         .v3_1_1
@@ -133,6 +139,7 @@ fn serveOne(
     const expected_client_id = if (origin_mode)
         "origin-allowed"
     else switch (protocol) {
+        .v3_1 => "mosquitto-ws-v31",
         .v3_1_1 => "mosquitto-ws-v311",
         .v5 => "mosquitto-ws-v5",
     };

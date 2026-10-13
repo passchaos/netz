@@ -65,8 +65,8 @@ def recv_binary_message(peer) -> bytes:
 
 
 def expected_connack(mqtt_packets, mqtt5_props, proto_ver: int) -> bytes:
-    if proto_ver == 4:
-        return mqtt_packets.gen_connack(rc=0, proto_ver=4)
+    if proto_ver != 5:
+        return mqtt_packets.gen_connack(rc=0, proto_ver=proto_ver)
     properties = (
         mqtt5_props.gen_uint16_prop(mqtt5_props.RECEIVE_MAXIMUM, 20)
         + mqtt5_props.gen_uint32_prop(
@@ -85,7 +85,9 @@ def expected_connack(mqtt_packets, mqtt5_props, proto_ver: int) -> bytes:
 def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props,
              transport: str, proto_ver: int, cafile: Path) -> None:
     port = free_port()
-    protocol_name = "v311" if proto_ver == 4 else "v5"
+    protocol_name = (
+        "v31" if proto_ver == 3 else "v311" if proto_ver == 4 else "v5"
+    )
     process = subprocess.Popen(
         [str(server), transport, protocol_name, str(port)],
         stdout=subprocess.PIPE,
@@ -126,7 +128,13 @@ def run_case(server: Path, websocket_wrapper, do_send, mqtt_packets, mqtt5_props
     )
 
     try:
-        client_id = "mosquitto-ws-v311" if proto_ver == 4 else "mosquitto-ws-v5"
+        client_id = (
+            "mosquitto-ws-v31"
+            if proto_ver == 3
+            else "mosquitto-ws-v311"
+            if proto_ver == 4
+            else "mosquitto-ws-v5"
+        )
         do_send(peer, mqtt_packets.gen_connect(client_id, proto_ver=proto_ver))
         connack = recv_binary_message(peer)
         expected = expected_connack(mqtt_packets, mqtt5_props, proto_ver)
@@ -228,7 +236,7 @@ def main() -> None:
         cafile = Path(directory) / "ca.pem"
         cafile.write_text(CERTIFICATE_PEM)
         for transport in ("ws", "wss"):
-            for proto_ver in (4, 5):
+            for proto_ver in (3, 4, 5):
                 run_case(
                     args.server,
                     WebsocketWrapper,

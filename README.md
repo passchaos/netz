@@ -1489,14 +1489,14 @@ zig build interop-websocket-autobahn -Doptimize=ReleaseFast -- --tls
 # Without Docker, exercise the same adapter over real cleartext/TLS sockets,
 # including concurrent echoes, protocol-error isolation, and worker reuse.
 zig build interop-websocket-autobahn-smoke -Doptimize=ReleaseFast
-# Exercise MQTT mTLS against OpenSSL and MQTT 3.1.1/5 listener mounts,
+# Exercise MQTT mTLS against OpenSSL and MQTT 3.1/3.1.1/5 listener mounts,
 # WS/WSS plus PROXY v1/v2, and Origin policy with Mosquitto 5cd25465 helpers.
 # Every netz endpoint receives std.Io from zio and the runners assert its
 # zio-std-io runtime identity.
 zig build interop-mqtt-mtls-openssl -Doptimize=ReleaseFast
 zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast
-# Build pinned Mosquitto 5cd25465 CLI clients and run both MQTT 3.1.1 and
-# MQTT 5 against netz, checking QoS 0/1/2 fanout, retained replay, and MQTT 5
+# Build pinned Mosquitto 5cd25465 CLI clients and run MQTT 3.1/3.1.1/5 against
+# netz, checking QoS 0/1/2 fanout, retained replay, and MQTT 5
 # Response Topic plus Correlation Data through libmosquitto's decoder.
 zig build interop-mqtt-mosquitto-clients -Doptimize=ReleaseFast
 # Build locked rumqttc 0.25.1 offline and independently exercise the same

@@ -65,7 +65,7 @@ fi
 port=$(free_port)
 "$server" \
   "--bind=127.0.0.1:$port" \
-  --connections=13 \
+  --connections=18 \
   --max-queued-deliveries=32 \
   --max-outgoing-inflight=16 \
   --max-packet-size=4096 \
@@ -107,6 +107,7 @@ run_version() {
   diff -u "$expected" "$output"
 }
 
+run_version mqtt31 mqttv31
 run_version mqtt311 mqttv311
 run_version mqtt5 mqttv5
 
@@ -141,4 +142,4 @@ diff -u "$work/properties.expected" "$work/properties.out"
 wait "$server_pid"
 server_pid=
 grep -Fq 'server_io=zio-std-io' "$work/server.log"
-echo "Mosquitto CLI client interop passed: source=$client_source version=$client_version protocols=mqtt311,mqtt5 qos=0,1,2 retained=true response-topic=true correlation-data=true client_io=libmosquitto server_io=zio-std-io"
+echo "Mosquitto CLI client interop passed: source=$client_source version=$client_version protocols=mqtt31,mqtt311,mqtt5 qos=0,1,2 retained=true response-topic=true correlation-data=true client_io=libmosquitto server_io=zio-std-io"
