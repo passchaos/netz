@@ -31,7 +31,7 @@ from mqtt_vectors import (
     will_delay_recovery,
 )
 
-BASE_SCENARIO_COUNT = 167
+BASE_SCENARIO_COUNT = 171
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
@@ -365,8 +365,20 @@ def mqtt31_duplicate_control_flags(executable: Path, mqtt_packets) -> None:
 
 def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
     # Direct wire ports of Mosquitto 21-proxy-v1-success.py and
-    # 21-proxy-v2-ipv4.py. Successful MQTT exchange after each header proves
-    # the proxy bytes were consumed rather than misparsed as CONNECT.
+    # 21-proxy-v2-ipv4.py / 21-proxy-v2-ipv6.py. Successful MQTT exchange
+    # after each header proves the proxy bytes were consumed rather than
+    # misparsed as CONNECT. The three oversized cases preserve the exact
+    # 501-byte IPv4/IPv6/Unix shapes from 21-proxy-v2-long-tlv.py and prove
+    # rejection does not consume an unbounded pre-CONNECT payload or poison
+    # the finite listener.
+    def proxy_v2_header(family_protocol: int, payload: bytes) -> bytes:
+        return (
+            b"\x0d\x0a\x0d\x0a\x00\x0d\x0aQUIT\x0a"
+            + bytes((0x21, family_protocol))
+            + len(payload).to_bytes(2, "big")
+            + payload
+        )
+
     with NetzBroker(
         executable, extra_args=("--proxy-protocol=1",)
     ) as broker:
@@ -382,26 +394,68 @@ def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
             sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
     with NetzBroker(
-        executable, extra_args=("--proxy-protocol=2",)
+        executable, connections=2, extra_args=("--proxy-protocol=2",)
     ) as broker:
-        with broker.connect() as sock:
-            address = (
+        addresses = (
+            (
+                0x11,
                 b"\xc0\x00\x02\x05"
                 + b"\x7f\x00\x00\x01"
-                + b"\x18\x83\x07\x5b"
-            )
-            sock.sendall(
-                b"\x0d\x0a\x0d\x0a\x00\x0d\x0aQUIT\x0a"
-                + b"\x21\x11"
-                + len(address).to_bytes(2, "big")
-                + address
-            )
-            connect_v5(sock, mqtt_packets, "proxy-v2")
-            sock.sendall(mqtt_packets.gen_pingreq())
+                + b"\x18\x83\x07\x5b",
+                "IPv4",
+            ),
+            (
+                0x21,
+                b"\x20\x01\x0d\xb8\x05\x06\x07\x08"
+                + b"\x09\x00\x00\x00\x00\x00\x00\x01"
+                + b"\x00" * 15
+                + b"\x01"
+                + b"\x18\x83\x00\x00",
+                "IPv6",
+            ),
+        )
+        for family_protocol, address, label in addresses:
+            with broker.connect() as sock:
+                sock.sendall(proxy_v2_header(family_protocol, address))
+                connect_v5(sock, mqtt_packets, f"proxy-v2-{label.lower()}")
+                sock.sendall(mqtt_packets.gen_pingreq())
+                expect_packet(
+                    sock, mqtt_packets.gen_pingresp(),
+                    f"PROXY v2 {label} PINGRESP",
+                )
+                sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+    with NetzBroker(
+        executable,
+        connections=4,
+        ignore_errors=True,
+        extra_args=("--proxy-protocol=2",),
+    ) as broker:
+        for family_protocol, label in (
+            (0x11, "IPv4"),
+            (0x21, "IPv6"),
+            (0x31, "Unix"),
+        ):
+            with broker.connect() as sock:
+                sock.sendall(proxy_v2_header(family_protocol, b"a" * 501))
+                try:
+                    trailing = sock.recv(1)
+                    if trailing:
+                        raise AssertionError(
+                            f"oversized PROXY v2 {label} received "
+                            f"{trailing.hex()}"
+                        )
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+        with broker.connect() as healthy:
+            healthy.sendall(proxy_v2_header(0x11, addresses[0][1]))
+            connect_v5(healthy, mqtt_packets, "after-oversized-proxy-v2")
+            healthy.sendall(mqtt_packets.gen_pingreq())
             expect_packet(
-                sock, mqtt_packets.gen_pingresp(), "PROXY v2 PINGRESP"
+                healthy, mqtt_packets.gen_pingresp(),
+                "healthy PINGRESP after oversized PROXY v2",
             )
-            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+            healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
 
 
 def assigned_client_identifier(

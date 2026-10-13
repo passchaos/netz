@@ -134,6 +134,10 @@ class SourceLockTests(unittest.TestCase):
                     "ff2c13c469c6ba35060a752c3cfb21b43556312c1fa4f1aca71e069697289b44",
                 "broker/03-publish-b2c-disconnect-qos2.py":
                     "4762f349ba73e77a20473a7930e39d9fcad80d316c4643d4793c46ded9020c3e",
+                "broker/03-publish-b2c-qos1-len.py":
+                    "1aa543556b11e7aaf4a88f804b091509c781df2e7475b39042f56e1aaa283982",
+                "broker/03-publish-b2c-qos2-len.py":
+                    "f098da5ac03dcd857c6aec9427cd8978d0e99d910d0111baefa25bb315fadc2f",
                 "broker/03-publish-c2b-disconnect-qos2.py":
                     "b4842048512fd9719abfec32074a6d055ca88c1979c2f0588e281c8e9c40e2e7",
                 "broker/03-publish-bad-flags.py":
@@ -218,6 +222,10 @@ class SourceLockTests(unittest.TestCase):
                     "07c5c8f9b94dc49239190b680e1c3f858ed987734d5c879a88531590e1583d53",
                 "broker/21-proxy-v2-ipv4.py":
                     "daf117e685ac994b45cce89c0c43269f3a799d2b0dd3ea2f358fb1fe2faab0c8",
+                "broker/21-proxy-v2-ipv6.py":
+                    "c918b204464775d1e6430b6b31f13e1a4488b40da6a2c6edd6f8e3fc5bec0d22",
+                "broker/21-proxy-v2-long-tlv.py":
+                    "40c392a92269836d6218e9a4694424b7f46c777cdcdeffb10437a3dcc62a28e2",
                 "broker/21-proxy-v2-websockets.py":
                     "de1ea836095867cec17fe21afbbcd29c7b9d9f05bf734d995914227119764c3f",
                 "broker/21-proxy-bad-version.py":
