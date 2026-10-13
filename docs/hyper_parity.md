@@ -1030,6 +1030,11 @@ The native vail-backed TCP transports now negotiate TLS 1.2 and TLS 1.3 with
 an explicit version policy. TLS 1.2 is limited to ECDHE+AEAD, requires Extended
 Master Secret and secure-renegotiation signaling, and is covered by HTTP/1 and
 HTTP/2 application round trips; QUIC/HTTP/3 remains TLS 1.3-only by protocol.
+The versioned stream server emits RFC 8446's compatibility ChangeCipherSpec
+between its cleartext ServerHello and encrypted TLS 1.3 flight. Modern
+OpenSSL/rustls/Vail clients ignore it, while Zig 0.16's standard TLS client uses
+it to activate pending handshake keys; HTTP/1 graceful shutdown, response-head
+timeout, and CONNECT-tunnel tests cover that cross-stack boundary.
 TLS 1.2 client-certificate selection honors CertificateRequest certificate
 types, signature algorithms, and acceptable CA distinguished names; P-521 is
 advertised by compatible servers, while a client with no suitable identity

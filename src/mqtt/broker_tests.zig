@@ -1946,6 +1946,7 @@ test "broker rejects an empty accepted protocol set" {
         error.InvalidProperty,
         Broker.init(allocator, threaded.io(), .{
             .accept = .{ .accepted_protocol_versions = .{
+                .v3_1 = false,
                 .v3_1_1 = false,
                 .v5 = false,
             } },

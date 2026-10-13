@@ -333,7 +333,7 @@ pub const Connection = struct {
             &established,
         );
         if (output.items.len != 0) {
-            try record_io.writeAll(io, stream, output.items);
+            try writeServerHandshakeOutput(io, stream, output.items);
             output.clearRetainingCapacity();
         }
         established = try finishHandshake(
@@ -798,7 +798,7 @@ fn finishHandshake(
             if (result.consumed > input.len) return error.ConnectionFailed;
             input = input[result.consumed..];
             if (output.items.len != 0) {
-                try record_io.writeAll(io, stream, output.items);
+                try writeServerHandshakeOutput(io, stream, output.items);
                 output.clearRetainingCapacity();
             }
             if (result.event) |event| switch (event) {
@@ -817,6 +817,48 @@ fn finishHandshake(
             if (input.len == 0 and result.consumed == 0) break;
         }
     }
+}
+
+/// TLS 1.3 permits a server compatibility ChangeCipherSpec immediately after
+/// ServerHello. Zig 0.16's standard TLS client still requires that signal
+/// before it activates pending handshake keys. Vail frames ServerHello as one
+/// cleartext record followed by encrypted application-data records, which
+/// gives this stream adapter an unambiguous insertion boundary. TLS 1.2 and
+/// HelloRetryRequest-only output retain their original bytes.
+fn writeServerHandshakeOutput(
+    io: std.Io,
+    stream: net.Stream,
+    bytes: []const u8,
+) Error!void {
+    if (bytes.len < vail.tls.record.header_len) {
+        return error.ConnectionFailed;
+    }
+    const first_payload_len = std.mem.readInt(u16, bytes[3..5], .big);
+    const first_len = std.math.add(
+        usize,
+        vail.tls.record.header_len,
+        first_payload_len,
+    ) catch return error.ConnectionFailed;
+    if (first_len > bytes.len) return error.ConnectionFailed;
+    const needs_compatibility_ccs =
+        bytes[0] == vail.tls.record.content_type_handshake and
+        first_len < bytes.len and
+        bytes[first_len] == vail.tls.record.content_type_application_data;
+    if (!needs_compatibility_ccs) {
+        return record_io.writeAll(io, stream, bytes);
+    }
+
+    const compatibility_ccs = [_]u8{
+        vail.tls.stream.content_type_change_cipher_spec,
+        0x03,
+        0x03,
+        0x00,
+        0x01,
+        0x01,
+    };
+    try record_io.writeAll(io, stream, bytes[0..first_len]);
+    try record_io.writeAll(io, stream, &compatibility_ccs);
+    try record_io.writeAll(io, stream, bytes[first_len..]);
 }
 
 fn randomP256(io: std.Io) (std.Io.RandomSecureError || error{InvalidSecretKey})![vail.tls.key_exchange.p256.secret_len]u8 {

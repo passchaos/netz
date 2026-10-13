@@ -777,6 +777,8 @@ Current protocol coverage includes:
   rotation, tamper/expiry enforcement, and a native seal/open benchmark,
   Vail-backed non-PSK TLS 1.3 server authentication with Certificate and
   Ed25519/ECDSA-P256/ECDSA-P384 CertificateVerify signing and verification,
+  stream-server compatibility ChangeCipherSpec emission after ServerHello for
+  Zig standard TLS clients while OpenSSL/rustls peers ignore it per RFC 8446,
   RSA-PSS/RSAE and RSA-PSS/PSS SHA-256/SHA-384/SHA-512 X.509
   CertificateVerify verification, pinned raw-key
   verification or an application X.509 trust-policy callback, transcript/signature tamper
