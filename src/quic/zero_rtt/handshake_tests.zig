@@ -4,23 +4,27 @@ const quic = @import("../mod.zig");
 const handshake = quic.handshake;
 
 test "QUIC integrated handshake accepts authenticated 0-RTT stream data" {
-    try runAcceptedEarlyData(.aes_128_gcm_sha256, false, false);
+    try runEarlyData(.aes_128_gcm_sha256, false, false, 1500, .accepted);
 }
 
 test "QUIC integrated handshake accepts ChaCha20 0-RTT and 1-RTT data" {
-    try runAcceptedEarlyData(.chacha20_poly1305_sha256, false, false);
+    try runEarlyData(.chacha20_poly1305_sha256, false, false, 1500, .accepted);
 }
 
 test "QUIC integrated handshake accepts AES-256 SHA-384 0-RTT and 1-RTT" {
-    try runAcceptedEarlyData(.aes_256_gcm_sha384, false, false);
+    try runEarlyData(.aes_256_gcm_sha384, false, false, 1500, .accepted);
 }
 
 test "QUIC integrated handshake preserves retransmitted 0-RTT packet numbers" {
-    try runAcceptedEarlyData(.aes_128_gcm_sha256, true, false);
+    try runEarlyData(.aes_128_gcm_sha256, true, false, 1500, .accepted);
 }
 
 test "QUIC integrated handshake retires socket-rejected 0-RTT packet number" {
-    try runAcceptedEarlyData(.aes_128_gcm_sha256, false, true);
+    try runEarlyData(.aes_128_gcm_sha256, false, true, 1500, .accepted);
+}
+
+test "QUIC ticket age skew rejects 0-RTT but resumes with PSK" {
+    try runEarlyData(.aes_128_gcm_sha256, false, false, 20_000, .rejected);
 }
 
 test "QUIC Version Negotiation reports prior 0-RTT offer as rejected" {
@@ -193,10 +197,12 @@ test "QUIC Version Negotiation reports prior 0-RTT offer as rejected" {
     try std.testing.expectEqual(.consumed, lease.state);
 }
 
-fn runAcceptedEarlyData(
+fn runEarlyData(
     cipher_suite: quic.tls_client_hello.CipherSuite,
     drop_first_server_flight: bool,
     reject_first_client_zero_rtt: bool,
+    server_now_ms: u64,
+    expected_status: quic.zero_rtt.handshake.Status,
 ) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -281,6 +287,7 @@ fn runAcceptedEarlyData(
         psk: [32]u8,
         psk_secret: quic.tls.secret.Secret,
         cipher_suite: quic.tls_client_hello.CipherSuite,
+        now_ms: u64,
         drop_first_server_flight: bool,
         err: ?anyerror = null,
         resumed: bool = false,
@@ -303,7 +310,7 @@ fn runAcceptedEarlyData(
                     .age_add = 17,
                     .issued_at_ms = 1000,
                     .lifetime_seconds = 3600,
-                    .now_ms = 1500,
+                    .now_ms = shared.now_ms,
                     .cipher_suite = shared.cipher_suite,
                 },
                 .early_data = .{
@@ -347,6 +354,7 @@ fn runAcceptedEarlyData(
             [_]u8{0} ** 32,
         .psk_secret = psk,
         .cipher_suite = cipher_suite,
+        .now_ms = server_now_ms,
         .drop_first_server_flight = drop_first_server_flight,
     };
     const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
@@ -394,18 +402,26 @@ fn runAcceptedEarlyData(
         established.connection.config.send_keys.suite,
     );
     try std.testing.expectEqual(
-        quic.zero_rtt.handshake.Status.accepted,
+        expected_status,
         established.early_data_status,
     );
     try std.testing.expect(shared.resumed);
     try std.testing.expectEqual(
-        quic.zero_rtt.handshake.Status.accepted,
+        expected_status,
         shared.early_data_status,
     );
-    try std.testing.expectEqualStrings(
-        "early request",
-        shared.early_data orelse return error.TestUnexpectedResult,
+    try std.testing.expectEqual(
+        @as(usize, if (expected_status == .accepted) 1 else 0),
+        replay_filter.count(),
     );
+    if (expected_status == .accepted) {
+        try std.testing.expectEqualStrings(
+            "early request",
+            shared.early_data orelse return error.TestUnexpectedResult,
+        );
+    } else {
+        try std.testing.expect(shared.early_data == null);
+    }
     try std.testing.expectEqual(.consumed, lease.state);
     const protected_early_data_packets =
         established.early_data_protected_packet_count;
@@ -435,14 +451,26 @@ fn runAcceptedEarlyData(
             ) != null,
         );
     }
-    try std.testing.expectEqual(
-        sent_early_data_packets,
-        established.connection.stats().sent_packet_stats.tracked_packets,
-    );
-    try std.testing.expectEqual(
-        sent_early_data_packets,
-        established.connection.stats().recovery_queue_stats.packet_number_copies,
-    );
+    if (expected_status == .accepted) {
+        try std.testing.expectEqual(
+            sent_early_data_packets,
+            established.connection.stats().sent_packet_stats.tracked_packets,
+        );
+        try std.testing.expectEqual(
+            sent_early_data_packets,
+            established.connection.stats().recovery_queue_stats.packet_number_copies,
+        );
+    } else {
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            established.connection.stats().sent_packet_stats.tracked_packets,
+        );
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            established.connection.pendingRecoveryCount(),
+        );
+        try std.testing.expect(established.connection.sendStreamStats(0) == null);
+    }
     // X25519MLKEM768 makes ClientHello exceed one 1200-byte Initial. Reaching
     // this assertion proves the server consumed the following standalone
     // 0-RTT datagram after cross-datagram Initial CRYPTO reassembly.

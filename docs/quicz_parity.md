@@ -1296,6 +1296,10 @@ The symmetric rejection path applies the same filtering before discarding the
 standalone 0-RTT datagram, so a lost first early packet followed by PTO's
 Initial-then-0-RTT sequence still completes PSK resumption instead of treating
 the retransmitted Initial as malformed early data.
+Ticket-age skew beyond the configured tolerance likewise rejects and discards
+0-RTT without rejecting an otherwise live, binder-authenticated PSK: the
+connection continues as a resumed 1-RTT handshake, and the rejected early
+request never reaches replay marking or application stream state.
 If Version Negotiation restarts the connection, the original 0-RTT packet is
 never replayed under the replacement version and its old-key packet numbers do
 not advance the new application space; the client nevertheless retains an

@@ -2626,16 +2626,21 @@ fn acceptInternal(
                     ),
                     .sm3 => return error.InvalidClientHello,
                 }
-                try quic.resumption.tls_psk.validateTicketAge(offer, .{
-                    .age_add = configured_psk.age_add,
-                    .issued_at_ms = configured_psk.issued_at_ms,
-                    .lifetime_seconds = configured_psk.lifetime_seconds,
-                    .now_ms = configured_psk.now_ms,
-                    .tolerance_ms = configured_psk.age_tolerance_ms,
-                });
+                const age_within_tolerance =
+                    try quic.resumption.tls_psk.ticketAgeWithinTolerance(
+                        offer,
+                        .{
+                            .age_add = configured_psk.age_add,
+                            .issued_at_ms = configured_psk.issued_at_ms,
+                            .lifetime_seconds = configured_psk.lifetime_seconds,
+                            .now_ms = configured_psk.now_ms,
+                            .tolerance_ms = configured_psk.age_tolerance_ms,
+                        },
+                    );
                 selected_psk = configured_secret;
                 const early_data_policy = options.early_data;
                 if (client_offered_early_data and
+                    age_within_tolerance and
                     effective_options.retry_source_connection_id.len == 0 and
                     early_data_policy != null and
                     early_data_policy.?.accept and
