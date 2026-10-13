@@ -10,12 +10,23 @@ const connect_headers = @import("runtime/connect/headers.zig");
 const datagram_codec = @import("runtime/datagram/codec.zig");
 const datagram_owned = @import("runtime/datagram/owned.zig");
 const datagram_send = @import("runtime/datagram/send.zig");
+const endpoint_client = @import("runtime/endpoint_client.zig");
 const session_control = @import("runtime/session_control.zig");
 const protected_control =
     @import("runtime/protected_session_control.zig");
 const stream_batch = @import("runtime/stream/batch.zig");
 const stream_association = @import("runtime/stream_association.zig");
 const development_stream = @import("runtime/development_stream.zig");
+
+pub const EndpointClient = endpoint_client.Client;
+pub const EndpointClientError = endpoint_client.Error;
+pub const EndpointClientTimeoutError = endpoint_client.TimeoutError;
+pub const EndpointClientSession = endpoint_client.Session;
+pub const EndpointClientOptions = endpoint_client.Options;
+pub const EndpointClientSessionOptions = endpoint_client.SessionOptions;
+pub const EndpointClientOpenResult = endpoint_client.OpenResult;
+pub const EndpointClientEvent = endpoint_client.Event;
+pub const EndpointClientRejection = endpoint_client.Rejection;
 
 test "WebTransport sessions keep inbound and outbound close storage compact" {
     if (@sizeOf(usize) == 8) {
@@ -89,6 +100,7 @@ test {
     _ = @import("runtime/connect/admission_tests.zig");
     _ = @import("runtime/connect/capacity_tests.zig");
     _ = @import("runtime/endpoint_dispatcher_tests.zig");
+    _ = @import("runtime/endpoint_client_tests.zig");
     _ = @import("runtime/endpoint_server_tests.zig");
     _ = @import("runtime/development_lifecycle_tests.zig");
     _ = @import("runtime/development_stream_tests.zig");

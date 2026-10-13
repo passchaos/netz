@@ -1220,7 +1220,11 @@ Current protocol coverage includes:
   per-connection Session capacity: connection+Session composite routing keeps
   CONNECT control, DATAGRAM, associated streams and CLOSE metadata isolated,
   while excess CONNECTs receive `H3_REQUEST_REJECTED`; the default and every
-  standalone owning adapter remain honest one-Session endpoints,
+  standalone owning adapter remain honest one-Session endpoints. The matching
+  authenticated `EndpointClient` owns one H3 reader while stable per-Session
+  objects share global QUIC stream IDs, preserve bounded non-2xx admission
+  metadata, enforce both peer SETTINGS and a local Session cap, and expose
+  targeted DATAGRAM, associated-stream, CLOSE and removal operations,
   modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with
