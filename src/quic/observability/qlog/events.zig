@@ -85,6 +85,12 @@ pub const Frame = union(enum) {
         error_code: u64,
         final_size: u64,
     },
+    reset_stream_at: struct {
+        stream_id: u64,
+        error_code: u64,
+        final_size: u64,
+        reliable_size: u64,
+    },
     stop_sending: struct {
         stream_id: u64,
         error_code: u64,

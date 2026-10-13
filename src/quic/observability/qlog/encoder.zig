@@ -230,6 +230,13 @@ fn writeFrame(json: *std.json.Stringify, frame_view: events.Frame) Error!void {
             try field(json, "error_code", reset.error_code);
             try field(json, "final_size", reset.final_size);
         },
+        .reset_stream_at => |reset| {
+            try field(json, "frame_type", "reset_stream_at");
+            try field(json, "stream_id", reset.stream_id);
+            try field(json, "error_code", reset.error_code);
+            try field(json, "final_size", reset.final_size);
+            try field(json, "reliable_size", reset.reliable_size);
+        },
         .stop_sending => |stop| {
             try field(json, "frame_type", "stop_sending");
             try field(json, "stream_id", stop.stream_id);

@@ -36,12 +36,12 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
             @sizeOf(AcceptedProtectedSession),
         );
         try std.testing.expectEqual(
-            @as(usize, 17_336),
+            @as(usize, 17_344),
             @sizeOf(AcceptedHandshakeSession),
         );
         try std.testing.expectEqual(@as(usize, 7_352), @sizeOf(ClientSession));
         try std.testing.expectEqual(
-            @as(usize, 17_880),
+            @as(usize, 17_888),
             @sizeOf(HandshakeClientSession),
         );
         try std.testing.expectEqual(
@@ -2648,6 +2648,25 @@ pub const EndpointAcceptedSession = struct {
             &self.streams,
             stream_id,
             application_error_code,
+        );
+        try self.refreshTimer();
+        try result;
+    }
+
+    /// Attempt RESET_STREAM_AT once. `reliable_size` counts WebTransport
+    /// application bytes and excludes the stream association prefix.
+    pub fn resetStreamReliably(
+        self: *EndpointAcceptedSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+    ) EndpointServerError!void {
+        const result = incremental_stream.resetReliablyOnce(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            reliable_size,
         );
         try self.refreshTimer();
         try result;
@@ -6295,6 +6314,66 @@ pub const AcceptedHandshakeSession = struct {
             &self.streams,
             stream_id,
             application_error_code,
+            deadline,
+        );
+    }
+
+    /// Reset after reliably delivering `reliable_size` WebTransport
+    /// application bytes; the stream association prefix is accounted for
+    /// internally.
+    pub fn resetStreamReliably(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+    ) Error!void {
+        try self.ensureApplicationSendOpen();
+        return incremental_stream.resetReliably(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            reliable_size,
+        );
+    }
+
+    pub fn resetStreamReliablyWithTimeout(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetStreamReliablyWithDeadline(
+            stream_id,
+            application_error_code,
+            reliable_size,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn resetStreamReliablyWithDeadline(
+        self: *AcceptedHandshakeSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        try self.ensureApplicationSendOpen();
+        return incremental_stream.resetReliablyWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            reliable_size,
             deadline,
         );
     }
@@ -9957,6 +10036,78 @@ pub const HandshakeClientSession = struct {
         );
     }
 
+    /// Reset after reliably delivering `reliable_size` WebTransport
+    /// application bytes; the stream association prefix is accounted for
+    /// internally.
+    pub fn resetStreamReliably(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+    ) Error!void {
+        try self.control.ensureOpen();
+        const result = if (self.dispatcher != null)
+            incremental_stream.resetReliablyOnce(
+                &self.h3.established.connection,
+                &self.streams,
+                stream_id,
+                application_error_code,
+                reliable_size,
+            )
+        else
+            incremental_stream.resetReliably(
+                &self.h3.established.connection,
+                &self.streams,
+                stream_id,
+                application_error_code,
+                reliable_size,
+            );
+        try self.refreshDispatcherTimer();
+        try result;
+    }
+
+    pub fn resetStreamReliablyWithTimeout(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetStreamReliablyWithDeadline(
+            stream_id,
+            application_error_code,
+            reliable_size,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    pub fn resetStreamReliablyWithDeadline(
+        self: *HandshakeClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        if (self.dispatcher != null) return error.InvalidDispatcherState;
+        try self.control.ensureOpen();
+        return incremental_stream.resetReliablyWithDeadline(
+            &self.h3.established.connection,
+            &self.streams,
+            stream_id,
+            application_error_code,
+            reliable_size,
+            deadline,
+        );
+    }
+
     pub fn stopStream(
         self: *HandshakeClientSession,
         stream_id: u62,
@@ -13089,6 +13240,49 @@ pub const StatefulProtectedClientSession = struct {
         return self.session.resetStreamWithDeadline(
             stream_id,
             application_error_code,
+            deadline,
+        );
+    }
+
+    pub fn resetStreamReliably(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+    ) Error!void {
+        return self.session.resetStreamReliably(
+            stream_id,
+            application_error_code,
+            reliable_size,
+        );
+    }
+
+    pub fn resetStreamReliablyWithTimeout(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!void {
+        return self.session.resetStreamReliablyWithTimeout(
+            stream_id,
+            application_error_code,
+            reliable_size,
+            timeout,
+        );
+    }
+
+    pub fn resetStreamReliablyWithDeadline(
+        self: *StatefulProtectedClientSession,
+        stream_id: u62,
+        application_error_code: u32,
+        reliable_size: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!void {
+        return self.session.resetStreamReliablyWithDeadline(
+            stream_id,
+            application_error_code,
+            reliable_size,
             deadline,
         );
     }

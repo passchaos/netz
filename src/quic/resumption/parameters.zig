@@ -1,8 +1,9 @@
 //! QUIC transport parameters that may be remembered for 0-RTT.
 //!
-//! RFC 9000 Section 7.4.1 deliberately excludes identity, ACK timing, reset,
-//! and preferred-address parameters. RFC 9221 additionally permits remembering
-//! `max_datagram_frame_size`.
+//! RFC 9000 Section 7.4.1 deliberately excludes identity, ACK timing,
+//! stateless-reset, and preferred-address parameters. RFC 9221 additionally
+//! permits remembering `max_datagram_frame_size`, while reliable stream reset
+//! requires remembering whether `reset_stream_at` was advertised.
 
 const std = @import("std");
 const quic = @import("../mod.zig");
@@ -10,6 +11,7 @@ const quic = @import("../mod.zig");
 pub const ValidationError = error{
     ReducedTransportParameter,
     MissingRememberedDatagramSupport,
+    MissingRememberedResetStreamAtSupport,
 };
 
 pub const Snapshot = struct {
@@ -21,6 +23,7 @@ pub const Snapshot = struct {
     initial_max_streams_bidi: u64,
     initial_max_streams_uni: u64,
     max_datagram_frame_size: ?u64 = null,
+    reset_stream_at: bool = false,
 
     pub fn fromTransportParameters(params: quic.TransportParameters) Snapshot {
         return .{
@@ -32,6 +35,7 @@ pub const Snapshot = struct {
             .initial_max_streams_bidi = params.initial_max_streams_bidi,
             .initial_max_streams_uni = params.initial_max_streams_uni,
             .max_datagram_frame_size = params.max_datagram_frame_size,
+            .reset_stream_at = params.reset_stream_at,
         };
     }
 
@@ -52,6 +56,7 @@ pub const Snapshot = struct {
         params.initial_max_streams_bidi = self.initial_max_streams_bidi;
         params.initial_max_streams_uni = self.initial_max_streams_uni;
         params.max_datagram_frame_size = self.max_datagram_frame_size;
+        params.reset_stream_at = self.reset_stream_at;
     }
 
     /// RFC 9000 §7.4.1 requires the server's handshake parameters to be at
@@ -84,6 +89,9 @@ pub const Snapshot = struct {
                 return error.ReducedTransportParameter;
             }
         }
+        if (self.reset_stream_at and !current.reset_stream_at) {
+            return error.MissingRememberedResetStreamAtSupport;
+        }
     }
 };
 
@@ -104,6 +112,7 @@ test "0-RTT snapshot remembers only permitted transport parameters" {
         .disable_active_migration = true,
         .active_connection_id_limit = 8,
         .max_datagram_frame_size = 1200,
+        .reset_stream_at = true,
     };
     const snapshot = Snapshot.fromTransportParameters(original);
     var restored = quic.TransportParameters{};
@@ -112,6 +121,7 @@ test "0-RTT snapshot remembers only permitted transport parameters" {
     try std.testing.expectEqual(@as(u64, 100), restored.initial_max_data);
     try std.testing.expectEqual(@as(u64, 8), restored.active_connection_id_limit);
     try std.testing.expectEqual(@as(?u64, 1200), restored.max_datagram_frame_size);
+    try std.testing.expect(restored.reset_stream_at);
     try std.testing.expect(restored.original_destination_connection_id == null);
     try std.testing.expect(restored.stateless_reset_token == null);
     try std.testing.expectEqual(@as(u64, 0), restored.max_idle_timeout);
@@ -136,6 +146,7 @@ test "0-RTT snapshot rejects reduced and removed parameters" {
         .initial_max_streams_bidi = 5,
         .initial_max_streams_uni = 6,
         .max_datagram_frame_size = 1200,
+        .reset_stream_at = true,
     };
     const baseline = quic.TransportParameters{
         .active_connection_id_limit = 4,
@@ -146,6 +157,7 @@ test "0-RTT snapshot rejects reduced and removed parameters" {
         .initial_max_streams_bidi = 5,
         .initial_max_streams_uni = 6,
         .max_datagram_frame_size = 1200,
+        .reset_stream_at = true,
     };
     try snapshot.validateAfterEarlyDataAccepted(baseline);
 
@@ -176,5 +188,11 @@ test "0-RTT snapshot rejects reduced and removed parameters" {
     try std.testing.expectError(
         error.MissingRememberedDatagramSupport,
         snapshot.validateAfterEarlyDataAccepted(removed_datagram),
+    );
+    var removed_reset_stream_at = baseline;
+    removed_reset_stream_at.reset_stream_at = false;
+    try std.testing.expectError(
+        error.MissingRememberedResetStreamAtSupport,
+        snapshot.validateAfterEarlyDataAccepted(removed_reset_stream_at),
     );
 }

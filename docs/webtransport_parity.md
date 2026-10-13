@@ -369,6 +369,13 @@ same bounded contract from the QUIC connection through both standalone
 WebTransport endpoint roles and the stateful protected client facade. Invalid
 or expired deadlines consume no packet number and leave both transport and
 WebTransport stop state uncommitted; a later retry sends the exact mapped code.
+Negotiated `RESET_STREAM_AT` adds partial-reliability cancellation across the
+same session facades. Its public `reliable_size` counts application bytes rather
+than the hidden WebTransport association prefix; the adapter translates that
+to the QUIC offset and rejects prefixes that have not reached the socket.
+Receive polling delivers the complete reliable prefix before the one-shot reset
+event, waits across reordered gaps, ignores reordered Reliable Size increases,
+and never lets automatic abandoned-stream cleanup reclaim the prefix early.
 After STOP_SENDING reaches the socket, standalone sessions discard any
 contiguous receive bytes already buffered for that direction and return only
 connection-level credit with MAX_DATA. They deliberately do not enlarge the

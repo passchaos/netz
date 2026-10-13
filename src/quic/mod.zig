@@ -507,6 +507,8 @@ pub const TransportParameterId = enum(u64) {
     max_datagram_frame_size = 0x20,
     grease_quic_bit = 0x2ab2,
     min_ack_delay = 0xff04de1b,
+    /// draft-ietf-quic-reliable-stream-reset: support for RESET_STREAM_AT.
+    reset_stream_at = 0x1d,
     _,
 };
 
@@ -601,6 +603,9 @@ pub const TransportParameters = struct {
     retry_source_connection_id: ?[]const u8 = null,
     version_information: ?VersionInformation = null,
     max_datagram_frame_size: ?u64 = null,
+    /// Support for receiving RESET_STREAM_AT frames. Presence is encoded as
+    /// an empty transport-parameter value.
+    reset_stream_at: bool = false,
     /// RFC 9287 support advertisement. Presence is encoded as an empty value.
     grease_quic_bit: bool = false,
     min_ack_delay: ?u64 = null,
@@ -622,6 +627,7 @@ pub const practical_transport_parameters = TransportParameters{
     .initial_max_streams_uni = 100,
     .active_connection_id_limit = 4,
     .max_datagram_frame_size = 65_535,
+    .reset_stream_at = true,
     // Match the timer granularity advertised by Quinn. Presence negotiates
     // draft ACK_FREQUENCY support; ordinary ACK behavior remains unchanged
     // until an authenticated request arrives.
@@ -676,6 +682,14 @@ pub fn encodeTransportParametersForSource(
         try encodeVersionInformationTransportParameter(list, allocator, version_information);
     }
     if (params.max_datagram_frame_size) |size| try encodeIntegerTransportParameter(list, allocator, .max_datagram_frame_size, size);
+    if (params.reset_stream_at) {
+        try encodeTransportParameter(
+            list,
+            allocator,
+            @intFromEnum(TransportParameterId.reset_stream_at),
+            &.{},
+        );
+    }
     if (params.grease_quic_bit) {
         try encodeTransportParameter(
             list,
@@ -820,6 +834,9 @@ pub fn parseTransportParametersTyped(
             params.version_information = try parseVersionInformation(value);
         } else if (id == @intFromEnum(TransportParameterId.max_datagram_frame_size)) {
             params.max_datagram_frame_size = try parseTransportInteger(.max_datagram_frame_size, value);
+        } else if (id == @intFromEnum(TransportParameterId.reset_stream_at)) {
+            if (value.len != 0) return error.InvalidTransportParameterLength;
+            params.reset_stream_at = true;
         } else if (id == @intFromEnum(TransportParameterId.grease_quic_bit)) {
             if (value.len != 0) return error.InvalidTransportParameterLength;
             params.grease_quic_bit = true;
@@ -1146,6 +1163,7 @@ pub const FrameType = enum(u64) {
     connection_close_app = 0x1d,
     handshake_done = 0x1e,
     immediate_ack = 0x1f,
+    reset_stream_at = 0x24,
     datagram = 0x30,
     datagram_len = 0x31,
     ack_frequency = 0xaf,
@@ -1178,6 +1196,7 @@ pub const FrameType = enum(u64) {
             @intFromEnum(FrameType.connection_close_app),
             @intFromEnum(FrameType.handshake_done),
             @intFromEnum(FrameType.immediate_ack),
+            @intFromEnum(FrameType.reset_stream_at),
             @intFromEnum(FrameType.datagram),
             @intFromEnum(FrameType.datagram_len),
             @intFromEnum(FrameType.ack_frequency),
@@ -1218,6 +1237,13 @@ pub const ResetStreamFrame = struct {
     stream_id: u64,
     application_error_code: u64,
     final_size: u64,
+};
+
+pub const ResetStreamAtFrame = struct {
+    stream_id: u64,
+    application_error_code: u64,
+    final_size: u64,
+    reliable_size: u64,
 };
 
 pub const StopSendingFrame = struct {
@@ -1310,6 +1336,7 @@ pub const Frame = union(enum) {
     ping: void,
     ack: AckFrame,
     reset_stream: ResetStreamFrame,
+    reset_stream_at: ResetStreamAtFrame,
     stop_sending: StopSendingFrame,
     new_token: NewTokenFrame,
     crypto: CryptoFrame,
@@ -1339,6 +1366,16 @@ pub const Frame = union(enum) {
             .ping => 1,
             .ack => |ack| try ackFrameWireLen(ack),
             .reset_stream => |reset| try tripleVarintFrameWireLen(@intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size),
+            .reset_stream_at => |reset| blk: {
+                if (reset.reliable_size > reset.final_size) return error.InvalidFrame;
+                break :blk try quadrupleVarintFrameWireLen(
+                    @intFromEnum(FrameType.reset_stream_at),
+                    reset.stream_id,
+                    reset.application_error_code,
+                    reset.final_size,
+                    reset.reliable_size,
+                );
+            },
             .stop_sending => |stop| try doubleVarintFrameWireLen(@intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code),
             .new_token => |new_token| blk: {
                 if (new_token.token.len == 0) return error.InvalidFrame;
@@ -1435,6 +1472,17 @@ pub const Frame = union(enum) {
             .ack => |ack| try writeAckFrameAssumeCapacity(list, ack),
             .reset_stream => |reset| {
                 try writeTripleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.reset_stream), reset.stream_id, reset.application_error_code, reset.final_size);
+            },
+            .reset_stream_at => |reset| {
+                if (reset.reliable_size > reset.final_size) return error.InvalidFrame;
+                try writeQuadrupleVarintFrameAssumeCapacity(
+                    list,
+                    @intFromEnum(FrameType.reset_stream_at),
+                    reset.stream_id,
+                    reset.application_error_code,
+                    reset.final_size,
+                    reset.reliable_size,
+                );
             },
             .stop_sending => |stop| {
                 try writeDoubleVarintFrameAssumeCapacity(list, @intFromEnum(FrameType.stop_sending), stop.stream_id, stop.application_error_code);
@@ -1574,6 +1622,22 @@ fn tripleVarintFrameWireLen(frame_type: u64, first: u64, second: u64, third: u64
     return addWireLen(len, try varint.length(third));
 }
 
+fn quadrupleVarintFrameWireLen(
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    fourth: u64,
+) Error!usize {
+    const len = try tripleVarintFrameWireLen(
+        frame_type,
+        first,
+        second,
+        third,
+    );
+    return addWireLen(len, try varint.length(fourth));
+}
+
 fn singleVarintPayloadFrameWireLen(frame_type: u64, value: u64, payload_len: usize) Error!usize {
     const len = try singleVarintFrameWireLen(frame_type, value);
     return addWireLen(len, payload_len);
@@ -1664,6 +1728,7 @@ pub fn frameAllowedInPacketType(frame: Frame, packet_type: FramePacketType) bool
             .padding,
             .ping,
             .reset_stream,
+            .reset_stream_at,
             .stop_sending,
             .stream,
             .max_data,
@@ -1844,6 +1909,17 @@ fn parseFrameAfterType(allocator: ?std.mem.Allocator, frame_type: u64, cursor: *
             .application_error_code = try varint.decode(cursor),
             .final_size = try varint.decode(cursor),
         } };
+    }
+
+    if (frame_type == @intFromEnum(FrameType.reset_stream_at)) {
+        const reset = ResetStreamAtFrame{
+            .stream_id = try varint.decode(cursor),
+            .application_error_code = try varint.decode(cursor),
+            .final_size = try varint.decode(cursor),
+            .reliable_size = try varint.decode(cursor),
+        };
+        if (reset.reliable_size > reset.final_size) return error.InvalidFrame;
+        return .{ .reset_stream_at = reset };
     }
 
     if (frame_type == @intFromEnum(FrameType.stop_sending)) {
@@ -2276,6 +2352,26 @@ fn writeTripleVarintFrameAssumeCapacityWithLens(
     varint.encodeWithLenAssumeCapacity(list, first, first_len);
     varint.encodeWithLenAssumeCapacity(list, second, second_len);
     varint.encodeWithLenAssumeCapacity(list, third, third_len);
+}
+
+fn writeQuadrupleVarintFrameAssumeCapacity(
+    list: *std.ArrayList(u8),
+    frame_type: u64,
+    first: u64,
+    second: u64,
+    third: u64,
+    fourth: u64,
+) Error!void {
+    const first_len = try varint.length(first);
+    const second_len = try varint.length(second);
+    const third_len = try varint.length(third);
+    const fourth_len = try varint.length(fourth);
+    std.debug.assert(frame_type <= 63);
+    list.appendAssumeCapacity(@intCast(frame_type));
+    varint.encodeWithLenAssumeCapacity(list, first, first_len);
+    varint.encodeWithLenAssumeCapacity(list, second, second_len);
+    varint.encodeWithLenAssumeCapacity(list, third, third_len);
+    varint.encodeWithLenAssumeCapacity(list, fourth, fourth_len);
 }
 
 fn writeSingleVarintPayloadFrame(
@@ -2998,6 +3094,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
             .available_versions_wire = &available_versions_wire,
         },
         .max_datagram_frame_size = 1200,
+        .reset_stream_at = true,
         .grease_quic_bit = true,
         .min_ack_delay = 1000,
     };
@@ -3014,6 +3111,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try std.testing.expectEqual(@as(u64, 50), decoded.max_ack_delay);
     try std.testing.expectEqual(@as(u64, 4), decoded.active_connection_id_limit);
     try std.testing.expectEqual(@as(?u64, 1200), decoded.max_datagram_frame_size);
+    try std.testing.expect(decoded.reset_stream_at);
     try std.testing.expect(decoded.grease_quic_bit);
     try std.testing.expectEqual(@as(?u64, 1000), decoded.min_ack_delay);
     try std.testing.expectEqualSlices(u8, &client_cid, decoded.initial_source_connection_id.?);
@@ -3079,6 +3177,23 @@ test "QUIC typed transport parameters roundtrip and validate" {
         parseTransportParametersTyped(
             allocator,
             non_empty_grease_bit.items,
+            .client,
+        ),
+    );
+
+    var non_empty_reset_stream_at: std.ArrayList(u8) = .empty;
+    defer non_empty_reset_stream_at.deinit(allocator);
+    try encodeTransportParameter(
+        &non_empty_reset_stream_at,
+        allocator,
+        @intFromEnum(TransportParameterId.reset_stream_at),
+        &.{1},
+    );
+    try std.testing.expectError(
+        error.InvalidTransportParameterLength,
+        parseTransportParametersTyped(
+            allocator,
+            non_empty_reset_stream_at.items,
             .client,
         ),
     );
@@ -3589,6 +3704,49 @@ test "QUIC stream reset control frames write fixed frame type bytes" {
     try std.testing.expectEqual(@as(u64, 99), parsed.frame.reset_stream.final_size);
 
     encoded.clearRetainingCapacity();
+    const reset_stream_at = Frame{ .reset_stream_at = .{
+        .stream_id = 4,
+        .application_error_code = 7,
+        .final_size = 99,
+        .reliable_size = 63,
+    } };
+    try reset_stream_at.write(&encoded, allocator);
+    try std.testing.expectEqual(
+        @as(u8, @intFromEnum(FrameType.reset_stream_at)),
+        encoded.items[0],
+    );
+    try std.testing.expectEqual(encoded.items.len, try reset_stream_at.wireLen());
+    parsed = try parseFrame(encoded.items);
+    try std.testing.expectEqual(@as(u64, 4), parsed.frame.reset_stream_at.stream_id);
+    try std.testing.expectEqual(
+        @as(u64, 7),
+        parsed.frame.reset_stream_at.application_error_code,
+    );
+    try std.testing.expectEqual(@as(u64, 99), parsed.frame.reset_stream_at.final_size);
+    try std.testing.expectEqual(@as(u64, 63), parsed.frame.reset_stream_at.reliable_size);
+    try std.testing.expect(frameAllowedInPacketType(reset_stream_at, .zero_rtt));
+    try std.testing.expect(frameAllowedInPacketType(reset_stream_at, .one_rtt));
+    try std.testing.expect(!frameAllowedInPacketType(reset_stream_at, .handshake));
+
+    try std.testing.expectError(
+        error.InvalidFrame,
+        (Frame{ .reset_stream_at = .{
+            .stream_id = 4,
+            .application_error_code = 7,
+            .final_size = 62,
+            .reliable_size = 63,
+        } }).wireLen(),
+    );
+
+    encoded.clearRetainingCapacity();
+    try varint.encode(&encoded, allocator, @intFromEnum(FrameType.reset_stream_at));
+    try varint.encode(&encoded, allocator, 4);
+    try varint.encode(&encoded, allocator, 7);
+    try varint.encode(&encoded, allocator, 62);
+    try varint.encode(&encoded, allocator, 63);
+    try std.testing.expectError(error.InvalidFrame, parseFrame(encoded.items));
+
+    encoded.clearRetainingCapacity();
     const stop_sending = Frame{ .stop_sending = .{
         .stream_id = 4,
         .application_error_code = 7,
@@ -3784,6 +3942,7 @@ test "QUIC frame wire lengths match encoders for every variant" {
             .ecn_counts = .{ .ect0_count = 3, .ect1_count = 2, .ecn_ce_count = 1 },
         } },
         .{ .reset_stream = .{ .stream_id = 4, .application_error_code = 7, .final_size = 99 } },
+        .{ .reset_stream_at = .{ .stream_id = 4, .application_error_code = 7, .final_size = 99, .reliable_size = 63 } },
         .{ .stop_sending = .{ .stream_id = 4, .application_error_code = 7 } },
         .{ .new_token = .{ .token = "token" } },
         .{ .crypto = .{ .offset = 2, .data = "crypto" } },

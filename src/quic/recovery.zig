@@ -319,10 +319,10 @@ pub const Queue = struct {
                 const parsed = quic.parseFrame(payload[pos..]) catch
                     return true;
                 if (reset_only) {
-                    if (parsed.frame == .reset_stream and
-                        parsed.frame.reset_stream.stream_id == stream_id)
-                    {
-                        return true;
+                    switch (parsed.frame) {
+                        .reset_stream => |reset| if (reset.stream_id == stream_id) return true,
+                        .reset_stream_at => |reset| if (reset.stream_id == stream_id) return true,
+                        else => {},
                     }
                 } else {
                     if (parsed.frame == .stream and
@@ -343,7 +343,37 @@ pub const Queue = struct {
     /// place so unrelated reliable frames retain their packet group and ACK
     /// identity without another allocation.
     pub fn abandonStreamData(self: *Queue, stream_id: u64) usize {
-        return self.abandonStreamFrames(stream_id, .data);
+        return self.abandonStreamFrames(stream_id, .data, 0);
+    }
+
+    /// Retain only STREAM frames that can contribute to the reliable prefix
+    /// of RESET_STREAM_AT. A frame crossing the boundary is retained whole;
+    /// retransmitting the small suffix is permitted and avoids rewriting
+    /// recovery payloads in place.
+    pub fn abandonStreamDataAfter(
+        self: *Queue,
+        stream_id: u64,
+        reliable_size: u64,
+    ) usize {
+        return self.abandonStreamFrames(
+            stream_id,
+            .data_after,
+            reliable_size,
+        );
+    }
+
+    /// Drop reset signals superseded by a smaller Reliable Size. The newly
+    /// submitted smallest reset remains tracked and therefore retransmittable.
+    pub fn abandonStreamResetsAbove(
+        self: *Queue,
+        stream_id: u64,
+        reliable_size: u64,
+    ) usize {
+        return self.abandonStreamFrames(
+            stream_id,
+            .reset_above,
+            reliable_size,
+        );
     }
 
     /// Drop every stream-scoped frame that has become obsolete once both
@@ -352,7 +382,7 @@ pub const Queue = struct {
         self: *Queue,
         stream_id: u64,
     ) usize {
-        return self.abandonStreamFrames(stream_id, .closed);
+        return self.abandonStreamFrames(stream_id, .closed, 0);
     }
 
     /// Whether recovery still owns data whose delivery matters to a completed
@@ -378,12 +408,18 @@ pub const Queue = struct {
         return false;
     }
 
-    const AbandonStreamFrames = enum { data, closed };
+    const AbandonStreamFrames = enum {
+        data,
+        data_after,
+        reset_above,
+        closed,
+    };
 
     fn abandonStreamFrames(
         self: *Queue,
         stream_id: u64,
         mode: AbandonStreamFrames,
+        reliable_size: u64,
     ) usize {
         var index: usize = 0;
         var removed_frames: usize = 0;
@@ -396,9 +432,17 @@ pub const Queue = struct {
                 const parsed = quic.parseFrame(payload[read..]) catch
                     unreachable;
                 const remove = switch (parsed.frame) {
-                    .stream => |stream| stream.stream_id == stream_id,
+                    .stream => |stream| stream.stream_id == stream_id and switch (mode) {
+                        .data, .closed => true,
+                        .data_after => stream.offset >= reliable_size,
+                        .reset_above => false,
+                    },
                     .reset_stream => |reset| mode == .closed and
                         reset.stream_id == stream_id,
+                    .reset_stream_at => |reset| reset.stream_id == stream_id and
+                        (mode == .closed or
+                            (mode == .reset_above and
+                                reset.reliable_size > reliable_size)),
                     .stop_sending => |stop| mode == .closed and
                         stop.stream_id == stream_id,
                     .max_stream_data => |maximum| mode == .closed and
@@ -930,17 +974,25 @@ test "QUIC recovery queue identifies pending stream terminal frames" {
         .application_error_code = 42,
         .final_size = 17,
     } }).write(&payload, allocator);
+    try (quic.Frame{ .reset_stream_at = .{
+        .stream_id = 12,
+        .application_error_code = 43,
+        .final_size = 19,
+        .reliable_size = 11,
+    } }).write(&payload, allocator);
 
     _ = try queue.trackSent(11, payload.items);
     try std.testing.expect(queue.hasPendingStreamData(4));
     try std.testing.expect(!queue.hasPendingStreamData(8));
     try std.testing.expect(queue.hasPendingResetStream(8));
+    try std.testing.expect(queue.hasPendingResetStream(12));
     try std.testing.expect(!queue.hasPendingResetStream(4));
     try std.testing.expect(!queue.hasPendingStreamData(12));
 
     try std.testing.expect(queue.acknowledgePacketNumber(11));
     try std.testing.expect(!queue.hasPendingStreamData(4));
     try std.testing.expect(!queue.hasPendingResetStream(8));
+    try std.testing.expect(!queue.hasPendingResetStream(12));
 }
 
 test "QUIC recovery abandons one stream without losing sibling frames" {
@@ -982,6 +1034,45 @@ test "QUIC recovery abandons one stream without losing sibling frames" {
     try std.testing.expectEqual(@as(usize, 1), queue.pendingCount());
     const ping = try quic.parseFrame(queue.packetNumberCandidate(7).?.payload);
     try std.testing.expect(ping.frame == .ping);
+}
+
+test "QUIC recovery retains only frames needed by reliable reset prefix" {
+    const allocator = std.testing.allocator;
+    var queue = Queue.init(allocator);
+    defer queue.deinit();
+
+    var payload: std.ArrayList(u8) = .empty;
+    defer payload.deinit(allocator);
+    for ([_]quic.Frame{
+        .{ .stream = .{ .stream_id = 4, .offset = 0, .data = "abc" } },
+        .{ .stream = .{ .stream_id = 4, .offset = 3, .data = "def" } },
+        .{ .stream = .{ .stream_id = 4, .offset = 6, .data = "ghi" } },
+        .{ .stream = .{ .stream_id = 8, .offset = 9, .data = "peer" } },
+    }) |frame| try frame.write(&payload, allocator);
+    _ = try queue.trackSent(13, payload.items);
+
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        queue.abandonStreamDataAfter(4, 5),
+    );
+    const kept = queue.packetNumberCandidate(13) orelse
+        return error.TestUnexpectedResult;
+    var remaining = kept.payload;
+    const expected = [_]struct { stream_id: u64, offset: u64 }{
+        .{ .stream_id = 4, .offset = 0 },
+        // A frame crossing the boundary remains whole. Retransmitting the
+        // suffix is permitted and avoids mutating tracked recovery payloads.
+        .{ .stream_id = 4, .offset = 3 },
+        .{ .stream_id = 8, .offset = 9 },
+    };
+    for (expected) |want| {
+        const parsed = try quic.parseFrame(remaining);
+        try std.testing.expect(parsed.frame == .stream);
+        try std.testing.expectEqual(want.stream_id, parsed.frame.stream.stream_id);
+        try std.testing.expectEqual(want.offset, parsed.frame.stream.offset);
+        remaining = remaining[parsed.consumed..];
+    }
+    try std.testing.expectEqual(@as(usize, 0), remaining.len);
 }
 
 test "QUIC recovery drops stale closed-stream controls only" {

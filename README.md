@@ -680,6 +680,10 @@ Current protocol coverage includes:
   encoding wired into 1-RTT ACK/STREAM exchange, indexed stream send/receive state with pre-reserved assume-capacity STREAM frame batches, preallocated receive-state clones, and empty non-FIN send no-ops, single-lookup flow creation and empty-index lookup skips,
   zero-consume skips, contiguous duplicate-overlap fast paths, conflict detection, offset reassembly, FIN, RESET_STREAM final-size validation, and STOP_SENDING
   to RESET_STREAM response handling,
+  draft-ietf-quic-reliable-stream-reset-09 negotiation and RESET_STREAM_AT
+  codec/state/recovery support, including 0-RTT capability memory, decreasing
+  Reliable Size, reliable-prefix retransmission, and WebTransport delivery
+  before the terminal reset event,
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
   MTU-bounded multi-frame batch packing with exact logical-prefix progress,
   configurable receive queues plus caller-buffer single and up-to-64-item
@@ -1271,8 +1275,10 @@ per-session stream/data credit SETTINGS by default, then reject DATAGRAM send or
 receive calls if the peer did not negotiate the matching capabilities.
 Handshake-backed sessions additionally expose caller-buffer incremental stream
 reads before FIN, flow-credit return after every delivered prefix, mapped
-32-bit WebTransport RESET_STREAM/STOP_SENDING APIs, and typed data/reset/stopped
-events while retaining the whole-FIN receive helper for compatibility. That
+32-bit WebTransport RESET_STREAM/STOP_SENDING APIs, application-byte-counted
+reliable reset APIs backed by negotiated QUIC RESET_STREAM_AT, and typed
+data/reset/stopped events while retaining the whole-FIN receive helper for
+compatibility. That
 helper converts QUIC's authoritative final size before subtracting the
 association prefix, so narrow targets reject unrepresentable complete streams
 without overflowing while reconstructing their buffer range. Once a

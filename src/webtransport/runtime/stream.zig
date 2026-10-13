@@ -1631,6 +1631,11 @@ fn takeHandshakeSessionStream(
     };
     const stats = connection.recvStreamStats(stream_id) orelse return null;
     if (stats.reset) |reset| {
+        if (reset.reliable_size != 0 and
+            stats.bytes_read + available.len < reset.reliable_size)
+        {
+            return null;
+        }
         if (stream.receive_reset == null) {
             stream.receive_reset = .fromHttp3(
                 reset.application_error_code,

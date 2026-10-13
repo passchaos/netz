@@ -55,6 +55,12 @@ const server_reset_seed = smithSliceSeed(&.{
     0, 0, // AES-128, QUIC v1.
     1, 7, 0xff, 7, 22, 16, 6, // Server STREAM then RESET_STREAM.
 });
+const reliable_reset_seed = smithSliceSeed(&.{
+    0, 0, // AES-128, QUIC v1.
+    0, 24, 48, // Three client STREAM bytes.
+    0xfc, 8, 8, 8, // Deliver RESET_STREAM_AT before STREAM data.
+    18, 6, 17, 7, 22, // Recover, ACK, and drain the reliable prefix.
+});
 const overlapping_key_update_seed = smithSliceSeed(&.{
     49,  208, // AES-256, QUIC v1.
     107, 95,
@@ -88,6 +94,7 @@ const corpus = &.{
     &hostile_delivery_seed,
     &client_reset_seed,
     &server_reset_seed,
+    &reliable_reset_seed,
     &overlapping_key_update_seed,
 };
 
@@ -112,6 +119,12 @@ test "structured stateful QUIC connection sequences reach target states" {
     try std.testing.expectEqual(@as(usize, 1), client_reset.client_resets);
     const server_reset = try runSequence(server_reset_seed[4..]);
     try std.testing.expectEqual(@as(usize, 1), server_reset.server_resets);
+
+    const reliable_reset = try runSequence(reliable_reset_seed[4..]);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        reliable_reset.client_reliable_resets,
+    );
 
     const overlapping = try runSequence(overlapping_key_update_seed[4..]);
     try std.testing.expect(overlapping.key_updates >= 4);
@@ -161,6 +174,8 @@ const Summary = struct {
     application_bytes: usize = 0,
     client_resets: usize = 0,
     server_resets: usize = 0,
+    client_reliable_resets: usize = 0,
+    server_reliable_resets: usize = 0,
 };
 
 const StreamModel = struct {
@@ -172,6 +187,7 @@ const StreamModel = struct {
     reset_sent: bool = false,
     reset_received: bool = false,
     reset_error_code: u64 = 0,
+    reliable_size: usize = 0,
 
     fn append(self: *StreamModel, byte: u8) void {
         std.debug.assert(self.sent_len < self.sent.len);
@@ -243,6 +259,7 @@ const Harness = struct {
             .initial_receive_max_streams_bidi = 1,
             .enable_pacing = false,
             .automatic_ecn_policy = .disabled,
+            .reliable_reset = .{ .local = true, .peer = true },
         });
         errdefer client.deinit();
         const server = try allocator.create(one_rtt.Connection);
@@ -263,6 +280,7 @@ const Harness = struct {
             .initial_receive_max_streams_bidi = 1,
             .enable_pacing = false,
             .automatic_ecn_policy = .disabled,
+            .reliable_reset = .{ .local = true, .peer = true },
         });
         errdefer server.deinit();
 
@@ -351,6 +369,35 @@ const Harness = struct {
         try self.capture(direction);
         model.reset_sent = true;
         model.reset_error_code = error_code;
+    }
+
+    fn sendReliableReset(
+        self: *Harness,
+        direction: Direction,
+        error_code: u64,
+    ) !void {
+        const connection, const model, const stream_id = switch (direction) {
+            .client_to_server => .{ self.client, &self.client_stream, @as(u64, 0) },
+            .server_to_client => .{ self.server, &self.server_stream, @as(u64, 1) },
+        };
+        if (model.fin_sent or model.reset_sent) return;
+        const reliable_size = (model.sent_len + 1) / 2;
+        connection.resetStreamReliably(
+            stream_id,
+            error_code,
+            reliable_size,
+        ) catch |err| switch (err) {
+            error.CongestionLimited => return,
+            else => |other| return other,
+        };
+        try self.capture(direction);
+        model.reset_sent = true;
+        model.reset_error_code = error_code;
+        model.reliable_size = reliable_size;
+        switch (direction) {
+            .client_to_server => self.summary.client_reliable_resets += 1,
+            .server_to_client => self.summary.server_reliable_resets += 1,
+        }
     }
 
     fn sendPing(self: *Harness, direction: Direction) !void {
@@ -581,6 +628,9 @@ const Harness = struct {
                         @as(u64, @intCast(model.sent_len)),
                         reset.final_size,
                     );
+                    try std.testing.expect(
+                        model.received_len >= model.reliable_size,
+                    );
                     model.reset_received = true;
                     switch (direction) {
                         .client_to_server => self.summary.client_resets += 1,
@@ -669,6 +719,16 @@ fn runSequence(bytes: []const u8) !Summary {
         }
         if (byte == 0xff) {
             try harness.sendReset(.server_to_client, 0x102);
+            try harness.validate();
+            continue;
+        }
+        if (byte == 0xfc) {
+            try harness.sendReliableReset(.client_to_server, 0x103);
+            try harness.validate();
+            continue;
+        }
+        if (byte == 0xfd) {
+            try harness.sendReliableReset(.server_to_client, 0x104);
             try harness.validate();
             continue;
         }

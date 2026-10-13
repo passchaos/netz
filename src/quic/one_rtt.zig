@@ -292,6 +292,12 @@ pub const sendZeroRttFrames = zero_rtt.sendFrames;
 pub const receiveZeroRtt = zero_rtt.receive;
 pub const openZeroRttBytes = zero_rtt.openBytes;
 
+pub const ReliableResetSupport = packed struct(u8) {
+    local: bool = false,
+    peer: bool = false,
+    reserved: u6 = 0,
+};
+
 pub const ConnectionConfig = struct {
     pub const EndpointRole = enum { client, server };
 
@@ -401,6 +407,8 @@ pub const ConnectionConfig = struct {
     peer_preferred_address: ?quic.PreferredAddress = null,
     local_max_datagram_frame_size: ?usize = null,
     peer_max_datagram_frame_size: ?usize = null,
+    /// Directional draft-ietf-quic-reliable-stream-reset negotiation state.
+    reliable_reset: ReliableResetSupport = .{},
     max_datagram_queue_items: usize = 16,
     enable_ack_frequency: bool = false,
     /// `min_ack_delay` advertised locally; gates peer ACK_FREQUENCY and
@@ -495,6 +503,7 @@ const RecvStreamPreflightEntry = struct {
     recv_state: quic.stream_state.RecvState.Preflight,
     highest_received_end: u64 = 0,
     final_size: ?u64 = null,
+    reset: ?StreamResetInfo = null,
 
     fn deinit(self: *RecvStreamPreflightEntry) void {
         self.recv_state.deinit();
@@ -505,6 +514,9 @@ const RecvStreamPreflightEntry = struct {
 pub const StreamResetInfo = struct {
     application_error_code: u64,
     final_size: u64,
+    /// Bytes from offset zero that remain reliable after RESET_STREAM_AT.
+    /// Zero also represents an ordinary RESET_STREAM.
+    reliable_size: u64 = 0,
 };
 
 pub const StopSendingInfo = struct {
@@ -742,7 +754,9 @@ fn applicationAvailableStreamBytes(
 ) []const u8 {
     const available = entry.recv_state.available();
     if (entry.reset_delivery_end) |delivery_end| {
-        if (!enable_reset_partial_delivery or
+        const reliable_reset = entry.reset != null and
+            entry.reset.?.reliable_size != 0;
+        if ((!enable_reset_partial_delivery and !reliable_reset) or
             entry.reset_reported or
             delivery_end <= entry.recv_state.read_offset)
         {
@@ -754,6 +768,17 @@ fn applicationAvailableStreamBytes(
         )];
     }
     return available;
+}
+
+/// A reset only makes the receive side transport-terminal after every byte in
+/// its reliable prefix is contiguous. Application consumption is deliberately
+/// separate: callers may still drain the prefix before observing the reset.
+fn resetReliablePrefixReceived(entry: *const StreamRecvFlowEntry) bool {
+    const reset = entry.reset orelse return false;
+    const reliable_size = std.math.cast(usize, reset.reliable_size) orelse
+        return false;
+    return entry.recv_state.read_offset + entry.recv_state.available().len >=
+        reliable_size;
 }
 
 const PeerAddressUpdate = union(enum) {
@@ -5322,6 +5347,9 @@ pub const Connection = struct {
                 const frame_size = datagramFrameWireSize(datagram) orelse return error.InvalidFrameLength;
                 if (frame_size > frame_limit) return error.DatagramTooLarge;
             },
+            .reset_stream_at => if (!self.config.reliable_reset.peer) {
+                return error.InvalidFrame;
+            },
             .ack_frequency => |ack_frequency| {
                 if (!self.ackFrequencySendEnabled()) {
                     return error.AckFrequencyDisabled;
@@ -7234,6 +7262,119 @@ pub const Connection = struct {
         );
     }
 
+    /// Reset a stream while guaranteeing delivery through `reliable_size`.
+    /// The peer must have advertised the reset_stream_at transport parameter,
+    /// and the reliable prefix must already have been submitted on the stream.
+    pub fn resetStreamReliably(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        reliable_size: u64,
+    ) Error!void {
+        try self.resetStreamReliablyAt(
+            stream_id,
+            application_error_code,
+            reliable_size,
+            null,
+        );
+    }
+
+    pub fn resetStreamReliablyWithTimeout(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        reliable_size: u64,
+        timeout: std.Io.Duration,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.resetStreamReliablyWithDeadline(
+            stream_id,
+            application_error_code,
+            reliable_size,
+            .fromNow(self.endpoint.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn resetStreamReliablyWithDeadline(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        reliable_size: u64,
+        deadline: std.Io.Clock.Timestamp,
+    ) (Error || quic.runtime.ReceiveTimeoutError)!void {
+        if (deadline.clock != .awake or
+            deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0)
+        {
+            return error.Timeout;
+        }
+        while (true) {
+            if (deadline.durationFromNow(self.endpoint.io).raw.nanoseconds <= 0) {
+                return error.Timeout;
+            }
+            self.resetStreamReliablyAt(
+                stream_id,
+                application_error_code,
+                reliable_size,
+                self.monotonicNowNs(),
+            ) catch |err| switch (err) {
+                error.CongestionLimited => {
+                    self.servicePacketServicingTimersDeadline(deadline) catch |progress_err|
+                        switch (progress_err) {
+                            error.CongestionLimited => continue,
+                            error.PacingLimited => {
+                                try self.waitForPacingAvailabilityWithDeadline(
+                                    deadline,
+                                );
+                                continue;
+                            },
+                            else => |other| return other,
+                        };
+                    continue;
+                },
+                error.PacingLimited => {
+                    try self.waitForPacingAvailabilityWithDeadline(deadline);
+                    continue;
+                },
+                else => |other| return other,
+            };
+            return;
+        }
+    }
+
+    pub fn tryResetStreamReliably(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        reliable_size: u64,
+    ) Error!void {
+        try self.resetStreamReliablyAt(
+            stream_id,
+            application_error_code,
+            reliable_size,
+            self.monotonicNowNs(),
+        );
+    }
+
+    fn resetStreamReliablyAt(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        reliable_size: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        if (!self.config.reliable_reset.peer) return error.InvalidFrame;
+        try self.validateNextPacketNumber();
+        const entry = try self.sendStreamEntry(stream_id);
+        if (reliable_size > entry.highest_sent_end) return error.InvalidFrame;
+        try self.sendResetStreamReliablyAt(
+            stream_id,
+            application_error_code,
+            entry.highest_sent_end,
+            reliable_size,
+            sent_time_ns,
+        );
+    }
+
     fn resetStreamAt(
         self: *Connection,
         stream_id: u64,
@@ -7374,7 +7515,10 @@ pub const Connection = struct {
             .final_size = send_stream.highest_sent_end,
         };
         const needs_reset = send_stream.final_size == null and
-            send_stream.reset_sent == null;
+            (send_stream.reset_sent == null or
+                send_stream.reset_sent.?.reliable_size != 0);
+        const satisfies_pending_stop = send_stream.stopped != null and
+            send_stream.reset_sent == null and needs_reset;
         if (send_stream.reset_sent) |existing| {
             if (existing.application_error_code != application_error_code or
                 existing.final_size != reset_info.final_size)
@@ -7415,7 +7559,12 @@ pub const Connection = struct {
             try self.sendTrackedFrames(frames[0..count]);
         if (needs_reset) {
             _ = self.recovery.abandonStreamData(stream_id);
+            _ = self.recovery.abandonStreamResetsAbove(stream_id, 0);
             send_stream.reset_sent = reset_info;
+            if (satisfies_pending_stop) {
+                std.debug.assert(self.pending_stop_sending_resets != 0);
+                self.pending_stop_sending_resets -= 1;
+            }
         }
         if (needs_stop) {
             recv_stream.stop_sending_sent = .{
@@ -7569,7 +7718,7 @@ pub const Connection = struct {
         if (self.isClosedPeerStream(stream_id)) return true;
         const recv_stream = self.findRecvStreamEntry(stream_id) orelse
             return error.StreamStateError;
-        if (recv_stream.reset == null and
+        if (!resetReliablePrefixReceived(recv_stream) and
             !recv_stream.recv_state.receivedComplete())
         {
             return false;
@@ -7769,7 +7918,7 @@ pub const Connection = struct {
         if (self.isClosedPeerStream(stream_id)) return .released;
         const recv_stream = self.findRecvStreamEntry(stream_id) orelse
             return error.StreamStateError;
-        const receive_terminal = recv_stream.reset != null or
+        const receive_terminal = resetReliablePrefixReceived(recv_stream) or
             recv_stream.recv_state.complete() or
             (recv_stream.stream_count_release_requested and
                 recv_stream.recv_state.receivedComplete());
@@ -8731,7 +8880,8 @@ pub const Connection = struct {
             self.config.enable_reset_partial_delivery,
         );
         if (entry.reset) |reset| reset: {
-            if (self.config.enable_reset_partial_delivery and
+            if ((self.config.enable_reset_partial_delivery or
+                reset.reliable_size != 0) and
                 !entry.reset_reported and
                 entry.reset_delivery_end.? > entry.recv_state.read_offset)
             {
@@ -13319,6 +13469,10 @@ pub const Connection = struct {
                     if (self.isClosedStream(reset.stream_id)) continue;
                     try self.receiveResetStream(reset);
                 },
+                .reset_stream_at => |reset| {
+                    if (self.isClosedStream(reset.stream_id)) continue;
+                    try self.receiveResetStreamAt(reset);
+                },
                 .stop_sending => |stop| {
                     if (self.isClosedStream(stop.stream_id) or
                         self.sendStreamTerminal(stop.stream_id)) continue;
@@ -13516,6 +13670,20 @@ pub const Connection = struct {
                         try self.validateResetStreamPrecondition(reset, &recv_streams, &recv_streams_allocated, &stream_frames, &recv_data_total);
                     }
                 },
+                .reset_stream_at => |reset| {
+                    if (!self.config.reliable_reset.local) return error.InvalidFrame;
+                    if (self.isClosedStream(reset.stream_id)) {
+                        try self.validateStreamReceiveFrameId(reset.stream_id);
+                    } else {
+                        try self.validateResetStreamAtPrecondition(
+                            reset,
+                            &recv_streams,
+                            &recv_streams_allocated,
+                            &stream_frames,
+                            &recv_data_total,
+                        );
+                    }
+                },
                 .stream_data_blocked => |blocked| try self.validateStreamReceiveFrameId(blocked.stream_id),
                 .max_stream_data => |max_stream_data| try self.validateStreamSendControlId(max_stream_data.stream_id),
                 .stop_sending => |stop| try self.validateStreamSendControlId(stop.stream_id),
@@ -13633,6 +13801,11 @@ pub const Connection = struct {
                         "datagram",
                     );
                 }
+                if (frame == .reset_stream_at) break :blk semanticClose(
+                    .protocol_violation,
+                    @intFromEnum(quic.FrameType.reset_stream_at),
+                    "reset stream at not negotiated",
+                );
                 break :blk null;
             },
             error.StreamLimitExceeded => triggeringFrameClose(frame, raw_frame_type, .stream_limit_error, "stream limit"),
@@ -13714,6 +13887,7 @@ pub const Connection = struct {
             else
                 @intFromEnum(quic.FrameType.stream) | 0x02,
             .reset_stream => @intFromEnum(quic.FrameType.reset_stream),
+            .reset_stream_at => @intFromEnum(quic.FrameType.reset_stream_at),
             .stream_data_blocked => @intFromEnum(quic.FrameType.stream_data_blocked),
             .max_stream_data => @intFromEnum(quic.FrameType.max_stream_data),
             .stop_sending => @intFromEnum(quic.FrameType.stop_sending),
@@ -13773,25 +13947,85 @@ pub const Connection = struct {
         stream_frames: *quic.stream_state.RecvState.PreflightFrames,
         recv_data_total: *u64,
     ) Error!void {
-        try self.validateStreamReceiveFrameId(reset.stream_id);
+        return self.validateResetPrecondition(
+            reset.stream_id,
+            reset.application_error_code,
+            reset.final_size,
+            0,
+            recv_streams,
+            recv_streams_allocated,
+            stream_frames,
+            recv_data_total,
+        );
+    }
+
+    fn validateResetPrecondition(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        final_size: u64,
+        reliable_size: u64,
+        recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_streams_allocated: *bool,
+        stream_frames: *quic.stream_state.RecvState.PreflightFrames,
+        recv_data_total: *u64,
+    ) Error!void {
+        try self.validateStreamReceiveFrameId(stream_id);
         const recv_stream = try self.preflightRecvStreamEntry(
             recv_streams,
             recv_streams_allocated,
             stream_frames,
-            reset.stream_id,
+            stream_id,
         );
-        try preflightApplyFinalSize(recv_stream, reset.final_size, true);
-        if (reset.final_size > recv_stream.flow_limit) return error.FlowControlViolation;
+        try validateResetIdentity(recv_stream.reset, .{
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+            .reliable_size = reliable_size,
+        });
+        try preflightApplyFinalSize(recv_stream, final_size, true);
+        if (final_size > recv_stream.flow_limit) return error.FlowControlViolation;
         const received = recv_stream.recv_state.receivedByteCount();
-        if (reset.final_size < received) return error.FinalSizeMismatch;
+        if (final_size < received) return error.FinalSizeMismatch;
         try self.preflightRecvCredit(
             receiveOffsetIncrement(
                 recv_stream.highest_received_end,
-                reset.final_size,
+                final_size,
             ),
             recv_data_total,
         );
-        recv_stream.highest_received_end = @max(recv_stream.highest_received_end, reset.final_size);
+        recv_stream.highest_received_end = @max(
+            recv_stream.highest_received_end,
+            final_size,
+        );
+        if (recv_stream.reset) |existing| {
+            if (reliable_size > existing.reliable_size) return;
+        }
+        recv_stream.reset = .{
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+            .reliable_size = reliable_size,
+        };
+    }
+
+    fn validateResetStreamAtPrecondition(
+        self: *Connection,
+        reset: quic.ResetStreamAtFrame,
+        recv_streams: *std.ArrayList(RecvStreamPreflightEntry),
+        recv_streams_allocated: *bool,
+        stream_frames: *quic.stream_state.RecvState.PreflightFrames,
+        recv_data_total: *u64,
+    ) Error!void {
+        if (reset.reliable_size > reset.final_size) return error.InvalidFrame;
+        try self.validateResetPrecondition(
+            reset.stream_id,
+            reset.application_error_code,
+            reset.final_size,
+            reset.reliable_size,
+            recv_streams,
+            recv_streams_allocated,
+            stream_frames,
+            recv_data_total,
+        );
     }
 
     fn preflightRecvStreamEntry(
@@ -13818,6 +14052,7 @@ pub const Connection = struct {
                 .recv_state = recv_state,
                 .highest_received_end = existing.highest_received_end,
                 .final_size = existing.final_size,
+                .reset = existing.reset,
             });
             appended = true;
         } else {
@@ -14118,37 +14353,97 @@ pub const Connection = struct {
     }
 
     fn receiveResetStream(self: *Connection, reset: quic.ResetStreamFrame) Error!void {
-        var recv_stream = try self.recvStreamFlow(reset.stream_id);
+        return self.receiveReset(
+            reset.stream_id,
+            reset.application_error_code,
+            reset.final_size,
+            0,
+        );
+    }
+
+    fn receiveResetStreamAt(
+        self: *Connection,
+        reset: quic.ResetStreamAtFrame,
+    ) Error!void {
+        if (!self.config.reliable_reset.local) return error.InvalidFrame;
+        if (reset.reliable_size > reset.final_size) return error.InvalidFrame;
+        return self.receiveReset(
+            reset.stream_id,
+            reset.application_error_code,
+            reset.final_size,
+            reset.reliable_size,
+        );
+    }
+
+    fn receiveReset(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        final_size: u64,
+        reliable_size: u64,
+    ) Error!void {
+        var recv_stream = try self.recvStreamFlow(stream_id);
         const first_reset = recv_stream.reset == null;
+        try validateResetIdentity(recv_stream.reset, .{
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+            .reliable_size = reliable_size,
+        });
         const old_highest_received_end = recv_stream.highest_received_end;
-        try self.applyFinalSize(recv_stream, reset.final_size, true);
-        try recv_stream.flow.receive(reset.final_size);
+        try self.applyFinalSize(recv_stream, final_size, true);
+        try recv_stream.flow.receive(final_size);
 
         const received = recv_stream.recv_state.receivedByteCount();
-        if (reset.final_size < received) return error.FinalSizeMismatch;
+        if (final_size < received) return error.FinalSizeMismatch;
         const offset_increment = receiveOffsetIncrement(
             old_highest_received_end,
-            reset.final_size,
+            final_size,
         );
         if (offset_increment != 0) {
             const next_total = std.math.add(u64, self.recv_data_total, offset_increment) catch return error.FlowControlViolation;
             try self.recv_flow.receive(next_total);
             self.recv_data_total = next_total;
         }
-        recv_stream.highest_received_end = @max(recv_stream.highest_received_end, reset.final_size);
+        recv_stream.highest_received_end = @max(recv_stream.highest_received_end, final_size);
 
         if (first_reset) {
             // Snapshot the contiguous prefix at the first reset. STREAM frames
             // can be reordered behind RESET_STREAM and remain useful for
             // protocol validation, but partial delivery is specifically for
             // bytes already available when the reset became observable.
-            recv_stream.reset_delivery_end = recv_stream.recv_state.read_offset +
-                recv_stream.recv_state.available().len;
+            recv_stream.reset_delivery_end = if (reliable_size != 0)
+                std.math.cast(usize, reliable_size) orelse
+                    return error.InvalidFrameLength
+            else
+                recv_stream.recv_state.read_offset +
+                    recv_stream.recv_state.available().len;
+        } else if (reliable_size < recv_stream.reset.?.reliable_size) {
+            recv_stream.reset_delivery_end = @min(
+                recv_stream.reset_delivery_end.?,
+                std.math.cast(usize, reliable_size) orelse
+                    return error.InvalidFrameLength,
+            );
+        } else if (reliable_size > recv_stream.reset.?.reliable_size) {
+            return;
         }
         recv_stream.reset = .{
-            .application_error_code = reset.application_error_code,
-            .final_size = reset.final_size,
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+            .reliable_size = reliable_size,
         };
+    }
+
+    fn validateResetIdentity(
+        existing: ?StreamResetInfo,
+        incoming: StreamResetInfo,
+    ) Error!void {
+        const prior = existing orelse return;
+        if (prior.final_size != incoming.final_size) {
+            return error.FinalSizeMismatch;
+        }
+        if (prior.application_error_code != incoming.application_error_code) {
+            return error.StreamStateError;
+        }
     }
 
     fn receiveStopSending(self: *Connection, stop: quic.StopSendingFrame) Error!void {
@@ -14200,9 +14495,11 @@ pub const Connection = struct {
             .application_error_code = application_error_code,
             .final_size = final_size,
         };
+        const satisfies_pending_stop = entry.stopped != null and
+            entry.reset_sent == null;
         if (entry.reset_sent) |existing| {
-            if (existing.application_error_code == info.application_error_code and existing.final_size == info.final_size) return;
-            return error.FinalSizeMismatch;
+            try validateResetIdentity(existing, info);
+            if (existing.reliable_size == 0) return;
         }
 
         const frames = [_]quic.Frame{.{ .reset_stream = .{
@@ -14215,8 +14512,55 @@ pub const Connection = struct {
         else
             try self.sendTrackedFrames(&frames);
         _ = self.recovery.abandonStreamData(stream_id);
+        _ = self.recovery.abandonStreamResetsAbove(stream_id, 0);
         entry.reset_sent = info;
-        if (entry.stopped != null) {
+        if (satisfies_pending_stop) {
+            std.debug.assert(self.pending_stop_sending_resets != 0);
+            self.pending_stop_sending_resets -= 1;
+        }
+    }
+
+    fn sendResetStreamReliablyAt(
+        self: *Connection,
+        stream_id: u64,
+        application_error_code: u64,
+        final_size: u64,
+        reliable_size: u64,
+        sent_time_ns: ?u64,
+    ) Error!void {
+        if (!self.config.reliable_reset.peer or reliable_size > final_size) {
+            return error.InvalidFrame;
+        }
+        const entry = try self.sendStreamEntry(stream_id);
+        const info: StreamResetInfo = .{
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+            .reliable_size = reliable_size,
+        };
+        const satisfies_pending_stop = entry.stopped != null and
+            entry.reset_sent == null;
+        if (entry.reset_sent) |existing| {
+            try validateResetIdentity(existing, info);
+            if (reliable_size == existing.reliable_size) return;
+            if (reliable_size > existing.reliable_size) {
+                return error.InvalidFrame;
+            }
+        }
+
+        const frames = [_]quic.Frame{.{ .reset_stream_at = .{
+            .stream_id = stream_id,
+            .application_error_code = application_error_code,
+            .final_size = final_size,
+            .reliable_size = reliable_size,
+        } }};
+        if (sent_time_ns) |now_ns|
+            try self.sendTrackedFramesEcnAt(&frames, .not_ect, now_ns)
+        else
+            try self.sendTrackedFrames(&frames);
+        _ = self.recovery.abandonStreamDataAfter(stream_id, reliable_size);
+        _ = self.recovery.abandonStreamResetsAbove(stream_id, reliable_size);
+        entry.reset_sent = info;
+        if (satisfies_pending_stop) {
             std.debug.assert(self.pending_stop_sending_resets != 0);
             self.pending_stop_sending_resets -= 1;
         }

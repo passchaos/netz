@@ -35,11 +35,13 @@ const transport_parameters_seed = smithSliceSeed(&.{
     0x04, 0x02, 0x40, 0x64, // initial_max_data = 100.
     0x0e, 0x01, 0x04, // active_connection_id_limit = 4.
     0x0c, 0x00, // disable_active_migration.
+    0x1d, 0x00, // reset_stream_at.
 });
 const frame_sequence_seed = smithSliceSeed(&.{
     0x01, // PING.
     0x02, 10, 0, 2, 0, 0, 1, 2, 0, // ACK with two ranges.
     0x0f, 0, 0, 3, 'a', 'b', 'c', // STREAM with OFF/LEN/FIN.
+    0x24, 0, 1, 4, 2, // RESET_STREAM_AT with a two-byte reliable prefix.
     0x1a, 1, 2, 3, 4, 5, 6, 7, 8, // PATH_CHALLENGE.
     0x1c, 0, 8, 3, 'b', 'a', 'd', // CONNECTION_CLOSE.
 });
@@ -93,7 +95,7 @@ test "structured QUIC wire seeds reach successful parsers" {
         transport_parameters_seed[4..],
     );
     defer allocator.free(untyped_parameters);
-    try std.testing.expectEqual(@as(usize, 3), untyped_parameters.len);
+    try std.testing.expectEqual(@as(usize, 4), untyped_parameters.len);
     const client_parameters = try netz.quic.parseTransportParametersTyped(
         allocator,
         transport_parameters_seed[4..],
@@ -101,6 +103,7 @@ test "structured QUIC wire seeds reach successful parsers" {
     );
     try std.testing.expectEqual(@as(u64, 100), client_parameters.initial_max_data);
     try std.testing.expect(client_parameters.disable_active_migration);
+    try std.testing.expect(client_parameters.reset_stream_at);
     _ = try netz.quic.parseTransportParametersTyped(
         allocator,
         transport_parameters_seed[4..],
@@ -117,7 +120,7 @@ test "structured QUIC wire seeds reach successful parsers" {
         defer parsed.deinitOwned(allocator);
         offset += parsed.consumed;
     }
-    try std.testing.expectEqual(@as(usize, 5), frame_count);
+    try std.testing.expectEqual(@as(usize, 6), frame_count);
     try std.testing.expect((try netz.quic.classifyFramePayloadCloseError(
         allocator,
         frame_sequence_seed[4..],

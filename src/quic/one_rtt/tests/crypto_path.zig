@@ -3142,7 +3142,19 @@ test "QUIC 1-RTT old-path loss does not reduce new-path congestion" {
         try connection.retransmitPacketThresholdLosses(2),
     );
     try std.testing.expectEqual(@as(usize, 2), connection.pendingRecoveryCount());
-    try std.testing.expectEqual(@as(usize, 2), connection.bytesInFlight());
+    var retransmitted_bytes: usize = 0;
+    for (connection.sent.packets.items) |packet| {
+        if (packet.packet_number < 5 or packet.acknowledged or packet.lost) {
+            continue;
+        }
+        try std.testing.expectEqual(new_epoch, packet.pmtu_path_epoch);
+        retransmitted_bytes += packet.bytes;
+    }
+    try std.testing.expect(retransmitted_bytes > 2);
+    try std.testing.expectEqual(
+        retransmitted_bytes,
+        connection.bytesInFlight(),
+    );
 }
 
 test "QUIC 1-RTT late old-path plain ACK does not fail fresh path ECN" {

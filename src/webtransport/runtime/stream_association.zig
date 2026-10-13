@@ -58,6 +58,15 @@ pub fn drainAbandonedReceives(
             continue;
         var fresh_reset = false;
         if (before.reset) |reset| {
+            // RESET_STREAM_AT keeps its prefix reliable. Do not let the
+            // automatic abandoned-stream sweep consume or retire that prefix
+            // before the application has received it through the normal
+            // stream polling path.
+            if (reset.reliable_size != 0 and
+                before.bytes_read < reset.reliable_size)
+            {
+                continue;
+            }
             // RESET_STREAM is application-visible. Preserve its metadata in
             // the session registry before releasing transport storage.
             if (stream.receive_reset == null) {
@@ -331,13 +340,18 @@ fn identifyInternal(
         if (receive_mode == .incremental) {
             // Association bytes count toward QUIC credit but are never exposed
             // as WebTransport application bytes.
+            var reset_consumed_prefix = false;
             if (connection.recvStreamStats(stream_id).?.reset) |reset| {
-                stream.?.receive_reset = .fromHttp3(
-                    reset.application_error_code,
-                );
-                stream.?.receive_reset_final_size = reset.final_size;
-                _ = try connection.discardResetReceived(stream_id);
-            } else {
+                if (reset.reliable_size <= prefix_len) {
+                    stream.?.receive_reset = .fromHttp3(
+                        reset.application_error_code,
+                    );
+                    stream.?.receive_reset_final_size = reset.final_size;
+                    _ = try connection.discardResetReceived(stream_id);
+                    reset_consumed_prefix = true;
+                }
+            }
+            if (!reset_consumed_prefix) {
                 const release_result = if (single_attempt)
                     connection.tryReleaseReceivedCapacity(
                         stream_id,
@@ -351,8 +365,8 @@ fn identifyInternal(
                 release_result catch |err| {
                     // Registry insertion must be transactional with prefix-
                     // credit consumption. Otherwise a failed MAX_* send leaves
-                    // a peer stream registered while its prefix is still at
-                    // the front of transport storage.
+                    // a peer stream registered while its prefix remains at the
+                    // front of transport storage.
                     registry.removeLastPeer(stream_id);
                     return err;
                 };

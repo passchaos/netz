@@ -60,6 +60,12 @@ pub fn adapt(
             .error_code = reset.application_error_code,
             .final_size = reset.final_size,
         } } },
+        .reset_stream_at => |reset| .{ .frame = .{ .reset_stream_at = .{
+            .stream_id = reset.stream_id,
+            .error_code = reset.application_error_code,
+            .final_size = reset.final_size,
+            .reliable_size = reset.reliable_size,
+        } } },
         .stop_sending => |stop| .{ .frame = .{ .stop_sending = .{
             .stream_id = stop.stream_id,
             .error_code = stop.application_error_code,

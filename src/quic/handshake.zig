@@ -349,6 +349,10 @@ pub const OneRttConfig = struct {
             .peer_preferred_address = peer_transport_parameters.preferred_address,
             .local_max_datagram_frame_size = if (local_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
             .peer_max_datagram_frame_size = if (peer_transport_parameters.max_datagram_frame_size) |size| std.math.cast(usize, size) orelse std.math.maxInt(usize) else null,
+            .reliable_reset = .{
+                .local = local_transport_parameters.reset_stream_at,
+                .peer = peer_transport_parameters.reset_stream_at,
+            },
             .accept_zero_fixed_bit = local_transport_parameters.grease_quic_bit,
             .grease_fixed_bit = peer_transport_parameters.grease_quic_bit,
             .enable_ack_frequency = local_transport_parameters.min_ack_delay != null or peer_transport_parameters.min_ack_delay != null,
