@@ -139,12 +139,6 @@ const ReloadSignal = if (builtin.os.tag == .linux) struct {
 const checkpoint_signal_poll_interval: std.Io.Clock.Duration =
     .{ .raw = .fromMilliseconds(100), .clock = .awake };
 
-const BridgeResult = struct {
-    index: usize,
-    err: ?anyerror,
-    expected_stop: bool,
-};
-
 pub const RunOptions = struct {
     /// Deterministic process-test lifecycle. Production config mode is a
     /// long-running supervisor and does not reinterpret listener limits as a
@@ -815,25 +809,21 @@ fn serveWithManagement(
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
-        bridge: BridgeResult,
-        bridge_failback: std.Io.Cancelable!void,
+        bridges: ?anyerror,
         periodic_timer: std.Io.Cancelable!void,
         signal_poll: std.Io.Cancelable!void,
     };
-    const result_buffer = try allocator.alloc(Result, 4 + bridges.values.len);
+    const result_buffer = try allocator.alloc(Result, 4);
     defer allocator.free(result_buffer);
     var select: std.Io.Select(Result) = .init(io, result_buffer);
     defer select.cancelDiscard();
     defer shutdown.set(io);
     defer bridges.requestStop();
     try select.concurrent(.serve, serveResult, .{ broker, service });
-    for (bridges.values, 0..) |_, index| {
-        try select.concurrent(.bridge, bridgeResult, .{ bridges, index });
-    }
-    if (bridges.needsPrimaryFailback()) {
+    if (bridges.values.len != 0) {
         try select.concurrent(
-            .bridge_failback,
-            configured_bridges.Set.runPrimaryFailback,
+            .bridges,
+            bridgeSetResult,
             .{bridges},
         );
     }
@@ -865,37 +855,11 @@ fn serveWithManagement(
                 if (maybe_error) |err| return err;
                 return;
             },
-            .bridge => |result| {
-                if (result.expected_stop) {
-                    if (result.err) |err| {
-                        std.debug.print(
-                            "netz MQTT bridge {d} completed " ++
-                                "start_type=once error={s}\n",
-                            .{ result.index, @errorName(err) },
-                        );
-                    } else {
-                        std.debug.print(
-                            "netz MQTT bridge {d} completed " ++
-                                "start_type=once\n",
-                            .{result.index},
-                        );
-                    }
-                    continue;
-                }
+            .bridges => |maybe_error| {
                 bridges.requestStop();
                 shutdown.set(io);
                 select.cancelDiscard();
-                if (result.err) |err| {
-                    std.debug.print(
-                        "netz MQTT bridge {d} stopped: error={s}\n",
-                        .{ result.index, @errorName(err) },
-                    );
-                    return err;
-                }
-                return error.UnexpectedBridgeExit;
-            },
-            .bridge_failback => |result| {
-                try result;
+                if (maybe_error) |err| return err;
                 return error.UnexpectedBridgeExit;
             },
             .periodic_timer => |result| {
@@ -975,32 +939,9 @@ fn serveWithManagement(
     }
 }
 
-fn bridgeResult(
-    bridges: *configured_bridges.Set,
-    index: usize,
-) BridgeResult {
-    const configured = bridges.configured[index];
-    const bridge = &bridges.values[index];
-    switch (configured.start_type) {
-        .automatic => bridge.run(.{ .timeout = .fromSeconds(30) }) catch |err| {
-            return .{ .index = index, .err = err, .expected_stop = false };
-        },
-        .lazy => bridge.runLazy(
-            .{ .timeout = .fromSeconds(30) },
-            configured.threshold,
-            .fromSeconds(configured.idle_timeout_seconds),
-        ) catch |err| {
-            return .{ .index = index, .err = err, .expected_stop = false };
-        },
-        .once => bridge.runOnce(.{ .timeout = .fromSeconds(30) }) catch |err| {
-            return .{ .index = index, .err = err, .expected_stop = true };
-        },
-    }
-    return .{
-        .index = index,
-        .err = null,
-        .expected_stop = configured.start_type == .once,
-    };
+fn bridgeSetResult(bridges: *configured_bridges.Set) ?anyerror {
+    bridges.runAll() catch |err| return err;
+    return null;
 }
 
 fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {

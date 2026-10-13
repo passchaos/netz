@@ -598,6 +598,122 @@ pub const Set = struct {
         return self.shutdown.isSet();
     }
 
+    const BridgeRunResult = struct {
+        index: usize,
+        err: ?anyerror,
+        expected_stop: bool,
+    };
+
+    /// Supervise every configured bridge behind one task boundary. Callers can
+    /// therefore stop and replace this Set without canceling unrelated tasks
+    /// in their own Select.
+    pub fn runAll(self: *Set) anyerror!void {
+        const Result = union(enum) {
+            bridge: BridgeRunResult,
+            primary_failback: std.Io.Cancelable!void,
+            shutdown: std.Io.Cancelable!void,
+        };
+        const result_capacity = try std.math.add(
+            usize,
+            self.values.len,
+            2,
+        );
+        const result_buffer = try self.allocator.alloc(Result, result_capacity);
+        defer self.allocator.free(result_buffer);
+        var select: std.Io.Select(Result) = .init(self.io, result_buffer);
+        defer select.cancelDiscard();
+        try select.concurrent(.shutdown, waitForStop, .{self});
+        for (self.values, 0..) |_, index| {
+            try select.concurrent(.bridge, bridgeResult, .{ self, index });
+        }
+        if (self.needsPrimaryFailback()) {
+            try select.concurrent(
+                .primary_failback,
+                Set.runPrimaryFailback,
+                .{self},
+            );
+        }
+        while (true) {
+            switch (try select.await()) {
+                .shutdown => |result| {
+                    try result;
+                    return;
+                },
+                .bridge => |result| {
+                    if (self.stopRequested()) return;
+                    if (result.expected_stop) {
+                        if (result.err) |err| {
+                            std.debug.print(
+                                "netz MQTT bridge {d} completed " ++
+                                    "start_type=once error={s}\n",
+                                .{ result.index, @errorName(err) },
+                            );
+                        } else {
+                            std.debug.print(
+                                "netz MQTT bridge {d} completed " ++
+                                    "start_type=once\n",
+                                .{result.index},
+                            );
+                        }
+                        continue;
+                    }
+                    if (result.err) |err| {
+                        std.debug.print(
+                            "netz MQTT bridge {d} stopped: error={s}\n",
+                            .{ result.index, @errorName(err) },
+                        );
+                        return err;
+                    }
+                    return error.UnexpectedBridgeExit;
+                },
+                .primary_failback => |result| {
+                    if (self.stopRequested()) return;
+                    try result;
+                    return error.UnexpectedBridgeExit;
+                },
+            }
+        }
+    }
+
+    fn waitForStop(self: *Set) std.Io.Cancelable!void {
+        try self.shutdown.wait(self.io);
+    }
+
+    fn bridgeResult(self: *Set, index: usize) BridgeRunResult {
+        const configured = self.configured[index];
+        const bridge = &self.values[index];
+        switch (configured.start_type) {
+            .automatic => bridge.run(.{
+                .timeout = .fromSeconds(30),
+            }) catch |err| return .{
+                .index = index,
+                .err = err,
+                .expected_stop = false,
+            },
+            .lazy => bridge.runLazy(
+                .{ .timeout = .fromSeconds(30) },
+                configured.threshold,
+                .fromSeconds(configured.idle_timeout_seconds),
+            ) catch |err| return .{
+                .index = index,
+                .err = err,
+                .expected_stop = false,
+            },
+            .once => bridge.runOnce(.{
+                .timeout = .fromSeconds(30),
+            }) catch |err| return .{
+                .index = index,
+                .err = err,
+                .expected_stop = true,
+            },
+        }
+        return .{
+            .index = index,
+            .err = null,
+            .expected_stop = configured.start_type == .once,
+        };
+    }
+
     /// Normalize every broker-local source before a final persistence
     /// snapshot. Persistent Sessions retain retransmittable work; clean
     /// Sessions remove their routes and queued deliveries.
@@ -1107,7 +1223,7 @@ test "configured bridge set owns an independent cancellation domain" {
         null,
     );
     defer bridges.deinit();
-    var untouched_listener_shutdown: std.Io.Event = .unset;
+    const untouched_listener_shutdown: std.Io.Event = .unset;
     const FailbackTask = struct {
         bridges: *Set,
         started: std.Io.Event = .unset,
@@ -1142,6 +1258,57 @@ test "configured bridge set owns an independent cancellation domain" {
     future.await(io);
     joined = true;
     if (task.err) |err| return err;
+}
+
+test "configured bridge supervisor stops without listener cancellation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    const configured: [0]mqtt.broker_config.Bridge = .{};
+    var bridges = try Set.init(
+        allocator,
+        io,
+        &broker,
+        &configured,
+        null,
+    );
+    defer bridges.deinit();
+
+    const Task = struct {
+        bridges: *Set,
+        started: std.Io.Event = .unset,
+        finished: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.started.set(self.bridges.io);
+            self.bridges.runAll() catch |err| {
+                self.err = err;
+            };
+            self.finished.set(self.bridges.io);
+        }
+    };
+    var task = Task{ .bridges = &bridges };
+    var future = try std.Io.concurrent(io, Task.run, .{&task});
+    var joined = false;
+    defer if (!joined) future.cancel(io);
+    try task.started.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+    try std.testing.expect(!task.finished.isSet());
+
+    const listener_shutdown: std.Io.Event = .unset;
+    bridges.requestStop();
+    try task.finished.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(1),
+        .clock = .awake,
+    } });
+    future.await(io);
+    joined = true;
+    if (task.err) |err| return err;
+    try std.testing.expect(!listener_shutdown.isSet());
 }
 
 test "configured bidirectional bridge never falls back from private mode" {
