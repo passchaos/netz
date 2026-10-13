@@ -1092,7 +1092,9 @@ Current protocol coverage includes:
   explicit local IPv4/IPv6 source-address binding across cleartext and TLS
   reconnects, configurable TCP keepalive plus optional Linux
   `TCP_USER_TIMEOUT` policy preserved across cleartext/TLS fallback and
-  reconnect attempts, and crash-safe QoS 2 state,
+  reconnect attempts, per-bridge `bridge_reload_type lazy|immediate` SIGHUP
+  replacement with prepare-before-commit rollback and no listener/client
+  interruption, and crash-safe QoS 2 state,
   listener-local P-256/P-384/P-521/Ed25519/RSA PEM `certfile`/`keyfile`,
   PBES2-encrypted PKCS#8 keys with file-backed passwords, and
   ordered OpenSSL-style `ciphers` and `ciphers_tls1.3` policies on both TLS

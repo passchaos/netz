@@ -19,6 +19,8 @@ from mqtt_broker_config_inflight import run_max_inflight_messages_case
 from mqtt_broker_config_bridge import (
     run_bidirectional_bridge_case,
     run_inbound_bridge_case,
+    run_bridge_reload_case,
+    run_outbound_bridge_reload_case,
     run_once_bridge_case,
     run_primary_failback_case,
     run_tls_inbound_bridge_case,
@@ -5453,6 +5455,8 @@ def main() -> None:
         run_per_listener_security_case(args.broker, directory)
         run_include_directory_case(args.broker, directory)
         run_inbound_bridge_case(args.broker, directory)
+        run_bridge_reload_case(args.broker, directory)
+        run_outbound_bridge_reload_case(args.broker, directory)
         run_bidirectional_bridge_case(args.broker, directory, 4)
         run_bidirectional_bridge_case(args.broker, directory, 5)
         run_outbound_bridge_case(args.broker, directory)
@@ -5516,7 +5520,9 @@ def main() -> None:
         "zero-length Client ID, global/listener auto-ID prefixes, required "
         "Client ID prefix admission, and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "
-        "configured cleartext/TLS inbound/outbound bridge prefix mapping, mTLS, "
+        "configured cleartext/TLS inbound/outbound bridge prefix mapping, "
+        "immediate/lazy SIGHUP bridge reload with rollback and client "
+        "continuity, mTLS, "
         "single-Session bidirectional bridge mapping, "
         "MQTT 3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "
         "persistent remote-subscription cleanup with interleaved delivery, "

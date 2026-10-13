@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import signal
 import socket
 import ssl
 import subprocess
@@ -301,6 +302,25 @@ def _wait_for_log(process: subprocess.Popen[bytes], log: Path, marker: str) -> N
     raise TimeoutError(f"timed out waiting for {marker!r}: {log.read_text()}")
 
 
+def _wait_for_log_count(
+    process: subprocess.Popen[bytes], log: Path, marker: str, count: int
+) -> None:
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        content = log.read_text(errors="replace") if log.exists() else ""
+        if content.count(marker) >= count:
+            return
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"broker exited before occurrence {count} of {marker!r}: {content}"
+            )
+        time.sleep(0.02)
+    raise TimeoutError(
+        f"timed out waiting for occurrence {count} of {marker!r}: "
+        f"{log.read_text(errors='replace')}"
+    )
+
+
 def _start_broker(
     binary: Path,
     config: Path,
@@ -581,6 +601,488 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
             publisher.close()
         if subscriber is not None:
             subscriber.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        if upstream_output is not None:
+            _stop(upstream, upstream_output)
+
+
+def run_bridge_reload_case(broker: Path, directory: Path) -> None:
+    upstream_port, local_port = _distinct_ports(2)
+    upstream_config = directory / "bridge-reload-upstream.conf"
+    upstream_config.write_text(
+        f"listener {upstream_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 4\n"
+    )
+    local_config = directory / "bridge-reload-local.conf"
+
+    def write_local(
+        generation: str,
+        reload_type: str,
+        *,
+        name: str = "reloadable",
+        client_id: str = "configured-reload-bridge",
+    ) -> None:
+        local_config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 4\n"
+            f"connection {name}\n"
+            f"address 127.0.0.1:{upstream_port}\n"
+            f"topic # in 1 local/{generation}/ remote/{generation}/\n"
+            "cleansession false\n"
+            "bridge_protocol_version mqttv50\n"
+            "bridge_session_expiry_interval 60\n"
+            f"remote_clientid {client_id}\n"
+            "restart_timeout 1\n"
+            f"bridge_reload_type {reload_type}\n"
+        )
+
+    def ping(client: socket.socket) -> None:
+        client.sendall(b"\xc0\x00")
+        response = _read_packet(client)
+        if response != b"\xd0\x00":
+            raise AssertionError(
+                f"bridge reload client expected PINGRESP: {response.hex()}"
+            )
+
+    def expect_no_publish(client: socket.socket, label: str) -> None:
+        previous_timeout = client.gettimeout()
+        client.settimeout(0.5)
+        try:
+            packet = _read_packet(client)
+        except socket.timeout:
+            return
+        finally:
+            client.settimeout(previous_timeout)
+        raise AssertionError(f"{label} unexpectedly received: {packet.hex()}")
+
+    write_local("one", "immediate")
+    upstream_log = directory / "bridge-reload-upstream.log"
+    local_log = directory / "bridge-reload-local.log"
+    upstream, upstream_output = _start_broker(
+        broker,
+        upstream_config,
+        upstream_log,
+        finite=False,
+    )
+    local = None
+    local_output = None
+    observer = None
+    subscriber = None
+    publisher = None
+    try:
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        observer = _connect_client(upstream_port, "bridge-reload-observer")
+        state_topic = "$SYS/broker/connection/configured-reload-bridge/state"
+        _subscribe_client(observer, 1, state_topic, 1)
+
+        local, local_output = _start_broker(
+            broker,
+            local_config,
+            local_log,
+            finite=False,
+        )
+        _wait_for_log(local, local_log, "bridge reloadable remote=")
+        _expect_bridge_state(observer, state_topic, b"1")
+        subscriber = _connect_client(local_port, "bridge-reload-local-client")
+        _subscribe_client(subscriber, 1, "local/#", 1)
+        publisher = _connect_client(upstream_port, "bridge-reload-publisher")
+        _publish_message(
+            publisher,
+            1,
+            b"initial-generation",
+            1,
+            topic="remote/one/value",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"initial-generation",
+            expected_topic="local/one/value",
+        )
+
+        write_local("two", "immediate")
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "bridge reload committed",
+            1,
+        )
+        _expect_bridge_state(observer, state_topic, b"0")
+        _expect_bridge_state(observer, state_topic, b"1")
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            2,
+            b"immediate-generation",
+            1,
+            topic="remote/two/value",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"immediate-generation",
+            expected_topic="local/two/value",
+        )
+
+        write_local("three", "lazy")
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "bridge reload committed",
+            2,
+        )
+        expect_no_publish(observer, "lazy bridge reload")
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            3,
+            b"lazy-old-generation",
+            1,
+            topic="remote/two/still-active",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"lazy-old-generation",
+            expected_topic="local/two/still-active",
+        )
+
+        write_local("latest", "lazy")
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "bridge reload committed",
+            3,
+        )
+        expect_no_publish(observer, "superseded lazy bridge reload")
+        _publish_message(
+            publisher,
+            4,
+            b"lazy-still-old-generation",
+            1,
+            topic="remote/two/still-active-again",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"lazy-still-old-generation",
+            expected_topic="local/two/still-active-again",
+        )
+
+        publisher.close()
+        publisher = None
+        observer.close()
+        observer = None
+        _stop(upstream, upstream_output)
+        upstream_output = None
+        ping(subscriber)
+
+        upstream, upstream_output = _start_broker(
+            broker,
+            upstream_config,
+            upstream_log,
+            finite=False,
+        )
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        observer = _connect_client(upstream_port, "bridge-reload-observer-2")
+        _subscribe_client(observer, 1, state_topic, 1)
+        _expect_bridge_state(observer, state_topic, b"1")
+        publisher = _connect_client(upstream_port, "bridge-reload-publisher-2")
+        _publish_message(
+            publisher,
+            5,
+            b"lazy-new-generation",
+            1,
+            topic="remote/latest/value",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"lazy-new-generation",
+            expected_topic="local/latest/value",
+        )
+
+        missing_ca = directory / "missing-bridge-reload-ca.pem"
+        local_config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "connection reloadable\n"
+            f"address localhost:{upstream_port}\n"
+            "topic # in 1 local/not-staged/ remote/not-staged/\n"
+            f"bridge_cafile {missing_ca}\n"
+            "bridge_tls_version tlsv1.3\n"
+            "bridge_reload_type immediate\n"
+        )
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "bridge reload failed: error=FileNotFound",
+            1,
+        )
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            6,
+            b"staging-rollback",
+            1,
+            topic="remote/latest/staging-rollback",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"staging-rollback",
+            expected_topic="local/latest/staging-rollback",
+        )
+
+        local_config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "connection reloadable\n"
+            f"address 127.0.0.1:{upstream_port}\n"
+            "topic # in 1 local/broken/ remote/broken/\n"
+            "bridge_reload_type invalid\n"
+        )
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "configuration reload failed: error=InvalidDirective",
+            1,
+        )
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            7,
+            b"rollback-generation",
+            1,
+            topic="remote/latest/rollback",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"rollback-generation",
+            expected_topic="local/latest/rollback",
+        )
+
+        local_config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 4\n"
+        )
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "bridge reload committed",
+            4,
+        )
+        _expect_bridge_state(observer, state_topic, b"0")
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            8,
+            b"removed-generation",
+            1,
+            topic="remote/latest/removed",
+        )
+        expect_no_publish(subscriber, "removed bridge")
+
+        added_state_topic = "$SYS/broker/connection/configured-reload-added/state"
+        _subscribe_client(observer, 2, added_state_topic, 1)
+        write_local(
+            "four",
+            "immediate",
+            name="added",
+            client_id="configured-reload-added",
+        )
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(
+            local,
+            local_log,
+            "bridge reload committed",
+            5,
+        )
+        _expect_bridge_state(observer, added_state_topic, b"1")
+        ping(subscriber)
+        _publish_message(
+            publisher,
+            9,
+            b"added-generation",
+            1,
+            topic="remote/four/value",
+        )
+        _expect_mapped_publish(
+            subscriber,
+            b"added-generation",
+            expected_topic="local/four/value",
+        )
+    except BaseException as exc:
+        raise RuntimeError(
+            "configured bridge reload failed:\nlocal:\n"
+            + (local_log.read_text(errors="replace") if local_log.exists() else "")
+            + "\nupstream:\n"
+            + (
+                upstream_log.read_text(errors="replace")
+                if upstream_log.exists()
+                else ""
+            )
+        ) from exc
+    finally:
+        for client in (publisher, subscriber, observer):
+            if client is not None:
+                client.close()
+        if local is not None and local_output is not None:
+            _stop(local, local_output)
+        if upstream_output is not None:
+            _stop(upstream, upstream_output)
+
+
+def run_outbound_bridge_reload_case(broker: Path, directory: Path) -> None:
+    upstream_port, local_port = _distinct_ports(2)
+    upstream_config = directory / "outbound-reload-upstream.conf"
+    upstream_config.write_text(
+        f"listener {upstream_port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 3\n"
+    )
+    local_config = directory / "outbound-reload-local.conf"
+
+    def write_local(generation: str, reload_type: str) -> None:
+        local_config.write_text(
+            f"listener {local_port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 3\n"
+            "connection outbound-reloadable\n"
+            f"address 127.0.0.1:{upstream_port}\n"
+            f"topic # out 1 local/{generation}/ remote/{generation}/\n"
+            "local_cleansession false\n"
+            "cleansession false\n"
+            "bridge_protocol_version mqttv50\n"
+            "bridge_session_expiry_interval 60\n"
+            "local_clientid configured-reload-local-source\n"
+            "remote_clientid configured-reload-outbound\n"
+            "restart_timeout 1\n"
+            f"bridge_reload_type {reload_type}\n"
+        )
+
+    def ping(client: socket.socket) -> None:
+        client.sendall(b"\xc0\x00")
+        response = _read_packet(client)
+        if response != b"\xd0\x00":
+            raise AssertionError(
+                f"outbound reload client expected PINGRESP: {response.hex()}"
+            )
+
+    def expect_no_publish(client: socket.socket, label: str) -> None:
+        previous_timeout = client.gettimeout()
+        client.settimeout(0.5)
+        try:
+            packet = _read_packet(client)
+        except socket.timeout:
+            return
+        finally:
+            client.settimeout(previous_timeout)
+        raise AssertionError(f"{label} unexpectedly received: {packet.hex()}")
+
+    def publish_and_expect(
+        publisher: socket.socket,
+        observer: socket.socket,
+        packet_id: int,
+        generation: str,
+        payload: bytes,
+    ) -> None:
+        _publish_message(
+            publisher,
+            packet_id,
+            payload,
+            1,
+            topic=f"local/{generation}/value",
+        )
+        _expect_mapped_publish(
+            observer,
+            payload,
+            expected_topic=f"remote/{generation}/value",
+        )
+
+    write_local("one", "immediate")
+    upstream_log = directory / "outbound-reload-upstream.log"
+    local_log = directory / "outbound-reload-local.log"
+    upstream, upstream_output = _start_broker(
+        broker,
+        upstream_config,
+        upstream_log,
+        finite=False,
+    )
+    local = None
+    local_output = None
+    observer = None
+    publisher = None
+    try:
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        observer = _connect_client(upstream_port, "outbound-reload-observer")
+        state_topic = "$SYS/broker/connection/configured-reload-outbound/state"
+        _subscribe_client(observer, 1, state_topic, 1)
+        local, local_output = _start_broker(
+            broker,
+            local_config,
+            local_log,
+            finite=False,
+        )
+        _wait_for_log(local, local_log, "bridge outbound-reloadable remote=")
+        _expect_bridge_state(observer, state_topic, b"1")
+        _subscribe_client(observer, 2, "remote/#", 1)
+        publisher = _connect_client(local_port, "outbound-reload-publisher")
+        publish_and_expect(publisher, observer, 1, "one", b"initial-outbound")
+
+        write_local("two", "immediate")
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(local, local_log, "bridge reload committed", 1)
+        _expect_bridge_state(observer, state_topic, b"0")
+        _expect_bridge_state(observer, state_topic, b"1")
+        ping(publisher)
+        publish_and_expect(publisher, observer, 2, "two", b"immediate-outbound")
+
+        write_local("three", "lazy")
+        os.kill(local.pid, signal.SIGHUP)
+        _wait_for_log_count(local, local_log, "bridge reload committed", 2)
+        expect_no_publish(observer, "lazy outbound bridge reload")
+        ping(publisher)
+        publish_and_expect(publisher, observer, 3, "two", b"lazy-outbound-old")
+
+        observer.close()
+        observer = None
+        _stop(upstream, upstream_output)
+        upstream_output = None
+        ping(publisher)
+
+        upstream, upstream_output = _start_broker(
+            broker,
+            upstream_config,
+            upstream_log,
+            finite=False,
+        )
+        _wait_for_log(upstream, upstream_log, "configured 1 listeners")
+        observer = _connect_client(upstream_port, "outbound-reload-observer-2")
+        _subscribe_client(observer, 1, state_topic, 1)
+        _expect_bridge_state(observer, state_topic, b"1")
+        _subscribe_client(observer, 2, "remote/#", 1)
+        ping(publisher)
+        publish_and_expect(publisher, observer, 4, "three", b"lazy-outbound-new")
+    except BaseException as exc:
+        raise RuntimeError(
+            "configured outbound bridge reload failed:\nlocal:\n"
+            + (local_log.read_text(errors="replace") if local_log.exists() else "")
+            + "\nupstream:\n"
+            + (
+                upstream_log.read_text(errors="replace")
+                if upstream_log.exists()
+                else ""
+            )
+        ) from exc
+    finally:
+        for client in (publisher, observer):
+            if client is not None:
+                client.close()
         if local is not None and local_output is not None:
             _stop(local, local_output)
         if upstream_output is not None:

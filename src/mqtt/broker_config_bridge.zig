@@ -67,6 +67,11 @@ pub const StartType = enum {
     once,
 };
 
+pub const ReloadType = enum {
+    lazy,
+    immediate,
+};
+
 pub const Rule = struct {
     /// Effective filter sent to the remote broker, including remote_prefix.
     filter: []u8,
@@ -143,6 +148,7 @@ pub const Bridge = struct {
     require_ocsp: bool = false,
     round_robin: bool = false,
     start_type: StartType = .automatic,
+    reload_type: ReloadType = .lazy,
     idle_timeout_seconds: u32 = default_lazy_idle_timeout_seconds,
     threshold: usize = default_lazy_threshold,
     notifications: bool = true,
@@ -439,6 +445,7 @@ const Seen = struct {
     bridge_tls_version: bool = false,
     round_robin: bool = false,
     start_type: bool = false,
+    bridge_reload_type: bool = false,
     idle_timeout: bool = false,
     threshold: bool = false,
     notifications: bool = false,
@@ -483,6 +490,7 @@ pub const Builder = struct {
     require_ocsp: bool = false,
     round_robin: bool = false,
     start_type: StartType = .automatic,
+    reload_type: ReloadType = .lazy,
     idle_timeout_seconds: u32 = default_lazy_idle_timeout_seconds,
     threshold: usize = default_lazy_threshold,
     notifications: bool = true,
@@ -718,6 +726,15 @@ pub const Builder = struct {
                 .once
             else
                 return error.UnsupportedBridgeStartType;
+        } else if (std.mem.eql(u8, directive, "bridge_reload_type")) {
+            try markOnce(&self.seen.bridge_reload_type);
+            const value = try parseOne(words);
+            self.reload_type = if (std.mem.eql(u8, value, "lazy"))
+                .lazy
+            else if (std.mem.eql(u8, value, "immediate"))
+                .immediate
+            else
+                return error.InvalidDirective;
         } else if (std.mem.eql(u8, directive, "idle_timeout")) {
             try markOnce(&self.seen.idle_timeout);
             self.idle_timeout_seconds = try parsePositive(u32, words);
@@ -902,6 +919,7 @@ pub const Builder = struct {
             .require_ocsp = self.require_ocsp,
             .round_robin = self.round_robin,
             .start_type = self.start_type,
+            .reload_type = self.reload_type,
             .idle_timeout_seconds = self.idle_timeout_seconds,
             .threshold = self.threshold,
             .notifications = self.notifications,
@@ -1077,6 +1095,7 @@ pub fn isDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "bridge_tls_version") or
         std.mem.eql(u8, value, "round_robin") or
         std.mem.eql(u8, value, "start_type") or
+        std.mem.eql(u8, value, "bridge_reload_type") or
         std.mem.eql(u8, value, "idle_timeout") or
         std.mem.eql(u8, value, "threshold") or
         std.mem.eql(u8, value, "notifications") or

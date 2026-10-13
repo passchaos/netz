@@ -317,7 +317,8 @@ pub const Bridge = struct {
         shutdown: *std.Io.Event,
     ) Error!Bridge {
         var owned_rules = try OwnedRules.init(allocator, options.rules);
-        errdefer owned_rules.deinit(allocator);
+        var owned_rules_owned = true;
+        errdefer if (owned_rules_owned) owned_rules.deinit(allocator);
         var notifications = if (options.notifications) |configured|
             try OwnedNotifications.init(allocator, configured)
         else
@@ -386,7 +387,8 @@ pub const Bridge = struct {
                 client_options,
             ),
         };
-        errdefer client.deinit();
+        var client_owned = true;
+        errdefer if (client_owned) client.deinit();
         if (qos2) {
             for (owned_rules.values) |rule| {
                 try client.seedSubscription(.{
@@ -413,11 +415,11 @@ pub const Bridge = struct {
             .qos2_enabled = qos2,
             .notifications = notifications,
         };
+        owned_rules_owned = false;
+        client_owned = false;
         notifications = null;
-        result.publishLocalNotification(false, true) catch |err| {
-            result.deinit();
-            return err;
-        };
+        errdefer result.deinit();
+        try result.publishLocalNotification(false, true);
         return result;
     }
 
@@ -522,12 +524,41 @@ pub const Bridge = struct {
         self: *Bridge,
         poll_options: reconnect.PollOptions,
     ) (Error || std.Io.Cancelable)!void {
+        return self.runLoop(poll_options, null, null);
+    }
+
+    /// Preserve an established bridge while a lazy configuration generation
+    /// is pending, then return at the first disconnected boundary before the
+    /// reconnect client starts another attempt.
+    pub fn runUntilReload(
+        self: *Bridge,
+        poll_options: reconnect.PollOptions,
+        reload_pending: *const std.atomic.Value(bool),
+        connected: *std.atomic.Value(bool),
+    ) (Error || std.Io.Cancelable)!void {
+        return self.runLoop(poll_options, reload_pending, connected);
+    }
+
+    fn runLoop(
+        self: *Bridge,
+        poll_options: reconnect.PollOptions,
+        reload_pending: ?*const std.atomic.Value(bool),
+        connected: ?*std.atomic.Value(bool),
+    ) (Error || std.Io.Cancelable)!void {
         defer self.publishLocalNotification(false, false) catch {};
+        defer if (connected) |state| state.store(false, .release);
         var bounded = poll_options;
         // Give the Bridge an explicit disconnected boundary before retrying so
         // local state observers see `0` before the next `1` generation.
         bounded.reconnect_after_transport_error = false;
         while (true) {
+            if (connected) |state| {
+                state.store(self.client.connection() != null, .release);
+            }
+            if (reload_pending) |pending| {
+                if (pending.load(.acquire) and
+                    self.client.connection() == null) return;
+            }
             _ = self.step(bounded) catch |err| switch (err) {
                 error.Canceled => return,
                 else => return err,
@@ -542,8 +573,26 @@ pub const Bridge = struct {
         self: *Bridge,
         poll_options: reconnect.PollOptions,
     ) (Error || std.Io.Cancelable)!void {
+        return self.runOnceTracked(poll_options, null);
+    }
+
+    pub fn runOnceWithConnectionState(
+        self: *Bridge,
+        poll_options: reconnect.PollOptions,
+        connected: *std.atomic.Value(bool),
+    ) (Error || std.Io.Cancelable)!void {
+        return self.runOnceTracked(poll_options, connected);
+    }
+
+    fn runOnceTracked(
+        self: *Bridge,
+        poll_options: reconnect.PollOptions,
+        connected: ?*std.atomic.Value(bool),
+    ) (Error || std.Io.Cancelable)!void {
         defer self.publishLocalNotification(false, false) catch {};
+        defer if (connected) |state| state.store(false, .release);
         _ = try self.connect();
+        if (connected) |state| state.store(true, .release);
         var bounded = poll_options;
         bounded.reconnect_after_transport_error = false;
         while (self.client.connection() != null) {
@@ -551,6 +600,9 @@ pub const Bridge = struct {
                 error.Canceled => return,
                 else => return err,
             };
+            if (connected) |state| {
+                state.store(self.client.connection() != null, .release);
+            }
         }
     }
 

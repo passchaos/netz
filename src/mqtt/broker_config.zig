@@ -39,6 +39,7 @@ pub const Bridge = bridge_config.Bridge;
 pub const BridgeRule = bridge_config.Rule;
 pub const BridgeEndpoint = bridge_config.Endpoint;
 pub const BridgeStartType = bridge_config.StartType;
+pub const BridgeReloadType = bridge_config.ReloadType;
 pub const BridgeDirection = bridge_config.Direction;
 
 pub const Listener = struct {
@@ -1664,6 +1665,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\bridge_tls_version tlsv1.3
         \\round_robin true
         \\start_type automatic
+        \\bridge_reload_type immediate
         \\notifications true
         \\notifications_local_only false
         \\notification_topic bridge/upstream/state
@@ -1691,6 +1693,10 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqual(
         BridgeStartType.automatic,
         upstream.start_type,
+    );
+    try std.testing.expectEqual(
+        BridgeReloadType.immediate,
+        upstream.reload_type,
     );
     try std.testing.expect(upstream.notifications);
     try std.testing.expect(!upstream.notifications_local_only);
@@ -1851,6 +1857,7 @@ test "MQTT broker config applies inbound bridge defaults" {
         BridgeStartType.automatic,
         bridge.start_type,
     );
+    try std.testing.expectEqual(BridgeReloadType.lazy, bridge.reload_type);
     try std.testing.expectEqualStrings("#", bridge.rules[0].filter);
     try std.testing.expect(bridge.notifications);
     try std.testing.expect(!bridge.notifications_local_only);
@@ -2045,6 +2052,22 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         parse(allocator, listener ++
             "connection old\naddress localhost\ntopic # in 0\n" ++
             "bridge_protocol_version mqttv31\n"),
+    );
+    try std.testing.expectError(
+        error.DirectiveRequiresBridge,
+        parse(allocator, listener ++ "bridge_reload_type immediate\n"),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator, listener ++
+            "connection invalid-reload\naddress localhost\ntopic # in 0\n" ++
+            "bridge_reload_type delayed\n"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator, listener ++
+            "connection duplicate-reload\naddress localhost\ntopic # in 0\n" ++
+            "bridge_reload_type lazy\nbridge_reload_type immediate\n"),
     );
     try std.testing.expectError(
         error.InvalidDirective,

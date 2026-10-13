@@ -376,9 +376,37 @@ pub const ConfiguredBridge = union(enum) {
             inline else => |*value| try value.run(options),
         }
     }
+
+    pub fn runUntilReload(
+        self: *ConfiguredBridge,
+        options: mqtt.reconnect.PollOptions,
+        reload_pending: *const std.atomic.Value(bool),
+        connected: *std.atomic.Value(bool),
+    ) anyerror!void {
+        switch (self.*) {
+            inline else => |*value| try value.runUntilReload(
+                options,
+                reload_pending,
+                connected,
+            ),
+        }
+    }
     pub fn runOnce(self: *ConfiguredBridge, options: mqtt.reconnect.PollOptions) anyerror!void {
         switch (self.*) {
             inline else => |*value| try value.runOnce(options),
+        }
+    }
+
+    pub fn runOnceWithConnectionState(
+        self: *ConfiguredBridge,
+        options: mqtt.reconnect.PollOptions,
+        connected: *std.atomic.Value(bool),
+    ) anyerror!void {
+        switch (self.*) {
+            inline else => |*value| try value.runOnceWithConnectionState(
+                options,
+                connected,
+            ),
         }
     }
 
@@ -397,6 +425,26 @@ pub const ConfiguredBridge = union(enum) {
             .inbound => return error.UnsupportedBridgeStartType,
         }
     }
+
+    pub fn runLazyUntilReload(
+        self: *ConfiguredBridge,
+        options: mqtt.reconnect.PollOptions,
+        threshold: usize,
+        idle_timeout: std.Io.Duration,
+        reload_pending: *const std.atomic.Value(bool),
+        connected: *std.atomic.Value(bool),
+    ) anyerror!void {
+        switch (self.*) {
+            .outbound => |*value| try value.runLazyUntilReload(
+                options,
+                threshold,
+                idle_timeout,
+                reload_pending,
+                connected,
+            ),
+            .inbound => return error.UnsupportedBridgeStartType,
+        }
+    }
 };
 
 /// One move-stable configured bridge generation. Connector callbacks borrow
@@ -410,6 +458,7 @@ pub const Entry = struct {
     value: ConfiguredBridge,
     connector_resources: ConnectorResources = .{},
     shutdown: std.Io.Event = .unset,
+    connected: std.atomic.Value(bool) = .init(false),
 
     fn create(
         allocator: std.mem.Allocator,
@@ -417,6 +466,7 @@ pub const Entry = struct {
         local: *mqtt.broker.Broker,
         configured: mqtt.broker_config.Bridge,
         persistence_path: ?[]const u8,
+        activate_local_source: bool,
     ) !*Entry {
         const entry = try allocator.create(Entry);
         errdefer allocator.destroy(entry);
@@ -436,6 +486,7 @@ pub const Entry = struct {
             &entry.connector_resources,
             &entry.shutdown,
             persistence_path,
+            activate_local_source,
         );
         return entry;
     }
@@ -457,15 +508,293 @@ pub const Entry = struct {
     pub fn stopRequested(self: *const Entry) bool {
         return self.shutdown.isSet();
     }
+
+    fn activate(self: *Entry) anyerror!void {
+        switch (self.value) {
+            .inbound => {},
+            .outbound => |*bridge| try bridge.activateLocalSource(),
+        }
+    }
+
+    fn runUntilReload(
+        self: *Entry,
+        reload_pending: *const std.atomic.Value(bool),
+    ) ?anyerror {
+        const configured = self.configured;
+        switch (configured.start_type) {
+            .automatic => self.value.runUntilReload(
+                .{ .timeout = .fromSeconds(30) },
+                reload_pending,
+                &self.connected,
+            ) catch |err| return err,
+            .lazy => self.value.runLazyUntilReload(
+                .{ .timeout = .fromSeconds(30) },
+                configured.threshold,
+                .fromSeconds(configured.idle_timeout_seconds),
+                reload_pending,
+                &self.connected,
+            ) catch |err| return err,
+            .once => self.value.runOnceWithConnectionState(
+                .{ .timeout = .fromSeconds(30) },
+                &self.connected,
+            ) catch |err| return err,
+        }
+        return null;
+    }
+};
+
+const Slot = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    name: []u8,
+    mutex: std.Io.Mutex = .init,
+    active: ?*Entry,
+    pending: ?*Entry = null,
+    has_pending: bool = false,
+    reload_pending: std.atomic.Value(bool) = .init(false),
+    running: bool = false,
+
+    fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        entry: *Entry,
+    ) !*Slot {
+        const slot = try allocator.create(Slot);
+        errdefer allocator.destroy(slot);
+        slot.* = .{
+            .allocator = allocator,
+            .io = io,
+            .name = try allocator.dupe(u8, entry.configured.name),
+            .active = entry,
+        };
+        return slot;
+    }
+
+    fn deinit(self: *Slot) void {
+        const allocator = self.allocator;
+        std.debug.assert(!self.running);
+        if (self.active) |entry| entry.deinit();
+        if (self.pending) |entry| entry.deinit();
+        allocator.free(self.name);
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+
+    fn detachActive(self: *Slot) *Entry {
+        std.debug.assert(!self.running);
+        std.debug.assert(!self.has_pending);
+        const entry = self.active.?;
+        self.active = null;
+        return entry;
+    }
+
+    fn install(self: *Slot, replacement: ?*Entry) bool {
+        self.mutex.lockUncancelable(self.io);
+        const retired_pending = self.pending;
+        self.pending = replacement;
+        self.has_pending = true;
+        self.reload_pending.store(true, .release);
+        const should_start = !self.running;
+        if (self.running and
+            (replacement == null or
+                replacement.?.configured.reload_type == .immediate or
+                !self.connected()))
+        {
+            self.active.?.requestStop();
+        }
+        self.mutex.unlock(self.io);
+        if (retired_pending) |entry| entry.deinit();
+        return should_start;
+    }
+
+    fn connected(self: *const Slot) bool {
+        const entry = self.active orelse return false;
+        return entry.connected.load(.acquire);
+    }
+
+    fn requestActiveStop(self: *Slot) void {
+        self.mutex.lockUncancelable(self.io);
+        if (self.active) |entry| entry.requestStop();
+        self.mutex.unlock(self.io);
+    }
+
+    fn activeStopRequested(self: *Slot) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const entry = self.active orelse return true;
+        return entry.stopRequested();
+    }
+
+    fn requestPrimaryFailback(self: *Slot, now_ns: i64) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const entry = self.active orelse return;
+        if (entry.stopRequested()) return;
+        const resources = &entry.connector_resources;
+        if (resources.connector_configured and
+            resources.connector.source.addressCount() > 1 and
+            !resources.connector.source.round_robin and
+            resources.connector.source.start_type == .automatic and
+            resources.connector.shouldFailBack(now_ns))
+        {
+            entry.value.requestReconnect();
+        }
+    }
+
+    fn disconnectLocalSource(self: *Slot) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const entry = self.active orelse return;
+        switch (entry.value) {
+            .inbound => {},
+            .outbound => |*value| value.source.disconnectTransport(),
+        }
+    }
+
+    fn start(self: *Slot, owner: *Set, workers: *std.Io.Group) void {
+        self.mutex.lockUncancelable(self.io);
+        std.debug.assert(!self.running);
+        self.running = true;
+        self.mutex.unlock(self.io);
+        workers.async(self.io, run, .{ self, owner });
+    }
+
+    fn run(self: *Slot, owner: *Set) std.Io.Cancelable!void {
+        while (true) {
+            self.mutex.lockUncancelable(self.io);
+            if (owner.stopRequested()) {
+                self.running = false;
+                self.mutex.unlock(self.io);
+                return;
+            }
+            var retired: ?*Entry = null;
+            if (self.has_pending) {
+                retired = self.active;
+                self.active = self.pending;
+                self.pending = null;
+                self.has_pending = false;
+                self.reload_pending.store(false, .release);
+            }
+            const active = self.active;
+            if (active == null) self.running = false;
+            self.mutex.unlock(self.io);
+            if (retired) |entry| entry.deinit();
+            const entry = active orelse return;
+
+            const maybe_error: ?anyerror = result: {
+                entry.activate() catch |err| break :result err;
+                break :result entry.runUntilReload(&self.reload_pending);
+            };
+
+            self.mutex.lockUncancelable(self.io);
+            if (owner.stopRequested()) {
+                self.running = false;
+                self.mutex.unlock(self.io);
+                return;
+            }
+            const replacement_waiting = self.has_pending;
+            if (replacement_waiting) {
+                self.mutex.unlock(self.io);
+                continue;
+            }
+            if (entry.configured.start_type == .once) {
+                if (maybe_error) |err| {
+                    std.debug.print(
+                        "netz MQTT bridge {s} completed " ++
+                            "start_type=once error={s}\n",
+                        .{ self.name, @errorName(err) },
+                    );
+                } else {
+                    std.debug.print(
+                        "netz MQTT bridge {s} completed start_type=once\n",
+                        .{self.name},
+                    );
+                }
+                self.running = false;
+                self.mutex.unlock(self.io);
+                return;
+            }
+            owner.recordFailure(maybe_error orelse error.UnexpectedBridgeExit);
+            self.running = false;
+            self.mutex.unlock(self.io);
+            return;
+        }
+    }
+};
+
+const PreparedReload = struct {
+    allocator: std.mem.Allocator,
+    slots: []?*Slot,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *mqtt.broker.Broker,
+        configured: []const mqtt.broker_config.Bridge,
+        persistence_path: ?[]const u8,
+        activate_local_sources: bool,
+    ) !PreparedReload {
+        const slots = try allocator.alloc(?*Slot, configured.len);
+        @memset(slots, null);
+        errdefer allocator.free(slots);
+        var initialized: usize = 0;
+        errdefer while (initialized != 0) {
+            initialized -= 1;
+            slots[initialized].?.deinit();
+        };
+        for (configured, slots) |source, *slot| {
+            const entry = try Entry.create(
+                allocator,
+                io,
+                local,
+                source,
+                persistence_path,
+                activate_local_sources,
+            );
+            errdefer entry.deinit();
+            slot.* = try Slot.create(allocator, io, entry);
+            initialized += 1;
+        }
+        return .{ .allocator = allocator, .slots = slots };
+    }
+
+    fn deinit(self: *PreparedReload) void {
+        for (self.slots) |maybe_slot| {
+            if (maybe_slot) |slot| slot.deinit();
+        }
+        self.allocator.free(self.slots);
+        self.* = undefined;
+    }
+
+    fn find(self: *const PreparedReload, name: []const u8) ?usize {
+        for (self.slots, 0..) |maybe_slot, index| {
+            const slot = maybe_slot orelse continue;
+            if (std.mem.eql(u8, slot.name, name)) return index;
+        }
+        return null;
+    }
+
+    fn takeSlot(self: *PreparedReload, index: usize) *Slot {
+        const slot = self.slots[index].?;
+        self.slots[index] = null;
+        return slot;
+    }
 };
 
 pub const Set = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    local: *mqtt.broker.Broker,
+    persistence_path: ?[]const u8,
     /// Stable, Set-local cancellation boundary. Bridge tasks can be stopped
     /// and replaced without signaling the listener/broker shutdown event.
     shutdown: *std.Io.Event,
-    entries: []*Entry,
+    slots: std.ArrayList(*Slot),
+    reload_storage: []PreparedReload,
+    reload_queue: std.Io.Queue(PreparedReload),
+    failure_mutex: std.Io.Mutex = .init,
+    failure: ?anyerror = null,
+    failed: std.Io.Event = .unset,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -477,136 +806,162 @@ pub const Set = struct {
         const shutdown = try allocator.create(std.Io.Event);
         errdefer allocator.destroy(shutdown);
         shutdown.* = .unset;
-        const entries = try allocator.alloc(*Entry, configured.len);
-        errdefer allocator.free(entries);
-        var initialized: usize = 0;
+        const reload_storage = try allocator.alloc(PreparedReload, 1);
+        errdefer allocator.free(reload_storage);
+        var prepared = try PreparedReload.init(
+            allocator,
+            io,
+            local,
+            configured,
+            persistence_path,
+            true,
+        );
+        defer prepared.deinit();
+        var slots: std.ArrayList(*Slot) = .empty;
         errdefer {
-            while (initialized != 0) {
-                initialized -= 1;
-                entries[initialized].deinit();
-            }
+            for (slots.items) |slot| slot.deinit();
+            slots.deinit(allocator);
         }
-        for (configured, entries) |source, *entry| {
-            entry.* = try Entry.create(
-                allocator,
-                io,
-                local,
-                source,
-                persistence_path,
-            );
-            initialized += 1;
+        try slots.ensureTotalCapacity(allocator, prepared.slots.len);
+        for (0..prepared.slots.len) |index| {
+            slots.appendAssumeCapacity(prepared.takeSlot(index));
         }
         return .{
             .allocator = allocator,
             .io = io,
+            .local = local,
+            .persistence_path = persistence_path,
             .shutdown = shutdown,
-            .entries = entries,
+            .slots = slots,
+            .reload_storage = reload_storage,
+            .reload_queue = .init(reload_storage),
         };
     }
 
     pub fn deinit(self: *Set) void {
         self.requestStop();
-        var remaining = self.entries.len;
-        while (remaining != 0) {
-            remaining -= 1;
-            self.entries[remaining].deinit();
+        self.reload_queue.close(self.io);
+        while (true) {
+            var pending: [1]PreparedReload = undefined;
+            const count = self.reload_queue.getUncancelable(
+                self.io,
+                &pending,
+                0,
+            ) catch break;
+            if (count == 0) break;
+            pending[0].deinit();
         }
-        self.allocator.free(self.entries);
+        for (self.slots.items) |slot| slot.deinit();
+        self.slots.deinit(self.allocator);
+        self.allocator.free(self.reload_storage);
         self.allocator.destroy(self.shutdown);
         self.* = undefined;
     }
 
-    /// Wake every bridge run loop without affecting listeners or other broker
-    /// work. The owner must await/cancel those tasks before calling `deinit`.
+    /// Stop the bridge supervisor without affecting listeners or other broker
+    /// work. `runAll` forwards this to every active bridge before returning;
+    /// the owner must await/cancel it before calling `deinit`.
     pub fn requestStop(self: *Set) void {
-        for (self.entries) |entry| entry.requestStop();
         self.shutdown.set(self.io);
+    }
+
+    fn requestActiveStops(self: *Set) void {
+        for (self.slots.items) |slot| slot.requestActiveStop();
     }
 
     pub fn stopRequested(self: *const Set) bool {
         return self.shutdown.isSet();
     }
 
+    pub fn len(self: *const Set) usize {
+        return self.slots.items.len;
+    }
+
+    /// Intended for setup-time inspection before `runAll` starts.
+    pub fn entryAt(self: *Set, index: usize) *Entry {
+        return self.slots.items[index].active.?;
+    }
+
     pub fn requestBridgeStop(self: *Set, index: usize) void {
-        self.entries[index].requestStop();
+        self.slots.items[index].requestActiveStop();
     }
 
-    pub fn bridgeStopRequested(self: *const Set, index: usize) bool {
-        return self.entries[index].stopRequested();
+    pub fn bridgeStopRequested(self: *Set, index: usize) bool {
+        return self.slots.items[index].activeStopRequested();
     }
-
-    const BridgeRunResult = struct {
-        index: usize,
-        err: ?anyerror,
-        expected_stop: bool,
-    };
 
     /// Supervise every configured bridge behind one task boundary. Callers can
     /// therefore stop and replace this Set without canceling unrelated tasks
     /// in their own Select.
     pub fn runAll(self: *Set) anyerror!void {
         const Result = union(enum) {
-            bridge: BridgeRunResult,
-            primary_failback: std.Io.Cancelable!void,
             shutdown: std.Io.Cancelable!void,
+            failure: std.Io.Cancelable!void,
+            reload: anyerror!PreparedReload,
+            failback_tick: std.Io.Cancelable!void,
         };
-        const result_capacity = try std.math.add(
-            usize,
-            self.entries.len,
-            2,
-        );
-        const result_buffer = try self.allocator.alloc(Result, result_capacity);
-        defer self.allocator.free(result_buffer);
-        var select: std.Io.Select(Result) = .init(self.io, result_buffer);
+        var workers: std.Io.Group = .init;
+        var workers_finished = false;
+        defer if (!workers_finished) {
+            self.requestStop();
+            self.requestActiveStops();
+            workers.cancel(self.io);
+        };
+        for (self.slots.items) |slot| slot.start(self, &workers);
+
+        var result_buffer: [4]Result = undefined;
+        var select: std.Io.Select(Result) = .init(self.io, &result_buffer);
         defer select.cancelDiscard();
         try select.concurrent(.shutdown, waitForStop, .{self});
-        for (self.entries, 0..) |_, index| {
-            try select.concurrent(.bridge, bridgeResult, .{ self, index });
-        }
-        if (self.needsPrimaryFailback()) {
-            try select.concurrent(
-                .primary_failback,
-                Set.runPrimaryFailback,
-                .{self},
-            );
-        }
+        try select.concurrent(.failure, waitForFailure, .{self});
+        try select.concurrent(.reload, receiveReload, .{self});
+        try select.concurrent(.failback_tick, waitForFailbackTick, .{self.io});
         while (true) {
             switch (try select.await()) {
                 .shutdown => |result| {
                     try result;
+                    self.requestStop();
+                    self.requestActiveStops();
+                    workers.cancel(self.io);
+                    workers_finished = true;
                     return;
                 },
-                .bridge => |result| {
-                    if (self.stopRequested()) return;
-                    if (result.expected_stop) {
-                        if (result.err) |err| {
-                            std.debug.print(
-                                "netz MQTT bridge {d} completed " ++
-                                    "start_type=once error={s}\n",
-                                .{ result.index, @errorName(err) },
-                            );
-                        } else {
-                            std.debug.print(
-                                "netz MQTT bridge {d} completed " ++
-                                    "start_type=once\n",
-                                .{result.index},
-                            );
-                        }
-                        continue;
-                    }
-                    if (result.err) |err| {
-                        std.debug.print(
-                            "netz MQTT bridge {d} stopped: error={s}\n",
-                            .{ result.index, @errorName(err) },
-                        );
-                        return err;
-                    }
-                    return error.UnexpectedBridgeExit;
-                },
-                .primary_failback => |result| {
-                    if (self.stopRequested()) return;
+                .failure => |result| {
                     try result;
-                    return error.UnexpectedBridgeExit;
+                    return self.firstFailure() orelse
+                        error.UnexpectedBridgeExit;
+                },
+                .reload => |result| {
+                    var prepared = result catch |err| switch (err) {
+                        error.Closed => {
+                            if (self.stopRequested()) return;
+                            return error.BridgeReloadQueueClosed;
+                        },
+                        else => return err,
+                    };
+                    defer prepared.deinit();
+                    self.applyReload(&prepared, &workers) catch |err| {
+                        std.debug.print(
+                            "netz MQTT bridge reload failed: error={s}\n",
+                            .{@errorName(err)},
+                        );
+                        try select.concurrent(.reload, receiveReload, .{self});
+                        continue;
+                    };
+                    std.debug.print(
+                        "netz MQTT bridge reload committed\n",
+                        .{},
+                    );
+                    try select.concurrent(.reload, receiveReload, .{self});
+                },
+                .failback_tick => |result| {
+                    try result;
+                    self.requestPrimaryFailback();
+                    try select.concurrent(
+                        .failback_tick,
+                        waitForFailbackTick,
+                        .{self.io},
+                    );
                 },
             }
         }
@@ -616,93 +971,91 @@ pub const Set = struct {
         try self.shutdown.wait(self.io);
     }
 
-    fn bridgeResult(self: *Set, index: usize) BridgeRunResult {
-        const configured = self.entries[index].configured;
-        const bridge = &self.entries[index].value;
-        switch (configured.start_type) {
-            .automatic => bridge.run(.{
-                .timeout = .fromSeconds(30),
-            }) catch |err| return .{
-                .index = index,
-                .err = err,
-                .expected_stop = false,
-            },
-            .lazy => bridge.runLazy(
-                .{ .timeout = .fromSeconds(30) },
-                configured.threshold,
-                .fromSeconds(configured.idle_timeout_seconds),
-            ) catch |err| return .{
-                .index = index,
-                .err = err,
-                .expected_stop = false,
-            },
-            .once => bridge.runOnce(.{
-                .timeout = .fromSeconds(30),
-            }) catch |err| return .{
-                .index = index,
-                .err = err,
-                .expected_stop = true,
-            },
+    fn waitForFailure(self: *Set) std.Io.Cancelable!void {
+        try self.failed.wait(self.io);
+    }
+
+    fn receiveReload(self: *Set) anyerror!PreparedReload {
+        return self.reload_queue.getOne(self.io);
+    }
+
+    fn waitForFailbackTick(io: std.Io) std.Io.Cancelable!void {
+        try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    }
+
+    /// Validate and fully construct a replacement generation before handing it
+    /// to the running supervisor. A failed preparation leaves every active
+    /// bridge untouched.
+    pub fn reload(
+        self: *Set,
+        configured: []const mqtt.broker_config.Bridge,
+    ) anyerror!void {
+        var prepared = try PreparedReload.init(
+            self.allocator,
+            self.io,
+            self.local,
+            configured,
+            self.persistence_path,
+            false,
+        );
+        errdefer prepared.deinit();
+        try self.reload_queue.putOne(self.io, prepared);
+    }
+
+    fn applyReload(
+        self: *Set,
+        prepared: *PreparedReload,
+        workers: *std.Io.Group,
+    ) std.mem.Allocator.Error!void {
+        try self.slots.ensureUnusedCapacity(
+            self.allocator,
+            prepared.slots.len,
+        );
+        const existing_count = self.slots.items.len;
+        for (self.slots.items[0..existing_count]) |slot| {
+            if (prepared.find(slot.name)) |index| {
+                const staged_slot = prepared.takeSlot(index);
+                const replacement = staged_slot.detachActive();
+                staged_slot.deinit();
+                if (slot.install(replacement)) slot.start(self, workers);
+            } else {
+                if (slot.install(null)) slot.start(self, workers);
+            }
         }
-        return .{
-            .index = index,
-            .err = null,
-            .expected_stop = configured.start_type == .once,
-        };
+        for (0..prepared.slots.len) |index| {
+            const maybe_slot = prepared.slots[index];
+            const slot = maybe_slot orelse continue;
+            prepared.slots[index] = null;
+            self.slots.appendAssumeCapacity(slot);
+            slot.start(self, workers);
+        }
+    }
+
+    fn recordFailure(self: *Set, err: anyerror) void {
+        self.failure_mutex.lockUncancelable(self.io);
+        if (self.failure == null) self.failure = err;
+        self.failure_mutex.unlock(self.io);
+        self.failed.set(self.io);
+    }
+
+    fn firstFailure(self: *Set) ?anyerror {
+        self.failure_mutex.lockUncancelable(self.io);
+        defer self.failure_mutex.unlock(self.io);
+        return self.failure;
     }
 
     /// Normalize every broker-local source before a final persistence
     /// snapshot. Persistent Sessions retain retransmittable work; clean
     /// Sessions remove their routes and queued deliveries.
     pub fn disconnectLocalSources(self: *Set) void {
-        for (self.entries) |entry| switch (entry.value) {
-            .inbound => {},
-            .outbound => |*value| value.source.disconnectTransport(),
-        };
+        for (self.slots.items) |slot| slot.disconnectLocalSource();
     }
 
-    pub fn needsPrimaryFailback(self: *const Set) bool {
-        for (self.entries) |entry| {
-            const resources = &entry.connector_resources;
-            if (resources.connector_configured and
-                resources.connector.source.addressCount() > 1 and
-                !resources.connector.source.round_robin and
-                resources.connector.source.start_type == .automatic)
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    pub fn runPrimaryFailback(
-        self: *Set,
-    ) std.Io.Cancelable!void {
-        while (!self.shutdown.isSet()) {
-            self.shutdown.waitTimeout(self.io, .{
-                .duration = .{
-                    .raw = .fromMilliseconds(100),
-                    .clock = .awake,
-                },
-            }) catch |err| switch (err) {
-                error.Timeout => {},
-                error.Canceled => return error.Canceled,
-            };
-            if (self.shutdown.isSet()) return;
-            const now_ns: i64 = @intCast(
-                std.Io.Clock.awake.now(self.io).nanoseconds,
-            );
-            for (self.entries) |entry| {
-                if (entry.stopRequested()) continue;
-                const resources = &entry.connector_resources;
-                if (resources.connector_configured and
-                    resources.connector.source.start_type == .automatic and
-                    resources.connector.shouldFailBack(now_ns))
-                {
-                    entry.value.requestReconnect();
-                }
-            }
-        }
+    fn requestPrimaryFailback(self: *Set) void {
+        const now_ns: i64 = @intCast(
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+        );
+        for (self.slots.items) |slot| slot.requestPrimaryFailback(now_ns);
     }
 };
 
@@ -714,6 +1067,7 @@ fn initConfiguredBridge(
     resources: *ConnectorResources,
     shutdown: *std.Io.Event,
     persistence_path: ?[]const u8,
+    activate_local_source: bool,
 ) !ConfiguredBridge {
     if (source.hasOutbound()) {
         return .{ .outbound = try initOutbound(
@@ -724,6 +1078,7 @@ fn initConfiguredBridge(
             resources,
             shutdown,
             persistence_path,
+            activate_local_source,
         ) };
     }
     const rules = try allocator.alloc(mqtt.bridge.Rule, source.rules.len);
@@ -821,6 +1176,7 @@ fn initOutbound(
     resources: *ConnectorResources,
     shutdown: *std.Io.Event,
     persistence_path: ?[]const u8,
+    activate_local_source: bool,
 ) !mqtt.bridge.outbound.LocalBridge {
     var outbound_count: usize = 0;
     var inbound_count: usize = 0;
@@ -927,6 +1283,8 @@ fn initOutbound(
         .attempt_target_unsubscribe = source.attempt_unsubscribe,
         .coordinator = if (journal_path) |path| .{ .bridge_id = id, .dir = std.Io.Dir.cwd(), .sub_path = path, .mode = mode } else null,
         .notifications = if (notification_topic) |topic| .{ .topic = topic, .publish_remote = !source.notifications_local_only } else null,
+        .defer_local_source_connect = !activate_local_source,
+        .replace_local_source_subscriptions = !activate_local_source,
     };
     if (source.usesTls()) try loadTlsResources(resources, allocator, io, std.Io.Dir.cwd(), source) else {
         resources.connector = .{
@@ -1128,6 +1486,59 @@ fn hashInteger(hasher: *std.crypto.hash.sha2.Sha256, value: usize) void {
     hasher.update(&encoded);
 }
 
+fn initializeAndQueueBridgeReload(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    direction: mqtt.broker_config.BridgeDirection,
+) !void {
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var initial_name = "allocation-reload".*;
+    var initial_host = "initial.example".*;
+    var initial_filter = "initial/#".*;
+    var initial_rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &initial_filter,
+        .qos = .at_most_once,
+        .direction = direction,
+    }};
+    const initial = [_]mqtt.broker_config.Bridge{.{
+        .name = &initial_name,
+        .host = &initial_host,
+        .rules = &initial_rules,
+    }};
+    var bridges = try Set.init(allocator, io, &broker, &initial, null);
+    defer bridges.deinit();
+
+    var replacement_name = "allocation-reload".*;
+    var replacement_host = "replacement.example".*;
+    var replacement_filter = "replacement/#".*;
+    var replacement_rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &replacement_filter,
+        .qos = .at_least_once,
+        .direction = direction,
+    }};
+    const replacement = [_]mqtt.broker_config.Bridge{.{
+        .name = &replacement_name,
+        .host = &replacement_host,
+        .rules = &replacement_rules,
+        .reload_type = .immediate,
+    }};
+    try bridges.reload(&replacement);
+}
+
+test "configured bridge reload preparation rolls back allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        initializeAndQueueBridgeReload,
+        .{ std.testing.io, mqtt.broker_config.BridgeDirection.in },
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        initializeAndQueueBridgeReload,
+        .{ std.testing.io, mqtt.broker_config.BridgeDirection.out },
+    );
+}
+
 test "configured bridge identifiers bind identity and mappings" {
     var name = "upstream".*;
     var host = "broker.example".*;
@@ -1225,7 +1636,7 @@ test "configured bridge set owns parser configuration lifetime" {
 
     config.deinit(allocator);
     config_owned = false;
-    const owned = &bridges.entries[0].configured;
+    const owned = &bridges.entryAt(0).configured;
     try std.testing.expectEqualStrings("owned-runtime", owned.name);
     try std.testing.expectEqualStrings("broker.example", owned.host);
     try std.testing.expectEqualStrings(
@@ -1237,7 +1648,7 @@ test "configured bridge set owns parser configuration lifetime" {
     try std.testing.expectEqualStrings("bridge-secret", owned.remote_password);
     try std.testing.expectEqual(
         owned,
-        bridges.entries[0].connector_resources.connector.source,
+        bridges.entryAt(0).connector_resources.connector.source,
     );
     bridges.disconnectLocalSources();
 }
@@ -1271,40 +1682,9 @@ test "configured bridge set owns an independent cancellation domain" {
     );
     defer bridges.deinit();
     const untouched_listener_shutdown: std.Io.Event = .unset;
-    const FailbackTask = struct {
-        bridges: *Set,
-        started: std.Io.Event = .unset,
-        finished: std.Io.Event = .unset,
-        err: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            self.started.set(self.bridges.io);
-            self.bridges.runPrimaryFailback() catch |err| {
-                self.err = err;
-            };
-            self.finished.set(self.bridges.io);
-        }
-    };
-    var task = FailbackTask{ .bridges = &bridges };
-    var future = try std.Io.concurrent(io, FailbackTask.run, .{&task});
-    var joined = false;
-    defer if (!joined) future.cancel(io);
-    try task.started.waitTimeout(io, .{ .duration = .{
-        .raw = .fromSeconds(1),
-        .clock = .awake,
-    } });
-    try std.testing.expect(!task.finished.isSet());
-
     bridges.requestStop();
     try std.testing.expect(bridges.stopRequested());
     try std.testing.expect(!untouched_listener_shutdown.isSet());
-    try task.finished.waitTimeout(io, .{ .duration = .{
-        .raw = .fromSeconds(1),
-        .clock = .awake,
-    } });
-    future.await(io);
-    joined = true;
-    if (task.err) |err| return err;
 }
 
 test "configured bridge supervisor stops without listener cancellation" {
@@ -1817,7 +2197,7 @@ test "configured bridges use Mosquitto decorrelated restart state" {
         null,
     );
     defer bridges.deinit();
-    const policy = bridges.entries[0].value.outbound.target.policy;
+    const policy = bridges.entryAt(0).value.outbound.target.policy;
     try std.testing.expectEqual(mqtt.reconnect.Jitter.decorrelated, policy.jitter);
     try std.testing.expect(policy.delay_after_disconnect);
     try std.testing.expectEqual(
@@ -1855,7 +2235,7 @@ test "configured outbound bridge maps local clean Session policy" {
         null,
     );
     defer bridges.deinit();
-    const bridge = &bridges.entries[0].value.outbound;
+    const bridge = &bridges.entryAt(0).value.outbound;
     try std.testing.expect(bridge.source.clean_session);
     try std.testing.expectEqualStrings(
         "configured-local-clean",
@@ -1900,7 +2280,7 @@ test "configured bidirectional bridge shares one private remote client" {
     );
     defer bridges.deinit();
 
-    const bridge = &bridges.entries[0].value.outbound;
+    const bridge = &bridges.entryAt(0).value.outbound;
     try std.testing.expectEqual(@as(usize, 1), bridge.rules.values.len);
     try std.testing.expect(bridge.rules.values[0].value.no_local);
     try std.testing.expectEqual(
@@ -1910,6 +2290,6 @@ test "configured bidirectional bridge shares one private remote client" {
     try std.testing.expect(!bridge.inbound_rules.values[0].no_local);
     try std.testing.expect(bridge.target.options.value.bridge_mode);
     try std.testing.expect(
-        bridges.entries[0].connector_resources.connector.require_private_bridge,
+        bridges.entryAt(0).connector_resources.connector.require_private_bridge,
     );
 }

@@ -91,6 +91,13 @@ pub const MultiOptions = struct {
     attempt_target_unsubscribe: bool = false,
     coordinator: ?CoordinatorOptions = null,
     notifications: ?NotificationOptions = null,
+    /// Construct a broker-local source without registering it yet. This is
+    /// used by configuration reload staging so the active generation retains
+    /// sole ownership until commit.
+    defer_local_source_connect: bool = false,
+    /// Replace an offline persistent local Session when its source filters
+    /// changed between configuration generations.
+    replace_local_source_subscriptions: bool = false,
 };
 
 pub const NotificationOptions = struct {
@@ -439,6 +446,7 @@ pub fn Engine(comptime Source: type) type {
                         .automatic,
                     .surface_incoming_qos2_retransmissions = outbound_qos2,
                 },
+                options.replace_local_source_subscriptions,
             );
             errdefer source.deinit();
             for (rules.values) |rule| {
@@ -559,11 +567,24 @@ pub fn Engine(comptime Source: type) type {
             // move boundary. Close only the new broker registration on failure;
             // the earlier source errdefer releases its allocations once.
             errdefer if (Source == local_source.Client) result.source.disconnectTransport();
-            if (Source == local_source.Client) {
+            if (Source == local_source.Client and
+                !options.defer_local_source_connect)
+            {
                 const connected = try result.source.connect();
                 try result.noteSourceConnected(connected);
             }
             return result;
+        }
+
+        /// Register a deferred broker-local source immediately before its
+        /// generation begins running. Repeated calls are harmless.
+        pub fn activateLocalSource(self: *Self) Error!void {
+            if (comptime Source == local_source.Client) {
+                if (!self.source.isConnected()) {
+                    const connected = try self.source.connect();
+                    try self.noteSourceConnected(connected);
+                }
+            }
         }
 
         pub fn deinit(self: *Self) void {
@@ -724,9 +745,41 @@ pub fn Engine(comptime Source: type) type {
             self: *Self,
             poll_options: reconnect.PollOptions,
         ) (Error || std.Io.Cancelable)!void {
+            return self.runLoop(poll_options, null, null);
+        }
+
+        /// Keep the active target generation alive while a lazy reload is
+        /// pending, then return before the first subsequent reconnect.
+        pub fn runUntilReload(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            reload_pending: *const std.atomic.Value(bool),
+            connected: *std.atomic.Value(bool),
+        ) (Error || std.Io.Cancelable)!void {
+            return self.runLoop(poll_options, reload_pending, connected);
+        }
+
+        fn runLoop(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            reload_pending: ?*const std.atomic.Value(bool),
+            connected: ?*std.atomic.Value(bool),
+        ) (Error || std.Io.Cancelable)!void {
             defer self.notifyLocal(false) catch {};
+            defer if (connected) |state| state.store(false, .release);
+            var bounded = poll_options;
+            if (reload_pending != null) {
+                bounded.reconnect_after_transport_error = false;
+            }
             while (true) {
-                _ = self.step(poll_options) catch |err| switch (err) {
+                if (connected) |state| {
+                    state.store(self.target.connection() != null, .release);
+                }
+                if (reload_pending) |pending| {
+                    if (pending.load(.acquire) and
+                        self.target.connection() == null) return;
+                }
+                _ = self.step(bounded) catch |err| switch (err) {
                     error.Canceled => return,
                     else => return err,
                 };
@@ -743,6 +796,43 @@ pub fn Engine(comptime Source: type) type {
             threshold: usize,
             idle_timeout: std.Io.Duration,
         ) (Error || std.Io.Cancelable)!void {
+            return self.runLazyLoop(
+                poll_options,
+                threshold,
+                idle_timeout,
+                null,
+                null,
+            );
+        }
+
+        /// Lazy lifecycle variant that adopts a pending configuration only at
+        /// a disconnected boundary, including the idle state before its next
+        /// threshold-triggered connection.
+        pub fn runLazyUntilReload(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            threshold: usize,
+            idle_timeout: std.Io.Duration,
+            reload_pending: *const std.atomic.Value(bool),
+            connected: *std.atomic.Value(bool),
+        ) (Error || std.Io.Cancelable)!void {
+            return self.runLazyLoop(
+                poll_options,
+                threshold,
+                idle_timeout,
+                reload_pending,
+                connected,
+            );
+        }
+
+        fn runLazyLoop(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            threshold: usize,
+            idle_timeout: std.Io.Duration,
+            reload_pending: ?*const std.atomic.Value(bool),
+            connected: ?*std.atomic.Value(bool),
+        ) (Error || std.Io.Cancelable)!void {
             if (comptime Source != local_source.Client) {
                 @compileError("lazy bridge lifecycle requires a local source");
             }
@@ -753,8 +843,16 @@ pub fn Engine(comptime Source: type) type {
                 return error.InvalidProperty;
             }
             defer self.notifyLocal(false) catch {};
+            defer if (connected) |state| state.store(false, .release);
             var reactivate_after_disconnect = false;
             while (true) {
+                if (connected) |state| {
+                    state.store(self.target.connection() != null, .release);
+                }
+                if (reload_pending) |pending| {
+                    if (pending.load(.acquire) and
+                        self.target.connection() == null) return;
+                }
                 if (!reactivate_after_disconnect) {
                     self.source.waitForPending(
                         threshold,
@@ -763,16 +861,25 @@ pub fn Engine(comptime Source: type) type {
                         else => return err,
                     };
                 }
+                if (reload_pending) |pending| {
+                    if (pending.load(.acquire) and
+                        self.target.connection() == null) return;
+                }
                 reactivate_after_disconnect = false;
                 _ = self.connect() catch |err| switch (err) {
                     error.Canceled => return,
                     else => return err,
                 };
+                if (connected) |state| state.store(true, .release);
 
                 var observed_generation = self.source.deliveryGeneration();
                 var idle_deadline: ?std.Io.Clock.Timestamp = null;
                 while (true) {
                     if (self.source.shutdown.isSet()) return;
+                    if (reload_pending) |pending| {
+                        if (pending.load(.acquire) and
+                            self.target.connection() == null) return;
+                    }
                     const pending = try self.source.pendingCount();
                     const generation = self.source.deliveryGeneration();
                     const has_work = pending != 0 or
@@ -815,6 +922,12 @@ pub fn Engine(comptime Source: type) type {
                         error.Canceled => return,
                         else => return err,
                     };
+                    if (connected) |state| {
+                        state.store(
+                            self.target.connection() != null,
+                            .release,
+                        );
+                    }
                 }
             }
         }
@@ -843,8 +956,26 @@ pub fn Engine(comptime Source: type) type {
         }
 
         pub fn runOnce(self: *Self, poll_options: reconnect.PollOptions) (Error || std.Io.Cancelable)!void {
+            return self.runOnceTracked(poll_options, null);
+        }
+
+        pub fn runOnceWithConnectionState(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            connected: *std.atomic.Value(bool),
+        ) (Error || std.Io.Cancelable)!void {
+            return self.runOnceTracked(poll_options, connected);
+        }
+
+        fn runOnceTracked(
+            self: *Self,
+            poll_options: reconnect.PollOptions,
+            connected: ?*std.atomic.Value(bool),
+        ) (Error || std.Io.Cancelable)!void {
             defer if (Source == local_source.Client) self.source.disconnectTransport();
+            defer if (connected) |state| state.store(false, .release);
             _ = try self.connect();
+            if (connected) |state| state.store(true, .release);
             self.once = true;
             defer self.once = false;
             defer self.notifyLocal(false) catch {};
@@ -853,6 +984,12 @@ pub fn Engine(comptime Source: type) type {
                     error.Canceled, error.ConnectionClosed => return,
                     else => return err,
                 };
+                if (connected) |state| {
+                    state.store(
+                        self.target.connection() != null,
+                        .release,
+                    );
+                }
             }
         }
 
@@ -1636,9 +1773,18 @@ pub fn Engine(comptime Source: type) type {
             policy: reconnect.ReconnectPolicy,
             shutdown: *std.Io.Event,
             client_options: reconnect.ClientOptions,
+            replace_local_source_subscriptions: bool,
         ) Error!Source {
             if (Source == reconnect.Client) return initClient(allocator, io, endpoint, connect_options, policy, shutdown, client_options);
-            return Source.init(allocator, io, endpoint.broker, endpoint.id, connect_options, shutdown);
+            return Source.init(
+                allocator,
+                io,
+                endpoint.broker,
+                endpoint.id,
+                connect_options,
+                shutdown,
+                replace_local_source_subscriptions,
+            );
         }
     };
 }

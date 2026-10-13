@@ -18,6 +18,10 @@ pub const Options = struct {
     /// Start with no prior local Session state and discard this Session when
     /// the consumer closes. Persistent consumers retain the existing default.
     clean_session: bool = false,
+    /// Permit an offline persistent Session to replace its subscription set.
+    /// Intended for an atomically prepared configuration generation after the
+    /// prior local consumer has closed.
+    replace_mismatched_session: bool = false,
     /// Maximum concurrently selected QoS 1/2 PUBLISH packets. A selected
     /// QoS 0 event must be completed or retried before the next poll.
     receive_maximum: u16 = 16,
@@ -219,6 +223,7 @@ pub fn Operations(comptime Context: type) type {
                 try self.sessions.routeId(handle)
             else
                 null;
+            var replace_mismatched_session = false;
             if (previous) |handle| {
                 if (self.local_consumer_routes.contains(previous_route_id.?)) {
                     return error.LocalConsumerAlreadyOpen;
@@ -228,11 +233,17 @@ pub fn Operations(comptime Context: type) type {
                         self,
                         handle,
                         options.subscriptions,
-                    )) return error.LocalConsumerIdentityMismatch;
+                    ))
+                {
+                    if (!options.replace_mismatched_session) {
+                        return error.LocalConsumerIdentityMismatch;
+                    }
+                    replace_mismatched_session = true;
+                }
             }
             const opened = try self.sessions.open(
                 client_id,
-                options.clean_session,
+                options.clean_session or replace_mismatched_session,
                 std.math.maxInt(u32),
                 now,
             );

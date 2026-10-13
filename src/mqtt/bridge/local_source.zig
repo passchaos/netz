@@ -63,6 +63,7 @@ pub const Client = struct {
     id: [16]u8,
     client_id: []u8,
     clean_session: bool,
+    replace_mismatched_session: bool,
     shutdown: *std.Io.Event,
     wake: *broker_mod.LocalConsumerWake,
     subscriptions: std.ArrayList(subscription.Owned) = .empty,
@@ -78,6 +79,7 @@ pub const Client = struct {
         id: [16]u8,
         options: runtime.ConnectOptions,
         shutdown: *std.Io.Event,
+        replace_mismatched_session: bool,
     ) Error!Client {
         const client_id = try allocator.dupe(u8, options.client_id);
         errdefer allocator.free(client_id);
@@ -99,6 +101,7 @@ pub const Client = struct {
             .id = id,
             .client_id = client_id,
             .clean_session = options.clean_start,
+            .replace_mismatched_session = replace_mismatched_session,
             .shutdown = shutdown,
             .wake = wake,
             .receipts = receipts,
@@ -142,6 +145,7 @@ pub const Client = struct {
             .receive_maximum = 1,
             .wake = self.wake,
             .clean_session = self.clean_session,
+            .replace_mismatched_session = self.replace_mismatched_session,
         });
         errdefer self.broker.closeLocalConsumer(&consumer);
         self.consumer = consumer;

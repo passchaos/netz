@@ -20,7 +20,7 @@ const tls_ticket_keys = @import("support/mqtt_tls_ticket_keys.zig");
 const mqtt = netz.mqtt;
 
 var checkpoint_requested: std.c.sig_atomic_t = 0;
-var security_reload_requested: std.c.sig_atomic_t = 0;
+var config_reload_requested: std.c.sig_atomic_t = 0;
 
 const CheckpointSignal = if (builtin.os.tag == .linux) struct {
     previous: std.posix.Sigaction,
@@ -81,7 +81,7 @@ const ReloadSignal = if (builtin.os.tag == .linux) struct {
     fn install() @This() {
         @atomicStore(
             std.c.sig_atomic_t,
-            &security_reload_requested,
+            &config_reload_requested,
             0,
             .release,
         );
@@ -99,7 +99,7 @@ const ReloadSignal = if (builtin.os.tag == .linux) struct {
         std.posix.sigaction(.HUP, &self.previous, null);
         @atomicStore(
             std.c.sig_atomic_t,
-            &security_reload_requested,
+            &config_reload_requested,
             0,
             .release,
         );
@@ -108,7 +108,7 @@ const ReloadSignal = if (builtin.os.tag == .linux) struct {
     fn take() bool {
         return @atomicRmw(
             std.c.sig_atomic_t,
-            &security_reload_requested,
+            &config_reload_requested,
             .Xchg,
             0,
             .acq_rel,
@@ -119,7 +119,7 @@ const ReloadSignal = if (builtin.os.tag == .linux) struct {
         // Loading, allocation, locks, and logging remain in the supervisor.
         @atomicStore(
             std.c.sig_atomic_t,
-            &security_reload_requested,
+            &config_reload_requested,
             1,
             .release,
         );
@@ -546,7 +546,8 @@ pub fn run(
     defer ticket_keyrings.deinit();
     const has_reloadable_files = security.hasReloadableFiles() or
         identities.hasReloadableFiles();
-    var reload_signal = if (has_reloadable_files)
+    const supports_config_reload = builtin.os.tag == .linux;
+    var reload_signal: ?ReloadSignal = if (supports_config_reload)
         ReloadSignal.install()
     else
         null;
@@ -743,7 +744,7 @@ pub fn run(
     for (config.bridges) |bridge| {
         std.debug.print(
             "  bridge {s} remote={s}:{d} addresses={d} transport={s} " ++
-                "rules={d} direction={s} start_type={s}\n",
+                "rules={d} direction={s} start_type={s} reload_type={s}\n",
             .{
                 bridge.name,
                 bridge.host,
@@ -758,6 +759,7 @@ pub fn run(
                 else
                     "in",
                 @tagName(bridge.start_type),
+                @tagName(bridge.reload_type),
             },
         );
     }
@@ -769,12 +771,13 @@ pub fn run(
             .listeners = active_endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence or has_reloadable_files or bridges.entries.len != 0) {
+    if (config.persistence or reload_signal != null or bridges.len() != 0) {
         try serveWithManagement(
             allocator,
             &broker,
             service,
             io,
+            config_path,
             &shutdown,
             &bridges,
             persistence_path,
@@ -800,6 +803,7 @@ fn serveWithManagement(
     broker: *mqtt.broker.Broker,
     service: Service,
     io: std.Io,
+    config_path: []const u8,
     shutdown: *std.Io.Event,
     bridges: *configured_bridges.Set,
     persistence_path: ?[]const u8,
@@ -820,13 +824,7 @@ fn serveWithManagement(
     defer shutdown.set(io);
     defer bridges.requestStop();
     try select.concurrent(.serve, serveResult, .{ broker, service });
-    if (bridges.entries.len != 0) {
-        try select.concurrent(
-            .bridges,
-            bridgeSetResult,
-            .{bridges},
-        );
-    }
+    try select.concurrent(.bridges, bridgeSetResult, .{bridges});
     if (interval_seconds) |seconds| {
         try select.concurrent(
             .periodic_timer,
@@ -838,13 +836,11 @@ fn serveWithManagement(
         );
     }
     if (comptime builtin.os.tag == .linux) {
-        if (persistence_path != null or security != null) {
-            try select.concurrent(
-                .signal_poll,
-                waitInterval,
-                .{ io, checkpoint_signal_poll_interval },
-            );
-        }
+        try select.concurrent(
+            .signal_poll,
+            waitInterval,
+            .{ io, checkpoint_signal_poll_interval },
+        );
     }
     while (true) {
         switch (try select.await()) {
@@ -904,6 +900,25 @@ fn serveWithManagement(
                     }
                 }
                 if (ReloadSignal.take()) {
+                    var reloaded_config = mqtt.broker_config.load(
+                        allocator,
+                        io,
+                        std.Io.Dir.cwd(),
+                        config_path,
+                    ) catch |err| {
+                        std.debug.print(
+                            "netz MQTT configuration reload failed: " ++
+                                "error={s} server_io=zio-std-io\n",
+                            .{@errorName(err)},
+                        );
+                        try select.concurrent(
+                            .signal_poll,
+                            waitInterval,
+                            .{ io, checkpoint_signal_poll_interval },
+                        );
+                        continue;
+                    };
+                    defer reloaded_config.deinit(allocator);
                     if (security) |policy| {
                         reloadSecurityAndIdentities(
                             broker,
@@ -928,6 +943,24 @@ fn serveWithManagement(
                             .{},
                         );
                     }
+                    bridges.reload(reloaded_config.bridges) catch |err| {
+                        std.debug.print(
+                            "netz MQTT bridge reload failed: " ++
+                                "error={s} server_io=zio-std-io\n",
+                            .{@errorName(err)},
+                        );
+                        try select.concurrent(
+                            .signal_poll,
+                            waitInterval,
+                            .{ io, checkpoint_signal_poll_interval },
+                        );
+                        continue;
+                    };
+                    std.debug.print(
+                        "netz MQTT bridge reload staged: " ++
+                            "source=SIGHUP server_io=zio-std-io\n",
+                        .{},
+                    );
                 }
                 try select.concurrent(
                     .signal_poll,

@@ -761,6 +761,49 @@ test "broker local consumer identity binds its subscriptions" {
     );
 }
 
+test "broker local consumer can replace an offline subscription generation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var broker = try Broker.init(allocator, threaded.io(), .{});
+    defer broker.deinit();
+    const id = [_]u8{0x79} ** 16;
+    var first = try broker.openLocalConsumer(.{
+        .id = id,
+        .subscriptions = &.{.{
+            .topic_filter = "first/#",
+            .qos = .at_least_once,
+        }},
+    });
+    try publishValue(&broker, "first/queued", "old", .at_least_once);
+    broker.closeLocalConsumer(&first);
+
+    var replacement = try broker.openLocalConsumer(.{
+        .id = id,
+        .subscriptions = &.{.{
+            .topic_filter = "second/#",
+            .qos = .at_least_once,
+        }},
+        .replace_mismatched_session = true,
+    });
+    defer broker.closeLocalConsumer(&replacement);
+    try std.testing.expect(!replacement.session_present);
+    try std.testing.expect(
+        (try broker.pollLocalConsumer(&replacement)) == null,
+    );
+    try publishValue(&broker, "first/ignored", "old-route", .at_least_once);
+    try std.testing.expect(
+        (try broker.pollLocalConsumer(&replacement)) == null,
+    );
+    try publishValue(&broker, "second/delivered", "new-route", .at_least_once);
+    var event = (try broker.pollLocalConsumer(&replacement)).?;
+    defer event.deinit();
+    try std.testing.expectEqualStrings(
+        "new-route",
+        event.publish.value.payload,
+    );
+}
+
 test "broker local consumer ACK waits outside locks for provisional CONNECT" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
