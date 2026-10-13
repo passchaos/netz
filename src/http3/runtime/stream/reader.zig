@@ -310,8 +310,7 @@ pub const Reader = struct {
                 },
                 http3.FrameType.push_promise => {
                     if (self.kind != .response or
-                        !self.push_promises_allowed or
-                        self.phase == .trailers)
+                        !self.push_promises_allowed)
                     {
                         return error.UnexpectedFrame;
                     }

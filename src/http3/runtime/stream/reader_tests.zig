@@ -329,6 +329,79 @@ test "HTTP/3 incremental message reader skips unknown extension frames" {
     try std.testing.expect(finished == .finished);
 }
 
+test "HTTP/3 incremental response reader permits PUSH_PROMISE after trailers" {
+    const allocator = std.testing.allocator;
+    var table = http3.Qpack.DynamicTable.init(allocator, 0);
+    defer table.deinit();
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(allocator);
+
+    try http3.Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "0" },
+    });
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+
+    block.clearRetainingCapacity();
+    try http3.Qpack.encodeLiteralBlock(&block, allocator, &.{.{
+        .name = "x-finished",
+        .value = "yes",
+    }});
+    try (http3.Frame{
+        .frame_type = http3.FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&bytes, allocator);
+
+    block.clearRetainingCapacity();
+    try http3.Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/after-trailers" },
+        .{ .name = ":authority", .value = "example.test" },
+    });
+    try http3.writePushPromiseFrame(&bytes, allocator, 7, block.items);
+
+    var reader = Reader.initResponse(allocator, 0, 512, .{});
+    defer reader.deinit();
+    try reader.insert(.{ .stream_id = 0, .data = bytes.items, .fin = true });
+
+    var head = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer head.deinit(allocator);
+    try std.testing.expect(head == .head);
+
+    var trailers = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer trailers.deinit(allocator);
+    try std.testing.expect(trailers == .trailers);
+    try std.testing.expectEqualStrings(
+        "yes",
+        trailers.trailers.fields[0].value,
+    );
+
+    var promise = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer promise.deinit(allocator);
+    try std.testing.expect(promise == .push_promise);
+    try std.testing.expectEqual(@as(u64, 7), promise.push_promise.push_id);
+    try std.testing.expectEqualStrings(
+        "/after-trailers",
+        promise.push_promise.request.path,
+    );
+
+    var finished = (try reader.next(table)) orelse
+        return error.TestUnexpectedResult;
+    defer finished.deinit(allocator);
+    try std.testing.expect(finished == .finished);
+}
+
 test "HTTP/3 incremental response reader owns dynamic PUSH_PROMISE before final head" {
     const allocator = std.testing.allocator;
     var table = http3.Qpack.DynamicTable.init(allocator, 256);

@@ -4862,7 +4862,10 @@ fn decodeMessageAfterHeaders(
                 saw_trailers = true;
             },
             FrameType.push_promise => {
-                if (kind == .request or saw_trailers) return error.UnexpectedFrame;
+                // RFC 9114 section 4.1 allows PUSH_PROMISE before, after, or
+                // interleaved with response-message frames. It remains
+                // forbidden on request and push streams.
+                if (kind == .request) return error.UnexpectedFrame;
                 var promise = try decodePushPromiseWithFieldDecoder(
                     allocator,
                     frame.payload,
@@ -7687,6 +7690,57 @@ test "HTTP/3 message aggregates DATA frames and trailing HEADERS" {
     try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
     try std.testing.expectEqualStrings("grpc-status", decoded.trailers[0].name);
     try std.testing.expectEqual(@as(usize, encoded.items.len), decoded.consumed);
+}
+
+test "HTTP/3 response permits PUSH_PROMISE after trailing HEADERS" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    var block: std.ArrayList(u8) = .empty;
+    defer block.deinit(allocator);
+
+    try Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "content-length", .value = "4" },
+    });
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+    try (Frame{
+        .frame_type = FrameType.data,
+        .payload = "body",
+        .consumed = 0,
+    }).write(&encoded, allocator);
+
+    block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&block, allocator, &.{.{
+        .name = "x-finished",
+        .value = "yes",
+    }});
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = block.items,
+        .consumed = 0,
+    }).write(&encoded, allocator);
+
+    block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&block, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":path", .value = "/after-trailers" },
+        .{ .name = ":authority", .value = "example.test" },
+    });
+    try writePushPromiseFrame(&encoded, allocator, 3, block.items);
+
+    var decoded = try decodeResponse(allocator, encoded.items);
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 200), decoded.status);
+    try std.testing.expectEqualStrings("body", decoded.body);
+    try std.testing.expectEqual(@as(usize, 1), decoded.trailers.len);
+    try std.testing.expectEqualStrings("yes", decoded.trailers[0].value);
+    try std.testing.expectEqual(encoded.items.len, decoded.consumed);
 }
 
 test "HTTP/3 message rejects bad frame order and content length" {

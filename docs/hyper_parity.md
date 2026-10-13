@@ -1306,6 +1306,9 @@ reuse. A callback that independently returns `error.Timeout` remains an
 application rejection and therefore cancels its batch without poisoning the
 otherwise synchronized connection. A partial HEADERS or DATA transport write
 is fail-closed because its visible wire prefix cannot be rolled back safely.
+Aggregate and incremental HTTP/3 response decoders also accept PUSH_PROMISE
+before, between, or after response frames, including after trailers, while
+continuing to reject PUSH_PROMISE on request and push streams.
 Body-bearing batches can now select callback-streaming responses as well as
 owned aggregation. The new `requestBodyBatchStreaming*` family reuses the same
 transactional HPACK staging, request DATA batching, duplex flow-control pump,
