@@ -1079,7 +1079,9 @@ QUIC's sentinel rule;
 zero-lifetime tickets are consumed and discarded without replacing an existing
 cache entry or failing the established HTTP connection; client caches, PSK age
 validation and server keyrings all reject a ticket at the exact advertised
-lifetime boundary rather than one unit later;
+lifetime boundary rather than one unit later; an otherwise valid PSK may resume
+under another cipher suite using the same transcript hash, but 0-RTT is rejected
+unless the ticket's original cipher suite and ALPN context both match;
 servers issue a fresh stateless ticket after full and resumed handshakes and
 fall back to certificate authentication when an opaque ticket is invalid.
 Both HTTP pools collect those post-handshake tickets after response traffic

@@ -1305,6 +1305,8 @@ selects a configured stateful or stateless ticket at its original wire index,
 and reports that index in ServerHello. Selecting any identity after index zero
 continues PSK resumption but rejects 0-RTT, whose parameters belong only to the
 first offered identity.
+PSK resumption may select another cipher suite with the same transcript hash;
+the stricter original-suite check remains at the 0-RTT acceptance boundary.
 If Version Negotiation restarts the connection, the original 0-RTT packet is
 never replayed under the replacement version and its old-key packet numbers do
 not advance the new application space; the client nevertheless retains an

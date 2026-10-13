@@ -276,7 +276,9 @@ Current protocol coverage includes:
   early-data limits, and QUIC-only enforcement of RFC 9001's `0xffffffff`
   sentinel; zero-lifetime tickets are consumed and discarded without failing
   the established connection, and client/server caches consistently expire
-  tickets at the exact advertised lifetime boundary, and
+  tickets at the exact advertised lifetime boundary. A ticket can resume with
+  another cipher suite using the same transcript hash, while 0-RTT still
+  requires the ticket's original cipher suite and ALPN context,
   separate bounded HTTP/1 and HTTP/2 pool caches that resume after physical
   connection retirement; MQTT reconnect clients retain separate TLS 1.2 and
   TLS 1.3 tickets, renew them across native TLS or WSS connections, and discard
