@@ -56,32 +56,39 @@ pub const Error = wire.Error || error{
 } || std.mem.Allocator.Error;
 
 pub const ProtocolVersion = enum(u8) {
+    v3_1 = 3,
     v3_1_1 = 4,
     v5 = 5,
 
     pub fn byte(self: ProtocolVersion) u8 {
         return @intFromEnum(self);
     }
+
+    pub fn isLegacy(self: ProtocolVersion) bool {
+        return self != .v5;
+    }
 };
 
 /// MQTT protocol versions a server listener permits during CONNECT.
 ///
-/// Both implemented versions are enabled by default. Keeping this independent
+/// All implemented versions are enabled by default. Keeping this independent
 /// of the parser's initial protocol hint lets one listener auto-detect both
 /// versions while still enforcing a listener-specific admission policy.
 pub const AcceptedProtocolVersions = struct {
+    v3_1: bool = true,
     v3_1_1: bool = true,
     v5: bool = true,
 
     pub fn allows(self: AcceptedProtocolVersions, version: ProtocolVersion) bool {
         return switch (version) {
+            .v3_1 => self.v3_1,
             .v3_1_1 => self.v3_1_1,
             .v5 => self.v5,
         };
     }
 
     pub fn any(self: AcceptedProtocolVersions) bool {
-        return self.v3_1_1 or self.v5;
+        return self.v3_1 or self.v3_1_1 or self.v5;
     }
 };
 
@@ -664,6 +671,18 @@ pub const Property = union(enum) {
 };
 
 pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error![]Property {
+    const properties = try parsePropertiesRaw(allocator, cursor);
+    errdefer allocator.free(properties);
+    for (properties) |property| {
+        try validateProperty(property);
+    }
+    return properties;
+}
+
+fn parsePropertiesRaw(
+    allocator: std.mem.Allocator,
+    cursor: *wire.Cursor,
+) Error![]Property {
     const prop_len_decoded = try decodeRemainingLength(cursor.buf[cursor.pos..]);
     cursor.pos += prop_len_decoded.len;
     const prop_bytes = try cursor.readSlice(prop_len_decoded.value);
@@ -695,11 +714,28 @@ pub fn parseProperties(allocator: std.mem.Allocator, cursor: *wire.Cursor) Error
             .utf8 => Property{ .utf8 = .{ .id = id, .value = try readUtf8(&prop_cursor) } },
             .utf8_pair => Property{ .utf8_pair = .{ .id = id, .key = try readUtf8(&prop_cursor), .value = try readUtf8(&prop_cursor) } },
         };
-        try validateProperty(prop);
+        // Response Topic is a Topic Name on the wire, not merely a property
+        // value constraint. Preserve its Protocol Error precedence even when
+        // the property itself is forbidden in the surrounding packet.
+        if (prop == .utf8 and prop.utf8.id == .response_topic) {
+            validateTopicName(prop.utf8.value) catch
+                return error.InvalidProperty;
+        }
         try validatePropertyNotDuplicate(prop, props.items);
         try props.append(allocator, prop);
     }
     return props.toOwnedSlice(allocator);
+}
+
+fn parsePropertiesFor(
+    allocator: std.mem.Allocator,
+    cursor: *wire.Cursor,
+    context: PropertyContext,
+) Error![]Property {
+    const properties = try parsePropertiesRaw(allocator, cursor);
+    errdefer allocator.free(properties);
+    try validateParsedPropertiesFor(context, properties);
+    return properties;
 }
 
 pub fn receiveMaximum(properties: []const Property) ?u16 {
@@ -1386,24 +1422,31 @@ pub const Connect = struct {
             ProtocolVersion,
             protocol_level,
         ) orelse return error.InvalidProtocolLevel;
-        if (bridge_mode and protocol != .v3_1_1) {
+        if ((prefix.name == .v3_1) != (protocol == .v3_1)) {
+            return error.InvalidProtocolLevel;
+        }
+        if (bridge_mode and protocol == .v5) {
             return error.InvalidProtocolLevel;
         }
         var cursor = prefix.cursor;
         const connect_flags = try cursor.readByte();
         try validateConnectFlags(protocol, connect_flags);
         const keep_alive = try cursor.readInt(u16, .big);
-        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .connect,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validateParsedPropertiesFor(.connect, props);
         const client_id = try readUtf8(&cursor);
         var will: ?LastWill = null;
         if ((connect_flags & 0x04) != 0) {
-            const will_props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+            const will_props = if (protocol == .v5) try parsePropertiesFor(
+                allocator,
+                &cursor,
+                .will,
+            ) else try allocator.alloc(Property, 0);
             errdefer allocator.free(will_props);
-            if (protocol == .v5) {
-                try validateParsedPropertiesFor(.will, will_props);
-            }
             const topic = try readUtf8(&cursor);
             try validateTopicName(topic);
             const payload = try readBinary(&cursor);
@@ -1439,6 +1482,7 @@ pub const Connect = struct {
 const ConnectProtocolPrefix = struct {
     cursor: wire.Cursor,
     level: u8,
+    name: enum { v3_1, modern },
 };
 
 fn parseConnectProtocolPrefix(
@@ -1446,7 +1490,11 @@ fn parseConnectProtocolPrefix(
 ) Error!ConnectProtocolPrefix {
     const prefix = try inspectConnectProtocolPrefix(packet);
     const fixed = try FixedHeader.parse(packet);
-    if (fixed.flags != 0) return error.InvalidFlags;
+    // MQTT 3.1 did not require the CONNECT fixed-header flags to be zero.
+    // MQTT 3.1.1 [MQTT-2.2.2-1] introduced that requirement.
+    if (prefix.name != .v3_1 and fixed.flags != 0) {
+        return error.InvalidFlags;
+    }
     return prefix;
 }
 
@@ -1460,13 +1508,18 @@ fn inspectConnectProtocolPrefix(
         packet[fixed.header_len .. fixed.header_len + fixed.remaining_len],
     );
     const protocol_name = try readUtf8(&cursor);
-    if (!std.mem.eql(u8, protocol_name, "MQTT")) {
-        return error.InvalidProtocolName;
-    }
+    const name: @FieldType(ConnectProtocolPrefix, "name") =
+        if (std.mem.eql(u8, protocol_name, "MQIsdp"))
+            .v3_1
+        else if (std.mem.eql(u8, protocol_name, "MQTT"))
+            .modern
+        else
+            return error.InvalidProtocolName;
     const level = try cursor.readByte();
     return .{
         .cursor = cursor,
         .level = level,
+        .name = name,
     };
 }
 
@@ -1503,14 +1556,18 @@ pub const ConnectPacketOptions = struct {
 };
 
 fn validateConnectFlags(protocol: ProtocolVersion, flags: u8) Error!void {
-    if ((flags & 0x01) != 0) return error.InvalidFlags;
+    if (protocol != .v3_1 and (flags & 0x01) != 0) {
+        return error.InvalidFlags;
+    }
 
     const will_flag = (flags & 0x04) != 0;
     const will_qos = (flags >> 3) & 0x03;
-    if (!will_flag and (flags & 0x38) != 0) return error.InvalidFlags;
+    if (protocol != .v3_1 and !will_flag and (flags & 0x38) != 0) {
+        return error.InvalidFlags;
+    }
     if (will_qos == 0x03) return error.InvalidQoS;
 
-    if (protocol == .v3_1_1 and (flags & 0xc0) == 0x40) {
+    if (protocol.isLegacy() and (flags & 0xc0) == 0x40) {
         // MQTT 3.1.1 couples the login flags: a password can only appear after
         // a username.  MQTT 5 relaxed this for enhanced-authentication use
         // cases, so keep the stricter check version-scoped instead of rejecting
@@ -1524,8 +1581,8 @@ pub const ConnAck = struct {
     reason_code: u8,
     properties: []Property = &.{},
 
-    /// Largest complete CONNACK without properties. MQTT 3.1.1 uses four
-    /// bytes, while MQTT 5 appends the mandatory zero Property Length byte.
+    /// Largest complete CONNACK without properties. MQTT 3.1 and 3.1.1 use
+    /// four bytes, while MQTT 5 appends the mandatory zero Property Length.
     pub const no_properties_max_len: usize = 5;
 
     pub fn deinit(self: *ConnAck, allocator: std.mem.Allocator) void {
@@ -1544,9 +1601,12 @@ pub const ConnAck = struct {
         const reason_code = try cursor.readByte();
         try validateConnAckReason(protocol, reason_code);
         try validateConnAckSessionPresent((ack_flags & 0x01) != 0, reason_code);
-        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .connack,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validateParsedPropertiesFor(.connack, props);
         if (cursor.remaining() != 0) return error.InvalidPacketType;
         return .{
             .session_present = (ack_flags & 0x01) != 0,
@@ -1682,9 +1742,12 @@ pub const Publish = struct {
             if (id == 0) return error.InvalidPacketIdentifier;
             break :blk id;
         };
-        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .publish,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validateParsedPropertiesFor(.publish, props);
         if (topic.len == 0) {
             if (protocol != .v5 or topicAlias(props) == null) return error.InvalidTopic;
         } else if (hasWildcards(topic)) {
@@ -1776,7 +1839,7 @@ pub const AckPacket = struct {
         var cursor = wire.Cursor.init(payload_bytes);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        if (protocol == .v3_1_1) {
+        if (protocol.isLegacy()) {
             if (!cursor.eof()) return error.InvalidPacketType;
             return .{
                 .packet_type = packet_type,
@@ -1788,12 +1851,15 @@ pub const AckPacket = struct {
         var reason_code: u8 = 0;
         if (!cursor.eof()) reason_code = try cursor.readByte();
         try validateAckReasonCode(packet_type, reason_code);
-        const props = if (!cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (!cursor.eof()) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .ack,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
         // The packet-type switch above establishes the ACK context. Apply
         // peer-facing Property validation here so a known Property Identifier
         // used in the wrong Control Packet remains Malformed Packet.
-        try validateParsedPropertiesFor(.ack, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{
             .packet_type = packet_type,
@@ -1819,7 +1885,7 @@ pub const AckPacket = struct {
             .puback, .pubrec, .pubrel, .pubcomp => {},
             else => return error.InvalidPacketType,
         }
-        if (protocol == .v3_1_1) {
+        if (protocol.isLegacy()) {
             if (reason_code != 0) return error.InvalidReasonCode;
             if (properties.len != 0) return error.InvalidProperty;
         } else {
@@ -1852,7 +1918,7 @@ pub const AckPacket = struct {
     }
 
     /// Largest complete PUBACK/PUBREC/PUBREL/PUBCOMP packet that has no
-    /// properties. MQTT 3.1.1 and an MQTT 5 success use four bytes; an MQTT 5
+    /// properties. Pre-v5 MQTT and an MQTT 5 success use four bytes; an MQTT 5
     /// non-success reason adds one byte.
     pub const no_properties_max_len: usize = 5;
 
@@ -1874,7 +1940,7 @@ pub const AckPacket = struct {
             .puback, .pubrec, .pubrel, .pubcomp => {},
             else => return error.InvalidPacketType,
         }
-        if (protocol == .v3_1_1) {
+        if (protocol.isLegacy()) {
             if (reason_code != 0) return error.InvalidReasonCode;
         } else {
             try validateAckReasonCode(packet_type, reason_code);
@@ -1930,9 +1996,12 @@ pub const Subscribe = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .subscribe,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validateParsedPropertiesFor(.subscribe, props);
 
         var subs: std.ArrayList(Subscription) = .empty;
         errdefer subs.deinit(allocator);
@@ -2035,9 +2104,12 @@ pub const SubAck = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .suback,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) try validateParsedPropertiesFor(.suback, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
         for (reason_codes) |code| try validateSubAckReason(protocol, code);
@@ -2161,11 +2233,12 @@ pub const Unsubscribe = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        const props = if (protocol == .v5) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5) try parsePropertiesFor(
+            allocator,
+            &cursor,
+            .unsubscribe,
+        ) else try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) {
-            try validateParsedPropertiesFor(.unsubscribe, props);
-        }
 
         var filters: std.ArrayList([]const u8) = .empty;
         errdefer filters.deinit(allocator);
@@ -2244,7 +2317,7 @@ pub const UnsubAck = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
         if (packet_id == 0) return error.InvalidPacketIdentifier;
-        if (protocol == .v3_1_1) {
+        if (protocol.isLegacy()) {
             if (!cursor.eof()) return error.InvalidPacketType;
             return .{
                 .packet_id = packet_id,
@@ -2252,9 +2325,8 @@ pub const UnsubAck = struct {
                 .reason_codes = try allocator.dupe(u8, &[_]u8{0x00}),
             };
         }
-        const props = try parseProperties(allocator, &cursor);
+        const props = try parsePropertiesFor(allocator, &cursor, .ack);
         errdefer allocator.free(props);
-        try validateParsedPropertiesFor(.ack, props);
         const reason_codes = try allocator.dupe(u8, cursor.buf[cursor.pos..]);
         errdefer allocator.free(reason_codes);
         for (reason_codes) |code| try validateUnsubAckReason(code);
@@ -2347,7 +2419,7 @@ pub const UnsubAck = struct {
     ) Error!usize {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         switch (protocol) {
-            .v3_1_1 => if (reason_codes.len != 0 and
+            .v3_1, .v3_1_1 => if (reason_codes.len != 0 and
                 !(reason_codes.len == 1 and reason_codes[0] == 0))
             {
                 return error.InvalidReasonCode;
@@ -2392,15 +2464,17 @@ pub const Disconnect = struct {
         if (fixed.packet_type != .disconnect) return error.InvalidPacketType;
         try validateControlFlags(fixed);
         try validatePacketBounds(packet, fixed);
-        if (protocol == .v3_1_1 and fixed.remaining_len != 0) return error.InvalidPacketType;
+        if (protocol.isLegacy() and fixed.remaining_len != 0) {
+            return error.InvalidPacketType;
+        }
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const reason_code = if (!cursor.eof()) try cursor.readByte() else 0;
         if (protocol == .v5) try validateDisconnectReason(reason_code);
-        const props = if (protocol == .v5 and !cursor.eof()) try parseProperties(allocator, &cursor) else try allocator.alloc(Property, 0);
+        const props = if (protocol == .v5 and !cursor.eof())
+            try parsePropertiesFor(allocator, &cursor, .disconnect)
+        else
+            try allocator.alloc(Property, 0);
         errdefer allocator.free(props);
-        if (protocol == .v5) {
-            try validateParsedPropertiesFor(.disconnect, props);
-        }
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{ .reason_code = reason_code, .properties = props };
     }
@@ -2414,7 +2488,7 @@ pub const Disconnect = struct {
     ) Error!void {
         const original_len = list.items.len;
         errdefer list.items.len = original_len;
-        if (protocol == .v3_1_1) {
+        if (protocol.isLegacy()) {
             if (reason_code != 0) return error.InvalidReasonCode;
             if (properties.len != 0) return error.InvalidProperty;
         } else try validateDisconnectReason(reason_code);
@@ -2453,7 +2527,7 @@ pub const Disconnect = struct {
         protocol: ProtocolVersion,
         reason_code: u8,
     ) Error![]u8 {
-        if (protocol == .v3_1_1) {
+        if (protocol.isLegacy()) {
             if (reason_code != 0) return error.InvalidReasonCode;
         } else {
             try validateDisconnectReason(reason_code);
@@ -2498,9 +2572,8 @@ pub const Auth = struct {
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const reason_code = try cursor.readByte();
         try validateAuthReason(reason_code);
-        const props = try parseProperties(allocator, &cursor);
+        const props = try parsePropertiesFor(allocator, &cursor, .auth);
         errdefer allocator.free(props);
-        try validateParsedPropertiesFor(.auth, props);
         if (!cursor.eof()) return error.InvalidPacketType;
         return .{ .reason_code = reason_code, .properties = props };
     }
@@ -2568,7 +2641,7 @@ pub const Auth = struct {
 };
 
 fn validateConnAckSessionPresent(session_present: bool, reason_code: u8) Error!void {
-    // MQTT 3.1.1/5 both require Session Present to be 0 when the connection is
+    // MQTT 3.1/3.1.1/5 require Session Present to be 0 when the connection is
     // refused.  Accepting `session_present=true` on failures lets clients
     // mistakenly resume state after a rejected CONNECT.
     if (session_present and reason_code != 0) return error.InvalidFlags;
@@ -2579,8 +2652,8 @@ fn validateSubscriptionOptions(protocol: ProtocolVersion, options: u8) Error!voi
     const qos_bits: u2 = @truncate(options & 0x03);
     if (qos_bits == 3) return error.InvalidQoS;
     switch (protocol) {
-        .v3_1_1 => {
-            // MQTT 3.1.1 SUBSCRIBE options only carry the requested QoS in
+        .v3_1, .v3_1_1 => {
+            // MQTT 3.1/3.1.1 SUBSCRIBE options only carry requested QoS in
             // bits 0..1.  MQTT 5 added No Local, Retain As Published and
             // Retain Handling in bits 2..5; reject those for v3 rather than
             // silently emitting or accepting a wire-incompatible packet.
@@ -2601,7 +2674,7 @@ fn validateParsedSubscriptionOptions(
     }
     const qos_bits: u2 = @truncate(options & 0x03);
     switch (protocol) {
-        .v3_1_1 => {
+        .v3_1, .v3_1_1 => {
             if ((options & 0xfc) != 0 or qos_bits == 3) {
                 return error.MalformedSubscriptionOptions;
             }
@@ -2625,7 +2698,7 @@ fn validateSharedSubscriptionOptions(protocol: ProtocolVersion, topic_filter: []
 
 fn validateSubAckReason(protocol: ProtocolVersion, code: u8) Error!void {
     switch (protocol) {
-        .v3_1_1 => switch (code) {
+        .v3_1, .v3_1_1 => switch (code) {
             0x00, 0x01, 0x02, 0x80 => {},
             else => return error.InvalidReasonCode,
         },
@@ -2649,7 +2722,7 @@ fn validateConnAckReason(protocol: ProtocolVersion, code: u8) Error!void {
         // (0-5). MQTT 5 replaced those numeric failures with the reason-code
         // registry below, so keep the validation version-aware instead of
         // accidentally rejecting legitimate v3 refusal packets.
-        .v3_1_1 => switch (code) {
+        .v3_1, .v3_1_1 => switch (code) {
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05 => {},
             else => return error.InvalidReasonCode,
         },
@@ -2841,7 +2914,7 @@ pub fn writeConnectPacket(
 ) Error!void {
     const original_len = list.items.len;
     errdefer list.items.len = original_len;
-    if (options.bridge_mode and protocol != .v3_1_1) {
+    if (options.bridge_mode and protocol == .v5) {
         return error.InvalidProtocolLevel;
     }
     try validateConnectClientId(
@@ -2858,7 +2931,10 @@ pub fn writeConnectPacket(
         return error.InvalidProperty;
     } else 0;
     try validateMqttUtf8String(options.client_id);
-    var remaining_len: usize = 10; // protocol name, level, flags, Keep Alive
+    var remaining_len: usize = if (protocol == .v3_1)
+        12
+    else
+        10; // protocol name, level, flags, Keep Alive
     if (protocol == .v5) {
         remaining_len = try addEncodedComponent(
             remaining_len,
@@ -2915,7 +2991,10 @@ pub fn writeConnectPacket(
     try list.ensureUnusedCapacity(allocator, encoded_len);
     list.appendAssumeCapacity(@as(u8, @intFromEnum(PacketType.connect)) << 4);
     encodeRemainingLengthAssumeCapacity(list, remaining_len);
-    appendLengthPrefixedAssumeCapacity(list, "MQTT");
+    appendLengthPrefixedAssumeCapacity(
+        list,
+        if (protocol == .v3_1) "MQIsdp" else "MQTT",
+    );
     list.appendAssumeCapacity(
         protocol.byte() | if (options.bridge_mode) @as(u8, 0x80) else 0,
     );
@@ -2972,8 +3051,12 @@ fn validateConnectClientId(
     // MQTT 3.1.1 permits an empty Client Identifier only with CleanSession=1.
     // MQTT 5 removed that restriction: the Server assigns the identifier and
     // returns it in CONNACK even when Clean Start is 0.
-    if (protocol == .v3_1_1 and client_id.len == 0 and !clean_start) {
-        return error.InvalidClientId;
+    switch (protocol) {
+        .v3_1 => if (client_id.len == 0) return error.InvalidClientId,
+        .v3_1_1 => if (client_id.len == 0 and !clean_start) {
+            return error.InvalidClientId;
+        },
+        .v5 => {},
     }
 }
 
@@ -3877,6 +3960,79 @@ test "MQTT 3.1.1 private bridge CONNECT roundtrip is version scoped" {
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+}
+
+test "MQTT 3.1 CONNECT uses MQIsdp and legacy validation" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeConnectPacket(&encoded, allocator, .v3_1, .{
+        .client_id = "p",
+        .clean_start = true,
+        .keep_alive_seconds = 10,
+    });
+    try std.testing.expectEqualSlices(u8, &.{
+        0x10, 0x0f,
+        0x00, 0x06,
+        'M',  'Q',
+        'I',  's',
+        'd',  'p',
+        0x03, 0x02,
+        0x00, 0x0a,
+        0x00, 0x01,
+        'p',
+    }, encoded.items);
+    var parsed = try Connect.parse(allocator, encoded.items);
+    try std.testing.expectEqual(ProtocolVersion.v3_1, parsed.protocol);
+    try std.testing.expect(parsed.clean_start);
+    parsed.deinit(allocator);
+
+    // MQTT 3.1 predates the MQTT 3.1.1 requirement that CONNECT's fixed
+    // header flags and Connect Flags bit zero are reserved-zero.
+    encoded.items[0] = 0x14;
+    encoded.items[11] |= 0x01;
+    parsed = try Connect.parse(allocator, encoded.items);
+    parsed.deinit(allocator);
+
+    encoded.items[10] = ProtocolVersion.v3_1_1.byte();
+    try std.testing.expectError(
+        error.InvalidProtocolLevel,
+        Connect.parse(allocator, encoded.items),
+    );
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientId,
+        writeConnectPacket(&encoded, allocator, .v3_1, .{
+            .client_id = "",
+            .clean_start = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    try writeConnectPacket(&encoded, allocator, .v3_1, .{
+        .client_id = "legacy-bridge",
+        .bridge_mode = true,
+        .clean_start = false,
+    });
+    const level_index = (try FixedHeader.parse(encoded.items)).header_len +
+        2 + "MQIsdp".len;
+    try std.testing.expectEqual(@as(u8, 0x83), encoded.items[level_index]);
+    parsed = try Connect.parse(allocator, encoded.items);
+    defer parsed.deinit(allocator);
+    try std.testing.expect(parsed.bridge_mode);
+
+    var connack_bytes: std.ArrayList(u8) = .empty;
+    defer connack_bytes.deinit(allocator);
+    try ConnAck.write(&connack_bytes, allocator, .v3_1, false, 0, &.{});
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x20, 0x02, 0x00, 0x00 },
+        connack_bytes.items,
+    );
+    var connack = try ConnAck.parse(allocator, .v3_1, connack_bytes.items);
+    defer connack.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0), connack.reason_code);
 }
 
 test "MQTT connect and publish parse" {

@@ -337,7 +337,7 @@ def verify(
             validate_mosquitto_config(
                 artifacts / "mosquitto.conf", queue_capacity
             )
-            if "netz MQTT 3.1.1/5 broker listening" not in (
+            if "netz MQTT 3.1/3.1.1/5 broker listening" not in (
                 artifacts / "netz-server.log"
             ).read_text(encoding="utf-8"):
                 raise ValueError(f"missing netz ready marker: {run}")

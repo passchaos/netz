@@ -4184,7 +4184,7 @@ pub const Broker = struct {
                 try self.refuseResolvedConnect(pending, .{
                     .reason_code = switch (pending.connect.connect.protocol) {
                         .v5 => 0x95,
-                        .v3_1_1 => 0x05,
+                        .v3_1, .v3_1_1 => 0x05,
                     },
                 }, &pending_owned);
                 return null;
@@ -4360,7 +4360,7 @@ pub const Broker = struct {
     ) Error!void {
         var refused = try pending.finish(.{
             .reason_code = switch (pending.connect.connect.protocol) {
-                .v3_1_1 => 0x05,
+                .v3_1, .v3_1_1 => 0x05,
                 .v5 => 0x87,
             },
         });
@@ -5339,7 +5339,7 @@ pub const Broker = struct {
         connect: mqtt.Connect,
         subscription: *mqtt.Subscription,
     ) void {
-        if (connect.protocol == .v3_1_1 and connect.bridge_mode) {
+        if (connect.protocol.isLegacy() and connect.bridge_mode) {
             // Mosquitto's private bridge extension gives legacy subscriptions
             // the MQTT 5-style loop prevention and retain preservation that
             // their wire format cannot otherwise express.

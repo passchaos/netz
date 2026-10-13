@@ -1206,6 +1206,7 @@ fn parseAcceptedProtocolVersions(
     words: anytype,
 ) error{ InvalidDirective, InvalidInteger }!mqtt.AcceptedProtocolVersions {
     var result = mqtt.AcceptedProtocolVersions{
+        .v3_1 = false,
         .v3_1_1 = false,
         .v5 = false,
     };
@@ -1215,17 +1216,16 @@ fn parseAcceptedProtocolVersions(
         while (versions.next()) |version| {
             if (version.len == 0) continue;
             saw_version = true;
-            if (std.mem.eql(u8, version, "4")) {
+            if (std.mem.eql(u8, version, "3")) {
+                if (result.v3_1) return error.InvalidInteger;
+                result.v3_1 = true;
+            } else if (std.mem.eql(u8, version, "4")) {
                 if (result.v3_1_1) return error.InvalidInteger;
                 result.v3_1_1 = true;
             } else if (std.mem.eql(u8, version, "5")) {
                 if (result.v5) return error.InvalidInteger;
                 result.v5 = true;
-            } else {
-                // MQTT 3.1 (level 3) is not implemented by netz. Rejecting it
-                // here avoids advertising a policy the runtime cannot honor.
-                return error.InvalidInteger;
-            }
+            } else return error.InvalidInteger;
         }
     }
     if (!saw_version) return error.InvalidDirective;
@@ -1672,6 +1672,7 @@ test "MQTT broker config parses owned inbound bridges" {
         \\connection backup
         \\address [::1]:3883
         \\topic backup/# in 2 mirror/ source/
+        \\bridge_protocol_version mqttv31
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -1797,6 +1798,7 @@ test "MQTT broker config parses owned inbound bridges" {
     try std.testing.expectEqualStrings("::1", backup.host);
     try std.testing.expectEqual(@as(u16, 3883), backup.port);
     try std.testing.expectEqualStrings("backup", backup.clientId());
+    try std.testing.expectEqual(mqtt.ProtocolVersion.v3_1, backup.protocol);
     try std.testing.expectEqualStrings("local.backup", backup.localClientId());
     try std.testing.expect(backup.usesQoS2());
     try std.testing.expectEqualStrings("source/backup/#", backup.rules[0].filter);
@@ -2051,7 +2053,7 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
         error.UnsupportedBridgeProtocol,
         parse(allocator, listener ++
             "connection old\naddress localhost\ntopic # in 0\n" ++
-            "bridge_protocol_version mqttv31\n"),
+            "bridge_protocol_version mqttv32\n"),
     );
     try std.testing.expectError(
         error.DirectiveRequiresBridge,
@@ -4218,17 +4220,20 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
         \\accept_protocol_versions 5
         \\allow_anonymous true
         \\listener 1884
-        \\accept_protocol_versions 4, 5
+        \\accept_protocol_versions 3, 4, 5
         \\allow_anonymous true
         \\listener 1885
         \\accept_protocol_versions 4
         \\allow_anonymous true
     );
     defer config.deinit(allocator);
+    try std.testing.expect(!config.listeners[0].accepted_protocol_versions.v3_1);
     try std.testing.expect(!config.listeners[0].accepted_protocol_versions.v3_1_1);
     try std.testing.expect(config.listeners[0].accepted_protocol_versions.v5);
+    try std.testing.expect(config.listeners[1].accepted_protocol_versions.v3_1);
     try std.testing.expect(config.listeners[1].accepted_protocol_versions.v3_1_1);
     try std.testing.expect(config.listeners[1].accepted_protocol_versions.v5);
+    try std.testing.expect(!config.listeners[2].accepted_protocol_versions.v3_1);
     try std.testing.expect(config.listeners[2].accepted_protocol_versions.v3_1_1);
     try std.testing.expect(!config.listeners[2].accepted_protocol_versions.v5);
 
@@ -4239,7 +4244,7 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
             \\listener 1883
         ),
     );
-    const invalid = [_][]const u8{ "", "3", "6", "4,4", "," };
+    const invalid = [_][]const u8{ "", "6", "3,3", "4,4", "," };
     for (invalid) |value| {
         const source = try std.fmt.allocPrint(
             allocator,

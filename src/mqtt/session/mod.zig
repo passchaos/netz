@@ -1211,9 +1211,12 @@ pub const Store = struct {
     ) u32 {
         return switch (protocol) {
             .v5 => mqtt.sessionExpiryInterval(properties) orelse 0,
-            // MQTT 3.1.1 CleanSession=0 has no timer and therefore persists
+            // Pre-v5 CleanSession=0 has no timer and therefore persists
             // until an administrative action or a later clean connection.
-            .v3_1_1 => if (clean_start) 0 else std.math.maxInt(u32),
+            .v3_1, .v3_1_1 => if (clean_start)
+                0
+            else
+                std.math.maxInt(u32),
         };
     }
 

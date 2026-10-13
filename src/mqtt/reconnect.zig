@@ -2418,7 +2418,7 @@ pub const Client = struct {
         };
         self.noteControlSent();
         errdefer unsuback.deinit(self.allocator);
-        if (active.protocol == .v3_1_1) {
+        if (active.protocol.isLegacy()) {
             for (filters) |filter| self.removeSubscription(filter);
         } else {
             for (filters, unsuback.unsuback.reason_codes) |filter, reason| {
@@ -3614,7 +3614,7 @@ fn reconnectSessionOptions() session.Options {
 fn configuredPersistentSession(options: runtime.ConnectOptions) bool {
     if (options.clean_start) return false;
     return switch (options.protocol) {
-        .v3_1_1 => true,
+        .v3_1, .v3_1_1 => true,
         .v5 => (mqtt.sessionExpiryInterval(options.properties) orelse 0) != 0,
     };
 }

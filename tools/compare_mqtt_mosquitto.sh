@@ -250,7 +250,7 @@ run_netz() {
   fi
   server_pid=$!
   wait_for_log "$work/netz-server.log" \
-    'netz MQTT 3.1.1/5 broker listening.*server_io=zio-std-io'
+    'netz MQTT 3.1/3.1.1/5 broker listening.*server_io=zio-std-io'
   if [[ "$stats" == true ]]; then
     start_rss_sampler "$server_pid" "$work/netz-server.rss"
   fi

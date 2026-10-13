@@ -133,7 +133,7 @@ class MqttBrokerMatrixCheckTest(unittest.TestCase):
                         f"{rss}\n", encoding="ascii"
                     )
                 (artifacts / "netz-server.log").write_text(
-                    "netz MQTT 3.1.1/5 broker listening server_io=zio-std-io\n",
+                    "netz MQTT 3.1/3.1.1/5 broker listening server_io=zio-std-io\n",
                     encoding="utf-8",
                 )
                 (artifacts / "mosquitto-server.log").write_text(

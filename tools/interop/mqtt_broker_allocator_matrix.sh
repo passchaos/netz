@@ -102,7 +102,7 @@ while IFS=$'\t' read -r shape publishers subscribers warmup messages payload win
       >"$run/server.log" 2>&1 &
     server_pid=$!
     for _ in $(seq 1 200); do
-      if grep -q 'netz MQTT 3.1.1/5 broker listening' "$run/server.log"; then
+      if grep -q 'netz MQTT 3.1/3.1.1/5 broker listening' "$run/server.log"; then
         break
       fi
       if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -111,7 +111,7 @@ while IFS=$'\t' read -r shape publishers subscribers warmup messages payload win
       fi
       sleep 0.05
     done
-    grep -q 'netz MQTT 3.1.1/5 broker listening' "$run/server.log"
+    grep -q 'netz MQTT 3.1/3.1.1/5 broker listening' "$run/server.log"
     taskset -c "$client_cpu" timeout 60s "$root/identity/mqtt-driver" \
       "--address=127.0.0.1:$port" "--publishers=$publishers" \
       "--subscribers=$subscribers" "--warmup-messages=$warmup" \

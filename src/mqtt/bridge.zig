@@ -718,7 +718,7 @@ fn rulesUseQoS2(rules: []const Rule) bool {
 fn persistentSession(connect: runtime.ConnectOptions) bool {
     if (connect.clean_start) return false;
     return switch (connect.protocol) {
-        .v3_1_1 => true,
+        .v3_1, .v3_1_1 => true,
         .v5 => (mqtt.sessionExpiryInterval(connect.properties) orelse 0) != 0,
     };
 }

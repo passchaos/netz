@@ -1292,7 +1292,7 @@ pub const PendingAcceptedClient = struct {
         }
         const connect = self.connect.connect;
         if (connect.clean_start) {
-            // A clean start discards any prior Session, so MQTT 3.1.1 and 5
+            // A clean start discards any prior Session, so MQTT 3.1/3.1.1/5
             // both require the successful CONNACK's Session Present bit to be
             // zero regardless of a direct server caller's requested value.
             resolved.session_present = false;
@@ -1301,7 +1301,7 @@ pub const PendingAcceptedClient = struct {
             !resolved.accepted_protocol_versions.allows(connect.protocol))
         {
             resolved.reason_code = switch (connect.protocol) {
-                .v3_1_1 => 0x01,
+                .v3_1, .v3_1_1 => 0x01,
                 .v5 => 0x84,
             };
             resolved.session_present = false;
@@ -1324,7 +1324,7 @@ pub const PendingAcceptedClient = struct {
             !resolved.allow_zero_length_client_id)
         {
             resolved.reason_code = switch (connect.protocol) {
-                .v3_1_1 => 0x02,
+                .v3_1, .v3_1_1 => 0x02,
                 .v5 => 0x80,
             };
             resolved.session_present = false;
@@ -1344,7 +1344,7 @@ pub const PendingAcceptedClient = struct {
                 connect.keep_alive_seconds > maximum)
             {
                 switch (connect.protocol) {
-                    .v3_1_1 => {
+                    .v3_1, .v3_1_1 => {
                         resolved.reason_code = 0x02;
                         resolved.session_present = false;
                         resolved.assigned_client_identifier = null;
@@ -3883,10 +3883,13 @@ pub const Connection = struct {
     ) Error!void {
         const raw_level = self.incomingConnectLevel() orelse return;
         const level = raw_level & 0x7f;
-        const response_protocol: mqtt.ProtocolVersion =
-            if (level == 3 or level == 4) .v3_1_1 else .v5;
+        const response_protocol: mqtt.ProtocolVersion = switch (level) {
+            3 => .v3_1,
+            4 => .v3_1_1,
+            else => .v5,
+        };
         const reason_code: u8 = switch (response_protocol) {
-            .v3_1_1 => switch (err) {
+            .v3_1, .v3_1_1 => switch (err) {
                 error.InvalidProtocolLevel => 0x01,
                 error.InvalidClientId => 0x02,
                 else => return,
@@ -6831,11 +6834,11 @@ fn validateUnsubAckResponse(protocol: mqtt.ProtocolVersion, unsuback: mqtt.Unsub
     if (unsuback.packet_id != packet_id) return error.UnexpectedPacket;
     switch (protocol) {
         .v5 => if (unsuback.reason_codes.len != topic_filter_count) return error.UnexpectedPacket,
-        // MQTT 3.1.1 UNSUBACK acknowledges only the Packet Identifier.  Unlike
+        // Pre-v5 UNSUBACK acknowledges only the Packet Identifier. Unlike
         // MQTT 5, it has no per-topic reason-code vector, so a single v3
         // UNSUBACK can validly confirm an UNSUBSCRIBE that contained multiple
         // topic filters.  Keep this aligned with rumqtt's v4 UnsubAck model.
-        .v3_1_1 => {},
+        .v3_1, .v3_1_1 => {},
     }
 }
 

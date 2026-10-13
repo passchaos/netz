@@ -322,7 +322,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     std.debug.print(
-        "netz MQTT 3.1.1/5 broker listening on {f} for {d} clients " ++
+        "netz MQTT 3.1/3.1.1/5 broker listening on {f} for {d} clients " ++
             "server_io=zio-std-io\n",
         .{ broker.address(), config.connections },
     );

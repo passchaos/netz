@@ -993,7 +993,7 @@ Current protocol coverage includes:
   negotiate `:protocol = websocket`,
   subprotocols, permessage-deflate, reject duplicate/legacy critical handshake
   fields, and use transport-derived `:scheme` over an h2 DATA tunnel
-- MQTT 3.1.1/5 fixed headers with transactional Remaining Length preflight and
+- MQTT 3.1/3.1.1/5 fixed headers with transactional Remaining Length preflight and
   exact header-only capacity reservation, plus single-reservation transactional
   Remaining Length, UTF-8 string, and Binary Data primitives, CONNECT/CONNACK with Last Will,
   version-scoped username/password flag validation and payload support, PUBLISH,
@@ -1047,7 +1047,7 @@ Current protocol coverage includes:
   subscription, retained, queue, inflight, QoS 2 and Will state, with retained
   `$SYS` gauge publication through the normal routing/ACL
   path, integrated into one live
-  TCP and Unix-domain broker listeners that auto-detect MQTT 3.1.1/5 per connection, exposes
+  TCP and Unix-domain broker listeners that auto-detect MQTT 3.1/3.1.1/5 per connection, exposes
   opt-in bounded HAProxy PROXY protocol v1/v2 parsing before TCP, TLS, WS, or
   WSS application handshakes, with trusted source, destination, transport and
   v2 TLV metadata,
@@ -1057,7 +1057,7 @@ Current protocol coverage includes:
   proxy-certificate CN username mapping on trusted cleartext listeners,
   finite deterministic batches plus a graceful-shutdown production supervisor
   that continuously replaces disconnected clients, and
-  listener-specific MQTT 3.1.1/5 admission with version-correct refusal,
+  listener-specific MQTT 3.1/3.1.1/5 admission with version-correct refusal,
   independent listener-local and broker-global simultaneous connection caps
   that actively close excess peers and reuse capacity after disconnect,
   Mosquitto-compatible mount-point namespaces with inbound PUBLISH/Will and
@@ -1168,7 +1168,7 @@ Current protocol coverage includes:
   partial-record truncation errors, and opt-in native MQTT TLS ALPN negotiation
   with the selected protocol exposed per
   connection, and
-  MQTT-over-WebSocket client/server adapters for MQTT 3.1.1 and MQTT 5, with
+  MQTT-over-WebSocket client/server adapters for MQTT 3.1, MQTT 3.1.1 and MQTT 5, with
   strict `mqtt` subprotocol
   negotiation, `ws://`/`wss://` client and server transports, WSS client
   identities with system/caller CA or pin/custom server verification, MQTT

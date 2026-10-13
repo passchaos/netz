@@ -12,7 +12,7 @@ and same-client broker results are kept separate.
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
 | Listener socket family | Mosquitto-style `socket_domain ipv4|ipv6` and `bind_interface` are listener-local across TCP, TLS, WS, and WSS. Omitted bind addresses become the selected family's wildcard, explicit address-family mismatches fail configuration when no interface overrides the address, and IPv6-only sockets set `IPV6_V6ONLY` before bind. With neither an address nor `socket_domain`, the configured runner opens separate IPv4 and IPv6 wildcard sockets when supported; both share the logical listener's admission cap and policy. A named interface takes precedence over the listener address and contributes its first address from each selected family without requiring privileged `SO_BINDTODEVICE`. Backend, interface, or explicitly selected family limitations fail closed; only an unavailable family in an all-family listener is skipped. | Mosquitto likewise enumerates all supported families by default, creates a separate socket for each, resolves `bind_interface` through `getifaddrs`, and restricts a listener to the configured family; rumqttd has no equivalent audited listener option |
-| MQTT versions | MQTT 3.1.1 and MQTT 5 packet/runtime; TCP, Unix-domain, WebSocket and secure listeners auto-detect both versions. Listener-local `accept_protocol_versions` admits `4`, `5`, or both and sends version-correct refusal CONNACKs before Session, Will, or route registration; unsupported MQTT 3.1 configuration fails closed. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports 3.1/3.1.1/5 and exposes the same listener version policy |
+| MQTT versions | MQTT 3.1, MQTT 3.1.1 and MQTT 5 packet/runtime; TCP, Unix-domain, WebSocket and secure listeners auto-detect all three versions. MQTT 3.1 preserves its `MQIsdp` protocol name, level-3 CONNECT quirks, mandatory non-empty Client ID, and legacy CONNACK/QoS control shapes instead of being aliased to 3.1.1. Listener-local `accept_protocol_versions` admits any exact combination of `3`, `4`, and `5` and sends version-correct refusal CONNACKs before Session, Will, or route registration. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports 3.1/3.1.1/5 and exposes the same listener version policy |
 | Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, TLS or WS/WSS Upgrade, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata. The production Mosquitto-style config exposes listener-local `enable_proxy_protocol 1|2` and `proxy_protocol_v2_require_tls`; on cleartext v2 listeners, `require_certificate` requires verified connection/session certificate evidence and `use_identity_as_username` accepts only a validated SSL-TLV commonName. Local TLS termination and full-Subject identity remain invalid with v2 | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery. Mosquitto-compatible global `max_inflight_messages` defaults to 20, bounds each client's incoming and outgoing QoS 1/2 transactions, advertises MQTT 5 Receive Maximum, enforces the same unadvertised bound for MQTT 3.1.1, and maps zero to the protocol default of 65,535 while retaining independent aggregate/memory bounds. Global `max_inflight_bytes` independently bounds outgoing QoS 1/2 payload bytes for transient connections and durable Sessions through final acknowledgement, and defaults to unlimited | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills and exposes the same global inflight settings |
@@ -22,7 +22,7 @@ and same-client broker results are kept separate.
 | Shared subscriptions | Trie-indexed `{group, filter}`, RoundRobin/Random/Sticky/Rendezvous; broker defaults to RoundRobin | rumqttd has RoundRobin/Random/Sticky; Mosquitto rotates each shared leaf list |
 | Topic routing | Exact, `+`, `#`, `$SYS`, No Local, shared groups. Network-client PUBLISH and Will writes to broker-owned `$SYS` and `$share` namespaces are denied by default, with Mosquitto's `$SYS/broker/connection/+/state` exception and an explicit opt-out; trusted local producers retain `$SYS` access | Both references provide production topic indexes; Mosquitto applies the same built-in `$SYS`/`$share` write protection before configured ACLs |
 | Listener topic namespaces and policy | Heterogeneous TCP/Unix/TLS/WS/Unix-WS/WSS `PendingSource`s can share one Broker core and deadline driver. Per-listener namespaces map PUBLISH/Will topics and ordinary/shared filters into canonical broker space, then strip the destination prefix from live, retained and durable Session delivery. Each listener may override CONNECT/CONNACK policy and add CONNECT plus live publish/subscribe/unsubscribe/delivery authorization on top of mandatory broker-wide policy; its negotiated Maximum QoS controls subscription grants plus live and durable delivery | Mosquitto `mount_point` applies a literal prefix at ingress and removes it per destination listener; Maximum QoS, authentication and selected limits may be listener-scoped with `per_listener_settings` |
-| Broker configuration | Public `mqtt.broker_config` parses and deep-owns a strict Mosquitto-style subset for TCP/TLS/WebSocket/WSS listeners, bounded ordered main-file `include_dir` expansion, and inbound, outbound, mixed, or bidirectional `connection` bridges sharing one remote Session with one or more DNS/IPv4/bracketed-IPv6 `address` targets with primary-preferred periodic failback or round-robin failover, disjoint `topic ... in|out|both ...` QoS 0/1/2 rules, local/remote prefix mapping, MQTT 3.1.1/5 Session selection, upstream credentials, Keep Alive, fixed or stateful decorrelated-jitter restart policy with stable-connection reset, automatic, one-shot, or threshold-triggered lazy outbound lifecycle with idle disconnect, retained local/remote connection-state notifications, and vail-backed TLS 1.3 with explicit CA files, bounded OpenSSL-style CA directories, operating-system CA trust, hostname verification, ALPN, and optional encrypted-key mTLS. The production runner supervises bridge generations behind a bridge-local cancellation domain, propagates fatal bridge failures into whole-service shutdown, and supports per-bridge `bridge_reload_type lazy|immediate` replacement without interrupting listeners or ordinary clients. It uses an identity-and-mapping-derived stable ID plus a crash-safe journal for persistent QoS 2. It also provides separate cross-listener caps for simultaneously admitted connections through `global_max_connections` and active/offline Sessions through `global_max_clients`, listener-local P-256/P-384/P-521/Ed25519 and 2048/3072/4096-bit RSA PEM `certfile`/`keyfile`, PBES2-encrypted PKCS#8 keys with file-backed passwords, ordered OpenSSL-style TLS 1.2 and TLS 1.3 cipher-suite policies, optional or required client certificates through strict `cafile` and bounded TCP/TLS `capath` trust sources plus `require_certificate`, Ed25519, P-256 ECDSA/SHA-256, P-384 ECDSA/SHA-384, or 1024-4096-bit RSA PKCS#1 v1.5 SHA-256 `crlfile` with directly signed base/delta composition, exact repeatable `websockets_origin` allowlists and a bounded global `websockets_headers_size`, verified certificate-CN and OpenSSL-compatible RFC 2253 full-Subject usernames through `use_identity_as_username`/`use_subject_as_username`, mount points, anonymous and zero-length Client ID policy with global or per-listener assigned-ID prefixes, deprecated global `clientid_prefixes` admission, Maximum QoS/Keep Alive, inbound and broker-created Topic Alias limits, username-derived Client IDs, connection and bidirectional inflight bounds, offline QoS 0, global outgoing QoS upgrade and TCP_NODELAY policy, per-bridge TCP keepalive and Linux TCP user-timeout policy, global or `per_listener_settings`-isolated password/ACL/zero-length-ID settings, and snapshot/autosave settings. All config and security files, server identities, CA bundles/directories and CRLs are validated before any listener is opened. Linux SIGHUP reloads bridge definitions plus the configured password/ACL and TLS/WSS identity/key-password/CA/CRL file contents; bridge parse or preparation failure retains all active bridge generations, while security parse/load failure retains the complete old policy and TLS generations. Successful password changes selectively administratively disconnect live users whose parsed credential changed or disappeared without publishing their Wills. Public `mqtt.password_file` validates and verifies Mosquitto Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, rejects plaintext/malformed/duplicate/unreasonably expensive input before listening, uses constant-time hash comparison, and serializes KDF work to bound concurrent Argon2 memory. Public `mqtt.acl_file` implements anonymous/user topic rules, global `%u`/`%c` patterns, read/write/readwrite access, default deny and deny precedence. The production example's exclusive `--config=PATH` mode creates all listeners and bridges over one shared Broker and enforces each transport/authentication/ACL policy | Mosquitto additionally supports broader listener reload policies and many additional listener/global controls; rumqttd uses its own structured configuration |
+| Broker configuration | Public `mqtt.broker_config` parses and deep-owns a strict Mosquitto-style subset for TCP/TLS/WebSocket/WSS listeners, bounded ordered main-file `include_dir` expansion, and inbound, outbound, mixed, or bidirectional `connection` bridges sharing one remote Session with one or more DNS/IPv4/bracketed-IPv6 `address` targets with primary-preferred periodic failback or round-robin failover, disjoint `topic ... in|out|both ...` QoS 0/1/2 rules, local/remote prefix mapping, MQTT 3.1/3.1.1/5 Session selection, upstream credentials, Keep Alive, fixed or stateful decorrelated-jitter restart policy with stable-connection reset, automatic, one-shot, or threshold-triggered lazy outbound lifecycle with idle disconnect, retained local/remote connection-state notifications, and vail-backed TLS 1.3 with explicit CA files, bounded OpenSSL-style CA directories, operating-system CA trust, hostname verification, ALPN, and optional encrypted-key mTLS. The production runner supervises bridge generations behind a bridge-local cancellation domain, propagates fatal bridge failures into whole-service shutdown, and supports per-bridge `bridge_reload_type lazy|immediate` replacement without interrupting listeners or ordinary clients. It uses an identity-and-mapping-derived stable ID plus a crash-safe journal for persistent QoS 2. It also provides separate cross-listener caps for simultaneously admitted connections through `global_max_connections` and active/offline Sessions through `global_max_clients`, listener-local P-256/P-384/P-521/Ed25519 and 2048/3072/4096-bit RSA PEM `certfile`/`keyfile`, PBES2-encrypted PKCS#8 keys with file-backed passwords, ordered OpenSSL-style TLS 1.2 and TLS 1.3 cipher-suite policies, optional or required client certificates through strict `cafile` and bounded TCP/TLS `capath` trust sources plus `require_certificate`, Ed25519, P-256 ECDSA/SHA-256, P-384 ECDSA/SHA-384, or 1024-4096-bit RSA PKCS#1 v1.5 SHA-256 `crlfile` with directly signed base/delta composition, exact repeatable `websockets_origin` allowlists and a bounded global `websockets_headers_size`, verified certificate-CN and OpenSSL-compatible RFC 2253 full-Subject usernames through `use_identity_as_username`/`use_subject_as_username`, mount points, anonymous and zero-length Client ID policy with global or per-listener assigned-ID prefixes, deprecated global `clientid_prefixes` admission, Maximum QoS/Keep Alive, inbound and broker-created Topic Alias limits, username-derived Client IDs, connection and bidirectional inflight bounds, offline QoS 0, global outgoing QoS upgrade and TCP_NODELAY policy, per-bridge TCP keepalive and Linux TCP user-timeout policy, global or `per_listener_settings`-isolated password/ACL/zero-length-ID settings, and snapshot/autosave settings. All config and security files, server identities, CA bundles/directories and CRLs are validated before any listener is opened. Linux SIGHUP reloads bridge definitions plus the configured password/ACL and TLS/WSS identity/key-password/CA/CRL file contents; bridge parse or preparation failure retains all active bridge generations, while security parse/load failure retains the complete old policy and TLS generations. Successful password changes selectively administratively disconnect live users whose parsed credential changed or disappeared without publishing their Wills. Public `mqtt.password_file` validates and verifies Mosquitto Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 entries, rejects plaintext/malformed/duplicate/unreasonably expensive input before listening, uses constant-time hash comparison, and serializes KDF work to bound concurrent Argon2 memory. Public `mqtt.acl_file` implements anonymous/user topic rules, global `%u`/`%c` patterns, read/write/readwrite access, default deny and deny precedence. The production example's exclusive `--config=PATH` mode creates all listeners and bridges over one shared Broker and enforces each transport/authentication/ACL policy | Mosquitto additionally supports broader listener reload policies and many additional listener/global controls; rumqttd uses its own structured configuration |
 | Fanout ownership | One ref-counted topic/payload/property allocation shared by every downstream delivery | Mirrors Mosquitto's `mosquitto__base_msg` reference-counted fanout |
 | Publisher acknowledgement | Route and durable commit before PUBACK; a self-matched PUBLISH is written first on the shared connection, while unrelated slow subscribers cannot delay PUBACK; MQTT 5 reason `0x10` when no subscription matches | Matches Mosquitto `handle_publish.c`; rumqttd uses its router event path |
 | Retained messages | Bounded Store integrated into live publish/subscribe, with expiry, Retain Handling, No Local, shared suppression, QoS and identifiers. Expired entries are always suppressed lazily; optional Mosquitto-compatible `retain_expiry_interval` also drives periodic physical pruning through the shared lifecycle timer and persists each non-empty cleanup to snapshots/journals. Original effective Client ID, username, and stable source-listener identity are deep-owned and persisted so replay can recheck the publisher's current global or per-listener write authorization; Mosquitto-compatible `check_retain_source` defaults on and can be disabled explicitly | Both production brokers integrate retained delivery; Mosquitto defaults `check_retain_source` on to prevent revoked publishers' stored messages from replaying and persists source ID, username, and listener port |
@@ -2013,13 +2013,13 @@ Throughput remained effectively flat versus the prior 39,146 median, while
 tail latency improved about 1.7-1.9%; the main value is simpler bounded
 ownership rather than a claimed throughput step.
 
-## MQTT 3.1.1/5 broker interoperability
+## MQTT 3.1/3.1.1/5 broker interoperability
 
 The live TCP listener now follows Mosquitto's version negotiation model: the
 configured protocol is only an initial parser default, while CONNECT selects
 MQTT 3.1.1 or MQTT 5 independently for every accepted socket.
 
-- MQTT 3.1.1 and MQTT 5 publishers/subscribers can share one listener and route
+- MQTT 3.1, MQTT 3.1.1 and MQTT 5 publishers/subscribers can share one listener and route
   between versions.
 - Empty clean-session Client IDs receive secure random UUID-style identities
   with a copied, configurable prefix. MQTT 5 reports the value through Assigned
@@ -2888,7 +2888,7 @@ recorded in `docs/benchmark-baseline.md`.
 ## Remaining work before broad superiority
 
 The shared `fuzz-parsers` target dispatches every bounded input through the
-MQTT Fixed Header and MQTT 3.1.1/5 CONNECT, CONNACK, PUBLISH, ACK,
+MQTT Fixed Header and MQTT 3.1/3.1.1/5 CONNECT, CONNACK, PUBLISH, ACK,
 SUBSCRIBE/SUBACK, UNSUBSCRIBE/UNSUBACK, DISCONNECT and AUTH parsers. Default
 tests replay valid and malformed seeds plus deterministic truncation/bit-flip/
 random mutations with leak checks; Zig's `--fuzz` mode adds coverage guidance.
@@ -3709,14 +3709,14 @@ unsupported capabilities; a server cannot send the client-only Disconnect with
 Will Message reason. A table-driven codec test covers every valid reason code,
 and a raw client sending Server Busy receives exact Protocol Error `0x82`
 before a fresh connection completes CONNECT/PING.
-Three protocol-negotiation cases mirror Mosquitto's
-`read_and_verify_protocol_version`: a structurally valid `MQTT` CONNECT with
-level 3 receives the legacy four-byte Unsupported Protocol Version CONNACK,
-level 6 receives MQTT 5 reason `0x84` with an empty property section, and an
-invalid protocol name remains a fail-closed connection error. A following
-valid MQTT 5 CONNECT/PING proves that these refusals do not poison the finite
-listener. Netz still implements only MQTT 3.1.1 and MQTT 5; the level-3 reply
-is an unambiguous negotiation response, not MQTT 3.1 support.
+Protocol-negotiation cases mirror Mosquitto's
+`read_and_verify_protocol_version`: MQTT 3.1 uses `MQIsdp` plus level 3, while
+`MQTT` plus level 3 remains a mismatched-name refusal with the legacy
+four-byte Unsupported Protocol Version CONNACK. Level 6 receives MQTT 5 reason
+`0x84` with an empty property section, and an invalid protocol name remains a
+fail-closed connection error. Real TCP and WebSocket tests complete MQTT 3.1
+CONNECT/PING/DISCONNECT, and broker coverage performs QoS 1 subscribe,
+self-publish, delivery, and acknowledgement on the same level-3 connection.
 The broker also exposes Mosquitto's administrative
 `persistent_client_expiration` behavior through both the production config
 directive and `persistent_session_expiry_seconds`: it caps a longer MQTT 5
@@ -3908,20 +3908,18 @@ without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
 as a CONNACK property. All 225 curated scenarios pass. A separate
 source-hash-locked adapter now executes every scenario in Mosquitto's complete
-`AUTH.json`, `DISCONNECT.json`, `FLOW.json`, `FORBIDDEN.json`, `OTHER.json`,
-`PINGREQ.json`, `PINGRESP.json`,
+`AUTH.json`, `CONNECT.json`, `CONNACK.json`, `DISCONNECT.json`, `FLOW.json`,
+`FORBIDDEN.json`, `OTHER.json`, `PINGREQ.json`, `PINGRESP.json`,
 `PUBACK.json`, `PUBREC.json`, `PUBREL.json`, `PUBCOMP.json`, `REGRESSION.json`,
 `SUBACK.json`, `SUBSCRIBE.json`, `UNSUBACK.json`, `UNSUBSCRIBE.json`, and
-`PUBLISH.json` files: 1,372 upstream scenarios across MQTT 3.1.1 and MQTT 5.
-It additionally runs 145 of 146 scenarios in the complete, hash-locked
-`CONNACK.json` and 299 of 307 in `CONNECT.json`, for 1,816 source-derived
-sequences total. The nine exclusions are exact `(group, test)` identities
-rather than pattern skips; all use obsolete MQTT protocol level 3 outside
-netz's declared 3.1.1/5 scope.
+`PUBLISH.json` files: 1,825 upstream scenarios across MQTT 3.1, MQTT 3.1.1 and
+MQTT 5. The nine formerly excluded level-3 CONNECT/CONNACK cases now run in
+isolated broker processes, preserving the upstream harness's fresh-broker
+Session Present assumptions without rewriting its byte-exact expectations.
 
 `PUBLISH.json` is now complete at 160/160. Its two `QoS 2 Dup flow*3`
 scenarios encode Mosquitto's private finite tolerance for repeated non-DUP
-PUBLISH packets, which conflicts with MQTT 3.1.1/5 receiver retransmission
+PUBLISH packets, which conflicts with MQTT 3.1/3.1.1/5 receiver retransmission
 semantics. The adapter therefore uses two source-locked standards replays: it
 verifies each entire original action list and inherited close expectation,
 preserves all three source PUBLISH packets, requires PUBREC after each one,
@@ -4073,18 +4071,14 @@ zig build interop-mqtt-mosquitto-packet-sequences -Doptimize=ReleaseFast -- \
   --mosquitto-test-root=/nav_env/Work/mosquitto/test
 ```
 
-The manifest pins SHA-256 hashes for all seventeen complete JSON inputs and the
-audited `CONNECT.json` and `CONNACK.json` subset sources,
-and the imported `mqtt_packets.py` generator, so a changed
+The manifest pins SHA-256 hashes for all nineteen complete JSON inputs and the
+imported `mqtt_packets.py` generator, so a changed
 upstream fixture cannot silently reuse the recorded scenario count.
-The adapter intentionally does not claim complete-file coverage for
-`CONNECT.json` or `CONNACK.json`; both contain MQTT 3.1 protocol-level cases,
-outside netz's declared MQTT 3.1.1/5 scope.
-The CONNECT subset also permits twelve exact MQTT 5 Malformed Packet
+The CONNECT gate also permits twelve exact MQTT 5 Malformed Packet
 diagnostics where Mosquitto's fixture only requires EOF, including the case
 whose group label says v3.1.1 but whose wire-level protocol byte is `05`.
-This is deliberately described as a selected
-wire-vector subset: Mosquitto's Python harness hardcodes its own `-v -c/-p`
+This remains a packet-file gate rather than a claim over Mosquitto's entire
+Python harness, which hardcodes its own `-v -c/-p`
 broker CLI and many tests depend on configuration outside netz's strict subset,
 logs, reload, persistence details or plugins, so passing these vectors is not
 proxy evidence for the entire suite.
@@ -4374,11 +4368,10 @@ proxy evidence for the entire suite.
    A seven-pair fixed-binary durable QoS 2 matrix was neutral in all five
    shapes; a matched 100,000-message serial profile reduced
    `flushSlotLocked` from 211 samples (4.35%) to 156 (3.22%).
-3. Expand the source-hash-locked gate beyond its current 1,816 upstream packet
+3. Expand the source-hash-locked gate beyond its current 1,825 upstream packet
    sequences, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
    semantics.
    The 225
-   curated scenarios, seventeen complete portable JSON files, audited 299/307
-   `CONNECT.json`, and 145/146 `CONNACK.json` subsets still do not cover the
-   full protocol/conformance suite.
+   curated scenarios and nineteen complete portable JSON files still do not
+   cover the full protocol/conformance suite.

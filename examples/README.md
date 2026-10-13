@@ -211,7 +211,7 @@ full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
 payloads are rejected while representable QoS flows complete. Each listener
-accepts MQTT 3.1.1 and MQTT 5 by default. Listener-local
+accepts MQTT 3.1, MQTT 3.1.1 and MQTT 5 by default. Listener-local
 `socket_domain ipv4|ipv6` constrains TCP, TLS, WebSocket, and WSS sockets to one
 address family. When the `listener` line omits its bind address, the directive
 selects `0.0.0.0` or `::`; an explicit address from the other family is
@@ -244,21 +244,21 @@ omitted or written as `""`. A connection may mix `in`, `out`, and `both`
 rules; each direction must remain pairwise disjoint after its own source-prefix
 expansion. Both directions share exactly one remote Client and MQTT Session.
 The local source excludes bridge-injected publications, while MQTT 5 remote
-subscriptions use No Local. MQTT 3.1.1 bidirectional bridges require the
+subscriptions use No Local. MQTT 3.1 and MQTT 3.1.1 bidirectional bridges require the
 private bridge protocol and fail instead of falling back when the peer rejects
 it, preventing an undetectable publication loop. With the default
 `round_robin false`, connection attempts
 fall through the ordered targets, but the first target remains primary: a
 secondary connection is retired after the configured restart cap so the next
 attempt probes the primary again. `round_robin true` instead rotates after each
-failure or disconnect and leaves a successful target active until it fails.
-MQTT 3.1 fails explicitly instead of being silently downgraded. One
+failure or disconnect and leaves a successful target active until it fails. One
 `restart_timeout` value selects a fixed delay. Two values select bounded
 decorrelated jitter; an optional third value is the stable-connection period
 in seconds after which the delay resets to the base. Reconnects after an
 established connection wait for the selected delay, while the initial startup
 attempt remains immediate. MQTT 3.1.1 is the bridge default;
-`bridge_protocol_version mqttv50` enables MQTT 5. `remote_username` and
+`bridge_protocol_version mqttv31` selects MQTT 3.1 and
+`bridge_protocol_version mqttv50` selects MQTT 5. `remote_username` and
 `remote_password` configure upstream authentication, with a password requiring
 a username. When `remote_clientid` is omitted, the unique connection name is
 used as the stable Client ID. `bridge_receive_maximum` is the non-zero MQTT 5
@@ -271,7 +271,7 @@ the smaller of this value and the remote CONNACK Maximum Packet Size. An
 oversized forwarded PUBLISH is dropped for that destination without tearing
 down the bridge.
 `bridge_outgoing_retain false` clears RETAIN from all remote PUBLISH packets in
-both MQTT 3.1.1 and MQTT 5, including remote state notifications.
+MQTT 3.1, MQTT 3.1.1 and MQTT 5, including remote state notifications.
 `bridge_attempt_unsubscribe` defaults true for outbound rules: after every
 remote CONNECT it sends mapped-filter UNSUBSCRIBE packets before publishing,
 except for filters still used by the same bidirectional bridge, so a persistent
@@ -279,7 +279,7 @@ Session cannot retain subscriptions left by an earlier inbound configuration.
 Set it false only when that cleanup is intentionally unwanted.
 Interleaved stale deliveries remain ordered, are protocol-acknowledged, and are
 dropped rather than terminating the bridge. `try_private` defaults true for
-MQTT 3.1.1 and emits Mosquitto's private bridge protocol marker. A peer that
+pre-v5 MQTT and emits Mosquitto's private bridge protocol marker. A peer that
 refuses that protocol level is retried immediately on the same endpoint with
 standard MQTT 3.1.1, and later reconnects retain the successful fallback.
 Incoming private bridges receive no-local and retain-as-published subscription

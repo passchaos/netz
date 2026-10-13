@@ -1074,7 +1074,7 @@ fn validateWillProperties(
 fn connectSessionExpiry(connect: mqtt.Connect) u32 {
     return switch (connect.protocol) {
         .v5 => mqtt.sessionExpiryInterval(connect.properties) orelse 0,
-        .v3_1_1 => if (connect.clean_start)
+        .v3_1, .v3_1_1 => if (connect.clean_start)
             0
         else
             std.math.maxInt(u32),

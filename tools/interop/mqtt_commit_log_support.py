@@ -46,8 +46,8 @@ def connect_packet(
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
 ) -> bytes:
-    if protocol not in (4, 5):
-        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
+    if protocol not in (3, 4, 5):
+        raise ValueError("protocol must be MQTT 3.1 (3), 3.1.1 (4), or 5")
     properties = b""
     if protocol == 5 and session_expiry:
         properties = b"\x11" + session_expiry.to_bytes(4, "big")
@@ -57,8 +57,8 @@ def connect_packet(
         connect_flags |= 0x04 | (will_qos << 3)
         if will_retain:
             connect_flags |= 0x20
-        if protocol == 4 and will_delay:
-            raise ValueError("MQTT 3.1.1 has no Will Delay property")
+        if protocol != 5 and will_delay:
+            raise ValueError("pre-v5 MQTT has no Will Delay property")
         will_properties = (
             b"\x18" + will_delay.to_bytes(4, "big")
             if will_delay else b""
@@ -73,7 +73,7 @@ def connect_packet(
             + will_payload
         )
     variable_header = (
-        mqtt_string("MQTT")
+        mqtt_string("MQIsdp" if protocol == 3 else "MQTT")
         + bytes((protocol, connect_flags))
         + keep_alive.to_bytes(2, "big")
     )
@@ -87,8 +87,8 @@ def subscribe_packet(
     *, subscription_identifier: int | None = SUBSCRIPTION_IDENTIFIER,
     qos: int = 1, protocol: int = 5,
 ) -> bytes:
-    if protocol not in (4, 5):
-        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
+    if protocol not in (3, 4, 5):
+        raise ValueError("protocol must be MQTT 3.1 (3), 3.1.1 (4), or 5")
     properties = (
         bytes((0x0B, subscription_identifier))
         if protocol == 5 and subscription_identifier is not None else b""
@@ -113,10 +113,10 @@ def publish_packet(
 ) -> bytes:
     if qos not in (1, 2):
         raise ValueError("publish_packet requires QoS 1 or 2")
-    if protocol not in (4, 5):
-        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
-    if protocol == 4 and expiry_seconds is not None:
-        raise ValueError("MQTT 3.1.1 has no Message Expiry property")
+    if protocol not in (3, 4, 5):
+        raise ValueError("protocol must be MQTT 3.1 (3), 3.1.1 (4), or 5")
+    if protocol != 5 and expiry_seconds is not None:
+        raise ValueError("pre-v5 MQTT has no Message Expiry property")
     properties = (
         b"\x02" + expiry_seconds.to_bytes(4, "big")
         if expiry_seconds is not None else b""
@@ -137,8 +137,8 @@ def publish_packet(
 def qos0_publish_packet(
     topic: str, payload: bytes, *, retain: bool, protocol: int = 5,
 ) -> bytes:
-    if protocol not in (4, 5):
-        raise ValueError("protocol must be MQTT 3.1.1 (4) or MQTT 5 (5)")
+    if protocol not in (3, 4, 5):
+        raise ValueError("protocol must be MQTT 3.1 (3), 3.1.1 (4), or 5")
     return packet(
         0x31 if retain else 0x30,
         mqtt_string(topic) + (b"\x00" if protocol == 5 else b"") + payload,

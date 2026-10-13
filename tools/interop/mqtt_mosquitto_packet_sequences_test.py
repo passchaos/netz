@@ -118,6 +118,8 @@ class SequenceLoadingTests(unittest.TestCase):
             set(sequences.SEQUENCE_FILES),
             {
                 "AUTH.json",
+                "CONNECT.json",
+                "CONNACK.json",
                 "DISCONNECT.json",
                 "FLOW.json",
                 "FORBIDDEN.json",
@@ -148,29 +150,15 @@ class SequenceLoadingTests(unittest.TestCase):
             sequences.SEQUENCE_FILES["PUBREL.json"],
             "5edf48213e6a9c85254b6255618fa5c67b47bfe59bf84b3b09307b8691cea225",
         )
-        self.assertEqual(
-            sequences.SEQUENCE_SUBSET_FILES,
-            {
-                "CONNECT.json":
-                    "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
-                "CONNACK.json":
-                    "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
-            },
-        )
+        self.assertEqual(sequences.SEQUENCE_SUBSET_FILES, {})
         self.assertEqual(
             set(sequences.SEQUENCE_EXCLUSIONS),
             set(sequences.SEQUENCE_SUBSET_FILES),
         )
-        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 1372)
-        self.assertEqual(
-            sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS,
-            {
-                "CONNECT.json": 299,
-                "CONNACK.json": 145,
-            },
-        )
-        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 444)
-        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1816)
+        self.assertEqual(sequences.EXPECTED_COMPLETE_SEQUENCE_COUNT, 1825)
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNTS, {})
+        self.assertEqual(sequences.EXPECTED_SUBSET_SEQUENCE_COUNT, 0)
+        self.assertEqual(sequences.EXPECTED_SEQUENCE_COUNT, 1825)
         self.assertEqual(sequences.EXPECTED_EXPECTATION_OVERRIDE_COUNT, 259)
         self.assertEqual(sequences.EXPECTED_SEQUENCE_REPLAY_COUNT, 2)
         self.assertEqual(
@@ -209,27 +197,7 @@ class SequenceLoadingTests(unittest.TestCase):
             set(sequences.CONNECT_REFUSAL_DIAGNOSTICS.values()),
             {bytes.fromhex("20 03 00 81 00")},
         )
-        self.assertEqual(
-            set(sequences.SEQUENCE_EXCLUSIONS["CONNECT.json"]),
-            {
-                ("v3.1   CONNECT", test)
-                for test in (
-                    "10 ok ",
-                    "14 ok ",
-                    "10 proto ver 2",
-                    "10 proto ver 4",
-                    "10 proto ver 6",
-                    "10 empty client ID",
-                    "10 ok",
-                    "10 remaining length 5 bytes",
-                )
-            },
-        )
-        self.assertEqual(
-            sequences.SEQUENCE_EXCLUSIONS["CONNACK.json"],
-            {("v3.1.1 CONNACK", "issue 2163 v3"):
-                "unsupported_mqtt_3_1"},
-        )
+        self.assertEqual(sequences.SEQUENCE_EXCLUSIONS, {})
         self.assertEqual(
             {
                 reason: sum(
@@ -239,9 +207,7 @@ class SequenceLoadingTests(unittest.TestCase):
                 )
                 for reason in sequences.EXCLUSION_REASONS
             },
-            {
-                "unsupported_mqtt_3_1": 9,
-            },
+            {},
         )
         self.assertEqual(
             set(sequences.SEQUENCE_REPLAYS),

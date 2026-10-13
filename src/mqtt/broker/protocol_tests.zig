@@ -45,15 +45,19 @@ test "broker writes self-delivery before publisher acknowledgement" {
     });
     defer threaded.deinit();
     const io = threaded.io();
-    var broker = try testBroker(allocator, io, 2, 64);
+    var broker = try testBroker(allocator, io, 3, 64);
     defer broker.deinit();
 
-    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    var serve = ServeState{ .broker = &broker, .connection_count = 3 };
     const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
     var joined = false;
     defer if (!joined) thread.join();
 
     var clients = [_]context.runtime_mod.Connection{
+        try connectWithOptions(allocator, io, broker, .{
+            .protocol = .v3_1,
+            .client_id = "self-delivery-order-v31",
+        }),
         try connectWithOptions(allocator, io, broker, .{
             .protocol = .v3_1_1,
             .client_id = "self-delivery-order-v311",

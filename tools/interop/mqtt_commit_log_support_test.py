@@ -66,10 +66,18 @@ class WireHelpersTests(unittest.TestCase):
                 "c", clean_start=True, protocol=4,
                 will_topic="w", will_delay=1,
             )
+        self.assertEqual(
+            support.connect_packet(
+                "c", clean_start=True, protocol=3, session_expiry=0,
+            ),
+            bytes.fromhex(
+                "10 0f 0006 4d5149736470 03 02 003c 0001 63"
+            ),
+        )
 
     def test_invalid_protocol_or_qos_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "protocol"):
-            support.connect_packet("c", clean_start=True, protocol=3)
+            support.connect_packet("c", clean_start=True, protocol=2)
         with self.assertRaisesRegex(ValueError, "QoS"):
             support.publish_packet("a", b"b", 1, qos=0)
         with self.assertRaisesRegex(ValueError, "Message Expiry"):

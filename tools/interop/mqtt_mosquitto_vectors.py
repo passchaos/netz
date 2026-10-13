@@ -233,10 +233,10 @@ def unsupported_protocol_levels(
     executable: Path, mqtt_packets, mqtt5_rc
 ) -> None:
     # Mosquitto's read_and_verify_protocol_version sends a legacy CONNACK for
-    # level 3/4-family clients and MQTT 5 Unsupported Protocol Version for
-    # newer/unknown levels. Netz supports 3.1.1 and 5, but must still give an
-    # unambiguous refusal instead of bare EOF when the MQTT protocol name is
-    # structurally valid. A wrong protocol name remains a fail-closed EOF.
+    # a level 3/4-family mismatch and MQTT 5 Unsupported Protocol Version for
+    # newer/unknown levels. Level 3 is valid only with the legacy MQIsdp name;
+    # this MQTT-name packet must still receive an unambiguous refusal instead
+    # of bare EOF. A wholly unknown protocol name remains a fail-closed EOF.
     base = bytearray(mqtt_packets.gen_connect(
         "unsupported-protocol-level", proto_ver=5
     ))
@@ -250,7 +250,7 @@ def unsupported_protocol_levels(
         executable, connections=4, ignore_errors=True
     ) as broker:
         cases = (
-            (3, mqtt_packets.gen_connack(rc=1, proto_ver=4), "level 3"),
+            (3, mqtt_packets.gen_connack(rc=1, proto_ver=4), "MQTT/level 3"),
             (6, mqtt_packets.gen_connack(
                 rc=mqtt5_rc.UNSUPPORTED_PROTOCOL_VERSION,
                 proto_ver=5,

@@ -334,7 +334,7 @@ def verify(
             for name in RUN_FILES:
                 require_artifact(run / name)
             server_log = run / "server.log"
-            if "netz MQTT 3.1.1/5 broker listening" not in server_log.read_text(
+            if "netz MQTT 3.1/3.1.1/5 broker listening" not in server_log.read_text(
                 encoding="utf-8"
             ):
                 raise ValueError(f"missing broker ready marker: {run}")

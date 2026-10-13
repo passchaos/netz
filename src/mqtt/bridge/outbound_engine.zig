@@ -389,7 +389,7 @@ pub fn Engine(comptime Source: type) type {
                             return error.UnsafeBidirectionalBridge;
                         }
                     },
-                    .v3_1_1 => {
+                    .v3_1, .v3_1_1 => {
                         if (!options.target_connect.bridge_mode) {
                             return error.UnsafeBidirectionalBridge;
                         }
@@ -2051,7 +2051,7 @@ fn hashIdentityByte(
 fn persistentSession(connect: runtime.ConnectOptions) bool {
     if (connect.clean_start) return false;
     return switch (connect.protocol) {
-        .v3_1_1 => true,
+        .v3_1, .v3_1_1 => true,
         .v5 => (mqtt.sessionExpiryInterval(connect.properties) orelse 0) != 0,
     };
 }

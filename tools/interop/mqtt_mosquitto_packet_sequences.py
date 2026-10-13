@@ -32,6 +32,10 @@ from mqtt_mosquitto_vectors import (
 SEQUENCE_FILES = {
     "AUTH.json":
         "e9591dd6236144f9d913d9cf2a167e2ed0aacc45f9e8ec1adb6a96031958b1a4",
+    "CONNECT.json":
+        "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
+    "CONNACK.json":
+        "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
     "DISCONNECT.json":
         "7572c864a8aea807ab8122a28fa6721292ee367b19e6cbb2a6e76ccb2d21f3bd",
     "FORBIDDEN.json":
@@ -65,43 +69,13 @@ SEQUENCE_FILES = {
     "UNSUBSCRIBE.json":
         "32a8618e6f74fb02df944bc528e9b4ff258e5e920473b7d7ea81ac107374b825",
 }
-SEQUENCE_SUBSET_FILES = {
-    "CONNECT.json":
-        "22dc51ebccb0d9938bb1e5111988ab02a061671dec15beab8aa4410e948158ac",
-    "CONNACK.json":
-        "307445b4773e219f4377b880e19678791ee70379f85a43c729b45af548fb9108",
-}
+SEQUENCE_SUBSET_FILES: dict[str, str] = {}
 
 # Each exclusion is an audited divergence from the selected upstream fixture,
 # not a wildcard skip. The full-file hash plus exact group/test identity makes
 # an upstream addition, rename, or content change fail closed.
-EXCLUSION_REASONS = {
-    "unsupported_mqtt_3_1": (
-        "the scenario uses obsolete MQTT protocol level 3, outside netz's "
-        "declared MQTT 3.1.1 and MQTT 5 scope"
-    ),
-}
-SEQUENCE_EXCLUSIONS = {
-    "CONNECT.json": {
-        **{
-            ("v3.1   CONNECT", test): "unsupported_mqtt_3_1"
-            for test in (
-                "10 ok ",
-                "14 ok ",
-                "10 proto ver 2",
-                "10 proto ver 4",
-                "10 proto ver 6",
-                "10 empty client ID",
-                "10 ok",
-                "10 remaining length 5 bytes",
-            )
-        },
-    },
-    "CONNACK.json": {
-        ("v3.1.1 CONNACK", "issue 2163 v3"):
-            "unsupported_mqtt_3_1",
-    },
-}
+EXCLUSION_REASONS: dict[str, str] = {}
+SEQUENCE_EXCLUSIONS: dict[str, dict[tuple[str, str], str]] = {}
 
 # Mosquitto's two "QoS 2 Dup flow*3" cases impose its implementation's
 # finite tolerance for repeated non-DUP PUBLISH packets. MQTT 3.1.1/5 instead
@@ -549,13 +523,10 @@ EXPECTATION_OVERRIDES["DISCONNECT.json"].update({
         for header in ("E1", "E2", "E4", "E8")
     },
 })
-EXPECTED_COMPLETE_SEQUENCE_COUNT = 1372
-EXPECTED_SUBSET_SEQUENCE_COUNTS = {
-    "CONNECT.json": 299,
-    "CONNACK.json": 145,
-}
+EXPECTED_COMPLETE_SEQUENCE_COUNT = 1825
+EXPECTED_SUBSET_SEQUENCE_COUNTS: dict[str, int] = {}
 EXPECTED_SUBSET_SEQUENCE_COUNT = sum(EXPECTED_SUBSET_SEQUENCE_COUNTS.values())
-EXPECTED_SEQUENCE_COUNT = 1816
+EXPECTED_SEQUENCE_COUNT = 1825
 EXPECTED_EXPECTATION_OVERRIDE_COUNT = 259
 EXPECTED_SEQUENCE_REPLAY_COUNT = 2
 CONNECT_REFUSAL_DIAGNOSTICS = {
@@ -936,7 +907,7 @@ def run_sequence(
     mqtt_packets,
 ) -> None:
     proto_ver = sequence["protocol"]
-    if proto_ver not in (4, 5):
+    if proto_ver not in (3, 4, 5):
         raise AssertionError(
             f"{sequence['name']}: unsupported portable protocol {proto_ver}"
         )
@@ -1086,18 +1057,46 @@ def main() -> None:
             f"found {len(sequences)}"
         )
 
+    # The upstream harness launches a fresh broker for every JSON test. Most
+    # selected cases use unique Client IDs or clean Sessions and can share one
+    # bounded process here. MQTT 3.1's source fixtures deliberately reuse the
+    # persistent Client ID "p", so isolate those nine cases to preserve their
+    # byte-exact Session Present expectations without rewriting the fixtures.
+    mqtt31_sequences = [
+        sequence for sequence in sequences if sequence["protocol"] == 3
+    ]
+    shared_sequences = [
+        sequence for sequence in sequences if sequence["protocol"] != 3
+    ]
+
+    for index, sequence in enumerate(mqtt31_sequences):
+        helper_connections = sum(
+            action["type"] == "external_publish"
+            for action in sequence["actions"]
+        )
+        with NetzBroker(
+            args.broker,
+            connections=1 + helper_connections,
+            ignore_errors=True,
+            extra_args=PACKET_SEQUENCE_BROKER_ARGS,
+        ) as broker:
+            run_sequence(broker, sequence, index, mqtt_packets)
+
     helper_connections = sum(
         action["type"] == "external_publish"
-        for sequence in sequences
+        for sequence in shared_sequences
         for action in sequence["actions"]
     )
     with NetzBroker(
         args.broker,
-        connections=len(sequences) + helper_connections + 1,
+        connections=len(shared_sequences) + helper_connections + 1,
         ignore_errors=True,
         extra_args=PACKET_SEQUENCE_BROKER_ARGS,
     ) as broker:
-        for index, sequence in enumerate(sequences):
+        for index, sequence in enumerate(
+            shared_sequences,
+            start=len(mqtt31_sequences),
+        ):
             run_sequence(
                 broker, sequence, index, mqtt_packets
             )
@@ -1117,12 +1116,16 @@ def main() -> None:
         f"{filename}={EXPECTED_SUBSET_SEQUENCE_COUNTS[filename]}"
         for filename in sorted(SEQUENCE_SUBSET_FILES)
     )
+    subset_clause = (
+        f"; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited subsets "
+        f"{subset_summary}"
+        if EXPECTED_SUBSET_SEQUENCE_COUNT != 0 else ""
+    )
     print(
         f"Mosquitto packet-sequence JSON gate passed: "
         f"{EXPECTED_SEQUENCE_COUNT} upstream scenarios "
         f"({EXPECTED_COMPLETE_SEQUENCE_COUNT} from complete files "
-        f"{filenames}; {EXPECTED_SUBSET_SEQUENCE_COUNT} from audited "
-        f"subsets {subset_summary}; "
+        f"{filenames}{subset_clause}; "
         f"{EXPECTED_EXPECTATION_OVERRIDE_COUNT} exact audited expectation "
         f"overrides; {EXPECTED_SEQUENCE_REPLAY_COUNT} exact audited "
         f"standards replays; {EXPECTED_CONNECT_REFUSAL_DIAGNOSTIC_COUNT} exact "

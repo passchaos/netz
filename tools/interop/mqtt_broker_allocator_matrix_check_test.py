@@ -62,7 +62,7 @@ class MqttBrokerAllocatorMatrixCheckTest(unittest.TestCase):
                 alloc_count = shape.messages + sample
                 allocated = shape.messages * shape.payload_bytes + sample
                 (run / "server.log").write_text(
-                    "netz MQTT 3.1.1/5 broker listening server_io=zio-std-io\n"
+                    "netz MQTT 3.1/3.1.1/5 broker listening server_io=zio-std-io\n"
                     "record=allocator implementation=netz endpoint_role=server "
                     f"protocol=mqtt5 transport=tcp mode=qos{qos}-fanout "
                     "timing_usable=false allocator_scope=broker-explicit "

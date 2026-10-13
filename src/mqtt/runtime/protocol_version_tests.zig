@@ -13,7 +13,7 @@ test "MQTT server enforces accepted CONNECT protocol versions" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    for ([_]mqtt.ProtocolVersion{ .v3_1_1, .v5 }) |denied_protocol| {
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1, .v5 }) |denied_protocol| {
         var server = try runtime.Server.listen(
             allocator,
             io,
@@ -54,6 +54,7 @@ test "MQTT server enforces accepted CONNECT protocol versions" {
             }
         };
         const accepted_versions = switch (denied_protocol) {
+            .v3_1 => mqtt.AcceptedProtocolVersions{ .v3_1 = false },
             .v3_1_1 => mqtt.AcceptedProtocolVersions{ .v3_1_1 = false },
             .v5 => mqtt.AcceptedProtocolVersions{ .v5 = false },
         };
@@ -77,7 +78,7 @@ test "MQTT server enforces accepted CONNECT protocol versions" {
         defer attempt.deinit(allocator);
         try std.testing.expect(!attempt.accepted());
         try std.testing.expectEqual(
-            @as(u8, if (denied_protocol == .v3_1_1) 0x01 else 0x84),
+            @as(u8, if (denied_protocol.isLegacy()) 0x01 else 0x84),
             attempt.connack.connack.reason_code,
         );
         try std.testing.expectEqual(
@@ -88,6 +89,61 @@ test "MQTT server enforces accepted CONNECT protocol versions" {
         thread.join();
         if (shared.err) |err| return err;
     }
+}
+
+test "MQTT 3.1 client and server complete CONNECT PING and DISCONNECT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v3_1 });
+            defer accepted.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                mqtt.ProtocolVersion.v3_1,
+                accepted.connect.connect.protocol,
+            );
+            try accepted.connection.readPingReq();
+            try accepted.connection.writePingResp();
+            var disconnect = try accepted.connection.readDisconnect();
+            disconnect.deinit(self.server.allocator);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try runtime.Client.connect(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v3_1, .client_id = "legacy-v31-client" },
+    );
+    defer client.close();
+    try client.ping();
+    try client.disconnect(0);
+
+    thread.join();
+    if (shared.err) |err| return err;
 }
 
 test "MQTT server requires an assigned identifier for an empty v5 Client ID" {

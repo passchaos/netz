@@ -96,12 +96,12 @@ def run_accepted_protocol_versions_case(
         f"listener {tcp_port} 127.0.0.1\n"
         "accept_protocol_versions 5\n"
         "allow_anonymous true\n"
-        "max_connections 2\n"
+        "max_connections 3\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
-        "accept_protocol_versions 4\n"
+        "accept_protocol_versions 3,4\n"
         "allow_anonymous true\n"
-        "max_connections 2\n"
+        "max_connections 3\n"
     )
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
@@ -112,13 +112,16 @@ def run_accepted_protocol_versions_case(
     assert process.stdout is not None
     try:
         ready = process.stdout.readline().strip()
-        if "configured 2 listeners for 4 clients" not in ready:
+        if "configured 2 listeners for 6 clients" not in ready:
             raise RuntimeError(f"protocol-policy broker failed to start: {ready}")
 
         tcp_v5 = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
         tcp_v5.settimeout(5)
         tcp_v311 = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
         tcp_v311.settimeout(5)
+        tcp_v31 = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
+        tcp_v31.settimeout(5)
+        ws_v31 = _websocket_connect(websocket_port)
         ws_v311 = _websocket_connect(websocket_port)
         ws_v5 = _websocket_connect(websocket_port)
         try:
@@ -134,6 +137,18 @@ def run_accepted_protocol_versions_case(
             if _connack_reason(tcp_v311) != 0x01:
                 raise AssertionError("v5-only TCP listener accepted MQTT 3.1.1")
 
+            tcp_v31.sendall(connect_packet(
+                "protocol-tcp-v31", clean_start=True, protocol=3,
+            ))
+            if _connack_reason(tcp_v31) != 0x01:
+                raise AssertionError("v5-only TCP listener accepted MQTT 3.1")
+
+            _send_websocket_binary(ws_v31, connect_packet(
+                "protocol-ws-v31", clean_start=True, protocol=3,
+            ))
+            if _read_websocket_binary(ws_v31) != (0x20, b"\x00\x00"):
+                raise AssertionError("legacy WS listener refused MQTT 3.1")
+
             _send_websocket_binary(ws_v311, connect_packet(
                 "protocol-ws-v311", clean_start=True, protocol=4,
             ))
@@ -147,10 +162,13 @@ def run_accepted_protocol_versions_case(
                 raise AssertionError("v3.1.1-only WS listener accepted MQTT 5")
 
             tcp_v5.sendall(b"\xe0\x00")
+            _send_websocket_binary(ws_v31, b"\xe0\x00")
             _send_websocket_binary(ws_v311, b"\xe0\x00")
         finally:
             tcp_v5.close()
             tcp_v311.close()
+            tcp_v31.close()
+            ws_v31.close()
             ws_v311.close()
             ws_v5.close()
 

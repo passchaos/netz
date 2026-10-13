@@ -302,7 +302,7 @@ pub const Bridge = struct {
     }
 
     pub fn usesPrivateBridgeMode(self: Bridge) bool {
-        return self.protocol == .v3_1_1 and self.try_private;
+        return self.protocol.isLegacy() and self.try_private;
     }
 
     pub fn addressCount(self: Bridge) usize {
@@ -573,7 +573,9 @@ pub const Builder = struct {
         } else if (std.mem.eql(u8, directive, "bridge_protocol_version")) {
             try markOnce(&self.seen.bridge_protocol_version);
             const value = try parseOne(words);
-            self.protocol = if (std.mem.eql(u8, value, "mqttv311"))
+            self.protocol = if (std.mem.eql(u8, value, "mqttv31"))
+                .v3_1
+            else if (std.mem.eql(u8, value, "mqttv311"))
                 .v3_1_1
             else if (std.mem.eql(u8, value, "mqttv50"))
                 .v5
@@ -869,7 +871,7 @@ pub const Builder = struct {
             return error.BridgePersistentSessionRequired;
         }
         if (has_outbound and has_inbound and
-            self.protocol == .v3_1_1 and !self.try_private)
+            self.protocol.isLegacy() and !self.try_private)
         {
             return error.UnsupportedBridgeDirection;
         }

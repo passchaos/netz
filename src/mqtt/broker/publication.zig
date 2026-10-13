@@ -258,7 +258,7 @@ pub const Publication = struct {
             now.nanoseconds,
         );
         if (remaining == 0) return false;
-        if (protocol == .v3_1_1) return true;
+        if (protocol.isLegacy()) return true;
         const required = std.math.add(
             usize,
             self.properties.len,

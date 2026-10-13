@@ -712,13 +712,13 @@ pub fn run(
 
     if (run_options.finite_test) {
         std.debug.print(
-            "netz MQTT 3.1.1/5 broker configured {d} listeners for {d} " ++
+            "netz MQTT 3.1/3.1.1/5 broker configured {d} listeners for {d} " ++
                 "clients server_io=zio-std-io\n",
             .{ config.listeners.len, connection_count },
         );
     } else {
         std.debug.print(
-            "netz MQTT 3.1.1/5 broker configured {d} listeners " ++
+            "netz MQTT 3.1/3.1.1/5 broker configured {d} listeners " ++
                 "global_max_connections={d} server_io=zio-std-io\n",
             .{ config.listeners.len, active_connection_limit },
         );

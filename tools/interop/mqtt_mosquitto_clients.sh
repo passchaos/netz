@@ -72,7 +72,7 @@ port=$(free_port)
   >"$work/server.log" 2>&1 &
 server_pid=$!
 wait_for_log "$work/server.log" \
-  'netz MQTT 3.1.1/5 broker listening' "$server_pid"
+  'netz MQTT 3.1/3.1.1/5 broker listening' "$server_pid"
 
 run_version() {
   local label=$1

@@ -40,7 +40,7 @@ start_broker() {
     >"$log" 2>&1 &
   server_pid=$!
   for _ in $(seq 1 200); do
-    if grep -Fq 'netz MQTT 3.1.1/5 broker listening' "$log"; then
+    if grep -Fq 'netz MQTT 3.1/3.1.1/5 broker listening' "$log"; then
       return
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then

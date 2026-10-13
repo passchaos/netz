@@ -122,7 +122,7 @@ def connect_packet(
         encoded_password = password.encode()
         payload += len(encoded_password).to_bytes(2, "big") + encoded_password
     body = (
-        utf8("MQTT")
+        utf8("MQIsdp" if proto_ver == 3 else "MQTT")
         + bytes((proto_ver, flags))
         + keep_alive.to_bytes(2, "big")
         + (b"\x00" if proto_ver == 5 else b"")
@@ -504,7 +504,7 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
     expected = (
-        "netz MQTT 3.1.1/5 broker configured 2 listeners for 6 clients "
+        "netz MQTT 3.1/3.1.1/5 broker configured 2 listeners for 6 clients "
         "server_io=zio-std-io"
     )
     if ready != expected:
@@ -2001,7 +2001,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     unsupported_protocol = directory / "unsupported-protocol-version.conf"
     unsupported_protocol.write_text(
         f"listener {free_port()} 127.0.0.1\n"
-        "accept_protocol_versions 3\n"
+        "accept_protocol_versions 2\n"
         "allow_anonymous true\n"
         "max_connections 1\n"
     )
@@ -2015,7 +2015,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     )
     if result.returncode == 0 or "InvalidInteger" not in result.stdout:
         raise AssertionError(
-            "unsupported MQTT 3.1 listener policy did not fail closed: "
+            "unsupported MQTT protocol level did not fail closed: "
             + result.stdout
         )
 
@@ -5457,6 +5457,7 @@ def main() -> None:
         run_inbound_bridge_case(args.broker, directory)
         run_bridge_reload_case(args.broker, directory)
         run_outbound_bridge_reload_case(args.broker, directory)
+        run_bidirectional_bridge_case(args.broker, directory, 3)
         run_bidirectional_bridge_case(args.broker, directory, 4)
         run_bidirectional_bridge_case(args.broker, directory, 5)
         run_outbound_bridge_case(args.broker, directory)
@@ -5524,7 +5525,7 @@ def main() -> None:
         "immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "
         "and client continuity, mTLS, "
         "single-Session bidirectional bridge mapping, "
-        "MQTT 3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "
+        "MQTT 3.1/3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "
         "persistent remote-subscription cleanup with interleaved delivery, "
         "private-bridge negotiation with standard MQTT 3.1.1 fallback, "
         "TLS 1.3 bridge cipher-suite selection, "

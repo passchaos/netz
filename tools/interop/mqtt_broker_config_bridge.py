@@ -122,7 +122,8 @@ def _connect_limits(
     protocol_name = packet[cursor:cursor + protocol_name_size]
     cursor += protocol_name_size
     expected_level = protocol_level | (0x80 if private_bridge else 0)
-    if protocol_name != b"MQTT" or packet[cursor] != expected_level:
+    expected_name = b"MQIsdp" if protocol_level == 3 else b"MQTT"
+    if protocol_name != expected_name or packet[cursor] != expected_level:
         raise AssertionError(f"unexpected bridge protocol: {packet.hex()}")
     cursor += 4  # protocol level, flags, and Keep Alive
     if protocol_level == 4:
@@ -1126,7 +1127,13 @@ def run_bidirectional_bridge_case(
     directory: Path,
     protocol_level: int,
 ) -> None:
-    label = "v5" if protocol_level == 5 else "v311-private"
+    label = (
+        "v5"
+        if protocol_level == 5
+        else "v31-private"
+        if protocol_level == 3
+        else "v311-private"
+    )
     upstream_port, local_port = _distinct_ports(2)
     upstream_config = directory / f"bridge-bidirectional-{label}-upstream.conf"
     upstream_config.write_text(
@@ -1150,6 +1157,8 @@ def run_bidirectional_bridge_case(
             "bridge_protocol_version mqttv50\n"
             "bridge_session_expiry_interval 60\n"
             if protocol_level == 5
+            else "bridge_protocol_version mqttv31\n"
+            if protocol_level == 3
             else ""
         )
         + f"local_clientid configured-duplex-local-{label}\n"
