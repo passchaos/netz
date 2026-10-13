@@ -305,6 +305,15 @@ pub const Bridge = struct {
         return self.protocol.isLegacy() and self.try_private;
     }
 
+    /// A bidirectional legacy bridge cannot safely fall back to an ordinary
+    /// MQTT client connection: MQTT 3.1 and 3.1.1 have no subscription-level
+    /// No Local or Retain As Published bits. Mosquitto's private bridge marker
+    /// is therefore required to prevent loops and preserve retained state.
+    pub fn requiresPrivateBridgeMode(self: Bridge) bool {
+        return self.usesPrivateBridgeMode() and
+            self.hasInbound() and self.hasOutbound();
+    }
+
     pub fn addressCount(self: Bridge) usize {
         return 1 + self.secondary_addresses.len;
     }

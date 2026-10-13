@@ -281,7 +281,9 @@ Interleaved stale deliveries remain ordered, are protocol-acknowledged, and are
 dropped rather than terminating the bridge. `try_private` defaults true for
 pre-v5 MQTT and emits Mosquitto's private bridge protocol marker. A peer that
 refuses that protocol level is retried immediately on the same endpoint with
-standard MQTT 3.1.1, and later reconnects retain the successful fallback.
+the configured standard MQTT 3.1 or 3.1.1 level, and later reconnects retain
+the successful fallback. Bidirectional legacy bridges never take this fallback
+because losing private mode would remove their loop-prevention guarantee.
 Incoming private bridges receive no-local and retain-as-published subscription
 semantics, preventing loops without losing the original RETAIN flag. MQTT 5
 does not emit the private marker, and `try_private false` always uses the

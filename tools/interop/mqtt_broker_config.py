@@ -5527,7 +5527,7 @@ def main() -> None:
         "single-Session bidirectional bridge mapping, "
         "MQTT 3.1/3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "
         "persistent remote-subscription cleanup with interleaved delivery, "
-        "private-bridge negotiation with standard MQTT 3.1.1 fallback, "
+        "private-bridge negotiation with standard MQTT 3.1/3.1.1 fallback, "
         "TLS 1.3 bridge cipher-suite selection, "
         "required TLS 1.3 bridge OCSP stapling, "
         "local Client ID and clean-Session restart isolation, "

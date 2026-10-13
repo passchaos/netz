@@ -90,13 +90,16 @@ def _expect_tcp_keepalive_trace(
         )
 
 
-def _private_bridge_connect(port: int, client_id: str) -> socket.socket:
+def _private_bridge_connect(
+    port: int, client_id: str, protocol_level: int
+) -> socket.socket:
     client = socket.create_connection(("127.0.0.1", port), timeout=10)
     try:
         client.settimeout(10)
+        protocol_name = "MQIsdp" if protocol_level == 3 else "MQTT"
         body = (
-            _utf8("MQTT")
-            + b"\x84\x02"
+            _utf8(protocol_name)
+            + bytes((protocol_level | 0x80, 0x02))
             + (30).to_bytes(2, "big")
             + _utf8(client_id)
         )
@@ -110,53 +113,63 @@ def _private_bridge_connect(port: int, client_id: str) -> socket.socket:
 
 
 def run_private_bridge_server_case(broker: Path, directory: Path) -> None:
-    port = _distinct_ports(1)[0]
-    config = directory / "private-bridge-server.conf"
-    config.write_text(
-        f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\nmax_connections 3\n"
-    )
-    log = directory / "private-bridge-server.log"
-    process, output = _start_broker(broker, config, log)
-    private = publisher = None
-    try:
-        _wait_for_log(process, log, "configured 1 listeners")
-        private = _private_bridge_connect(port, "private-bridge-peer")
-        private.sendall(_packet(0x82, b"\x00\x01" + _utf8("bridge/#") + b"\x00"))
-        if _read_packet(private) != b"\x90\x03\x00\x01\x00":
-            raise AssertionError("private bridge SUBSCRIBE was not accepted")
-
-        private.sendall(_packet(0x31, _utf8("bridge/self") + b"self"))
-        private.settimeout(0.2)
-        try:
-            unexpected = _read_packet(private)
-        except socket.timeout:
-            unexpected = None
-        if unexpected is not None:
-            raise AssertionError(
-                "private bridge no-local policy echoed its own publish: "
-                + unexpected.hex()
-            )
-
-        private.settimeout(10)
-        publisher = _connect_client(port, "private-bridge-publisher")
-        publisher.sendall(
-            _packet(0x31, _utf8("bridge/peer") + b"\x00" + b"retained")
+    for protocol_level in (3, 4):
+        port = _distinct_ports(1)[0]
+        config = directory / f"private-bridge-server-v{protocol_level}.conf"
+        config.write_text(
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous true\nmax_connections 3\n"
         )
-        forwarded = _read_packet(private)
-        if forwarded[0] & 0x01 == 0:
-            raise AssertionError(
-                "private bridge subscription did not preserve RETAIN: "
-                + forwarded.hex()
+        log = directory / f"private-bridge-server-v{protocol_level}.log"
+        process, output = _start_broker(broker, config, log)
+        private = publisher = None
+        try:
+            _wait_for_log(process, log, "configured 1 listeners")
+            private = _private_bridge_connect(
+                port, f"private-bridge-peer-v{protocol_level}", protocol_level
             )
-        if _publish_contents(forwarded, 4) != ("bridge/peer", b"retained"):
-            raise AssertionError("private bridge received the wrong publication")
-    finally:
-        if publisher is not None:
-            publisher.close()
-        if private is not None:
-            private.close()
-        _stop(process, output)
+            private.sendall(
+                _packet(0x82, b"\x00\x01" + _utf8("bridge/#") + b"\x00")
+            )
+            if _read_packet(private) != b"\x90\x03\x00\x01\x00":
+                raise AssertionError("private bridge SUBSCRIBE was not accepted")
+
+            private.sendall(_packet(0x31, _utf8("bridge/self") + b"self"))
+            private.settimeout(0.2)
+            try:
+                unexpected = _read_packet(private)
+            except socket.timeout:
+                unexpected = None
+            if unexpected is not None:
+                raise AssertionError(
+                    "private bridge no-local policy echoed its own publish: "
+                    + unexpected.hex()
+                )
+
+            private.settimeout(10)
+            publisher = _connect_client(
+                port, f"private-bridge-publisher-v{protocol_level}"
+            )
+            publisher.sendall(
+                _packet(0x31, _utf8("bridge/peer") + b"\x00" + b"retained")
+            )
+            forwarded = _read_packet(private)
+            if forwarded[0] & 0x01 == 0:
+                raise AssertionError(
+                    "private bridge subscription did not preserve RETAIN: "
+                    + forwarded.hex()
+                )
+            if _publish_contents(forwarded, protocol_level) != (
+                "bridge/peer",
+                b"retained",
+            ):
+                raise AssertionError("private bridge received the wrong publication")
+        finally:
+            if publisher is not None:
+                publisher.close()
+            if private is not None:
+                private.close()
+            _stop(process, output)
 
 
 def run_bridge_cipher_suite_case(broker: Path, directory: Path) -> None:

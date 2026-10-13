@@ -7743,34 +7743,36 @@ pub const Broker = struct {
     }
 };
 
-test "MQTT 3.1.1 private bridge subscriptions prevent loops and preserve retain" {
-    const bridge_connect = mqtt.Connect{
-        .protocol = .v3_1_1,
-        .bridge_mode = true,
-        .clean_start = false,
-        .keep_alive_seconds = 60,
-        .client_id = "bridge",
-    };
-    var subscription = mqtt.Subscription{
-        .topic_filter = "sensors/#",
-        .qos = .at_least_once,
-    };
-    Broker.applyPrivateBridgeSubscriptionPolicy(
-        bridge_connect,
-        &subscription,
-    );
-    try std.testing.expect(subscription.no_local);
-    try std.testing.expect(subscription.retain_as_published);
+test "legacy private bridge subscriptions prevent loops and preserve retain" {
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1 }) |protocol| {
+        const bridge_connect = mqtt.Connect{
+            .protocol = protocol,
+            .bridge_mode = true,
+            .clean_start = false,
+            .keep_alive_seconds = 60,
+            .client_id = "bridge",
+        };
+        var subscription = mqtt.Subscription{
+            .topic_filter = "sensors/#",
+            .qos = .at_least_once,
+        };
+        Broker.applyPrivateBridgeSubscriptionPolicy(
+            bridge_connect,
+            &subscription,
+        );
+        try std.testing.expect(subscription.no_local);
+        try std.testing.expect(subscription.retain_as_published);
 
-    var ordinary = mqtt.Subscription{
-        .topic_filter = "sensors/#",
-        .qos = .at_least_once,
-    };
-    var ordinary_connect = bridge_connect;
-    ordinary_connect.bridge_mode = false;
-    Broker.applyPrivateBridgeSubscriptionPolicy(ordinary_connect, &ordinary);
-    try std.testing.expect(!ordinary.no_local);
-    try std.testing.expect(!ordinary.retain_as_published);
+        var ordinary = mqtt.Subscription{
+            .topic_filter = "sensors/#",
+            .qos = .at_least_once,
+        };
+        var ordinary_connect = bridge_connect;
+        ordinary_connect.bridge_mode = false;
+        Broker.applyPrivateBridgeSubscriptionPolicy(ordinary_connect, &ordinary);
+        try std.testing.expect(!ordinary.no_local);
+        try std.testing.expect(!ordinary.retain_as_published);
+    }
 }
 
 fn createRoutePublication(

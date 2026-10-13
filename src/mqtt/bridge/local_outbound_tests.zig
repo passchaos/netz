@@ -72,7 +72,7 @@ test "local bidirectional bridge rejects MQTT 5 without No Local" {
     );
 }
 
-test "local bidirectional bridge rejects MQTT 3.1.1 without private mode" {
+test "local bidirectional bridge rejects legacy MQTT without private mode" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -81,35 +81,37 @@ test "local bidirectional bridge rejects MQTT 3.1.1 without private mode" {
     defer local.deinit();
     var shutdown: std.Io.Event = .unset;
 
-    try std.testing.expectError(
-        error.UnsafeBidirectionalBridge,
-        outbound.LocalBridge.initEndpoints(
-            allocator,
-            io,
-            .{ .broker = &local, .id = [_]u8{0x6a} ** 16 },
-            .{ .address = .{ .ip4 = .loopback(1) } },
-            .{
-                .source_connect = .{
-                    .protocol = .v5,
-                    .client_id = "unsafe-v311-local",
+    for ([_]mqtt.ProtocolVersion{ .v3_1, .v3_1_1 }) |protocol| {
+        try std.testing.expectError(
+            error.UnsafeBidirectionalBridge,
+            outbound.LocalBridge.initEndpoints(
+                allocator,
+                io,
+                .{ .broker = &local, .id = [_]u8{0x6a} ** 16 },
+                .{ .address = .{ .ip4 = .loopback(1) } },
+                .{
+                    .source_connect = .{
+                        .protocol = .v5,
+                        .client_id = "unsafe-legacy-local",
+                    },
+                    .target_connect = .{
+                        .protocol = protocol,
+                        .client_id = "unsafe-legacy-remote",
+                    },
+                    .rules = &.{.{
+                        .filter = "#",
+                        .no_local = true,
+                    }},
+                    .inbound_rules = &.{.{
+                        .filter = "remote/#",
+                        .local_prefix = "local/",
+                        .remote_prefix = "remote/",
+                    }},
                 },
-                .target_connect = .{
-                    .protocol = .v3_1_1,
-                    .client_id = "unsafe-v311-remote",
-                },
-                .rules = &.{.{
-                    .filter = "#",
-                    .no_local = true,
-                }},
-                .inbound_rules = &.{.{
-                    .filter = "remote/#",
-                    .local_prefix = "local/",
-                    .remote_prefix = "remote/",
-                }},
-            },
-            &shutdown,
-        ),
-    );
+                &shutdown,
+            ),
+        );
+    }
     try std.testing.expectEqual(
         @as(usize, 0),
         local.local_consumer_routes.count(),

@@ -1397,8 +1397,8 @@ fn propertyAllowedInContext(context: PropertyContext, id: PropertyId) bool {
 
 pub const Connect = struct {
     protocol: ProtocolVersion,
-    /// Mosquitto's private bridge marker carried in bit 7 of an MQTT 3.1.1
-    /// protocol level. It is never valid for MQTT 5.
+    /// Mosquitto's private bridge marker carried in bit 7 of an MQTT 3.1 or
+    /// MQTT 3.1.1 protocol level. It is never valid for MQTT 5.
     bridge_mode: bool = false,
     clean_start: bool,
     keep_alive_seconds: u16,
@@ -1545,7 +1545,7 @@ pub const LastWill = struct {
 
 pub const ConnectPacketOptions = struct {
     client_id: []const u8,
-    /// Emit Mosquitto's private bridge protocol-level bit for MQTT 3.1.1.
+    /// Emit Mosquitto's private bridge protocol-level bit for MQTT 3.1/3.1.1.
     bridge_mode: bool = false,
     clean_start: bool = true,
     keep_alive_seconds: u16 = 30,

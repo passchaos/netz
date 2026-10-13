@@ -1087,7 +1087,7 @@ Current protocol coverage includes:
   automatic/one-shot lifecycles, independently configurable remote/local
   Client IDs and clean Sessions, per-bridge Receive Maximum, Topic Alias,
   outgoing packet-size and RETAIN policy, stale remote-subscription cleanup,
-  Mosquitto private-bridge negotiation with same-endpoint MQTT 3.1.1 fallback
+  Mosquitto private-bridge negotiation with same-endpoint MQTT 3.1/3.1.1 fallback
   for one-way bridges and mandatory private mode for bidirectional bridges,
   explicit local IPv4/IPv6 source-address binding across cleartext and TLS
   reconnects, configurable TCP keepalive plus optional Linux

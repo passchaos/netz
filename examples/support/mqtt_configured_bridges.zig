@@ -1335,8 +1335,7 @@ fn initOutbound(
     if (source.usesTls()) try loadTlsResources(resources, allocator, io, std.Io.Dir.cwd(), source) else {
         resources.connector = .{
             .source = source,
-            .require_private_bridge = source.hasInbound() and
-                source.hasOutbound() and source.protocol == .v3_1_1,
+            .require_private_bridge = source.requiresPrivateBridgeMode(),
         };
         resources.connector_configured = true;
     }
@@ -1489,8 +1488,7 @@ fn loadTlsResources(
     resources.connector = .{
         .source = source,
         .tls_options = connect_options,
-        .require_private_bridge = source.hasInbound() and
-            source.hasOutbound() and source.protocol == .v3_1_1,
+        .require_private_bridge = source.requiresPrivateBridgeMode(),
     };
     resources.connector_configured = true;
 }
@@ -1833,7 +1831,10 @@ test "configured bridge entries have independent cancellation" {
     try std.testing.expect(!bridges.bridgeStopRequested(1));
 }
 
-test "configured bidirectional bridge never falls back from private mode" {
+fn testConfiguredPrivateBridgeNegotiation(
+    protocol: mqtt.ProtocolVersion,
+    require_private_bridge: bool,
+) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -1850,6 +1851,8 @@ test "configured bidirectional bridge never falls back from private mode" {
 
     const Peer = struct {
         server: *mqtt.runtime.Server,
+        protocol: mqtt.ProtocolVersion,
+        expect_fallback: bool,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -1860,13 +1863,21 @@ test "configured bidirectional bridge never falls back from private mode" {
 
         fn runFallible(self: *@This()) !void {
             var rejected = try self.server.accept(.{
-                .protocol = .v3_1_1,
+                .protocol = self.protocol,
                 .reason_code = 0x01,
             });
             defer rejected.deinit(self.server.allocator);
             try std.testing.expect(rejected.connect.connect.bridge_mode);
+            if (self.expect_fallback) {
+                var fallback = try self.server.accept(.{
+                    .protocol = self.protocol,
+                });
+                defer fallback.deinit(self.server.allocator);
+                try std.testing.expect(!fallback.connect.connect.bridge_mode);
+                return;
+            }
             var fallback = self.server.acceptWithTimeout(
-                .{ .protocol = .v3_1_1 },
+                .{ .protocol = self.protocol },
                 .fromMilliseconds(50),
             ) catch |err| switch (err) {
                 error.Timeout => return,
@@ -1876,7 +1887,11 @@ test "configured bidirectional bridge never falls back from private mode" {
             return error.TestUnexpectedResult;
         }
     };
-    var peer = Peer{ .server = &server };
+    var peer = Peer{
+        .server = &server,
+        .protocol = protocol,
+        .expect_fallback = !require_private_bridge,
+    };
     const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
     var joined = false;
     defer if (!joined) thread.join();
@@ -1888,16 +1903,17 @@ test "configured bidirectional bridge never falls back from private mode" {
         .host = &host,
         .port = server.address().ip4.port,
         .rules = &.{},
+        .protocol = protocol,
     };
     var connector = ConfiguredConnector{
         .source = &source,
-        .require_private_bridge = true,
+        .require_private_bridge = require_private_bridge,
     };
     var attempt = try connector.connectAttemptMaybeBefore(
         allocator,
         io,
         .{
-            .protocol = .v3_1_1,
+            .protocol = protocol,
             .client_id = "required-private",
             .bridge_mode = true,
         },
@@ -1905,13 +1921,35 @@ test "configured bidirectional bridge never falls back from private mode" {
         null,
     );
     defer attempt.deinit(allocator);
-    try std.testing.expect(!attempt.accepted());
-    try std.testing.expectEqual(@as(u8, 0x01), attempt.connack.connack.reason_code);
-    try std.testing.expect(connector.private_bridge_supported.load(.acquire));
+    if (require_private_bridge) {
+        try std.testing.expect(!attempt.accepted());
+        try std.testing.expectEqual(
+            @as(u8, 0x01),
+            attempt.connack.connack.reason_code,
+        );
+        try std.testing.expect(
+            connector.private_bridge_supported.load(.acquire),
+        );
+    } else {
+        try std.testing.expect(attempt.accepted());
+        try std.testing.expect(
+            !connector.private_bridge_supported.load(.acquire),
+        );
+    }
 
     thread.join();
     joined = true;
     if (peer.err) |err| return err;
+}
+
+test "configured bidirectional legacy bridges never fall back from private mode" {
+    try testConfiguredPrivateBridgeNegotiation(.v3_1, true);
+    try testConfiguredPrivateBridgeNegotiation(.v3_1_1, true);
+}
+
+test "configured one-way legacy bridges fall back at the same protocol level" {
+    try testConfiguredPrivateBridgeNegotiation(.v3_1, false);
+    try testConfiguredPrivateBridgeNegotiation(.v3_1_1, false);
 }
 
 fn testConfiguredBridgeResumesTicketOnlyForMatchingEndpoint(
@@ -2338,4 +2376,26 @@ test "configured bidirectional bridge shares one private remote client" {
     try std.testing.expect(
         bridges.entryAt(0).connector_resources.connector.require_private_bridge,
     );
+}
+
+test "configured MQTT 3.1 bidirectional bridge requires private remote mode" {
+    var name = "duplex-v31".*;
+    var host = "localhost".*;
+    var filter = "remote/#".*;
+    var rules = [_]mqtt.broker_config.BridgeRule{.{
+        .filter = &filter,
+        .qos = .at_most_once,
+        .direction = .both,
+    }};
+    const configured = mqtt.broker_config.Bridge{
+        .name = &name,
+        .host = &host,
+        .rules = &rules,
+        .protocol = .v3_1,
+        .clean_session = false,
+        .local_clean_session = false,
+        .try_private = true,
+    };
+    try std.testing.expect(configured.usesPrivateBridgeMode());
+    try std.testing.expect(configured.requiresPrivateBridgeMode());
 }
