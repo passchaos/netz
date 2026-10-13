@@ -512,7 +512,6 @@ pub fn run(
         io,
         &broker,
         config.bridges,
-        &shutdown,
         persistence_path,
     );
     defer bridges.deinit();
@@ -826,6 +825,7 @@ fn serveWithManagement(
     var select: std.Io.Select(Result) = .init(io, result_buffer);
     defer select.cancelDiscard();
     defer shutdown.set(io);
+    defer bridges.requestStop();
     try select.concurrent(.serve, serveResult, .{ broker, service });
     for (bridges.values, 0..) |_, index| {
         try select.concurrent(.bridge, bridgeResult, .{ bridges, index });
@@ -834,7 +834,7 @@ fn serveWithManagement(
         try select.concurrent(
             .bridge_failback,
             configured_bridges.Set.runPrimaryFailback,
-            .{ bridges, io, shutdown },
+            .{bridges},
         );
     }
     if (interval_seconds) |seconds| {
@@ -859,6 +859,7 @@ fn serveWithManagement(
     while (true) {
         switch (try select.await()) {
             .serve => |maybe_error| {
+                bridges.requestStop();
                 shutdown.set(io);
                 select.cancelDiscard();
                 if (maybe_error) |err| return err;
@@ -881,6 +882,7 @@ fn serveWithManagement(
                     }
                     continue;
                 }
+                bridges.requestStop();
                 shutdown.set(io);
                 select.cancelDiscard();
                 if (result.err) |err| {
