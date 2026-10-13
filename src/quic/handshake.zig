@@ -1472,7 +1472,7 @@ fn connectAttempt(
         }
         if (!offered_alpn) return error.InvalidClientHello;
         const age = now_ms - session.issued_at_ms;
-        if (age > @as(u64, session.lifetime_seconds) * std.time.ms_per_s or
+        if (age >= @as(u64, session.lifetime_seconds) * std.time.ms_per_s or
             age > std.math.maxInt(u32))
         {
             return error.ExpiredPsk;

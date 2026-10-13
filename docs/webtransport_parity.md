@@ -738,7 +738,9 @@ established CID router without competing socket readers. RFC 9001 ticket
 validation remains separate from the shared TLS codec: every present QUIC
 `max_early_data_size` must be `0xffffffff`, while finite TLS limits remain valid
 for stream transports. A zero-lifetime QUIC ticket advances the authenticated
-CRYPTO stream but is not inserted into the session cache. HTTP/3 now exposes
+CRYPTO stream but is not inserted into the session cache. QUIC client and
+server stores reject tickets exactly at the advertised lifetime boundary and
+before their issue time. HTTP/3 now exposes
 source-aware Initial acceptance.
 WebTransport additionally exposes a split
 `HandshakeAdmission`: the caller completes QUIC/TLS from an inbox, promotes its

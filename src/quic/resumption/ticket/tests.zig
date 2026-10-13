@@ -310,7 +310,7 @@ test "server ticket store caches earliest expiry and future issue time" {
         store.identity_index.get("short"),
         store.earliest_expiry_index,
     );
-    try std.testing.expectEqual(@as(usize, 1), store.count(3001));
+    try std.testing.expectEqual(@as(usize, 1), store.count(3000));
     try std.testing.expect(store.identity_index.get("short") == null);
     try std.testing.expectEqual(
         store.identity_index.get("long"),

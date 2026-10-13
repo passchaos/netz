@@ -184,14 +184,12 @@ test "resumption cache expires tickets and validates lifetime" {
     var cache = try resumption.Cache.init(std.testing.allocator, 2);
     defer cache.deinit();
     try cache.store(ticket("valid", "h3", "ticket", 1000, 1, null, 1));
-    var at_expiry = (try cache.acquire("valid", "h3", 2000)).?;
-    at_expiry.deinit();
-    // Strictly after the lifetime is expired; exactly at expiry remains usable
-    // as in TLS ticket lifetime arithmetic.
-    try std.testing.expect((try cache.acquire("valid", "h3", 2001)) == null);
+    var before_expiry = (try cache.acquire("valid", "h3", 1999)).?;
+    before_expiry.deinit();
+    try std.testing.expect((try cache.acquire("valid", "h3", 2000)) == null);
     try std.testing.expectEqual(@as(usize, 0), cache.count());
     try std.testing.expectEqual(@as(usize, 0), cache.origin_index.count());
-    try std.testing.expectEqual(@as(usize, 0), cache.pruneExpired(2001));
+    try std.testing.expectEqual(@as(usize, 0), cache.pruneExpired(2000));
 
     try std.testing.expectError(
         error.InvalidTicketLifetime,

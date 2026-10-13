@@ -163,7 +163,7 @@ const Entry = struct {
         if (now_ms < self.issued_at_ms) return true;
         const lifetime_ms = @as(u64, self.lifetime_seconds) *
             std.time.ms_per_s;
-        return now_ms - self.issued_at_ms > lifetime_ms;
+        return now_ms - self.issued_at_ms >= lifetime_ms;
     }
 
     fn matches(self: Entry, server_id: []const u8, alpn: []const u8) bool {
