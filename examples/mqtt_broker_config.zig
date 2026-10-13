@@ -769,7 +769,7 @@ pub fn run(
             .listeners = active_endpoints,
             .shutdown = &shutdown,
         } };
-    if (config.persistence or has_reloadable_files or bridges.values.len != 0) {
+    if (config.persistence or has_reloadable_files or bridges.entries.len != 0) {
         try serveWithManagement(
             allocator,
             &broker,
@@ -820,7 +820,7 @@ fn serveWithManagement(
     defer shutdown.set(io);
     defer bridges.requestStop();
     try select.concurrent(.serve, serveResult, .{ broker, service });
-    if (bridges.values.len != 0) {
+    if (bridges.entries.len != 0) {
         try select.concurrent(
             .bridges,
             bridgeSetResult,

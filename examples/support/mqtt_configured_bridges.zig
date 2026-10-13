@@ -399,21 +399,73 @@ pub const ConfiguredBridge = union(enum) {
     }
 };
 
+/// One move-stable configured bridge generation. Connector callbacks borrow
+/// `configured` and `connector_resources`, while the runtime clients retain
+/// the address of `shutdown`, so the complete entry remains heap allocated
+/// until its task has stopped and `deinit` returns.
+pub const Entry = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    configured: mqtt.broker_config.Bridge,
+    value: ConfiguredBridge,
+    connector_resources: ConnectorResources = .{},
+    shutdown: std.Io.Event = .unset,
+
+    fn create(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local: *mqtt.broker.Broker,
+        configured: mqtt.broker_config.Bridge,
+        persistence_path: ?[]const u8,
+    ) !*Entry {
+        const entry = try allocator.create(Entry);
+        errdefer allocator.destroy(entry);
+        entry.* = .{
+            .allocator = allocator,
+            .io = io,
+            .configured = try configured.clone(allocator),
+            .value = undefined,
+        };
+        errdefer entry.configured.deinit(allocator);
+        errdefer entry.connector_resources.deinit(allocator);
+        entry.value = try initConfiguredBridge(
+            allocator,
+            io,
+            local,
+            &entry.configured,
+            &entry.connector_resources,
+            &entry.shutdown,
+            persistence_path,
+        );
+        return entry;
+    }
+
+    pub fn deinit(self: *Entry) void {
+        const allocator = self.allocator;
+        self.requestStop();
+        self.value.deinit();
+        self.connector_resources.deinit(allocator);
+        self.configured.deinit(allocator);
+        self.* = undefined;
+        allocator.destroy(self);
+    }
+
+    pub fn requestStop(self: *Entry) void {
+        self.shutdown.set(self.io);
+    }
+
+    pub fn stopRequested(self: *const Entry) bool {
+        return self.shutdown.isSet();
+    }
+};
+
 pub const Set = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     /// Stable, Set-local cancellation boundary. Bridge tasks can be stopped
     /// and replaced without signaling the listener/broker shutdown event.
     shutdown: *std.Io.Event,
-    /// Each bridge keeps a stable cancellation address so a future reload can
-    /// retire one generation without disturbing unrelated bridge tasks.
-    bridge_shutdowns: []std.Io.Event,
-    /// Runtime-owned configuration backing connector callbacks and reconnect
-    /// policy. Keeping this independent from the parser document permits a
-    /// future reload supervisor to stage a replacement Set transactionally.
-    configured: []mqtt.broker_config.Bridge,
-    values: []ConfiguredBridge,
-    connector_resources: []ConnectorResources,
+    entries: []*Entry,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -425,181 +477,41 @@ pub const Set = struct {
         const shutdown = try allocator.create(std.Io.Event);
         errdefer allocator.destroy(shutdown);
         shutdown.* = .unset;
-        const bridge_shutdowns = try allocator.alloc(
-            std.Io.Event,
-            configured.len,
-        );
-        errdefer allocator.free(bridge_shutdowns);
-        @memset(bridge_shutdowns, .unset);
-        const owned_configured = try allocator.alloc(
-            mqtt.broker_config.Bridge,
-            configured.len,
-        );
-        var configured_initialized: usize = 0;
-        errdefer {
-            while (configured_initialized != 0) {
-                configured_initialized -= 1;
-                owned_configured[configured_initialized].deinit(allocator);
-            }
-            allocator.free(owned_configured);
-        }
-        for (configured, owned_configured) |source, *owned| {
-            owned.* = try source.clone(allocator);
-            configured_initialized += 1;
-        }
-
-        const values = try allocator.alloc(
-            ConfiguredBridge,
-            owned_configured.len,
-        );
-        errdefer allocator.free(values);
-        const connector_resources = try allocator.alloc(
-            ConnectorResources,
-            owned_configured.len,
-        );
-        errdefer allocator.free(connector_resources);
-        @memset(connector_resources, .{});
-        errdefer for (connector_resources) |*resources| {
-            resources.deinit(allocator);
-        };
+        const entries = try allocator.alloc(*Entry, configured.len);
+        errdefer allocator.free(entries);
         var initialized: usize = 0;
         errdefer {
             while (initialized != 0) {
                 initialized -= 1;
-                values[initialized].deinit();
+                entries[initialized].deinit();
             }
         }
-        for (
-            owned_configured,
-            values,
-            connector_resources,
-            bridge_shutdowns,
-        ) |*source, *bridge, *resources, *bridge_shutdown| {
-            if (source.hasOutbound()) {
-                bridge.* = .{ .outbound = try initOutbound(allocator, io, local, source, resources, bridge_shutdown, persistence_path) };
-                initialized += 1;
-                continue;
-            }
-            const rules = try allocator.alloc(mqtt.bridge.Rule, source.rules.len);
-            defer allocator.free(rules);
-            for (source.rules, rules) |rule, *runtime_rule| {
-                runtime_rule.* = .{
-                    .filter = rule.filter,
-                    .qos = rule.qos,
-                    .local_prefix = rule.local_prefix,
-                    .remote_prefix = rule.remote_prefix,
-                };
-            }
-            var properties: [1]mqtt.Property = undefined;
-            const property_slice: []const mqtt.Property = if (source.protocol == .v5 and
-                source.session_expiry_interval != 0)
-            blk: {
-                properties[0] = .{ .four_byte = .{
-                    .id = .session_expiry_interval,
-                    .value = source.session_expiry_interval,
-                } };
-                break :blk &properties;
-            } else &.{};
-            const notification_topic = if (source.notifications)
-                try source.notificationTopicAlloc(allocator)
-            else
-                null;
-            defer if (notification_topic) |topic| allocator.free(topic);
-            const options = mqtt.bridge.MultiOptions{
-                .connect = remoteConnectOptions(source, property_slice),
-                .reconnect_policy = .{
-                    .initial_delay = .fromSeconds(
-                        source.restart.base_seconds,
-                    ),
-                    .max_delay = .fromSeconds(source.restart.cap_seconds),
-                    .backoff = .fixed,
-                    .jitter = if (source.restart.jitter)
-                        .decorrelated
-                    else
-                        .none,
-                    .stable_connection_period = .fromSeconds(
-                        source.restart.stable_connection_seconds,
-                    ),
-                    .delay_after_disconnect = true,
-                    .max_attempts = if (source.start_type == .once)
-                        source.addressCount()
-                    else
-                        0,
-                },
-                .rules = rules,
-                .bridge_id = if (source.usesQoS2())
-                    stableBridgeId(source.*)
-                else
-                    null,
-                .notifications = if (notification_topic) |topic| .{
-                    .topic = topic,
-                    .publish_local = true,
-                    .publish_remote = !source.notifications_local_only,
-                } else null,
-            };
-            bridge.* = .{ .inbound = if (source.usesTls() or
-                source.addressCount() > 1 or
-                source.usesPrivateBridgeMode())
-            blk: {
-                if (source.usesTls()) {
-                    try loadTlsResources(
-                        resources,
-                        allocator,
-                        io,
-                        std.Io.Dir.cwd(),
-                        source,
-                    );
-                } else {
-                    resources.connector = .{ .source = source };
-                    resources.connector_configured = true;
-                }
-                break :blk try mqtt.bridge.Bridge.initConnectorMany(
-                    allocator,
-                    io,
-                    local,
-                    resources.connector.connector(),
-                    options,
-                    bridge_shutdown,
-                );
-            } else try mqtt.bridge.Bridge.initHostMany(
+        for (configured, entries) |source, *entry| {
+            entry.* = try Entry.create(
                 allocator,
                 io,
                 local,
-                source.host,
-                source.port,
-                options,
-                bridge_shutdown,
-            ) };
+                source,
+                persistence_path,
+            );
             initialized += 1;
         }
         return .{
             .allocator = allocator,
             .io = io,
             .shutdown = shutdown,
-            .bridge_shutdowns = bridge_shutdowns,
-            .configured = owned_configured,
-            .values = values,
-            .connector_resources = connector_resources,
+            .entries = entries,
         };
     }
 
     pub fn deinit(self: *Set) void {
         self.requestStop();
-        var remaining = self.values.len;
+        var remaining = self.entries.len;
         while (remaining != 0) {
             remaining -= 1;
-            self.values[remaining].deinit();
+            self.entries[remaining].deinit();
         }
-        for (self.connector_resources) |*resources| {
-            resources.deinit(self.allocator);
-        }
-        self.allocator.free(self.connector_resources);
-        self.allocator.free(self.values);
-        self.allocator.free(self.bridge_shutdowns);
-        for (self.configured) |*configured| {
-            configured.deinit(self.allocator);
-        }
-        self.allocator.free(self.configured);
+        self.allocator.free(self.entries);
         self.allocator.destroy(self.shutdown);
         self.* = undefined;
     }
@@ -607,9 +519,7 @@ pub const Set = struct {
     /// Wake every bridge run loop without affecting listeners or other broker
     /// work. The owner must await/cancel those tasks before calling `deinit`.
     pub fn requestStop(self: *Set) void {
-        for (self.bridge_shutdowns) |*bridge_shutdown| {
-            bridge_shutdown.set(self.io);
-        }
+        for (self.entries) |entry| entry.requestStop();
         self.shutdown.set(self.io);
     }
 
@@ -618,11 +528,11 @@ pub const Set = struct {
     }
 
     pub fn requestBridgeStop(self: *Set, index: usize) void {
-        self.bridge_shutdowns[index].set(self.io);
+        self.entries[index].requestStop();
     }
 
     pub fn bridgeStopRequested(self: *const Set, index: usize) bool {
-        return self.bridge_shutdowns[index].isSet();
+        return self.entries[index].stopRequested();
     }
 
     const BridgeRunResult = struct {
@@ -642,7 +552,7 @@ pub const Set = struct {
         };
         const result_capacity = try std.math.add(
             usize,
-            self.values.len,
+            self.entries.len,
             2,
         );
         const result_buffer = try self.allocator.alloc(Result, result_capacity);
@@ -650,7 +560,7 @@ pub const Set = struct {
         var select: std.Io.Select(Result) = .init(self.io, result_buffer);
         defer select.cancelDiscard();
         try select.concurrent(.shutdown, waitForStop, .{self});
-        for (self.values, 0..) |_, index| {
+        for (self.entries, 0..) |_, index| {
             try select.concurrent(.bridge, bridgeResult, .{ self, index });
         }
         if (self.needsPrimaryFailback()) {
@@ -707,8 +617,8 @@ pub const Set = struct {
     }
 
     fn bridgeResult(self: *Set, index: usize) BridgeRunResult {
-        const configured = self.configured[index];
-        const bridge = &self.values[index];
+        const configured = self.entries[index].configured;
+        const bridge = &self.entries[index].value;
         switch (configured.start_type) {
             .automatic => bridge.run(.{
                 .timeout = .fromSeconds(30),
@@ -745,14 +655,15 @@ pub const Set = struct {
     /// snapshot. Persistent Sessions retain retransmittable work; clean
     /// Sessions remove their routes and queued deliveries.
     pub fn disconnectLocalSources(self: *Set) void {
-        for (self.values) |*bridge| switch (bridge.*) {
+        for (self.entries) |entry| switch (entry.value) {
             .inbound => {},
             .outbound => |*value| value.source.disconnectTransport(),
         };
     }
 
     pub fn needsPrimaryFailback(self: *const Set) bool {
-        for (self.connector_resources) |*resources| {
+        for (self.entries) |entry| {
+            const resources = &entry.connector_resources;
             if (resources.connector_configured and
                 resources.connector.source.addressCount() > 1 and
                 !resources.connector.source.round_robin and
@@ -781,17 +692,126 @@ pub const Set = struct {
             const now_ns: i64 = @intCast(
                 std.Io.Clock.awake.now(self.io).nanoseconds,
             );
-            for (self.connector_resources, self.values) |*resources, *bridge| {
+            for (self.entries) |entry| {
+                if (entry.stopRequested()) continue;
+                const resources = &entry.connector_resources;
                 if (resources.connector_configured and
                     resources.connector.source.start_type == .automatic and
                     resources.connector.shouldFailBack(now_ns))
                 {
-                    bridge.requestReconnect();
+                    entry.value.requestReconnect();
                 }
             }
         }
     }
 };
+
+fn initConfiguredBridge(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    local: *mqtt.broker.Broker,
+    source: *const mqtt.broker_config.Bridge,
+    resources: *ConnectorResources,
+    shutdown: *std.Io.Event,
+    persistence_path: ?[]const u8,
+) !ConfiguredBridge {
+    if (source.hasOutbound()) {
+        return .{ .outbound = try initOutbound(
+            allocator,
+            io,
+            local,
+            source,
+            resources,
+            shutdown,
+            persistence_path,
+        ) };
+    }
+    const rules = try allocator.alloc(mqtt.bridge.Rule, source.rules.len);
+    defer allocator.free(rules);
+    for (source.rules, rules) |rule, *runtime_rule| {
+        runtime_rule.* = .{
+            .filter = rule.filter,
+            .qos = rule.qos,
+            .local_prefix = rule.local_prefix,
+            .remote_prefix = rule.remote_prefix,
+        };
+    }
+    var properties: [1]mqtt.Property = undefined;
+    const property_slice: []const mqtt.Property = if (source.protocol == .v5 and
+        source.session_expiry_interval != 0)
+    blk: {
+        properties[0] = .{ .four_byte = .{
+            .id = .session_expiry_interval,
+            .value = source.session_expiry_interval,
+        } };
+        break :blk &properties;
+    } else &.{};
+    const notification_topic = if (source.notifications)
+        try source.notificationTopicAlloc(allocator)
+    else
+        null;
+    defer if (notification_topic) |topic| allocator.free(topic);
+    const options = mqtt.bridge.MultiOptions{
+        .connect = remoteConnectOptions(source, property_slice),
+        .reconnect_policy = .{
+            .initial_delay = .fromSeconds(source.restart.base_seconds),
+            .max_delay = .fromSeconds(source.restart.cap_seconds),
+            .backoff = .fixed,
+            .jitter = if (source.restart.jitter) .decorrelated else .none,
+            .stable_connection_period = .fromSeconds(
+                source.restart.stable_connection_seconds,
+            ),
+            .delay_after_disconnect = true,
+            .max_attempts = if (source.start_type == .once)
+                source.addressCount()
+            else
+                0,
+        },
+        .rules = rules,
+        .bridge_id = if (source.usesQoS2())
+            stableBridgeId(source.*)
+        else
+            null,
+        .notifications = if (notification_topic) |topic| .{
+            .topic = topic,
+            .publish_local = true,
+            .publish_remote = !source.notifications_local_only,
+        } else null,
+    };
+    return .{ .inbound = if (source.usesTls() or
+        source.addressCount() > 1 or
+        source.usesPrivateBridgeMode())
+    blk: {
+        if (source.usesTls()) {
+            try loadTlsResources(
+                resources,
+                allocator,
+                io,
+                std.Io.Dir.cwd(),
+                source,
+            );
+        } else {
+            resources.connector = .{ .source = source };
+            resources.connector_configured = true;
+        }
+        break :blk try mqtt.bridge.Bridge.initConnectorMany(
+            allocator,
+            io,
+            local,
+            resources.connector.connector(),
+            options,
+            shutdown,
+        );
+    } else try mqtt.bridge.Bridge.initHostMany(
+        allocator,
+        io,
+        local,
+        source.host,
+        source.port,
+        options,
+        shutdown,
+    ) };
+}
 
 fn initOutbound(
     allocator: std.mem.Allocator,
@@ -1205,7 +1225,7 @@ test "configured bridge set owns parser configuration lifetime" {
 
     config.deinit(allocator);
     config_owned = false;
-    const owned = &bridges.configured[0];
+    const owned = &bridges.entries[0].configured;
     try std.testing.expectEqualStrings("owned-runtime", owned.name);
     try std.testing.expectEqualStrings("broker.example", owned.host);
     try std.testing.expectEqualStrings(
@@ -1217,7 +1237,7 @@ test "configured bridge set owns parser configuration lifetime" {
     try std.testing.expectEqualStrings("bridge-secret", owned.remote_password);
     try std.testing.expectEqual(
         owned,
-        bridges.connector_resources[0].connector.source,
+        bridges.entries[0].connector_resources.connector.source,
     );
     bridges.disconnectLocalSources();
 }
@@ -1797,7 +1817,7 @@ test "configured bridges use Mosquitto decorrelated restart state" {
         null,
     );
     defer bridges.deinit();
-    const policy = bridges.values[0].outbound.target.policy;
+    const policy = bridges.entries[0].value.outbound.target.policy;
     try std.testing.expectEqual(mqtt.reconnect.Jitter.decorrelated, policy.jitter);
     try std.testing.expect(policy.delay_after_disconnect);
     try std.testing.expectEqual(
@@ -1835,7 +1855,7 @@ test "configured outbound bridge maps local clean Session policy" {
         null,
     );
     defer bridges.deinit();
-    const bridge = &bridges.values[0].outbound;
+    const bridge = &bridges.entries[0].value.outbound;
     try std.testing.expect(bridge.source.clean_session);
     try std.testing.expectEqualStrings(
         "configured-local-clean",
@@ -1880,7 +1900,7 @@ test "configured bidirectional bridge shares one private remote client" {
     );
     defer bridges.deinit();
 
-    const bridge = &bridges.values[0].outbound;
+    const bridge = &bridges.entries[0].value.outbound;
     try std.testing.expectEqual(@as(usize, 1), bridge.rules.values.len);
     try std.testing.expect(bridge.rules.values[0].value.no_local);
     try std.testing.expectEqual(
@@ -1890,6 +1910,6 @@ test "configured bidirectional bridge shares one private remote client" {
     try std.testing.expect(!bridge.inbound_rules.values[0].no_local);
     try std.testing.expect(bridge.target.options.value.bridge_mode);
     try std.testing.expect(
-        bridges.connector_resources[0].connector.require_private_bridge,
+        bridges.entries[0].connector_resources.connector.require_private_bridge,
     );
 }
