@@ -3570,6 +3570,9 @@ capabilities match byte-for-byte, and a PING on the first connection proves
 that assigning the second identifier did not accidentally take over the first
 anonymous Session. This strengthens the upstream vector's prefix-only check
 without presenting the existing in-process broker tests as external evidence.
+The shared MQTT 5 CONNACK codec also rejects an explicitly present but empty
+Assigned Client Identifier on both parse and write paths, so lower-level users
+cannot bypass the same MQTT-3.2.2-16 invariant enforced by the runtime.
 The source-locked Server Keep Alive case ports Mosquitto's
 `12-prop-server-keepalive.py`
 against the new example-broker `--server-keep-alive` policy switch. A client

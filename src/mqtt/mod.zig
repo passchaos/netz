@@ -1150,6 +1150,11 @@ fn validateProperty(property: Property) Error!void {
         },
         .utf8 => |p| switch (p.id) {
             .response_topic => validateTopicName(p.value) catch return error.InvalidProperty,
+            // MQTT-3.2.2-16 requires this to identify a real Session; the
+            // zero-length value is reserved for the client's CONNECT request.
+            .assigned_client_identifier => if (p.value.len == 0) {
+                return error.InvalidProperty;
+            },
             else => {},
         },
         else => {},
@@ -4203,6 +4208,17 @@ test "MQTT v5 packet-specific properties are validated" {
     try std.testing.expectError(error.InvalidProperty, ConnAck.write(&encoded, allocator, .v5, false, 0, &.{
         .{ .two_byte = .{ .id = .topic_alias, .value = 1 } },
     }));
+    try std.testing.expectError(error.InvalidProperty, ConnAck.write(&encoded, allocator, .v5, false, 0, &.{
+        .{ .utf8 = .{ .id = .assigned_client_identifier, .value = "" } },
+    }));
+    try std.testing.expectError(
+        error.InvalidProperty,
+        ConnAck.parse(
+            allocator,
+            .v5,
+            &.{ 0x20, 0x06, 0x00, 0x00, 0x03, 0x12, 0x00, 0x00 },
+        ),
+    );
     try std.testing.expectError(error.InvalidProperty, writePublish(&encoded, allocator, .v5, "topic", "payload", .{
         .properties = &.{.{ .two_byte = .{ .id = .receive_maximum, .value = 1 } }},
     }));

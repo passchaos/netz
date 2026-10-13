@@ -211,14 +211,25 @@ test "MQTT client validates Assigned Client Identifier against CONNECT" {
                 } else properties[0..0];
                 var response: std.ArrayList(u8) = .empty;
                 defer response.deinit(self.allocator);
-                try mqtt.ConnAck.write(
-                    &response,
-                    self.allocator,
-                    .v5,
-                    false,
-                    0,
-                    response_properties,
-                );
+                if (case.assigned_client_id != null and
+                    case.assigned_client_id.?.len == 0)
+                {
+                    // Deliberately malformed peer packet: the public writer
+                    // correctly refuses an empty Assigned Client Identifier.
+                    try response.appendSlice(
+                        self.allocator,
+                        &.{ 0x20, 0x06, 0x00, 0x00, 0x03, 0x12, 0x00, 0x00 },
+                    );
+                } else {
+                    try mqtt.ConnAck.write(
+                        &response,
+                        self.allocator,
+                        .v5,
+                        false,
+                        0,
+                        response_properties,
+                    );
+                }
                 try peer.writePacket(response.items);
             }
         }
