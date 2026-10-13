@@ -1189,6 +1189,7 @@ test "session reconnect retransmits PUBREL and accepts out-of-order ack" {
         qos2_id,
         pubrel[0].pubrel.packet_id,
     );
+    try std.testing.expect(!pubrel[0].pubrel.dup);
     try store.disconnect(opened.handle, null, .zero);
     const resumed = try store.open("retry-qos2", false, 60, .zero);
     const retry = try store.drainInto(resumed.handle, .zero, 10, &output);
@@ -1196,6 +1197,7 @@ test "session reconnect retransmits PUBREL and accepts out-of-order ack" {
         qos2_id,
         retry[0].pubrel.packet_id,
     );
+    try std.testing.expect(retry[0].pubrel.dup);
     try std.testing.expectEqual(
         session.AckAction.completed,
         try store.handleAck(resumed.handle, .pubcomp, qos2_id, 0),
@@ -1256,6 +1258,7 @@ test "session transmission writers preserve DUP and PUBREL identifiers" {
         try store.handleAck(resumed.handle, .pubrec, packet_id, 0),
     );
     const pubrel = try store.drainInto(resumed.handle, .zero, 10, &output);
+    try std.testing.expect(!pubrel[0].pubrel.dup);
     encoded.clearRetainingCapacity();
     try pubrel[0].pubrel.write(&encoded, allocator, .v5);
     var ack = try mqtt.AckPacket.parse(allocator, .v5, encoded.items);
@@ -1270,6 +1273,23 @@ test "session transmission writers preserve DUP and PUBREL identifiers" {
     const repeated = try store.drainInto(resumed.handle, .zero, 10, &output);
     try std.testing.expectEqual(@as(usize, 1), repeated.len);
     try std.testing.expectEqual(packet_id, repeated[0].pubrel.packet_id);
+    try std.testing.expect(repeated[0].pubrel.dup);
+
+    encoded.clearRetainingCapacity();
+    try repeated[0].pubrel.write(&encoded, allocator, .v3_1);
+    var duplicate_ack = try mqtt.AckPacket.parse(
+        allocator,
+        .v3_1,
+        encoded.items,
+    );
+    defer duplicate_ack.deinit(allocator);
+    try std.testing.expect(duplicate_ack.dup);
+
+    encoded.clearRetainingCapacity();
+    try repeated[0].pubrel.write(&encoded, allocator, .v5);
+    var modern_ack = try mqtt.AckPacket.parse(allocator, .v5, encoded.items);
+    defer modern_ack.deinit(allocator);
+    try std.testing.expect(!modern_ack.dup);
 }
 
 test "session reconnect honors a lower Receive Maximum" {

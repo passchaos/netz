@@ -4770,6 +4770,28 @@ pub const Connection = struct {
         try self.writeAckPacketNoProperties(.pubrel, packet_id, reason_code);
     }
 
+    /// Write a retransmitted MQTT 3.1 PUBREL with DUP set. Later protocol
+    /// versions reject `dup=true` because their fixed-header pattern is 0x2.
+    pub fn writePubRelWithDup(
+        self: *Connection,
+        packet_id: u16,
+        reason_code: u8,
+        dup: bool,
+    ) Error!void {
+        var encoded: [mqtt.AckPacket.no_properties_max_len]u8 = undefined;
+        try self.writeGeneratedPacket(
+            try mqtt.AckPacket.writeNoPropertiesIntoWithDup(
+                &encoded,
+                self.protocol,
+                .pubrel,
+                dup,
+                packet_id,
+                reason_code,
+            ),
+            .pubrel,
+        );
+    }
+
     pub fn readPubRel(self: *Connection) Error!OwnedAck {
         var pubrel = try self.readAck(.pubrel);
         errdefer pubrel.deinit(self.allocator);
@@ -9758,8 +9780,9 @@ test "MQTT runtime property-free acknowledgements use fixed caller storage" {
     );
     connection.allocator = fail_first.allocator();
 
-    // Exercise both MQTT 5 wire lengths: success omits Reason Code and
-    // Property Length, while a negative acknowledgement carries the reason.
+    // Exercise both MQTT 5 wire lengths, then MQTT 3.1's duplicate PUBREL.
+    // Success omits Reason Code and Property Length, while a negative
+    // acknowledgement carries the reason.
     try connection.writePubAck(0x1234, 0);
     try connection.writePubRec(0x5678, 0x80);
     try connection.writePubRel(0x9abc, 0);
@@ -9771,6 +9794,8 @@ test "MQTT runtime property-free acknowledgements use fixed caller storage" {
             .value = "suppressed",
         } },
     });
+    connection.protocol = .v3_1;
+    try connection.writePubRelWithDup(0x1357, 0, true);
     try std.testing.expect(!fail_first.has_induced_failure);
 
     const expected = [_]u8{
@@ -9779,7 +9804,8 @@ test "MQTT runtime property-free acknowledgements use fixed caller storage" {
         0x80, 0x62, 0x02, 0x9a,
         0xbc, 0x70, 0x03, 0xde,
         0xf0, 0x92, 0x40, 0x03,
-        0x24, 0x68, 0x80,
+        0x24, 0x68, 0x80, 0x6a,
+        0x02, 0x13, 0x57,
     };
     var received: [expected.len]u8 = undefined;
     var offset: usize = 0;

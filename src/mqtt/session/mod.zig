@@ -196,6 +196,8 @@ pub const PublishTransmission = struct {
 
 pub const PubRelTransmission = struct {
     packet_id: u16,
+    /// The transaction has already emitted PUBREL on an earlier attempt.
+    dup: bool = false,
 
     pub fn write(
         self: PubRelTransmission,
@@ -203,11 +205,12 @@ pub const PubRelTransmission = struct {
         allocator: std.mem.Allocator,
         protocol: mqtt.ProtocolVersion,
     ) Error!void {
-        try mqtt.AckPacket.write(
+        try mqtt.AckPacket.writeWithDup(
             list,
             allocator,
             protocol,
             .pubrel,
+            self.dup and protocol == .v3_1,
             self.packet_id,
             0,
             &.{},
@@ -2547,6 +2550,7 @@ pub const Store = struct {
                         return error.InvalidAcknowledgement;
                     }
                     noteInflightNeedsSend(session, index, inflight);
+                    inflight.retransmission = true;
                     return .send_pubrel;
                 }
                 if (inflight.state != .await_pubrec) {
@@ -3543,7 +3547,10 @@ fn transmissionForInflight(
             .publish = publishTransmission(inflight, now_ns),
         },
         .await_pubcomp => .{
-            .pubrel = .{ .packet_id = inflight.packet_id },
+            .pubrel = .{
+                .packet_id = inflight.packet_id,
+                .dup = inflight.retransmission,
+            },
         },
     };
 }

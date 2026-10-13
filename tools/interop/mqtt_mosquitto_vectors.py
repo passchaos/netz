@@ -31,7 +31,7 @@ from mqtt_vectors import (
     will_delay_recovery,
 )
 
-BASE_SCENARIO_COUNT = 164
+BASE_SCENARIO_COUNT = 167
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
@@ -310,6 +310,57 @@ def mqtt31_client_identifier_length(executable: Path, mqtt_packets) -> None:
                 mqtt_packets.gen_connack(rc=2, proto_ver=3),
                 "MQTT 3.1 overlong Client Identifier",
             )
+
+
+def mqtt31_duplicate_control_flags(executable: Path, mqtt_packets) -> None:
+    # MQTT 3.1 carries DUP in bit 3 when QoS-1 control packets are retried.
+    # MQTT 3.1.1 replaced these shapes with a mandatory fixed 0x2 nibble.
+    topic = "v31/duplicate-control"
+    with NetzBroker(executable) as broker:
+        with broker.connect() as sock:
+            connect_client(sock, mqtt_packets, "v31-dup-control", 3)
+
+            sock.sendall(mqtt_packets.gen_subscribe(
+                1, topic, 1, cmd=0x8A, proto_ver=3
+            ))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_suback(1, 1, proto_ver=3),
+                "MQTT 3.1 duplicate SUBSCRIBE",
+            )
+
+            sock.sendall(mqtt_packets.gen_unsubscribe(
+                2, topic, cmd=0xAA, proto_ver=3
+            ))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_unsuback(2, proto_ver=3),
+                "MQTT 3.1 duplicate UNSUBSCRIBE",
+            )
+
+            sock.sendall(mqtt_packets.gen_publish(
+                topic, qos=2, mid=3, payload="dup", proto_ver=3
+            ))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_pubrec(3, proto_ver=3),
+                "MQTT 3.1 QoS 2 PUBREC before duplicate PUBREL",
+            )
+            sock.sendall(mqtt_packets.gen_pubrel(3, proto_ver=3))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_pubcomp(3, proto_ver=3),
+                "MQTT 3.1 initial PUBCOMP",
+            )
+            sock.sendall(mqtt_packets.gen_pubrel(
+                3, dup=True, proto_ver=3
+            ))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_pubcomp(3, proto_ver=3),
+                "MQTT 3.1 duplicate PUBREL",
+            )
+            sock.sendall(mqtt_packets.gen_disconnect(proto_ver=3))
 
 
 def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
@@ -6215,6 +6266,7 @@ def main() -> None:
 
     unsupported_protocol_levels(args.broker, mqtt_packets, mqtt5_rc)
     mqtt31_client_identifier_length(args.broker, mqtt_packets)
+    mqtt31_duplicate_control_flags(args.broker, mqtt_packets)
     proxy_protocol_v1_v2(args.broker, mqtt_packets)
     maximum_topic_hierarchy.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,

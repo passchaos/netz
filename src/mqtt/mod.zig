@@ -248,9 +248,8 @@ fn validateControlFlags(fixed: FixedHeader) Error!void {
 }
 
 /// Validate the complete fixed-header flag field for an established protocol
-/// version. PUBLISH has variable flags, but QoS 3 and DUP on QoS 0 are
-/// malformed. Every other packet type uses its one reserved pattern in both
-/// supported protocol versions.
+/// version. MQTT 3.1 used DUP on retransmitted QoS-1 control packets;
+/// MQTT 3.1.1 replaced those shapes with one mandatory reserved pattern.
 pub fn validatePacketFlags(
     protocol: ProtocolVersion,
     fixed: FixedHeader,
@@ -263,7 +262,14 @@ pub fn validatePacketFlags(
         }
         return;
     }
-    _ = protocol;
+    if (protocol == .v3_1 and
+        (fixed.packet_type == .pubrel or
+            fixed.packet_type == .subscribe or
+            fixed.packet_type == .unsubscribe) and
+        (fixed.flags == 0x02 or fixed.flags == 0x0a))
+    {
+        return;
+    }
     try validateControlFlags(fixed);
 }
 
@@ -1773,9 +1779,8 @@ pub const Publish = struct {
 pub const AckPacket = struct {
     packet_type: PacketType,
     packet_id: u16,
-    /// Retained for source compatibility; always false for supported MQTT
-    /// versions. MQTT 3.1 used bit 3 for retransmitted PUBREL, but MQTT 3.1.1
-    /// and MQTT 5 both require the fixed 0x2 flag pattern.
+    /// MQTT 3.1 uses bit 3 for a retransmitted PUBREL. MQTT 3.1.1 and MQTT 5
+    /// require the fixed 0x2 pattern and therefore always decode false.
     dup: bool = false,
     reason_code: u8 = 0,
     properties: []Property = &.{},
@@ -1797,6 +1802,7 @@ pub const AckPacket = struct {
             allocator,
             protocol,
             fixed.packet_type,
+            fixed.flags,
             packet[fixed.header_len .. fixed.header_len + fixed.remaining_len],
         );
     }
@@ -1826,6 +1832,7 @@ pub const AckPacket = struct {
             allocator,
             protocol,
             packet_type,
+            flags,
             payload_bytes,
         );
     }
@@ -1834,6 +1841,7 @@ pub const AckPacket = struct {
         allocator: std.mem.Allocator,
         protocol: ProtocolVersion,
         packet_type: PacketType,
+        flags: u4,
         payload_bytes: []const u8,
     ) Error!AckPacket {
         var cursor = wire.Cursor.init(payload_bytes);
@@ -1844,6 +1852,7 @@ pub const AckPacket = struct {
             return .{
                 .packet_type = packet_type,
                 .packet_id = packet_id,
+                .dup = (flags & 0x08) != 0,
                 .properties = try allocator.alloc(Property, 0),
             };
         }
@@ -1864,6 +1873,7 @@ pub const AckPacket = struct {
         return .{
             .packet_type = packet_type,
             .packet_id = packet_id,
+            .dup = false,
             .reason_code = reason_code,
             .properties = props,
         };
@@ -1874,6 +1884,30 @@ pub const AckPacket = struct {
         allocator: std.mem.Allocator,
         protocol: ProtocolVersion,
         packet_type: PacketType,
+        packet_id: u16,
+        reason_code: u8,
+        properties: []const Property,
+    ) Error!void {
+        return writeWithDup(
+            list,
+            allocator,
+            protocol,
+            packet_type,
+            false,
+            packet_id,
+            reason_code,
+            properties,
+        );
+    }
+
+    /// Encode a QoS acknowledgement with the MQTT 3.1 retransmission bit.
+    /// `dup=true` is valid only for MQTT 3.1 PUBREL.
+    pub fn writeWithDup(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        packet_type: PacketType,
+        dup: bool,
         packet_id: u16,
         reason_code: u8,
         properties: []const Property,
@@ -1903,11 +1937,19 @@ pub const AckPacket = struct {
                 remainingLengthEncodedLen(properties_len) + properties_len
             else
                 0;
+        const flags = packet_type.defaultFlags() |
+            (if (dup) @as(u4, 0x08) else 0);
+        try validatePacketFlags(protocol, .{
+            .packet_type = packet_type,
+            .flags = flags,
+            .remaining_len = remaining_len,
+            .header_len = 0,
+        });
         try writeFixedHeaderAssumeCapacity(
             list,
             allocator,
             packet_type,
-            packet_type.defaultFlags(),
+            flags,
             remaining_len,
         );
         appendIntAssumeCapacity(list, u16, packet_id);
@@ -1935,6 +1977,25 @@ pub const AckPacket = struct {
         packet_id: u16,
         reason_code: u8,
     ) Error![]u8 {
+        return writeNoPropertiesIntoWithDup(
+            storage,
+            protocol,
+            packet_type,
+            false,
+            packet_id,
+            reason_code,
+        );
+    }
+
+    /// Caller-buffer form of `writeWithDup` for property-free ACK packets.
+    pub fn writeNoPropertiesIntoWithDup(
+        storage: *[no_properties_max_len]u8,
+        protocol: ProtocolVersion,
+        packet_type: PacketType,
+        dup: bool,
+        packet_id: u16,
+        reason_code: u8,
+    ) Error![]u8 {
         if (packet_id == 0) return error.InvalidPacketIdentifier;
         switch (packet_type) {
             .puback, .pubrec, .pubrel, .pubcomp => {},
@@ -1948,8 +2009,16 @@ pub const AckPacket = struct {
 
         const include_reason = protocol == .v5 and reason_code != 0;
         const remaining_len: u8 = if (include_reason) 3 else 2;
+        const flags = packet_type.defaultFlags() |
+            (if (dup) @as(u4, 0x08) else 0);
+        try validatePacketFlags(protocol, .{
+            .packet_type = packet_type,
+            .flags = flags,
+            .remaining_len = remaining_len,
+            .header_len = 0,
+        });
         storage[0] = (@as(u8, @intFromEnum(packet_type)) << 4) |
-            packet_type.defaultFlags();
+            flags;
         storage[1] = remaining_len;
         std.mem.writeInt(u16, storage[2..4], packet_id, .big);
         if (include_reason) storage[4] = reason_code;
@@ -1978,6 +2047,8 @@ pub const Subscription = struct {
 };
 
 pub const Subscribe = struct {
+    /// MQTT 3.1 retransmission marker. Later protocol versions require false.
+    dup: bool = false,
     packet_id: u16,
     properties: []Property = &.{},
     subscriptions: []Subscription,
@@ -1991,7 +2062,7 @@ pub const Subscribe = struct {
     pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!Subscribe {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .subscribe) return error.InvalidPacketType;
-        try validateControlFlags(fixed);
+        try validatePacketFlags(protocol, fixed);
         try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
@@ -2020,13 +2091,39 @@ pub const Subscribe = struct {
             });
         }
         if (subs.items.len == 0) return error.InvalidSubscription;
-        return .{ .packet_id = packet_id, .properties = props, .subscriptions = try subs.toOwnedSlice(allocator) };
+        return .{
+            .dup = (fixed.flags & 0x08) != 0,
+            .packet_id = packet_id,
+            .properties = props,
+            .subscriptions = try subs.toOwnedSlice(allocator),
+        };
     }
 
     pub fn write(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
         protocol: ProtocolVersion,
+        packet_id: u16,
+        properties: []const Property,
+        subscriptions: []const Subscription,
+    ) Error!void {
+        return writeWithDup(
+            list,
+            allocator,
+            protocol,
+            false,
+            packet_id,
+            properties,
+            subscriptions,
+        );
+    }
+
+    /// Encode MQTT 3.1 retransmission state. Later versions reject `dup=true`.
+    pub fn writeWithDup(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        dup: bool,
         packet_id: u16,
         properties: []const Property,
         subscriptions: []const Subscription,
@@ -2062,11 +2159,19 @@ pub const Subscribe = struct {
                 ),
             );
         }
+        const flags = PacketType.subscribe.defaultFlags() |
+            (if (dup) @as(u4, 0x08) else 0);
+        try validatePacketFlags(protocol, .{
+            .packet_type = .subscribe,
+            .flags = flags,
+            .remaining_len = remaining_len,
+            .header_len = 0,
+        });
         try writeFixedHeaderAssumeCapacity(
             list,
             allocator,
             .subscribe,
-            PacketType.subscribe.defaultFlags(),
+            flags,
             remaining_len,
         );
         appendIntAssumeCapacity(list, u16, packet_id);
@@ -2215,6 +2320,8 @@ pub const SubAck = struct {
 };
 
 pub const Unsubscribe = struct {
+    /// MQTT 3.1 retransmission marker. Later protocol versions require false.
+    dup: bool = false,
     packet_id: u16,
     properties: []Property = &.{},
     topic_filters: [][]const u8,
@@ -2228,7 +2335,7 @@ pub const Unsubscribe = struct {
     pub fn parse(allocator: std.mem.Allocator, protocol: ProtocolVersion, packet: []const u8) Error!Unsubscribe {
         const fixed = try FixedHeader.parse(packet);
         if (fixed.packet_type != .unsubscribe) return error.InvalidPacketType;
-        try validateControlFlags(fixed);
+        try validatePacketFlags(protocol, fixed);
         try validatePacketBounds(packet, fixed);
         var cursor = wire.Cursor.init(packet[fixed.header_len .. fixed.header_len + fixed.remaining_len]);
         const packet_id = try cursor.readInt(u16, .big);
@@ -2248,13 +2355,39 @@ pub const Unsubscribe = struct {
             try filters.append(allocator, filter);
         }
         if (filters.items.len == 0) return error.InvalidSubscription;
-        return .{ .packet_id = packet_id, .properties = props, .topic_filters = try filters.toOwnedSlice(allocator) };
+        return .{
+            .dup = (fixed.flags & 0x08) != 0,
+            .packet_id = packet_id,
+            .properties = props,
+            .topic_filters = try filters.toOwnedSlice(allocator),
+        };
     }
 
     pub fn write(
         list: *std.ArrayList(u8),
         allocator: std.mem.Allocator,
         protocol: ProtocolVersion,
+        packet_id: u16,
+        properties: []const Property,
+        topic_filters: []const []const u8,
+    ) Error!void {
+        return writeWithDup(
+            list,
+            allocator,
+            protocol,
+            false,
+            packet_id,
+            properties,
+            topic_filters,
+        );
+    }
+
+    /// Encode MQTT 3.1 retransmission state. Later versions reject `dup=true`.
+    pub fn writeWithDup(
+        list: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        protocol: ProtocolVersion,
+        dup: bool,
         packet_id: u16,
         properties: []const Property,
         topic_filters: []const []const u8,
@@ -2281,11 +2414,19 @@ pub const Unsubscribe = struct {
                 try encodedLengthPrefixedLen(filter, true),
             );
         }
+        const flags = PacketType.unsubscribe.defaultFlags() |
+            (if (dup) @as(u4, 0x08) else 0);
+        try validatePacketFlags(protocol, .{
+            .packet_type = .unsubscribe,
+            .flags = flags,
+            .remaining_len = remaining_len,
+            .header_len = 0,
+        });
         try writeFixedHeaderAssumeCapacity(
             list,
             allocator,
             .unsubscribe,
-            PacketType.unsubscribe.defaultFlags(),
+            flags,
             remaining_len,
         );
         appendIntAssumeCapacity(list, u16, packet_id);
@@ -4925,7 +5066,6 @@ test "MQTT connack ack and ping controls" {
         error.InvalidFlags,
         AckPacket.parse(allocator, .v5, &.{ 0x6a, 0x02, 0x00, 0x2a }),
     );
-
     var ping: std.ArrayList(u8) = .empty;
     defer ping.deinit(allocator);
     try writePing(&ping, allocator, false);
@@ -5138,6 +5278,7 @@ test "MQTT unsubscribe and unsuback controls" {
     defer unsubscribe.deinit(allocator);
     try std.testing.expectEqual(@as(u16, 11), unsubscribe.packet_id);
     try std.testing.expectEqual(@as(usize, 2), unsubscribe.topic_filters.len);
+
     try std.testing.expectEqualStrings("sensors/+", unsubscribe.topic_filters[0]);
     try std.testing.expectEqualStrings("alerts/#", unsubscribe.topic_filters[1]);
 
@@ -5525,6 +5666,7 @@ test {
     _ = @import("runtime/auth_tests.zig");
     _ = @import("runtime/connect_timeout_tests.zig");
     _ = @import("runtime/protocol_version_tests.zig");
+    _ = @import("protocol_version_codec_tests.zig");
     _ = @import("runtime/tcp_endpoint_tests.zig");
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/reconnect_tests.zig");
