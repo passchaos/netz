@@ -821,7 +821,15 @@ capacity to 4,096 bytes while leaving generic QUIC at 65,535. Generated
 capacity and oversized raw overrides are rejected. The bounded policy lives in
 `src/http3/runtime/receive/policy.zig`, and the transport-parameter rule lives
 in `src/quic/handshake/transport_limits.zig`, keeping both out of the large
-runtime and handshake facades. A CPU-0, seven-pair, order-alternated, same-binary
+runtime and handshake facades. The generic RFC 9000 codec still accepts the
+complete wire ranges: `max_idle_timeout` can use the full QUIC varint range and
+an explicit `max_udp_payload_size` is invalid only below 1200, while actual
+sends remain bounded by the endpoint and path limits. RFC 9368 validation also
+keeps its role asymmetry: a client list must contain its chosen version, a
+server list may omit it, and an explicitly empty server list is rejected after
+Version Negotiation. Preferred-address validation rejects the RFC 9000-invalid
+combination with a zero-length server connection ID. A CPU-0, seven-pair,
+order-alternated, same-binary
 16 MiB/four-stream download A/B measured batch 16 at 86.02 MiB/s median versus
 67.20 MiB/s for batch 1 (1.280x, 6/7 wins), with exact payload/status checks and
 `zio-std-io` on every arm. Bidirectional tquic interop passed with and without

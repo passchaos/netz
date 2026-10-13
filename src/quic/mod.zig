@@ -532,7 +532,9 @@ pub const default_max_udp_payload_size: u64 = 65_527;
 pub const default_ack_delay_exponent: u64 = 3;
 pub const default_max_ack_delay_ms: u64 = 25;
 pub const default_active_connection_id_limit: u64 = 2;
-pub const max_idle_timeout_ms_cap: u64 = @as(u64, 1) << 32;
+/// RFC 9000 does not impose a max_idle_timeout limit below the largest
+/// encodable QUIC variable-length integer.
+pub const max_idle_timeout_ms_cap: u64 = varint.max_value;
 pub const max_stream_count: u64 = 1 << 60;
 
 pub const PreferredAddress = struct {
@@ -711,9 +713,35 @@ pub fn validateTransportParameters(params: TransportParameters, source: Transpor
     if (params.initial_source_connection_id) |cid| try validateTransportConnectionId(cid, false);
     if (params.retry_source_connection_id) |cid| try validateTransportConnectionId(cid, false);
     if (params.preferred_address) |preferred| try validatePreferredAddress(preferred);
-    if (params.version_information) |version_information| try validateVersionInformation(version_information);
+    if (params.version_information) |version_information| {
+        try validateVersionInformation(version_information);
+        // RFC 9368 requires a client's Chosen Version to occur in its
+        // Available Versions list. Servers may omit their chosen version while
+        // retiring a fully deployed version.
+        if (source == .client and
+            !version_information.containsAvailableVersion(
+                version_information.chosen_version,
+            ))
+        {
+            return error.InvalidTransportParameter;
+        }
+    }
 
+    try validateTransportInteger(.max_idle_timeout, params.max_idle_timeout);
     try validateTransportInteger(.max_udp_payload_size, params.max_udp_payload_size);
+    try validateTransportInteger(.initial_max_data, params.initial_max_data);
+    try validateTransportInteger(
+        .initial_max_stream_data_bidi_local,
+        params.initial_max_stream_data_bidi_local,
+    );
+    try validateTransportInteger(
+        .initial_max_stream_data_bidi_remote,
+        params.initial_max_stream_data_bidi_remote,
+    );
+    try validateTransportInteger(
+        .initial_max_stream_data_uni,
+        params.initial_max_stream_data_uni,
+    );
     try validateTransportInteger(.initial_max_streams_bidi, params.initial_max_streams_bidi);
     try validateTransportInteger(.initial_max_streams_uni, params.initial_max_streams_uni);
     try validateTransportInteger(.ack_delay_exponent, params.ack_delay_exponent);
@@ -1015,7 +1043,6 @@ fn validateTransportInteger(id: TransportParameterId, value: u64) Error!void {
         },
         .max_udp_payload_size => {
             if (value < 1200) return error.InvalidTransportParameter;
-            if (value > default_max_udp_payload_size) return error.InvalidTransportParameter;
         },
         .initial_max_streams_bidi, .initial_max_streams_uni => {
             if (value > max_stream_count) return error.InvalidTransportParameter;
@@ -3021,29 +3048,6 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try encodeTransportParameter(&invalid_udp, allocator, @intFromEnum(TransportParameterId.max_udp_payload_size), &.{1});
     try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, invalid_udp.items, .client));
 
-    var jumbo_udp: std.ArrayList(u8) = .empty;
-    defer jumbo_udp.deinit(allocator);
-    var jumbo_value: std.ArrayList(u8) = .empty;
-    defer jumbo_value.deinit(allocator);
-    try varint.encode(&jumbo_value, allocator, default_max_udp_payload_size + 1);
-    try encodeTransportParameter(&jumbo_udp, allocator, @intFromEnum(TransportParameterId.max_udp_payload_size), jumbo_value.items);
-    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, jumbo_udp.items, .client));
-    try std.testing.expectError(error.InvalidTransportParameter, encodeTransportParameters(&encoded_excessive, allocator, .{
-        .max_udp_payload_size = default_max_udp_payload_size + 1,
-    }));
-
-    var max_idle_ok: std.ArrayList(u8) = .empty;
-    defer max_idle_ok.deinit(allocator);
-    try encodeIntegerTransportParameter(&max_idle_ok, allocator, .max_idle_timeout, max_idle_timeout_ms_cap);
-    const decoded_idle = try parseTransportParametersTyped(allocator, max_idle_ok.items, .client);
-    try std.testing.expectEqual(max_idle_timeout_ms_cap, decoded_idle.max_idle_timeout);
-
-    var max_idle_too_large: std.ArrayList(u8) = .empty;
-    defer max_idle_too_large.deinit(allocator);
-    try encodeTransportParameter(&max_idle_too_large, allocator, @intFromEnum(TransportParameterId.max_idle_timeout), &.{ 0xc0, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01 });
-    try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, max_idle_too_large.items, .client));
-    try std.testing.expectError(error.InvalidTransportParameter, encodeIntegerTransportParameter(&max_idle_too_large, allocator, .max_idle_timeout, max_idle_timeout_ms_cap + 1));
-
     var bad_version_info: std.ArrayList(u8) = .empty;
     defer bad_version_info.deinit(allocator);
     try encodeTransportParameter(&bad_version_info, allocator, @intFromEnum(TransportParameterId.version_information), &.{ 0, 0, 0 });
@@ -3052,7 +3056,7 @@ test "QUIC typed transport parameters roundtrip and validate" {
     try encodeTransportParameter(&bad_version_info, allocator, @intFromEnum(TransportParameterId.version_information), &.{ 0, 0, 0, 0 });
     try std.testing.expectError(error.InvalidTransportParameter, parseTransportParametersTyped(allocator, bad_version_info.items, .client));
     bad_version_info.clearRetainingCapacity();
-    try encodeVersionInformationFromVersions(&bad_version_info, allocator, .version_1, &.{ .version_2, @enumFromInt(0x0a0a0a0a) });
+    try encodeVersionInformationFromVersions(&bad_version_info, allocator, .version_1, &.{ .version_1, .version_2, @enumFromInt(0x0a0a0a0a) });
     const decoded_reserved = try parseTransportParametersTyped(allocator, bad_version_info.items, .client);
     try std.testing.expect(decoded_reserved.version_information.?.containsAvailableVersion(@enumFromInt(0x0a0a0a0a)));
 
@@ -3078,6 +3082,77 @@ test "QUIC typed transport parameters roundtrip and validate" {
             .client,
         ),
     );
+}
+
+test "QUIC integer transport parameters accept the full RFC 9000 range" {
+    const allocator = std.testing.allocator;
+    const large_udp_payload_size = default_max_udp_payload_size + 1;
+    const params = TransportParameters{
+        .max_idle_timeout = varint.max_value,
+        .max_udp_payload_size = large_udp_payload_size,
+    };
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encodeTransportParametersForSource(&encoded, allocator, params, .client);
+    const decoded = try parseTransportParametersTyped(
+        allocator,
+        encoded.items,
+        .client,
+    );
+    try std.testing.expectEqual(varint.max_value, decoded.max_idle_timeout);
+    try std.testing.expectEqual(
+        large_udp_payload_size,
+        decoded.max_udp_payload_size,
+    );
+
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        validateTransportParameters(.{
+            .max_idle_timeout = @as(u64, varint.max_value) + 1,
+        }, .client),
+    );
+}
+
+test "QUIC Version Information applies sender-specific available versions" {
+    const allocator = std.testing.allocator;
+    const only_v2 = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
+    const params = TransportParameters{
+        .version_information = .{
+            .chosen_version = .version_1,
+            .available_versions_wire = &only_v2,
+        },
+    };
+
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        validateTransportParameters(params, .client),
+    );
+    try validateTransportParameters(params, .server);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encodeTransportParametersForSource(
+        &encoded,
+        allocator,
+        params,
+        .server,
+    );
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        parseTransportParametersTyped(allocator, encoded.items, .client),
+    );
+    const decoded = try parseTransportParametersTyped(
+        allocator,
+        encoded.items,
+        .server,
+    );
+    try std.testing.expectEqual(
+        Version.version_1,
+        decoded.version_information.?.chosen_version,
+    );
+    try std.testing.expect(!decoded.version_information.?
+        .containsAvailableVersion(.version_1));
 }
 
 test "QUIC reserved transport parameters grease unknown handling" {

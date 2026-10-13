@@ -6944,7 +6944,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.quic, "frameAllowedInPacketType"));
     try std.testing.expect(@hasDecl(netz.quic, "validateFrameForPacketType"));
     try std.testing.expect(@hasDecl(netz.quic, "VersionNegotiationPacket"));
-    try std.testing.expectEqual(@as(u64, 1) << 32, netz.quic.max_idle_timeout_ms_cap);
+    try std.testing.expectEqual(
+        (@as(u64, 1) << 62) - 1,
+        netz.quic.max_idle_timeout_ms_cap,
+    );
     try std.testing.expect(@hasDecl(netz.quic, "writeVersionNegotiationPacket"));
     try std.testing.expect(@hasDecl(netz.quic, "parseVersionNegotiationPacket"));
     try std.testing.expect(@hasDecl(netz.quic.runtime.Endpoint, "versionNegotiationResponse"));

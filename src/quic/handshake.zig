@@ -4782,6 +4782,13 @@ fn validateServerTransportParameters(
     if (!std.mem.eql(u8, params.original_destination_connection_id.?, original_destination_connection_id)) {
         return error.InvalidTransportParameter;
     }
+    if (params.preferred_address != null and
+        params.initial_source_connection_id.?.len == 0)
+    {
+        // RFC 9000 section 18.2 forbids a server that selected a zero-length
+        // connection ID from providing a preferred address.
+        return error.InvalidTransportParameter;
+    }
     if (retry_source_connection_id.len == 0) {
         if (params.retry_source_connection_id != null) return error.InvalidTransportParameter;
     } else {
@@ -4802,13 +4809,78 @@ fn validatePeerVersionInformation(
         return;
     };
     if (info.chosen_version.wireValue() != expected_version.wireValue()) return error.InvalidTransportParameter;
-    if (!info.containsAvailableVersion(expected_version)) return error.InvalidTransportParameter;
     if (version_negotiation_processed) {
+        // RFC 9368 requires an explicitly present server list to be non-empty
+        // after the client has acted on Version Negotiation. The special QUIC
+        // v1 compatibility rule applies only when the parameter is absent.
+        if (info.availableVersionCount() == 0) {
+            return error.InvalidTransportParameter;
+        }
         for (available_versions) |local| {
             if (local.wireValue() == expected_version.wireValue()) break;
             if (info.containsAvailableVersion(local)) return error.InvalidTransportParameter;
         } else {}
     }
+}
+
+test "QUIC server Version Information may omit its chosen version" {
+    const only_v2 = [_]u8{ 0x6b, 0x33, 0x43, 0xcf };
+    const base = quic.TransportParameters{
+        .original_destination_connection_id = "original",
+        .initial_source_connection_id = "server",
+        .version_information = .{
+            .chosen_version = .version_1,
+            .available_versions_wire = &only_v2,
+        },
+    };
+    try validateServerTransportParameters(
+        base,
+        "server",
+        "original",
+        &.{},
+        .version_1,
+        &.{ .version_1, .version_2 },
+        false,
+    );
+
+    var empty_available = base;
+    empty_available.version_information.?.available_versions_wire = &.{};
+    try validateServerTransportParameters(
+        empty_available,
+        "server",
+        "original",
+        &.{},
+        .version_1,
+        &.{.version_1},
+        false,
+    );
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        validateServerTransportParameters(
+            empty_available,
+            "server",
+            "original",
+            &.{},
+            .version_1,
+            &.{.version_1},
+            true,
+        ),
+    );
+}
+
+test "QUIC server with a zero-length CID cannot provide a preferred address" {
+    try std.testing.expectError(
+        error.InvalidTransportParameter,
+        validateServerTransportParameters(.{
+            .original_destination_connection_id = "original",
+            .initial_source_connection_id = &.{},
+            .preferred_address = .{
+                .ipv4_address = .{ 127, 0, 0, 1 },
+                .ipv4_port = 4433,
+                .connection_id = "preferred",
+            },
+        }, &.{}, "original", &.{}, .version_1, &.{.version_1}, false),
+    );
 }
 
 const ServerFlight = struct {
