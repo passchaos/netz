@@ -401,7 +401,10 @@ pub const ConfiguredBridge = union(enum) {
 
 pub const Set = struct {
     allocator: std.mem.Allocator,
-    configured: []const mqtt.broker_config.Bridge,
+    /// Runtime-owned configuration backing connector callbacks and reconnect
+    /// policy. Keeping this independent from the parser document permits a
+    /// future reload supervisor to stage a replacement Set transactionally.
+    configured: []mqtt.broker_config.Bridge,
     values: []ConfiguredBridge,
     connector_resources: []ConnectorResources,
 
@@ -413,11 +416,31 @@ pub const Set = struct {
         shutdown: *std.Io.Event,
         persistence_path: ?[]const u8,
     ) !Set {
-        const values = try allocator.alloc(ConfiguredBridge, configured.len);
+        const owned_configured = try allocator.alloc(
+            mqtt.broker_config.Bridge,
+            configured.len,
+        );
+        var configured_initialized: usize = 0;
+        errdefer {
+            while (configured_initialized != 0) {
+                configured_initialized -= 1;
+                owned_configured[configured_initialized].deinit(allocator);
+            }
+            allocator.free(owned_configured);
+        }
+        for (configured, owned_configured) |source, *owned| {
+            owned.* = try source.clone(allocator);
+            configured_initialized += 1;
+        }
+
+        const values = try allocator.alloc(
+            ConfiguredBridge,
+            owned_configured.len,
+        );
         errdefer allocator.free(values);
         const connector_resources = try allocator.alloc(
             ConnectorResources,
-            configured.len,
+            owned_configured.len,
         );
         errdefer allocator.free(connector_resources);
         @memset(connector_resources, .{});
@@ -431,7 +454,7 @@ pub const Set = struct {
                 values[initialized].deinit();
             }
         }
-        for (configured, values, connector_resources) |*source, *bridge, *resources| {
+        for (owned_configured, values, connector_resources) |*source, *bridge, *resources| {
             if (source.hasOutbound()) {
                 bridge.* = .{ .outbound = try initOutbound(allocator, io, local, source, resources, shutdown, persistence_path) };
                 initialized += 1;
@@ -531,7 +554,7 @@ pub const Set = struct {
         }
         return .{
             .allocator = allocator,
-            .configured = configured,
+            .configured = owned_configured,
             .values = values,
             .connector_resources = connector_resources,
         };
@@ -548,6 +571,10 @@ pub const Set = struct {
         }
         self.allocator.free(self.connector_resources);
         self.allocator.free(self.values);
+        for (self.configured) |*configured| {
+            configured.deinit(self.allocator);
+        }
+        self.allocator.free(self.configured);
         self.* = undefined;
     }
 
@@ -988,6 +1015,52 @@ test "configured bridge identifiers bind identity and mappings" {
         &stableBridgeId(source),
         &stableBridgeId(mixed),
     ));
+}
+
+test "configured bridge set owns parser configuration lifetime" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var broker = try mqtt.broker.Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    var shutdown: std.Io.Event = .unset;
+    var config = try mqtt.broker_config.parse(allocator,
+        \\listener 1883
+        \\allow_anonymous true
+        \\connection owned-runtime
+        \\address broker.example:2883 backup.example:3883
+        \\topic sensors/# out 0 local/ remote/
+        \\remote_username bridge-user
+        \\remote_password bridge-secret
+    );
+    var config_owned = true;
+    defer if (config_owned) config.deinit(allocator);
+    var bridges = try Set.init(
+        allocator,
+        io,
+        &broker,
+        config.bridges,
+        &shutdown,
+        null,
+    );
+    defer bridges.deinit();
+
+    config.deinit(allocator);
+    config_owned = false;
+    const owned = &bridges.configured[0];
+    try std.testing.expectEqualStrings("owned-runtime", owned.name);
+    try std.testing.expectEqualStrings("broker.example", owned.host);
+    try std.testing.expectEqualStrings(
+        "backup.example",
+        owned.secondary_addresses[0].host,
+    );
+    try std.testing.expectEqualStrings("remote/sensors/#", owned.rules[0].filter);
+    try std.testing.expectEqualStrings("bridge-user", owned.remote_username);
+    try std.testing.expectEqualStrings("bridge-secret", owned.remote_password);
+    try std.testing.expectEqual(
+        owned,
+        bridges.connector_resources[0].connector.source,
+    );
+    bridges.disconnectLocalSources();
 }
 
 test "configured bidirectional bridge never falls back from private mode" {

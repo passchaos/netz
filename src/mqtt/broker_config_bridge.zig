@@ -150,6 +150,71 @@ pub const Bridge = struct {
     notification_topic: []u8 = &.{},
     restart: RestartPolicy = .{},
 
+    /// Deep-copy a validated bridge configuration for a runtime owner. This
+    /// keeps connector callbacks and reconnect state independent from the
+    /// parser document, which is required before bridge configurations can be
+    /// staged and atomically replaced on reload.
+    pub fn clone(
+        self: Bridge,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error!Bridge {
+        var copy = self;
+        copy.name = &.{};
+        copy.host = &.{};
+        copy.secondary_addresses = &.{};
+        copy.rules = &.{};
+        copy.local_client_id = &.{};
+        copy.remote_client_id = &.{};
+        copy.remote_username = &.{};
+        copy.remote_password = &.{};
+        copy.ca_file = &.{};
+        copy.ca_path = &.{};
+        copy.certificate_file = &.{};
+        copy.private_key_file = &.{};
+        copy.private_key_password_file = &.{};
+        copy.alpn = &.{};
+        copy.cipher_suites = &.{};
+        copy.tls12_cipher_suites = &.{};
+        copy.notification_topic = &.{};
+        errdefer copy.deinit(allocator);
+
+        copy.name = try allocator.dupe(u8, self.name);
+        copy.host = try allocator.dupe(u8, self.host);
+        copy.secondary_addresses = try cloneEndpoints(
+            allocator,
+            self.secondary_addresses,
+        );
+        copy.rules = try cloneRules(allocator, self.rules);
+        copy.local_client_id = try cloneBytes(allocator, self.local_client_id);
+        copy.remote_client_id = try cloneBytes(allocator, self.remote_client_id);
+        copy.remote_username = try cloneBytes(allocator, self.remote_username);
+        copy.remote_password = try cloneBytes(allocator, self.remote_password);
+        copy.ca_file = try cloneBytes(allocator, self.ca_file);
+        copy.ca_path = try cloneBytes(allocator, self.ca_path);
+        copy.certificate_file = try cloneBytes(allocator, self.certificate_file);
+        copy.private_key_file = try cloneBytes(allocator, self.private_key_file);
+        copy.private_key_password_file = try cloneBytes(
+            allocator,
+            self.private_key_password_file,
+        );
+        copy.alpn = try cloneBytes(allocator, self.alpn);
+        copy.cipher_suites = try cloneSlice(
+            tls_cipher_suites.Suite,
+            allocator,
+            self.cipher_suites,
+        );
+        copy.tls12_cipher_suites = try cloneSlice(
+            tls_cipher_suites.Tls12Suite,
+            allocator,
+            self.tls12_cipher_suites,
+        );
+        copy.notification_topic = try cloneBytes(
+            allocator,
+            self.notification_topic,
+        );
+        return copy;
+    }
+
     pub fn deinit(self: *Bridge, allocator: std.mem.Allocator) void {
         for (self.rules) |*rule| rule.deinit(allocator);
         allocator.free(self.rules);
@@ -260,6 +325,84 @@ pub const Bridge = struct {
         return topic;
     }
 };
+
+fn cloneBytes(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) std.mem.Allocator.Error![]u8 {
+    return if (value.len == 0) &.{} else allocator.dupe(u8, value);
+}
+
+fn cloneSlice(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    value: []const T,
+) std.mem.Allocator.Error![]T {
+    return if (value.len == 0) &.{} else allocator.dupe(T, value);
+}
+
+fn cloneEndpoints(
+    allocator: std.mem.Allocator,
+    endpoints: []const Endpoint,
+) std.mem.Allocator.Error![]Endpoint {
+    if (endpoints.len == 0) return &.{};
+    const copies = try allocator.alloc(Endpoint, endpoints.len);
+    var initialized: usize = 0;
+    errdefer {
+        while (initialized != 0) {
+            initialized -= 1;
+            copies[initialized].deinit(allocator);
+        }
+        allocator.free(copies);
+    }
+    for (endpoints, copies) |source, *copy| {
+        copy.* = .{
+            .host = try allocator.dupe(u8, source.host),
+            .port = source.port,
+        };
+        initialized += 1;
+    }
+    return copies;
+}
+
+fn cloneRules(
+    allocator: std.mem.Allocator,
+    rules: []const Rule,
+) std.mem.Allocator.Error![]Rule {
+    if (rules.len == 0) return &.{};
+    const copies = try allocator.alloc(Rule, rules.len);
+    var initialized: usize = 0;
+    errdefer {
+        while (initialized != 0) {
+            initialized -= 1;
+            copies[initialized].deinit(allocator);
+        }
+        allocator.free(copies);
+    }
+    for (rules, copies) |source, *copy| {
+        copy.* = try cloneRule(allocator, source);
+        initialized += 1;
+    }
+    return copies;
+}
+
+fn cloneRule(
+    allocator: std.mem.Allocator,
+    source: Rule,
+) std.mem.Allocator.Error!Rule {
+    const filter = try allocator.dupe(u8, source.filter);
+    errdefer allocator.free(filter);
+    const local_prefix = try cloneBytes(allocator, source.local_prefix);
+    errdefer if (local_prefix.len != 0) allocator.free(local_prefix);
+    const remote_prefix = try cloneBytes(allocator, source.remote_prefix);
+    return .{
+        .filter = filter,
+        .qos = source.qos,
+        .local_prefix = local_prefix,
+        .remote_prefix = remote_prefix,
+        .direction = source.direction,
+    };
+}
 
 const Seen = struct {
     address: bool = false,
@@ -1145,6 +1288,94 @@ fn parsePositiveCInt(words: anytype) Error!u32 {
         return error.InvalidInteger;
     }
     return value;
+}
+
+fn testBridgeClone(allocator: std.mem.Allocator) !void {
+    var name = "primary".*;
+    var host = "broker.example".*;
+    var secondary_host = "backup.example".*;
+    var filter = "remote/sensors/#".*;
+    var local_prefix = "local/".*;
+    var remote_prefix = "remote/".*;
+    var username = "bridge-user".*;
+    var password = "bridge-secret".*;
+    var ca_file = "ca.pem".*;
+    var notification_topic = "bridge/state".*;
+    var suites = [_]tls_cipher_suites.Suite{
+        .aes_256_gcm_sha384,
+        .aes_128_gcm_sha256,
+    };
+    var tls12_suites = [_]tls_cipher_suites.Tls12Suite{
+        .ecdhe_ecdsa_aes_128_gcm_sha256,
+    };
+    const endpoints = [_]Endpoint{.{
+        .host = &secondary_host,
+        .port = 2883,
+    }};
+    const rules = [_]Rule{.{
+        .filter = &filter,
+        .qos = .at_least_once,
+        .local_prefix = &local_prefix,
+        .remote_prefix = &remote_prefix,
+        .direction = .both,
+    }};
+    const source = Bridge{
+        .name = &name,
+        .host = &host,
+        .secondary_addresses = @constCast(&endpoints),
+        .rules = @constCast(&rules),
+        .remote_username = &username,
+        .remote_password = &password,
+        .ca_file = &ca_file,
+        .cipher_suites = &suites,
+        .tls12_cipher_suites = &tls12_suites,
+        .notification_topic = &notification_topic,
+    };
+    var copy = try source.clone(allocator);
+    defer copy.deinit(allocator);
+
+    @memset(&name, 'x');
+    @memset(&host, 'x');
+    @memset(&secondary_host, 'x');
+    @memset(&filter, 'x');
+    @memset(&local_prefix, 'x');
+    @memset(&remote_prefix, 'x');
+    @memset(&username, 'x');
+    @memset(&password, 'x');
+    @memset(&ca_file, 'x');
+    @memset(&notification_topic, 'x');
+    suites[0] = .aes_128_ccm_sha256;
+    tls12_suites[0] = .ecdhe_rsa_aes_256_gcm_sha384;
+
+    try std.testing.expectEqualStrings("primary", copy.name);
+    try std.testing.expectEqualStrings("broker.example", copy.host);
+    try std.testing.expectEqualStrings(
+        "backup.example",
+        copy.secondary_addresses[0].host,
+    );
+    try std.testing.expectEqualStrings("remote/sensors/#", copy.rules[0].filter);
+    try std.testing.expectEqualStrings("local/", copy.rules[0].local_prefix);
+    try std.testing.expectEqualStrings("remote/", copy.rules[0].remote_prefix);
+    try std.testing.expectEqualStrings("bridge-user", copy.remote_username);
+    try std.testing.expectEqualStrings("bridge-secret", copy.remote_password);
+    try std.testing.expectEqualStrings("ca.pem", copy.ca_file);
+    try std.testing.expectEqualStrings("bridge/state", copy.notification_topic);
+    try std.testing.expectEqual(
+        tls_cipher_suites.Suite.aes_256_gcm_sha384,
+        copy.cipher_suites[0],
+    );
+    try std.testing.expectEqual(
+        tls_cipher_suites.Tls12Suite.ecdhe_ecdsa_aes_128_gcm_sha256,
+        copy.tls12_cipher_suites[0],
+    );
+}
+
+test "MQTT bridge configuration clone owns all nested state" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testBridgeClone,
+        .{},
+    );
 }
 
 fn parseOneInteger(comptime T: type, words: anytype) Error!T {

@@ -1073,7 +1073,8 @@ Current protocol coverage includes:
   before bind,
   bounded, ordered Mosquitto-compatible `include_dir` expansion and
   supervised single-Session inbound, outbound, mixed, and `topic ... both ...`
-  bridges with strict QoS/prefix mapping, local/remote loop suppression,
+  bridges whose runtime Set deep-owns every nested configuration value for
+  safe staged replacement, with strict QoS/prefix mapping and local/remote loop suppression,
   upstream Session/authentication settings, bounded
   reconnect policy, vail-backed TLS 1.2/1.3 with CA/hostname verification,
   explicit minimum-version policy, separate ordered TLS 1.2/TLS 1.3

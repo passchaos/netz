@@ -304,6 +304,15 @@ a trust source fail before listeners start. The process gate constrains a live
 bridge ClientHello to ChaCha20-Poly1305 and checks the negotiated suite from an
 OpenSSL TLS server.
 
+The configured bridge runtime now deep-copies complete validated bridge
+records, including rules, secondary endpoints, credentials, TLS paths and
+cipher lists. Connector callbacks therefore point into move-stable Set-owned
+storage and the parser document may be released immediately after construction.
+Allocation-failure testing covers every clone boundary and securely clears an
+owned remote password during rollback. This is the ownership prerequisite for
+staging a replacement bridge set during future `bridge_reload_type` support;
+it does not yet claim live bridge task replacement.
+
 TLS and WSS listeners expose the matching `ciphers_tls1.3` directive alongside
 their existing TLS 1.2 `ciphers` policy. The ordered list is deep-owned by the
 configuration and passed to every vail server handshake; unknown or duplicate
