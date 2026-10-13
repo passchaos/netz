@@ -2019,6 +2019,30 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
             + result.stdout
         )
 
+    overlong_v31_bridge = directory / "overlong-v31-bridge-client.conf"
+    overlong_v31_bridge.write_text(
+        f"listener {free_port()} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "connection overlong-v31-client\n"
+        "address localhost\n"
+        "topic # in 0\n"
+        "bridge_protocol_version mqttv31\n"
+        "remote_clientid abcdefghijklmnopqrstuvwx\n"
+    )
+    result = subprocess.run(
+        [str(broker), f"--config={overlong_v31_bridge}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0 or "InvalidClientId" not in result.stdout:
+        raise AssertionError(
+            "overlong MQTT 3.1 bridge Client ID did not fail before serving: "
+            + result.stdout
+        )
+
 
 def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
     password_file = directory / "plaintext.pwfile"
@@ -5518,8 +5542,8 @@ def main() -> None:
         "persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
-        "zero-length Client ID, global/listener auto-ID prefixes, required "
-        "Client ID prefix admission, and outgoing QoS policy, ordered "
+        "zero-length and MQTT 3.1 Client ID bounds, global/listener auto-ID "
+        "prefixes, required Client ID prefix admission, and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, "
         "immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "

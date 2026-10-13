@@ -31,7 +31,7 @@ from mqtt_vectors import (
     will_delay_recovery,
 )
 
-BASE_SCENARIO_COUNT = 161
+BASE_SCENARIO_COUNT = 164
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
@@ -286,6 +286,30 @@ def unsupported_protocol_levels(
                 "healthy PINGRESP after unsupported protocols",
             )
             healthy.sendall(mqtt_packets.gen_disconnect(proto_ver=5))
+
+
+def mqtt31_client_identifier_length(executable: Path, mqtt_packets) -> None:
+    # MQTT 3.1 section "Client Identifier" requires 1-23 characters and an
+    # Identifier Rejected CONNACK for an overlong value. Exercise both the
+    # ASCII boundary and the character (rather than encoded-byte) interpretation.
+    with NetzBroker(executable, connections=3, ignore_errors=True) as broker:
+        for client_id in ("a" * 23, "\u00e9" * 23):
+            with broker.connect() as sock:
+                sock.sendall(mqtt_packets.gen_connect(client_id, proto_ver=3))
+                expect_packet(
+                    sock,
+                    mqtt_packets.gen_connack(rc=0, proto_ver=3),
+                    "MQTT 3.1 maximum Client Identifier",
+                )
+                sock.sendall(mqtt_packets.gen_disconnect(proto_ver=3))
+
+        with broker.connect() as sock:
+            sock.sendall(mqtt_packets.gen_connect("a" * 24, proto_ver=3))
+            expect_packet(
+                sock,
+                mqtt_packets.gen_connack(rc=2, proto_ver=3),
+                "MQTT 3.1 overlong Client Identifier",
+            )
 
 
 def proxy_protocol_v1_v2(executable: Path, mqtt_packets) -> None:
@@ -6190,6 +6214,7 @@ def main() -> None:
     import mqtt_packets  # type: ignore
 
     unsupported_protocol_levels(args.broker, mqtt_packets, mqtt5_rc)
+    mqtt31_client_identifier_length(args.broker, mqtt_packets)
     proxy_protocol_v1_v2(args.broker, mqtt_packets)
     maximum_topic_hierarchy.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,

@@ -1464,7 +1464,7 @@ pub const Connect = struct {
         const password = if ((connect_flags & 0x40) != 0) try readBinary(&cursor) else null;
         if (!cursor.eof()) return error.InvalidPacketType;
         const clean_start = (connect_flags & 0x02) != 0;
-        try validateConnectClientId(protocol, client_id, clean_start);
+        try validateClientIdentifier(protocol, client_id, clean_start);
         return .{
             .protocol = protocol,
             .bridge_mode = bridge_mode,
@@ -2917,7 +2917,7 @@ pub fn writeConnectPacket(
     if (options.bridge_mode and protocol == .v5) {
         return error.InvalidProtocolLevel;
     }
-    try validateConnectClientId(
+    try validateClientIdentifier(
         protocol,
         options.client_id,
         options.clean_start,
@@ -3043,16 +3043,27 @@ fn connectFlags(options: ConnectPacketOptions) u8 {
     return flags;
 }
 
-fn validateConnectClientId(
+/// Validate the Client Identifier rules attached to a CONNECT protocol level.
+/// MQTT 3.1 has a strict 1-23-character bound; later versions deliberately
+/// retain their distinct empty-identifier and server-assignment semantics.
+pub fn validateClientIdentifier(
     protocol: ProtocolVersion,
     client_id: []const u8,
     clean_start: bool,
 ) Error!void {
-    // MQTT 3.1.1 permits an empty Client Identifier only with CleanSession=1.
-    // MQTT 5 removed that restriction: the Server assigns the identifier and
-    // returns it in CONNACK even when Clean Start is 0.
+    // MQTT 3.1 requires 1-23 characters. MQTT 3.1.1 permits an empty Client
+    // Identifier only with CleanSession=1. MQTT 5 removed that restriction:
+    // the Server assigns the identifier and returns it in CONNACK even when
+    // Clean Start is 0.
     switch (protocol) {
-        .v3_1 => if (client_id.len == 0) return error.InvalidClientId,
+        .v3_1 => {
+            const character_count = std.unicode.utf8CountCodepoints(
+                client_id,
+            ) catch return error.InvalidUtf8;
+            if (character_count == 0 or character_count > 23) {
+                return error.InvalidClientId;
+            }
+        },
         .v3_1_1 => if (client_id.len == 0 and !clean_start) {
             return error.InvalidClientId;
         },
@@ -4006,6 +4017,45 @@ test "MQTT 3.1 CONNECT uses MQIsdp and legacy validation" {
         writeConnectPacket(&encoded, allocator, .v3_1, .{
             .client_id = "",
             .clean_start = true,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    const maximum_ascii_id = "abcdefghijklmnopqrstuvw";
+    try writeConnectPacket(&encoded, allocator, .v3_1, .{
+        .client_id = maximum_ascii_id,
+    });
+    parsed = try Connect.parse(allocator, encoded.items);
+    try std.testing.expectEqualStrings(maximum_ascii_id, parsed.client_id);
+    parsed.deinit(allocator);
+
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientId,
+        writeConnectPacket(&encoded, allocator, .v3_1, .{
+            .client_id = "abcdefghijklmnopqrstuvwx",
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), encoded.items.len);
+
+    const maximum_multibyte_id = [_]u8{ 0xc3, 0xa9 } ** 23;
+    try writeConnectPacket(&encoded, allocator, .v3_1, .{
+        .client_id = &maximum_multibyte_id,
+    });
+    parsed = try Connect.parse(allocator, encoded.items);
+    try std.testing.expectEqualSlices(
+        u8,
+        &maximum_multibyte_id,
+        parsed.client_id,
+    );
+    parsed.deinit(allocator);
+
+    const overlong_multibyte_id = [_]u8{ 0xc3, 0xa9 } ** 24;
+    encoded.clearRetainingCapacity();
+    try std.testing.expectError(
+        error.InvalidClientId,
+        writeConnectPacket(&encoded, allocator, .v3_1, .{
+            .client_id = &overlong_multibyte_id,
         }),
     );
     try std.testing.expectEqual(@as(usize, 0), encoded.items.len);

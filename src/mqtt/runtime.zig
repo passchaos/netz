@@ -8426,7 +8426,7 @@ test "MQTT server reports version-aware CONNECT failures" {
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
-            for (0..8) |_| {
+            for (0..9) |_| {
                 const stream = self.listener.accept(self.io) catch |err| {
                     self.err = err;
                     return;
@@ -8465,21 +8465,22 @@ test "MQTT server reports version-aware CONNECT failures" {
         2 + "MQTT".len;
     const valid_v5 = try allocator.dupe(u8, encoded.items);
     defer allocator.free(valid_v5);
+    const mismatched_v31 = try allocator.dupe(u8, valid_v5);
+    defer allocator.free(mismatched_v31);
+    mismatched_v31[level_index] = 3;
+    const unsupported_v6 = try allocator.dupe(u8, valid_v5);
+    defer allocator.free(unsupported_v6);
+    unsupported_v6[level_index] = 6;
+    const invalid_flags = try allocator.dupe(u8, valid_v5);
+    defer allocator.free(invalid_flags);
+    invalid_flags[0] = 0x1f;
     const cases = [_]struct { packet: []const u8, expected: ?[]const u8 }{
         .{
-            .packet = blk: {
-                const packet = try allocator.dupe(u8, valid_v5);
-                packet[level_index] = 3;
-                break :blk packet;
-            },
+            .packet = mismatched_v31,
             .expected = &.{ 0x20, 0x02, 0x00, 0x01 },
         },
         .{
-            .packet = blk: {
-                const packet = try allocator.dupe(u8, valid_v5);
-                packet[level_index] = 6;
-                break :blk packet;
-            },
+            .packet = unsupported_v6,
             .expected = &.{ 0x20, 0x03, 0x00, 0x84, 0x00 },
         },
         .{
@@ -8490,11 +8491,16 @@ test "MQTT server reports version-aware CONNECT failures" {
             .expected = &.{ 0x20, 0x02, 0x00, 0x02 },
         },
         .{
-            .packet = blk: {
-                const packet = try allocator.dupe(u8, valid_v5);
-                packet[0] = 0x1f;
-                break :blk packet;
+            .packet = &.{
+                0x10, 0x26, 0x00, 0x06, 'M',  'Q',  'I', 's', 'd', 'p',
+                0x03, 0x02, 0x00, 0x0a, 0x00, 0x18, 'a', 'b', 'c', 'd',
+                'e',  'f',  'g',  'h',  'i',  'j',  'k', 'l', 'm', 'n',
+                'o',  'p',  'q',  'r',  's',  't',  'u', 'v', 'w', 'x',
             },
+            .expected = &.{ 0x20, 0x02, 0x00, 0x02 },
+        },
+        .{
+            .packet = invalid_flags,
             .expected = &.{ 0x20, 0x03, 0x00, 0x81, 0x00 },
         },
         .{
@@ -8523,9 +8529,6 @@ test "MQTT server reports version-aware CONNECT failures" {
             .expected = null,
         },
     };
-    defer allocator.free(cases[0].packet);
-    defer allocator.free(cases[1].packet);
-    defer allocator.free(cases[3].packet);
     const Peer = struct {
         fn run(
             peer_io: std.Io,

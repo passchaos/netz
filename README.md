@@ -996,7 +996,8 @@ Current protocol coverage includes:
 - MQTT 3.1/3.1.1/5 fixed headers with transactional Remaining Length preflight and
   exact header-only capacity reservation, plus single-reservation transactional
   Remaining Length, UTF-8 string, and Binary Data primitives, CONNECT/CONNACK with Last Will,
-  version-scoped username/password flag validation and payload support, PUBLISH,
+  version-scoped Client Identifier rules (including MQTT 3.1's 1-23-character
+  bound), username/password flag validation and payload support, PUBLISH,
   PUBACK/PUBREC/PUBREL/PUBCOMP acknowledgements, SUBSCRIBE/SUBACK,
   UNSUBSCRIBE/UNSUBACK, PING,
   DISCONNECT with MQTT v5 minimal reason-only encoding, AUTH

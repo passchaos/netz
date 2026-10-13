@@ -12,7 +12,7 @@ and same-client broker results are kept separate.
 | Area | netz | rumqtt / Mosquitto references |
 | --- | --- | --- |
 | Listener socket family | Mosquitto-style `socket_domain ipv4|ipv6` and `bind_interface` are listener-local across TCP, TLS, WS, and WSS. Omitted bind addresses become the selected family's wildcard, explicit address-family mismatches fail configuration when no interface overrides the address, and IPv6-only sockets set `IPV6_V6ONLY` before bind. With neither an address nor `socket_domain`, the configured runner opens separate IPv4 and IPv6 wildcard sockets when supported; both share the logical listener's admission cap and policy. A named interface takes precedence over the listener address and contributes its first address from each selected family without requiring privileged `SO_BINDTODEVICE`. Backend, interface, or explicitly selected family limitations fail closed; only an unavailable family in an all-family listener is skipped. | Mosquitto likewise enumerates all supported families by default, creates a separate socket for each, resolves `bind_interface` through `getifaddrs`, and restricts a listener to the configured family; rumqttd has no equivalent audited listener option |
-| MQTT versions | MQTT 3.1, MQTT 3.1.1 and MQTT 5 packet/runtime; TCP, Unix-domain, WebSocket and secure listeners auto-detect all three versions. MQTT 3.1 preserves its `MQIsdp` protocol name, level-3 CONNECT quirks, mandatory non-empty Client ID, and legacy CONNACK/QoS control shapes instead of being aliased to 3.1.1. Listener-local `accept_protocol_versions` admits any exact combination of `3`, `4`, and `5` and sends version-correct refusal CONNACKs before Session, Will, or route registration. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports 3.1/3.1.1/5 and exposes the same listener version policy |
+| MQTT versions | MQTT 3.1, MQTT 3.1.1 and MQTT 5 packet/runtime; TCP, Unix-domain, WebSocket and secure listeners auto-detect all three versions. MQTT 3.1 preserves its `MQIsdp` protocol name, level-3 CONNECT quirks, required 1-23-character Client Identifier, and legacy CONNACK/QoS control shapes instead of being aliased to 3.1.1. Listener-local `accept_protocol_versions` admits any exact combination of `3`, `4`, and `5` and sends version-correct refusal CONNACKs before Session, Will, or route registration. MQTT 5 Topic Alias uses sparse per-connection storage and supports the complete non-zero u16 range instead of imposing a private small-table cap. | rumqtt clients support 3.1.1/5; Mosquitto broker supports 3.1/3.1.1/5 and exposes the same listener version policy |
 | Trusted proxy ingress | Opt-in, bounded HAProxy PROXY v1/v2 parsing before MQTT CONNECT, TLS or WS/WSS Upgrade, with IPv4/IPv6/Unix endpoints, LOCAL/UNKNOWN handling, CRC32C, ALPN/authority/unique-id/network-namespace, and nested SSL TLVs exposed as owned connection metadata. The production Mosquitto-style config exposes listener-local `enable_proxy_protocol 1|2` and `proxy_protocol_v2_require_tls`; on cleartext v2 listeners, `require_certificate` requires verified connection/session certificate evidence and `use_identity_as_username` accepts only a validated SSL-TLV commonName. Local TLS termination and full-Subject identity remain invalid with v2 | Mosquitto supports listener-level PROXY v1/v2, including address replacement and selected SSL TLVs; rumqttd has no equivalent listener surface in the audited tree |
 | Live broker dispatch | Bounded connection slots and queues; SUBSCRIBE/UNSUBSCRIBE; QoS 0/1/2 fanout; downstream Receive Maximum; cleanup | Both references are production brokers with broader lifecycle support |
 | QoS | Runtime and live broker QoS 0/1/2, including exactly-once route at PUBREL; broker Maximum QoS caps subscription grants and live/durable delivery. Mosquitto-compatible global `max_inflight_messages` defaults to 20, bounds each client's incoming and outgoing QoS 1/2 transactions, advertises MQTT 5 Receive Maximum, enforces the same unadvertised bound for MQTT 3.1.1, and maps zero to the protocol default of 65,535 while retaining independent aggregate/memory bounds. Global `max_inflight_bytes` independently bounds outgoing QoS 1/2 payload bytes for transient connections and durable Sessions through final acknowledgement, and defaults to unlimited | Both brokers support QoS 0/1/2; Mosquitto applies its listener Maximum QoS to grants, delivery, and Wills and exposes the same global inflight settings |
@@ -550,7 +550,7 @@ optional absolute header timeout prevents incomplete proxy prefaces from
 holding listener workers indefinitely.
 
 The selected Mosquitto-derived process gate enables a five-second CONNECT
-deadline on every one of its finite broker processes, so all 225 curated raw
+deadline on every one of its finite broker processes, so all 228 curated raw
 scenarios
 also exercise the bounded admission path rather than merely proving the option
 in an isolated unit test.
@@ -1848,7 +1848,7 @@ property, the result also returns to the fixed path. A real TCP
 fail-first-allocator test covers all four packet types and both wire lengths;
 unlike the audited rumqttd writers, this hot path does not depend on spare
 `BytesMut` capacity. The
-Mosquitto-derived 225-scenario packet gate and MQTT 3.1.1/5 WS/WSS gate remain
+Mosquitto-derived 228-scenario packet gate and MQTT 3.1/3.1.1/5 WS/WSS gate remain
 green. CPU-0-pinned 1-KiB QoS 1 regression runs measured 10.437 us per
 PUBLISH/PUBACK over WebSocket (95,805 operations/s) and 11.541 us over native
 TLS (86,640 operations/s). These check the shared packet receive/send paths
@@ -1866,8 +1866,8 @@ real TCP test sends two 1-KiB packets, disables all allocation after warmup, and
 verifies the prefix scratch remains smaller than the payload while the peer
 parses the complete bytes. WebSocket tests independently verify one-frame
 masked client and unmasked server messages assembled from two parts. The full
-Netz test suite, 225-scenario
-Mosquitto-derived wire gate, and MQTT 3.1.1/5 WS/WSS gate remain green. Five
+Netz test suite, 228-scenario
+Mosquitto-derived wire gate, and MQTT 3.1/3.1.1/5 WS/WSS gate remain green. Five
 CPU-0 native-TLS samples measured 11.292-11.761 us per QoS 1 PUBLISH/PUBACK
 (11.445 us mean). Five WebSocket samples measured 10.448-10.859 us with a
 10.450-us median and 10.534-us mean.
@@ -3128,7 +3128,7 @@ Listeners can also opt into Mosquitto-compatible
 then Session, Will, takeover and live ACL state consistently use the required
 username as the effective Client ID. Missing usernames receive Not Authorized;
 tests prove two different wire Client IDs with one username resume/take over the
-same durable Session. The 225-scenario Mosquitto-derived wire gate runs the
+same durable Session. The 228-scenario Mosquitto-derived wire gate runs the
 same policy through the standalone broker option, including exact Session
 Present, takeover DISCONNECT and missing-username refusal bytes.
 `zig build interop-mqtt-listener-mount-mosquitto -Doptimize=ReleaseFast`
@@ -3319,7 +3319,7 @@ success/revocation pairs through the production configuration path. The
 P-384 and Ed25519 paths also reject authenticated signature mutations before
 any listener binds.
 
-`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 225
+`zig build interop-mqtt-mosquitto-vectors -Doptimize=ReleaseFast` now runs 228
 raw MQTT scenarios derived directly from Mosquitto `5cd25465`'s packet
 generators: two source-locked PROXY protocol cases consume Mosquitto's v1 TCP4
 and v2 IPv4
@@ -3909,7 +3909,9 @@ overflow case now covers both protocol versions and the exact advertised
 Receive Maximum: MQTT 5 receives DISCONNECT 0x93, while MQTT 3.1.1 closes
 without an unrepresentable reason packet. Server-side admission enforces the
 configured inbound limit in MQTT 3.1.1 even though only MQTT 5 can advertise it
-as a CONNACK property. All 225 curated scenarios pass. A separate
+as a CONNACK property. All 228 curated scenarios pass. The MQTT 3.1 additions
+also verify successful 23-character ASCII and multibyte Client Identifiers and
+the required Identifier Rejected CONNACK for 24 characters. A separate
 source-hash-locked adapter now executes every scenario in Mosquitto's complete
 `AUTH.json`, `CONNECT.json`, `CONNACK.json`, `DISCONNECT.json`, `FLOW.json`,
 `FORBIDDEN.json`, `OTHER.json`, `PINGREQ.json`, `PINGRESP.json`,
@@ -4375,6 +4377,6 @@ proxy evidence for the entire suite.
    sequences, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
    semantics.
-   The 225
+   The 228
    curated scenarios and nineteen complete portable JSON files still do not
    cover the full protocol/conformance suite.

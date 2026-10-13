@@ -1966,6 +1966,28 @@ test "MQTT broker config applies inbound bridge defaults" {
     );
 }
 
+test "MQTT broker config enforces MQTT 3.1 bridge Client ID length" {
+    const allocator = std.testing.allocator;
+    const listener = "listener 1883\nallow_anonymous true\n";
+    var maximum = try parse(allocator, listener ++
+        "connection maximum-v31-client\naddress localhost\n" ++
+        "topic # in 0\nbridge_protocol_version mqttv31\n" ++
+        "remote_clientid abcdefghijklmnopqrstuvw\n");
+    defer maximum.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "abcdefghijklmnopqrstuvw",
+        maximum.bridges[0].clientId(),
+    );
+
+    try std.testing.expectError(
+        error.InvalidClientId,
+        parse(allocator, listener ++
+            "connection overlong-v31-client\naddress localhost\n" ++
+            "topic # in 0\nbridge_protocol_version mqttv31\n" ++
+            "remote_clientid abcdefghijklmnopqrstuvwx\n"),
+    );
+}
+
 test "MQTT broker config rejects incomplete or unsupported bridges" {
     const allocator = std.testing.allocator;
     const listener = "listener 1883\nallow_anonymous true\n";

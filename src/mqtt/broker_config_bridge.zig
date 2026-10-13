@@ -777,6 +777,11 @@ pub const Builder = struct {
     ) Error!Bridge {
         if (!self.seen.address) return error.BridgeAddressRequired;
         if (self.rules.items.len == 0) return error.BridgeTopicRequired;
+        try mqtt.validateClientIdentifier(
+            self.protocol,
+            self.clientId(),
+            self.clean_session,
+        );
         if (self.bind_address) |local_address| {
             try validateEndpointFamily(self.host, local_address);
             for (self.secondary_addresses.items) |endpoint| {

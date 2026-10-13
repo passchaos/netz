@@ -1162,7 +1162,7 @@ def run_bidirectional_bridge_case(
             else ""
         )
         + f"local_clientid configured-duplex-local-{label}\n"
-        f"remote_clientid configured-duplex-remote-{label}\n"
+        f"remote_clientid duplex-remote-v{protocol_level}\n"
         "notifications false\n"
     )
     upstream_log = directory / f"bridge-bidirectional-{label}-upstream.log"
