@@ -376,6 +376,12 @@ to the QUIC offset and rejects prefixes that have not reached the socket.
 Receive polling delivers the complete reliable prefix before the one-shot reset
 event, waits across reordered gaps, ignores reordered Reliable Size increases,
 and never lets automatic abandoned-stream cleanup reclaim the prefix early.
+The real TLS/QUIC stream-churn binary exposes `--reliable-reset`; its repository
+gate retains the ordinary reset/loss and all-FIN/reorder baselines, then repeats
+the mixed FIN/reset shape with RESET_STREAM_AT under both ACK loss and outbound
+STREAM/reset reordering. A one-run eight-stream, 4-KiB smoke delivered the exact
+17,408 expected bytes and four reset events in both reliable fault modes, with
+five client datagrams actually held in the reorder case.
 After STOP_SENDING reaches the socket, standalone sessions discard any
 contiguous receive bytes already buffered for that direction and return only
 connection-level credit with MAX_DATA. They deliberately do not enlarge the

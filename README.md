@@ -683,7 +683,9 @@ Current protocol coverage includes:
   draft-ietf-quic-reliable-stream-reset-09 negotiation and RESET_STREAM_AT
   codec/state/recovery support, including 0-RTT capability memory, decreasing
   Reliable Size, reliable-prefix retransmission, and WebTransport delivery
-  before the terminal reset event,
+  before the terminal reset event; the real-handshake WebTransport churn gate
+  exercises both ordinary and reliable reset under deterministic loss and
+  packet reordering,
   RFC 9221 QUIC DATAGRAM negotiation limits with 1-RTT send helpers,
   MTU-bounded multi-frame batch packing with exact logical-prefix progress,
   configurable receive queues plus caller-buffer single and up-to-64-item

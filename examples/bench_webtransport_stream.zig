@@ -343,7 +343,16 @@ pub fn main(init: std.process.Init) !void {
                 }
                 send_calls += 1;
             }
-            try client.resetStream(stream_id, cancellation_code);
+            if (config.reliable_reset) {
+                try client.resetStreamReliablyWithDeadline(
+                    stream_id,
+                    cancellation_code,
+                    reset_prefix_bytes,
+                    send_deadline,
+                );
+            } else {
+                try client.resetStream(stream_id, cancellation_code);
+            }
             offset.* = payload.len;
         }
         const writes = try allocator.alloc(
@@ -445,6 +454,7 @@ pub fn main(init: std.process.Init) !void {
         \\  receive window: {d}
         \\  reset every N streams: {d}
         \\  reset streams: {d}
+        \\  reset mode: {s}
         \\  bytes before reset: {d}
         \\  simulated loss percent: {d}
         \\  datagrams considered: {d}
@@ -472,6 +482,7 @@ pub fn main(init: std.process.Init) !void {
         config.stream_window,
         config.reset_every,
         resetStreamCount(config),
+        if (config.reliable_reset) "reliable" else "ordinary",
         reset_prefix_bytes,
         config.loss_pct,
         loss_state.considered.load(.monotonic),
@@ -504,6 +515,7 @@ const Config = struct {
     stream_slices: usize = 1,
     reset_every: usize = 0,
     reset_after_bytes: usize = 1024,
+    reliable_reset: bool = false,
     loss_pct: u8 = 0,
     reorder_every: usize = 0,
     fault_direction: FaultDirection = .server,
@@ -570,6 +582,8 @@ fn parseArgs(
                 arg["--reset-after-bytes=".len..],
                 10,
             );
+        } else if (std.mem.eql(u8, arg, "--reliable-reset")) {
+            config.reliable_reset = true;
         } else if (std.mem.startsWith(u8, arg, "--loss-pct=")) {
             config.loss_pct = try std.fmt.parseInt(
                 u8,
@@ -599,6 +613,11 @@ fn parseArgs(
         return error.InvalidArgument;
     }
     if (!config.send_all and config.stream_slices != 1) {
+        return error.InvalidArgument;
+    }
+    if (config.reliable_reset and
+        (config.reset_every == 0 or config.reset_after_bytes == 0))
+    {
         return error.InvalidArgument;
     }
     return config;

@@ -43,12 +43,17 @@ run_case() {
     grep -Fq "  total transfer bytes: $expected_bytes" "$output"
     grep -Fq "  streams: $streams" "$output"
     grep -Fq "  reset streams: $reset_streams" "$output"
+    if [[ $label == reliable-* ]]; then
+      grep -Fq '  reset mode: reliable' "$output"
+    else
+      grep -Fq '  reset mode: ordinary' "$output"
+    fi
     case $label in
-      loss)
+      loss|reliable-loss)
         grep -Fq '  simulated loss percent: 5' "$output"
         awk '/  datagrams dropped:/ { if ($3 + 0 > 0) found=1 } END { exit !found }' "$output"
         ;;
-      client-reorder)
+      client-reorder|reliable-client-reorder)
         grep -Fq '  reorder every: 5' "$output"
         grep -Fq '  fault direction: client' "$output"
         awk '/  datagrams held:/ { if ($3 + 0 > 0) found=1 } END { exit !found }' "$output"
@@ -77,3 +82,10 @@ finished_streams=$streams
 expected_bytes=$((streams * transfer_bytes))
 run_case client-reorder --reorder-every=5 --fault-direction=client
 reset_every=$saved_reset_every
+
+reset_streams=$((streams / reset_every))
+finished_streams=$((streams - reset_streams))
+expected_bytes=$((finished_streams * transfer_bytes + reset_streams * reset_prefix))
+run_case reliable-loss --reliable-reset --loss-pct=5
+run_case reliable-client-reorder --reliable-reset \
+  --reorder-every=5 --fault-direction=client
