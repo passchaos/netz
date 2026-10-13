@@ -306,6 +306,30 @@ test "HTTP/1 streaming chunked reader bounds a complete size line" {
         error.ChunkExtensionTooLarge,
         reader.readRequest(&context, Context.begin, Context.consume),
     );
+
+    var invalid_extension_input: std.ArrayList(u8) = .empty;
+    defer invalid_extension_input.deinit(allocator);
+    try invalid_extension_input.appendSlice(
+        allocator,
+        head ++ "1;name=bad value\r\nx\r\n0\r\n\r\n",
+    );
+    var invalid_extension_source = Source{};
+    var invalid_extension_reader = Reader{
+        .allocator = allocator,
+        .context = &invalid_extension_source,
+        .read_some = Source.readSome,
+        .inbuf = &invalid_extension_input,
+        .limits = .{ .max_head_bytes = 1024, .max_body_bytes = 1 },
+        .options = .{},
+    };
+    try std.testing.expectError(
+        error.InvalidChunk,
+        invalid_extension_reader.readRequest(
+            &context,
+            Context.begin,
+            Context.consume,
+        ),
+    );
 }
 
 test "HTTP/1 streaming request reads fixed body without aggregation" {

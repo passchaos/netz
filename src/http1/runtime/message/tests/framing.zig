@@ -60,6 +60,19 @@ test "HTTP/1 message framing counts decoded chunk payload only" {
     );
 }
 
+test "HTTP/1 message framing rejects malformed chunk extensions" {
+    const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
+    try std.testing.expectError(
+        error.InvalidChunk,
+        targetLength(
+            head ++ "1;name=bad value\r\nx\r\n0\r\n\r\n",
+            1024,
+            1,
+            null,
+        ),
+    );
+}
+
 test "HTTP/1 message framing bounds chunk extensions and trailers independently" {
     const head = "POST / HTTP/1.1\r\nHost: example\r\nTransfer-Encoding: chunked\r\n\r\n";
     const trailer_fields = "Digest: abc\r\n\r\n";

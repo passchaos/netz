@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
+const chunk_extension = @import("chunk_extension.zig");
 pub const content_coding = @import("../http/content_coding.zig");
 
 pub const runtime = @import("runtime.zig");
@@ -2753,7 +2754,7 @@ fn scanChunkedBody(bytes: []const u8) Error!ChunkedBodyScan {
         if (semi != line.len) {
             extension_bytes = std.math.add(usize, extension_bytes, line.len - semi) catch return error.ChunkExtensionTooLarge;
             if (extension_bytes > max_chunk_extension_bytes) return error.ChunkExtensionTooLarge;
-            try validateChunkExtension(line[semi + 1 ..]);
+            try chunk_extension.validate(line[semi + 1 ..]);
         }
         const size_part = try chunkSizePart(line[0..semi]);
         const size = try parseChunkSize(size_part);
@@ -2937,16 +2938,6 @@ fn trailerNameDeclared(
         }
     }
     return false;
-}
-
-fn validateChunkExtension(extension: []const u8) Error!void {
-    for (extension) |byte| {
-        // Hyper rejects bare LF inside ignored chunk extensions because some
-        // permissive intermediaries accidentally treat it as a line boundary.
-        // Reject CR too unless it is the actual CRLF delimiter consumed by the
-        // caller; otherwise peers can disagree about where the chunk header ends.
-        if (byte == 0x0a or byte == 0x0d) return error.InvalidChunk;
-    }
 }
 
 fn chunkSizePart(raw_size: []const u8) Error![]const u8 {
@@ -4959,6 +4950,30 @@ test "HTTP/1 chunked extensions are bounded" {
     try std.testing.expectError(error.InvalidChunk, parseChunkSize(" 1A "));
     try std.testing.expectError(error.InvalidChunk, parseChunkSize("1A "));
     try std.testing.expectEqual(@as(usize, 0x1a), try parseChunkSize("1A"));
+}
+
+test "HTTP/1 aggregate chunked parser validates extension grammar" {
+    const allocator = std.testing.allocator;
+    var decoded = try decodeChunked(
+        allocator,
+        "1; foo = bar ; quoted = \"one,two;three\\\"\"\r\nx\r\n" ++
+            "0; final\r\n\r\n",
+        .{},
+    );
+    defer decoded.deinit(allocator);
+    try std.testing.expectEqualStrings("x", decoded.body);
+
+    for ([_][]const u8{
+        "1;bad/name=value\r\nx\r\n0\r\n\r\n",
+        "1;name=\r\nx\r\n0\r\n\r\n",
+        "1;name=\"unterminated\r\nx\r\n0\r\n\r\n",
+        "1;name=value;;next=ok\r\nx\r\n0\r\n\r\n",
+    }) |invalid| {
+        try std.testing.expectError(
+            error.InvalidChunk,
+            decodeChunked(allocator, invalid, .{}),
+        );
+    }
 }
 
 test "HTTP/1 parser decodes chunked transfer bodies" {

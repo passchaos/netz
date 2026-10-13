@@ -128,6 +128,10 @@ benchmark response:
 - Transfer-Encoding parsing validates coding and parameter tokens without
   allocation, honors commas inside quoted parameter values, rejects malformed
   or unterminated parameters, and rejects parameters on `chunked` itself;
+- aggregate, pipeline-boundary, and streaming chunked readers share one RFC
+  9112 chunk-extension parser. It accepts token or quoted-string values with
+  bad whitespace, rejects empty names/values, invalid separators, controls and
+  unterminated quoted strings, and retains the existing cumulative size bound;
 - low-level request/response writers apply the same Host, HTTP-version and
   Transfer-Encoding grammar before reserving output; requests additionally
   reject missing or mismatched framing and both directions reject simultaneous

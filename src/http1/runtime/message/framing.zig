@@ -1,6 +1,7 @@
 const std = @import("std");
 const http1 = @import("../../mod.zig");
 const wire = @import("../../../internal/wire.zig");
+const chunk_extension = @import("../../chunk_extension.zig");
 
 pub const Error = http1.Error || error{
     HeadersTooLarge,
@@ -298,7 +299,7 @@ pub fn chunkedBodyLayout(
             if (extension_bytes > http1.max_chunk_extension_bytes) {
                 return error.ChunkExtensionTooLarge;
             }
-            try validateChunkExtension(line[semi + 1 ..]);
+            try chunk_extension.validate(line[semi + 1 ..]);
         }
         const size = try http1.parseChunkSize(try chunkSizePart(line[0..semi]));
         line_overhead_bytes = std.math.add(
@@ -381,12 +382,6 @@ fn chunkSizePart(raw_size: []const u8) Error![]const u8 {
         if (byte != ' ' and byte != '\t') return error.InvalidChunk;
     }
     return raw_size[0..end];
-}
-
-fn validateChunkExtension(extension: []const u8) Error!void {
-    for (extension) |byte| {
-        if (byte == '\r' or byte == '\n') return error.InvalidChunk;
-    }
 }
 
 const ChunkedTrailerLayout = struct {

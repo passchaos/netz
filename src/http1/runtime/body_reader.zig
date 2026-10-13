@@ -1,5 +1,6 @@
 const std = @import("std");
 const http1 = @import("../mod.zig");
+const chunk_extension = @import("../chunk_extension.zig");
 
 const direct_body_read_bytes: usize = 64 * 1024;
 // Four 16-KiB chunks fit in one read for the common streaming shape while the
@@ -754,6 +755,7 @@ pub fn Reader(comptime RuntimeError: type) type {
                         {
                             return error.ChunkExtensionTooLarge;
                         }
+                        try chunk_extension.validate(line[semi + 1 ..]);
                     }
                     const size = try http1.parseChunkSize(
                         try chunkSizePart(line[0..semi]),
