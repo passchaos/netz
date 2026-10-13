@@ -257,7 +257,11 @@ attempt retains status/custom headers/bounded entity state, then two accepted
 Sessions exchange independent DATAGRAMs and associated streams, send distinct
 CLOSE metadata, and are removed separately without destroying H3. Its third
 open is rejected locally from the peer SETTINGS/local-cap minimum before a
-request stream is consumed. Both
+request stream is consumed. Targeted receive remains available, while
+`pollAny`/`receiveAny*` use a stable Session-ID round-robin cursor so a busy
+Session cannot starve another; deterministic readiness tests cover wraparound
+and stale-cursor removal, and the real TLS test receives both DATAGRAM and
+reverse-stream events through this whichever-ready path. Both
 endpoint roles also preserve a RESET_STREAM that overtakes its fragmented
 association prefix, so the WebTransport layer reports the mapped terminal
 event instead of the generic HTTP/3 router consuming it.

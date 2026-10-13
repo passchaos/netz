@@ -26,6 +26,7 @@ pub const EndpointClientOptions = endpoint_client.Options;
 pub const EndpointClientSessionOptions = endpoint_client.SessionOptions;
 pub const EndpointClientOpenResult = endpoint_client.OpenResult;
 pub const EndpointClientEvent = endpoint_client.Event;
+pub const EndpointClientAnyEvent = endpoint_client.AnyEvent;
 pub const EndpointClientRejection = endpoint_client.Rejection;
 
 test "WebTransport sessions keep inbound and outbound close storage compact" {

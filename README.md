@@ -1224,7 +1224,9 @@ Current protocol coverage includes:
   authenticated `EndpointClient` owns one H3 reader while stable per-Session
   objects share global QUIC stream IDs, preserve bounded non-2xx admission
   metadata, enforce both peer SETTINGS and a local Session cap, and expose
-  targeted DATAGRAM, associated-stream, CLOSE and removal operations,
+  targeted DATAGRAM, associated-stream, CLOSE and removal operations, plus
+  stable-key `pollAny`/`receiveAny*` fairness across ready Sessions even after
+  hash-map growth or removal of the prior producer,
   modern
   `0x41 + Session ID` bidirectional and `0x54 + Session ID` unidirectional
   stream association, real-handshake bidi/uni open/send/receive with

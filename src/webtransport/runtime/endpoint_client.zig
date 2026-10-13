@@ -9,6 +9,7 @@ const webtransport = @import("../mod.zig");
 const http3 = @import("../../http3/mod.zig");
 const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
+const round_robin = @import("../../internal/round_robin.zig");
 const connect_headers = @import("connect/headers.zig");
 const session_control = @import("session_control.zig");
 const handshake_stream = @import("stream.zig");
@@ -87,6 +88,16 @@ pub const Event = union(enum) {
             .datagram => |*value| value.deinit(allocator),
             .stream, .session => {},
         }
+        self.* = undefined;
+    }
+};
+
+pub const AnyEvent = struct {
+    session_id: webtransport.SessionId,
+    event: Event,
+
+    pub fn deinit(self: *AnyEvent, allocator: std.mem.Allocator) void {
+        self.event.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -340,6 +351,7 @@ pub const Client = struct {
     h3: http3.runtime.HandshakeClient,
     max_sessions: usize,
     sessions: std.AutoHashMapUnmanaged(u62, *Session) = .empty,
+    last_ready_session_id: ?u62 = null,
 
     pub fn connect(
         allocator: std.mem.Allocator,
@@ -770,6 +782,9 @@ pub const Client = struct {
         const removed = self.sessions.fetchRemove(session_id.value).?.value;
         removed.deinit(self);
         self.allocator.destroy(removed);
+        if (self.last_ready_session_id == session_id.value) {
+            self.last_ready_session_id = null;
+        }
         return true;
     }
 
@@ -781,6 +796,15 @@ pub const Client = struct {
         if (stream_buffer.len == 0) return error.BufferTooShort;
         const session_value = self.session(session_id) orelse
             return error.InvalidSessionState;
+        return self.pollSession(session_value, stream_buffer);
+    }
+
+    fn pollSession(
+        self: *Client,
+        session_value: *Session,
+        stream_buffer: []u8,
+    ) Error!?Event {
+        const session_id = session_value.session_id;
         if (session_value.close_response_pending) {
             self.h3.trySendRequestBody(
                 session_id.value,
@@ -848,6 +872,41 @@ pub const Client = struct {
         return null;
     }
 
+    /// Return one already-buffered event from any active Session. The stable
+    /// Session-ID cursor survives hash-map rehashes and advances only when a
+    /// producer yields an event, preventing one continuously ready Session
+    /// from starving its siblings.
+    pub fn pollAny(
+        self: *Client,
+        stream_buffer: []u8,
+    ) Error!?AnyEvent {
+        if (stream_buffer.len == 0) return error.BufferTooShort;
+        return round_robin.poll(
+            u62,
+            @TypeOf(self.sessions),
+            AnyEvent,
+            &self.sessions,
+            &self.last_ready_session_id,
+            .{ .client = self, .stream_buffer = stream_buffer },
+            struct {
+                fn run(
+                    context: anytype,
+                    session_id: u62,
+                    session_ptr: **Session,
+                ) Error!?AnyEvent {
+                    const event = (try context.client.pollSession(
+                        session_ptr.*,
+                        context.stream_buffer,
+                    )) orelse return null;
+                    return .{
+                        .session_id = .init(session_id),
+                        .event = event,
+                    };
+                }
+            }.run,
+        );
+    }
+
     pub fn receiveWithDeadline(
         self: *Client,
         session_id: webtransport.SessionId,
@@ -883,6 +942,81 @@ pub const Client = struct {
             }),
         );
     }
+
+    pub fn receiveAnyWithDeadline(
+        self: *Client,
+        stream_buffer: []u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) TimeoutError!AnyEvent {
+        _ = try deadline_policy.usableAwake(
+            self.h3.established.connection.endpoint.io,
+            deadline,
+        );
+        while (true) {
+            if (try self.pollAny(stream_buffer)) |event| return event;
+            const session_id = self.firstSessionId() orelse
+                return error.InvalidSessionState;
+            try self.h3.receiveDetachedResponseProgressWithDeadline(
+                session_id,
+                deadline,
+            );
+        }
+    }
+
+    pub fn receiveAnyWithTimeout(
+        self: *Client,
+        stream_buffer: []u8,
+        timeout: std.Io.Duration,
+    ) TimeoutError!AnyEvent {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.receiveAnyWithDeadline(
+            stream_buffer,
+            .fromNow(self.h3.established.connection.endpoint.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }),
+        );
+    }
+
+    fn firstSessionId(self: *const Client) ?u62 {
+        var iterator = self.sessions.keyIterator();
+        return if (iterator.next()) |key| key.* else null;
+    }
+
+    pub const testing = struct {
+        const ReadyProbe = struct {
+            ready: []const u62,
+
+            fn poll(
+                self: *const ReadyProbe,
+                session_id: u62,
+                _: **Session,
+            ) Error!?u62 {
+                if (std.mem.indexOfScalar(
+                    u62,
+                    self.ready,
+                    session_id,
+                ) == null) return null;
+                return session_id;
+            }
+        };
+
+        pub fn pollReadySessionId(
+            client: *Client,
+            ready: []const u62,
+        ) Error!?u62 {
+            var probe = ReadyProbe{ .ready = ready };
+            return round_robin.poll(
+                u62,
+                @TypeOf(client.sessions),
+                u62,
+                &client.sessions,
+                &client.last_ready_session_id,
+                &probe,
+                ReadyProbe.poll,
+            );
+        }
+    };
 
     fn sessionLookup(self: *const Client) stream_association.SessionLookup {
         return .{

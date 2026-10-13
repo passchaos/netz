@@ -71,6 +71,48 @@ test "WebTransport endpoint client rejects an empty local Session budget" {
     );
 }
 
+test "WebTransport endpoint client rotates ready Sessions fairly" {
+    const allocator = std.testing.allocator;
+    var client = runtime.EndpointClient{
+        .allocator = allocator,
+        .h3 = undefined,
+        .max_sessions = 3,
+    };
+    defer client.sessions.deinit(allocator);
+    var storage: [3]runtime.EndpointClientSession = undefined;
+    const ids = [_]u62{ 0, 4, 8 };
+    for (ids, 0..) |session_id, index| {
+        try client.sessions.put(allocator, session_id, &storage[index]);
+    }
+
+    var order: [ids.len]u62 = undefined;
+    for (&order) |*session_id| {
+        session_id.* = (try runtime.EndpointClient.testing
+            .pollReadySessionId(&client, &ids)) orelse
+            return error.TestUnexpectedResult;
+    }
+    for (order, 0..) |session_id, index| {
+        for (order[0..index]) |earlier| {
+            try std.testing.expect(session_id != earlier);
+        }
+    }
+    try std.testing.expectEqual(
+        order[0],
+        (try runtime.EndpointClient.testing.pollReadySessionId(
+            &client,
+            &ids,
+        )).?,
+    );
+
+    const stale = order[0];
+    try std.testing.expect(client.sessions.remove(stale));
+    client.last_ready_session_id = stale;
+    const after_removal = (try runtime.EndpointClient.testing
+        .pollReadySessionId(&client, &ids)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(after_removal != stale);
+}
+
 test "WebTransport endpoint client multiplexes two authenticated Sessions" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
@@ -121,66 +163,6 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
             self.runFallible() catch |err| {
                 self.err = err;
             };
-        }
-
-        fn expectDatagram(
-            client: *runtime.EndpointClient,
-            session_id: webtransport.SessionId,
-            expected: []const u8,
-        ) !void {
-            var buffer: [32]u8 = undefined;
-            while (true) {
-                var event = try client.receiveWithTimeout(
-                    session_id,
-                    &buffer,
-                    .fromSeconds(3),
-                );
-                defer event.deinit(allocator);
-                switch (event) {
-                    .datagram => |datagram| {
-                        try std.testing.expectEqualStrings(
-                            expected,
-                            datagram.payload,
-                        );
-                        return;
-                    },
-                    else => return error.TestUnexpectedResult,
-                }
-            }
-        }
-
-        fn expectStream(
-            client: *runtime.EndpointClient,
-            session_id: webtransport.SessionId,
-            expected: []const u8,
-        ) !void {
-            var buffer: [32]u8 = undefined;
-            var received: usize = 0;
-            while (true) {
-                var event = try client.receiveWithTimeout(
-                    session_id,
-                    &buffer,
-                    .fromSeconds(3),
-                );
-                defer event.deinit(allocator);
-                switch (event) {
-                    .stream => |stream| {
-                        if (stream != .data) {
-                            return error.TestUnexpectedResult;
-                        }
-                        try std.testing.expectEqualStrings(
-                            expected[received..][0..stream.data.bytes],
-                            buffer[0..stream.data.bytes],
-                        );
-                        received += stream.data.bytes;
-                        if (stream.data.fin) {
-                            try std.testing.expectEqual(expected.len, received);
-                            return;
-                        }
-                    },
-                    else => return error.TestUnexpectedResult,
-                }
-            }
         }
 
         fn runFallible(self: *@This()) !void {
@@ -266,8 +248,27 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
 
             try first.sendDatagram(&client, "first");
             try second.sendDatagram(&client, "second");
-            try expectDatagram(&client, first.id(), "echo-first");
-            try expectDatagram(&client, second.id(), "echo-second");
+            var datagrams_seen = [_]bool{ false, false };
+            var any_buffer: [32]u8 = undefined;
+            for (0..2) |_| {
+                var ready = try client.receiveAnyWithTimeout(
+                    &any_buffer,
+                    .fromSeconds(3),
+                );
+                defer ready.deinit(allocator);
+                if (ready.event != .datagram) {
+                    return error.TestUnexpectedResult;
+                }
+                const index: usize = if (ready.session_id.value ==
+                    first.id().value) 0 else if (ready.session_id.value ==
+                    second.id().value) 1 else return error.TestUnexpectedResult;
+                try std.testing.expect(!datagrams_seen[index]);
+                try std.testing.expectEqualStrings(
+                    if (index == 0) "echo-first" else "echo-second",
+                    ready.event.datagram.payload,
+                );
+                datagrams_seen[index] = true;
+            }
 
             const first_stream = try first.openBidirectionalStream(&client);
             const second_stream = try second.openBidirectionalStream(&client);
@@ -283,8 +284,40 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                 "stream-second",
                 true,
             );
-            try expectStream(&client, first.id(), "echo-stream-first");
-            try expectStream(&client, second.id(), "echo-stream-second");
+            var stream_bytes = [_]usize{ 0, 0 };
+            var streams_finished = [_]bool{ false, false };
+            while (!streams_finished[0] or !streams_finished[1]) {
+                var ready = try client.receiveAnyWithTimeout(
+                    &any_buffer,
+                    .fromSeconds(3),
+                );
+                defer ready.deinit(allocator);
+                if (ready.event != .stream or
+                    ready.event.stream != .data)
+                {
+                    return error.TestUnexpectedResult;
+                }
+                const index: usize = if (ready.session_id.value ==
+                    first.id().value) 0 else if (ready.session_id.value ==
+                    second.id().value) 1 else return error.TestUnexpectedResult;
+                const expected = if (index == 0)
+                    "echo-stream-first"
+                else
+                    "echo-stream-second";
+                const stream = ready.event.stream.data;
+                try std.testing.expectEqualStrings(
+                    expected[stream_bytes[index]..][0..stream.bytes],
+                    any_buffer[0..stream.bytes],
+                );
+                stream_bytes[index] += stream.bytes;
+                if (stream.fin) {
+                    try std.testing.expectEqual(
+                        expected.len,
+                        stream_bytes[index],
+                    );
+                    streams_finished[index] = true;
+                }
+            }
             try first.close(&client, 81, "first");
             try second.close(&client, 82, "second");
             try self.done.wait(self.io);
