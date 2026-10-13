@@ -693,7 +693,9 @@ pub const Connection = struct {
                 std.Io.Timestamp.now(self.io, .real).toMilliseconds(),
             )),
         ) catch |err| switch (err) {
-            error.OutOfMemory => return,
+            error.OutOfMemory,
+            error.TicketDiscarded,
+            => return,
             else => {
                 self.records.tls13.failed = true;
                 return err;

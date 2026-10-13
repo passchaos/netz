@@ -124,9 +124,10 @@ test "NewSessionTicket codec rejects invalid QUIC early-data values" {
         .allow_early_data = true,
     });
     encoded.items[encoded.items.len - 1] = 0xfe;
+    const parsed = try ticket.codec.parse(encoded.items);
     try std.testing.expectError(
         error.InvalidEarlyDataSize,
-        ticket.codec.parse(encoded.items),
+        ticket.codec.validateQuicEarlyDataSize(parsed.max_early_data_size),
     );
 }
 
@@ -475,6 +476,28 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
                 return;
             };
             defer established.deinit();
+            var discard_message: std.ArrayList(u8) = .empty;
+            defer discard_message.deinit(shared.endpoint.allocator);
+            ticket.codec.write(
+                &discard_message,
+                shared.endpoint.allocator,
+                .{
+                    .lifetime_seconds = 0,
+                    .age_add = 16,
+                    .nonce = &.{0x10},
+                    .ticket = "discard-ticket",
+                },
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
+            established.connection.sendPostHandshakeCrypto(
+                &established.post_handshake_send_crypto_offset,
+                discard_message.items,
+            ) catch |err| {
+                shared.err = err;
+                return;
+            };
             _ = established.issueSessionTicket(shared.endpoint.io, .{
                 .store = shared.store,
                 .now_ms = 1000,
@@ -508,6 +531,12 @@ test "integrated handshake issues caches and automatically resumes a ticket" {
             .cipher_suites = &.{.aes_256_gcm_sha384},
         },
     );
+    try first_client.receiveAndCacheSessionTicket(.{
+        .cache = &client_cache,
+        .server_id = "localhost:443",
+        .now_ms = 1000,
+    });
+    try std.testing.expectEqual(@as(usize, 0), client_cache.count());
     try first_client.receiveAndCacheSessionTicket(.{
         .cache = &client_cache,
         .server_id = "localhost:443",

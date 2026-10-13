@@ -1076,6 +1076,8 @@ extension vector, while ignoring genuinely unknown extensions;
 the stream-TLS codec preserves the server's exact RFC 8446
 `max_early_data_size`, including finite and zero values, rather than imposing
 QUIC's sentinel rule;
+zero-lifetime tickets are consumed and discarded without replacing an existing
+cache entry or failing the established HTTP connection;
 servers issue a fresh stateless ticket after full and resumed handshakes and
 fall back to certificate authentication when an opaque ticket is invalid.
 Both HTTP pools collect those post-handshake tickets after response traffic

@@ -120,7 +120,9 @@ extraction and PSK-DHE resumption without enabling early data. Ticket extension
 parsing uses full-namespace duplicate detection, rejects recognized misplaced
 extensions and the RFC-forbidden 65,535-byte vector, and ignores genuinely
 unknown extensions. Stream TLS preserves exact finite or zero RFC 8446
-`max_early_data_size` values instead of applying QUIC's sentinel rule.
+`max_early_data_size` values instead of applying QUIC's sentinel rule, and
+zero-lifetime tickets are discarded without failing the established WSS
+connection.
 End-to-end tests cover verified localhost CA/SAN, strict subprotocol selection,
 encrypted binary echo, public-client mTLS with server pin verification and
 application-visible client certificate chains, and the shared close/ownership

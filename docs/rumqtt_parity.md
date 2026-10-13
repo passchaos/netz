@@ -2470,7 +2470,9 @@ The versioned stream additionally exposes RFC 8446 TLS 1.3 PSK-DHE tickets:
 post-handshake messages are authenticated and retained instead of discarded,
 and the server issues a fresh stateless ticket after either a full or resumed
 handshake. The shared parser preserves finite RFC 8446 early-data limits even
-though MQTT leaves early data disabled. The bidirectional
+though MQTT leaves early data disabled; zero-lifetime tickets are consumed and
+discarded without failing the live connection or replacing an older cache entry.
+The bidirectional
 `interop-tls13-ticket-openssl` gate validates
 both endpoint roles against OpenSSL. MQTT reconnect now owns, ages, renews, and
 reuses these TLS 1.3 tickets across both native TLS and WSS connections. Its

@@ -184,6 +184,16 @@ pub fn receiveAndCache(
         return error.InvalidNewSessionTicket;
     }
     const parsed = try codec.parse(crypto.data);
+    try codec.validateQuicEarlyDataSize(parsed.max_early_data_size);
+    const next_crypto_offset = std.math.add(
+        u64,
+        expected_crypto_offset.*,
+        crypto.data.len,
+    ) catch return error.InvalidNewSessionTicket;
+    if (parsed.lifetime_seconds == 0) {
+        expected_crypto_offset.* = next_crypto_offset;
+        return;
+    }
     const psk_secret = try quic.tls.key_schedule.deriveResumptionPskFor(
         resumption_master_secret,
         parsed.nonce,
@@ -205,11 +215,7 @@ pub fn receiveAndCache(
         .max_early_data_size = parsed.max_early_data_size,
         .transport_parameters = peer_transport_parameters,
     });
-    expected_crypto_offset.* = std.math.add(
-        u64,
-        expected_crypto_offset.*,
-        crypto.data.len,
-    ) catch return error.InvalidNewSessionTicket;
+    expected_crypto_offset.* = next_crypto_offset;
 }
 
 pub fn acquireFirst(

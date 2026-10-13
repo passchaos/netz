@@ -274,7 +274,8 @@ Current protocol coverage includes:
   vector bounds with unknown-extension tolerance, invalid-ticket fallback to a
   certificate-authenticated full handshake, generic TLS preservation of finite
   early-data limits, and QUIC-only enforcement of RFC 9001's `0xffffffff`
-  sentinel, and
+  sentinel; zero-lifetime tickets are consumed and discarded without failing
+  the established connection, and
   separate bounded HTTP/1 and HTTP/2 pool caches that resume after physical
   connection retirement; MQTT reconnect clients retain separate TLS 1.2 and
   TLS 1.3 tickets, renew them across native TLS or WSS connections, and discard
