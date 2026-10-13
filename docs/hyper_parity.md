@@ -1248,6 +1248,17 @@ callback-streaming counterparts provide the same combinations while retaining
 the borrowed-body and final-head callbacks.
 Because HTTP/1 cannot cancel one exchange independently, timeout marks the
 connection unusable so pools cannot replay against ambiguous leftover bytes.
+CONNECT and generic Upgrade opening handshakes now expose matching timeout and
+absolute-deadline entry points. One budget spans the complete request write,
+every informational response, and the final switching or rejection entity.
+Deadline writes preserve header/body ownership unless callers selected the
+existing flatten strategy, then use prefix-tracked TCP/TLS writes; any transport
+failure retires the HTTP connection because a TLS sequence number or arbitrary
+wire prefix may already be committed. Real-socket tests cover a silent peer,
+a 103 response that cannot renew the Upgrade budget, kernel send backpressure,
+successful bounded cleartext handoff, and buffered upgraded-protocol suffixes;
+the bidirectional Hyper process gate covers CONNECT/Upgrade over cleartext and
+certificate-verified TLS.
 One-shot HTTP and HTTPS URI helpers additionally accept an end-to-end absolute
 deadline spanning DNS/TCP, standard or vail TLS, request emission, and the same
 complete response boundary, while retaining every stricter phase timeout.

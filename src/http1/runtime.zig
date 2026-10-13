@@ -1280,6 +1280,70 @@ const RuntimeTransport = union(enum) {
         };
     }
 
+    /// Write one logical plaintext slice under an absolute deadline while
+    /// reporting the exact prefix committed to the transport.
+    fn writeAllWithDeadline(
+        self: RuntimeTransport,
+        bytes: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        return switch (self) {
+            .tcp => |tcp| stream_io.writeAllTrackedWithDeadline(
+                tcp.io,
+                tcp.stream,
+                bytes,
+                committed,
+                deadline,
+            ),
+            .tls_client => |conn| conn.writeAllWithDeadline(
+                bytes,
+                committed,
+                deadline,
+            ),
+            .tls_vail => |conn| conn.writeAllWithDeadline(
+                bytes,
+                committed,
+                deadline,
+            ),
+            .tls_server => |conn| conn.writeAllWithDeadline(
+                bytes,
+                committed,
+                deadline,
+            ),
+        };
+    }
+
+    fn writeAllPartsWithDeadline(
+        self: RuntimeTransport,
+        header: []const u8,
+        body: []const u8,
+        committed: *usize,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!void {
+        committed.* = 0;
+        var part_committed: usize = 0;
+        self.writeAllWithDeadline(
+            header,
+            &part_committed,
+            deadline,
+        ) catch |err| {
+            committed.* = part_committed;
+            return err;
+        };
+        committed.* = part_committed;
+        part_committed = 0;
+        self.writeAllWithDeadline(
+            body,
+            &part_committed,
+            deadline,
+        ) catch |err| {
+            committed.* += part_committed;
+            return err;
+        };
+        committed.* += part_committed;
+    }
+
     fn writeAllParts(
         self: RuntimeTransport,
         header: []const u8,
@@ -3042,6 +3106,38 @@ pub const Client = struct {
             options,
             &self.write_scratch,
         );
+        if (self.response_deadline) |deadline| {
+            var committed: usize = 0;
+            const active_transport = self.transport();
+            if (self.limits.write_strategy == .flatten) {
+                const bytes = try flattenWriteParts(
+                    self.allocator,
+                    &self.write_scratch,
+                    &.{ parts.header, parts.body },
+                );
+                active_transport.writeAllWithDeadline(
+                    bytes,
+                    &committed,
+                    deadline,
+                ) catch |err| {
+                    self.writer_state.phase = .unusable;
+                    return err;
+                };
+            } else active_transport.writeAllPartsWithDeadline(
+                parts.header,
+                parts.body,
+                &committed,
+                deadline,
+            ) catch |err| {
+                // TLS may have consumed a sequence number into a buffered
+                // record even when no complete plaintext prefix committed.
+                // Once a timed transport write starts, retire the HTTP
+                // connection rather than risk replaying an ambiguous prefix.
+                self.writer_state.phase = .unusable;
+                return err;
+            };
+            return;
+        }
         var transport_started = false;
         writeMessagePartsWithStrategy(
             self.allocator,
@@ -3932,6 +4028,35 @@ pub const Client = struct {
         );
     }
 
+    pub fn openConnectTunnelWithTimeout(
+        self: *Client,
+        target: []const u8,
+        headers: []const http1.Header,
+        timeout: std.Io.Duration,
+    ) Error!Tunnel {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openConnectTunnelWithDeadline(
+            target,
+            headers,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Open CONNECT under one absolute budget spanning request write,
+    /// informational responses, and the final response entity.
+    pub fn openConnectTunnelWithDeadline(
+        self: *Client,
+        target: []const u8,
+        headers: []const http1.Header,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Tunnel {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.openConnectTunnel(target, headers);
+    }
+
     pub fn openConnectTunnel(self: *Client, target: []const u8, headers: []const http1.Header) Error!Tunnel {
         try self.writer_state.ensureAvailable();
         try http1.validateConnectTarget(target);
@@ -3943,13 +4068,16 @@ pub const Client = struct {
         });
         self.beginResponseHeadSequence();
         defer self.endResponseHeadSequence();
-        var response = readResponseFromTransportBufferedForRequest(
+        var response = readResponseFromTransportBufferedForRequestObserved(
             self.allocator,
             self.transport(),
             self.limits,
             .{},
             &self.inbuf,
             .CONNECT,
+            null,
+            null,
+            self.response_deadline,
         ) catch |err| {
             self.writer_state.phase = .unusable;
             return err;
@@ -3970,6 +4098,41 @@ pub const Client = struct {
             .tls_vail_conn = self.tls_vail_conn,
             .inbuf = &self.inbuf,
         };
+    }
+
+    /// Relative-timeout wrapper for the complete Upgrade handshake.
+    pub fn openUpgradeWithTimeout(
+        self: *Client,
+        target: []const u8,
+        host: ?[]const u8,
+        protocol: []const u8,
+        headers: []const http1.Header,
+        timeout: std.Io.Duration,
+    ) Error!Tunnel {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.openUpgradeWithDeadline(
+            target,
+            host,
+            protocol,
+            headers,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Perform the request write and complete Upgrade under one deadline.
+    pub fn openUpgradeWithDeadline(
+        self: *Client,
+        target: []const u8,
+        host: ?[]const u8,
+        protocol: []const u8,
+        headers: []const http1.Header,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Tunnel {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.openUpgrade(target, host, protocol, headers);
     }
 
     /// Perform a generic HTTP/1.1 Upgrade and transfer the underlying byte
@@ -4011,6 +4174,31 @@ pub const Client = struct {
         return self.finishUpgrade(protocol);
     }
 
+    /// Relative-timeout wrapper for an already-written Upgrade request.
+    pub fn finishUpgradeWithTimeout(
+        self: *Client,
+        protocol: []const u8,
+        timeout: std.Io.Duration,
+    ) Error!Tunnel {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.finishUpgradeWithDeadline(
+            protocol,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn finishUpgradeWithDeadline(
+        self: *Client,
+        protocol: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Tunnel {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        std.debug.assert(self.response_deadline == null);
+        self.response_deadline = deadline;
+        defer self.response_deadline = null;
+        return self.finishUpgrade(protocol);
+    }
+
     /// Complete a generic Upgrade from an already-written request. This split
     /// form supports callers that must coalesce their first protocol bytes
     /// with the HTTP request while preserving any response suffix read ahead.
@@ -4022,13 +4210,16 @@ pub const Client = struct {
         try validateUpgradeProtocol(protocol);
         self.beginResponseHeadSequence();
         defer self.endResponseHeadSequence();
-        var response = readResponseFromTransportBufferedForRequest(
+        var response = readResponseFromTransportBufferedForRequestObserved(
             self.allocator,
             self.transport(),
             self.limits,
             .{},
             &self.inbuf,
             .GET,
+            null,
+            null,
+            self.response_deadline,
         ) catch |err| {
             self.writer_state.phase = .unusable;
             return err;
@@ -9138,7 +9329,11 @@ test "HTTP/1 runtime opens CONNECT tunnel" {
     });
     defer client.close();
 
-    var tunnel = try client.openConnectTunnel("example.com:443", &.{});
+    var tunnel = try client.openConnectTunnelWithTimeout(
+        "example.com:443",
+        &.{},
+        .fromSeconds(2),
+    );
     try std.testing.expect(!client.isReusable());
     try std.testing.expectError(
         error.ConnectionUnusable,
@@ -9277,9 +9472,10 @@ test "HTTP/1 TLS tunnels close the write half and retain reads" {
             );
         };
         defer client.close();
-        var tunnel = try client.openConnectTunnel(
+        var tunnel = try client.openConnectTunnelWithTimeout(
             "example.com:443",
             &.{},
+            .fromSeconds(2),
         );
         try tunnel.writeSlices(&.{ "client", "", " ", "bytes" });
         try tunnel.closeWrite();
@@ -9574,7 +9770,10 @@ test "HTTP/1 tunnel deadline preserves buffered bytes and recovers after timeout
             "Connection: Upgrade\r\n" ++
             "Upgrade: netz-timeout\r\n\r\nbuffered",
     );
-    var tunnel = try client.finishUpgrade("netz-timeout");
+    var tunnel = try client.finishUpgradeWithTimeout(
+        "netz-timeout",
+        .fromSeconds(2),
+    );
     try shared.buffered_read.wait(io);
     try shared.timed_out.wait(io);
     try tunnel.write("after-timeout");
@@ -9647,7 +9846,10 @@ test "HTTP/1 runtime hands off generic Upgrade with buffered bytes" {
             "Connection: keep-alive, Upgrade\r\n" ++
             "Upgrade: netz-test\r\n\r\nclient-preface",
     );
-    var tunnel = try client.finishUpgrade("netz-test");
+    var tunnel = try client.finishUpgradeWithTimeout(
+        "netz-test",
+        .fromSeconds(2),
+    );
     try tunnel.closeWrite();
     var preface: [14]u8 = undefined;
     var read: usize = 0;
@@ -12597,6 +12799,7 @@ test {
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");
     _ = @import("runtime/response_timeout_tests.zig");
+    _ = @import("runtime/handoff_timeout_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
