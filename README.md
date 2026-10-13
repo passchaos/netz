@@ -1125,7 +1125,8 @@ Current protocol coverage includes:
   retained-message expiry pruning with durable journal/autosave updates,
   retained `$SYS` publication with a zero-disable policy, configurable
   TCP_NODELAY across raw, TLS, WebSocket and WSS listeners, and configurable
-  global/per-listener assigned Client ID prefixes, plus
+  global/per-listener assigned Client ID prefixes plus the deprecated
+  Mosquitto-compatible global `clientid_prefixes` admission policy, plus
   opt-in Mosquitto-compatible outgoing QoS upgrades across live,
   retained and durable delivery, plus default-on retained-source ACL rechecks
   with persisted Client ID, username and source-listener identity, and

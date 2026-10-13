@@ -1758,6 +1758,66 @@ def run_auto_client_id_prefix_matrix(broker: Path, directory: Path) -> None:
             )
 
 
+def run_required_client_id_prefix_case(
+    broker: Path, directory: Path
+) -> None:
+    port = free_port()
+    config = directory / "required-client-id-prefix.conf"
+    config.write_text(
+        "clientid_prefixes secure-\n"
+        "auto_id_prefix secure-auto-\n"
+        f"listener {port} 127.0.0.1\n"
+        "allow_anonymous true\n"
+        "max_connections 4\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 4 clients" not in ready:
+        raise RuntimeError(f"Client ID prefix broker failed: {ready}")
+
+    cases = (
+        ("secure-client", 5, 0x00),
+        ("other-client", 5, 0x87),
+        ("other-v311", 4, 0x05),
+        ("", 5, 0x00),
+    )
+    for client_id, protocol, expected_reason in cases:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        try:
+            client.sendall(connect_packet(client_id, proto_ver=protocol))
+            connack = read_mqtt_packet(client)
+            actual_reason = connack_reason(connack)
+            if actual_reason != expected_reason:
+                raise AssertionError(
+                    "Client ID prefix refusal mismatch: "
+                    f"client_id={client_id!r} protocol={protocol} "
+                    f"expected={expected_reason:#x} actual={actual_reason:#x}"
+                )
+            if client_id == "":
+                assigned = assigned_client_identifier(connack)
+                if not assigned.startswith("secure-auto-"):
+                    raise AssertionError(
+                        "assigned Client ID bypassed required prefix: "
+                        f"{assigned!r}"
+                    )
+            if expected_reason == 0:
+                client.sendall(bytes.fromhex("e000"))
+        finally:
+            client.close()
+
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "Client ID prefix broker failed: " + process.stdout.read()
+        )
+
+
 def run_upgrade_outgoing_qos_case(broker: Path, directory: Path) -> None:
     port = free_port()
     config = directory / "upgrade-outgoing-qos.conf"
@@ -5410,6 +5470,7 @@ def main() -> None:
         run_retain_unavailable_case(args.broker, directory)
         run_zero_length_client_id_case(args.broker, directory)
         run_auto_client_id_prefix_matrix(args.broker, directory)
+        run_required_client_id_prefix_case(args.broker, directory)
         run_upgrade_outgoing_qos_case(args.broker, directory)
         run_max_inflight_messages_case(args.broker, directory)
         run_zero_maximum_keep_alive_case(args.broker, directory)
@@ -5452,8 +5513,9 @@ def main() -> None:
         "persistent-client and "
         "retained-message "
         "expiration, and periodic $SYS policy, "
-        "zero-length Client ID plus global/listener auto-ID prefixes and outgoing QoS "
-        "policy, ordered include_dir and global/per-listener security files, "
+        "zero-length Client ID, global/listener auto-ID prefixes, required "
+        "Client ID prefix admission, and outgoing QoS policy, ordered "
+        "include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, mTLS, "
         "single-Session bidirectional bridge mapping, "
         "MQTT 3.1.1/5 bridge receive/alias/packet limits and outgoing RETAIN, "

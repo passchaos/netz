@@ -65,6 +65,7 @@ pub const Error = runtime.Error || router_mod.Error ||
     commit_log_mod.Error ||
     std.Io.RandomSecureError || error{
     BrokerFull,
+    ClientIdPrefixMismatch,
     ClientNotRegistered,
     ClientOffline,
     CommitLogAlreadyEnabled,
@@ -138,6 +139,9 @@ pub const Options = struct {
     /// Mosquitto limits `auto_id_prefix` to 50 bytes; matching that cap keeps
     /// the generated identifier below MQTT's u16 UTF-8 string bound.
     auto_client_id_prefix: []const u8 = "netz-",
+    /// Optional global prefix required for every network Client Identifier.
+    /// The bytes are copied by `init`; an empty slice disables the policy.
+    client_id_prefix: []const u8 = &.{},
     router: router_mod.Options = .{},
     retained: retained_mod.Options = .{},
     session: session_mod.Options = .{},
@@ -2103,6 +2107,7 @@ pub const Broker = struct {
             return error.InvalidProperty;
         }
         try validateAutoClientIdPrefix(options.auto_client_id_prefix);
+        try validateClientIdPrefix(options.client_id_prefix);
         if (options.system_stats_interval) |interval| {
             if (interval.nanoseconds <= 0) return error.InvalidProperty;
         }
@@ -2131,6 +2136,13 @@ pub const Broker = struct {
             options.auto_client_id_prefix,
         );
         errdefer allocator.free(auto_client_id_prefix);
+        const required_client_id_prefix = if (options.client_id_prefix.len == 0)
+            &.{}
+        else
+            try allocator.dupe(u8, options.client_id_prefix);
+        errdefer if (required_client_id_prefix.len != 0) {
+            allocator.free(required_client_id_prefix);
+        };
         const response_information = if (options.accept.response_information) |value|
             try allocator.dupe(u8, value)
         else
@@ -2138,6 +2150,7 @@ pub const Broker = struct {
         errdefer if (response_information) |value| allocator.free(value);
         var owned_options = options;
         owned_options.auto_client_id_prefix = auto_client_id_prefix;
+        owned_options.client_id_prefix = required_client_id_prefix;
         owned_options.accept.response_information = response_information;
         const autosave_sub_path = if (options.persistent_change_autosave) |autosave|
             try allocator.dupe(u8, autosave.sub_path)
@@ -2260,6 +2273,9 @@ pub const Broker = struct {
         }
         self.allocator.free(self.slots);
         self.allocator.free(self.options.auto_client_id_prefix);
+        if (self.options.client_id_prefix.len != 0) {
+            self.allocator.free(@constCast(self.options.client_id_prefix));
+        }
         if (self.options.accept.response_information) |value| {
             self.allocator.free(value);
         }
@@ -4155,6 +4171,14 @@ pub const Broker = struct {
             );
             return null;
         }
+        if (pending.connect.connect.client_id.len != 0 and
+            !self.clientIdMatchesRequiredPrefix(
+                pending.connect.connect.client_id,
+            ))
+        {
+            try self.refuseUnauthorizedConnect(pending, &pending_owned);
+            return null;
+        }
         if (pending.connect.connect.will) |will| {
             if (self.payloadTooLarge(will.payload)) {
                 try self.refuseResolvedConnect(pending, .{
@@ -4278,6 +4302,10 @@ pub const Broker = struct {
                         &pending_owned,
                     );
                 }
+                return null;
+            }
+            if (err == error.ClientIdPrefixMismatch) {
+                try self.refuseUnauthorizedConnect(pending, &pending_owned);
                 return null;
             }
             return err;
@@ -4405,6 +4433,9 @@ pub const Broker = struct {
                 slot,
                 auto_client_id_prefix,
             );
+        }
+        if (!self.clientIdMatchesRequiredPrefix(effective_connect.client_id)) {
+            return error.ClientIdPrefixMismatch;
         }
         const previous_session_handle = self.sessions.find(
             effective_connect.client_id,
@@ -4572,6 +4603,18 @@ pub const Broker = struct {
                 candidate,
             );
         }
+    }
+
+    fn clientIdMatchesRequiredPrefix(
+        self: *const Broker,
+        client_id: []const u8,
+    ) bool {
+        return self.options.client_id_prefix.len == 0 or
+            std.mem.startsWith(
+                u8,
+                client_id,
+                self.options.client_id_prefix,
+            );
     }
 
     fn sessionExpiryForConnect(
@@ -9363,10 +9406,24 @@ test "broker rejects invalid listener Client Identifier prefixes" {
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        Broker.init(allocator, io, .{
+            .limits = .{ .max_connections = 1 },
+            .client_id_prefix = "bad\x00prefix",
+        }),
+    );
+    var required_prefix = [_]u8{ 's', 'e', 'c', 'u', 'r', 'e', '-' };
     var broker = try Broker.init(allocator, io, .{
         .limits = .{ .max_connections = 1 },
+        .client_id_prefix = &required_prefix,
     });
     defer broker.deinit();
+    @memset(&required_prefix, 'x');
+    try std.testing.expectEqualStrings(
+        "secure-",
+        broker.options.client_id_prefix,
+    );
 
     try std.testing.expectError(
         error.InvalidProperty,
@@ -9606,6 +9663,11 @@ fn validateAutoClientIdPrefix(prefix: []const u8) Error!void {
         return error.InvalidProperty;
     }
     try mqtt.validateUtf8String(prefix);
+}
+
+fn validateClientIdPrefix(prefix: []const u8) Error!void {
+    if (prefix.len > std.math.maxInt(u16)) return error.InvalidProperty;
+    mqtt.validateUtf8String(prefix) catch return error.InvalidProperty;
 }
 
 fn protocolReason(

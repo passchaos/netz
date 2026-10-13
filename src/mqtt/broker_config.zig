@@ -140,6 +140,7 @@ pub const Config = struct {
     max_queued_bytes: usize = 0,
     retain_available: bool = true,
     check_retain_source: bool = true,
+    client_id_prefixes: []u8 = &.{},
     allow_zero_length_client_id: bool = true,
     auto_id_prefix: []u8 = &.{},
     persistent_client_expiration_seconds: ?u32 = null,
@@ -160,6 +161,9 @@ pub const Config = struct {
         if (self.bridges.len != 0) allocator.free(self.bridges);
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
+        if (self.client_id_prefixes.len != 0) {
+            allocator.free(self.client_id_prefixes);
+        }
         if (self.auto_id_prefix.len != 0) allocator.free(self.auto_id_prefix);
         if (self.persistence_location.len != 0) {
             allocator.free(self.persistence_location);
@@ -319,6 +323,7 @@ const GlobalSeen = struct {
     max_queued_bytes: bool = false,
     retain_available: bool = false,
     check_retain_source: bool = false,
+    client_id_prefixes: bool = false,
     allow_zero_length_client_id: bool = false,
     auto_id_prefix: bool = false,
     persistent_client_expiration: bool = false,
@@ -374,6 +379,9 @@ fn parseSources(
             allocator.free(config.password_file);
         }
         if (config.acl_file.len != 0) allocator.free(config.acl_file);
+        if (config.client_id_prefixes.len != 0) {
+            allocator.free(config.client_id_prefixes);
+        }
         if (config.auto_id_prefix.len != 0) {
             allocator.free(config.auto_id_prefix);
         }
@@ -545,6 +553,12 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "check_retain_source")) {
                 try markOnce(&global_seen.check_retain_source);
                 config.check_retain_source = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "clientid_prefixes")) {
+                try markOnce(&global_seen.client_id_prefixes);
+                config.client_id_prefixes = try parseClientIdPrefix(
+                    allocator,
+                    &words,
+                );
             } else if (std.mem.eql(
                 u8,
                 directive,
@@ -976,6 +990,11 @@ fn parseSources(
         {
             return error.ClientCertificateConfigurationIncomplete;
         }
+        if (config.client_id_prefixes.len != 0 and
+            listener.use_username_as_client_id)
+        {
+            return error.InvalidDirective;
+        }
         const password_file = if (config.per_listener_settings)
             listener.password_file
         else
@@ -1113,6 +1132,16 @@ fn parseAutoIdPrefix(
 ) (Error || std.mem.Allocator.Error)![]u8 {
     const value = try parseOne(words);
     if (value.len > client_id.max_prefix_len) return error.InvalidDirective;
+    try mqtt.validateUtf8String(value);
+    return allocator.dupe(u8, value);
+}
+
+fn parseClientIdPrefix(
+    allocator: std.mem.Allocator,
+    words: anytype,
+) (Error || std.mem.Allocator.Error)![]u8 {
+    const value = try parseOne(words);
+    if (value.len > std.math.maxInt(u16)) return error.InvalidDirective;
     try mqtt.validateUtf8String(value);
     return allocator.dupe(u8, value);
 }
@@ -1396,6 +1425,45 @@ test "MQTT broker config parses owned multi-listener policy" {
     const path = try config.persistencePath(allocator);
     defer allocator.free(path);
     try std.testing.expectEqualStrings("state/broker.db", path);
+}
+
+test "MQTT broker config owns global Client Identifier prefix policy" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupe(
+        u8,
+        "clientid_prefixes secure-\n" ++
+            "listener 1883\nallow_anonymous true",
+    );
+    defer allocator.free(source);
+    var config = try parse(allocator, source);
+    defer config.deinit(allocator);
+    @memset(source, 'x');
+    try std.testing.expectEqualStrings("secure-", config.client_id_prefixes);
+
+    try std.testing.expectError(
+        error.InvalidUtf8,
+        parse(
+            allocator,
+            "clientid_prefixes bad\x00prefix\n" ++
+                "listener 1883\nallow_anonymous true",
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(
+            allocator,
+            "clientid_prefixes first-\nclientid_prefixes second-\n" ++
+                "listener 1883\nallow_anonymous true",
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(
+            allocator,
+            "clientid_prefixes secure-\nlistener 1883\n" ++
+                "allow_anonymous true\nuse_username_as_clientid true",
+        ),
+    );
 }
 
 test "MQTT broker config scopes socket domains to listeners" {

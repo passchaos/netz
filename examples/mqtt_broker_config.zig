@@ -441,6 +441,7 @@ pub fn run(
         },
         .max_inflight_payload_bytes_per_connection = config.max_inflight_bytes,
         .accept = base_accept,
+        .client_id_prefix = config.client_id_prefixes,
         .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
         .queue_qos0_messages = config.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
