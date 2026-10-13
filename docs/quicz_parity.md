@@ -1300,6 +1300,11 @@ Ticket-age skew beyond the configured tolerance likewise rejects and discards
 0-RTT without rejecting an otherwise live, binder-authenticated PSK: the
 connection continues as a resumed 1-RTT handshake, and the rejected early
 request never reaches replay marking or application stream state.
+The server also validates complete multi-identity PSK and binder vectors,
+selects a configured stateful or stateless ticket at its original wire index,
+and reports that index in ServerHello. Selecting any identity after index zero
+continues PSK resumption but rejects 0-RTT, whose parameters belong only to the
+first offered identity.
 If Version Negotiation restarts the connection, the original 0-RTT packet is
 never replayed under the replacement version and its old-key packet numbers do
 not advance the new application space; the client nevertheless retains an

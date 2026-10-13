@@ -239,7 +239,7 @@ pub fn lookupServer(
     identity: []const u8,
 ) Error!?store.Lease {
     if (config.stateless) |stateless| {
-        const opened = stateless.keyring.openSecret(
+        var opened = stateless.keyring.openSecret(
             identity,
             stateless.server_id,
             stateless.alpn,
@@ -252,6 +252,10 @@ pub fn lookupServer(
             => return null,
             else => return err,
         };
+        defer opened.secret.deinit();
+        const cipher_suite = quic.tls.cipher_suite.Suite.fromWire(
+            opened.cipher_suite_wire,
+        ) orelse return null;
         const identity_copy = try config.allocator.dupe(u8, identity);
         return .{
             .allocator = config.allocator,
@@ -262,9 +266,7 @@ pub fn lookupServer(
                 [_]u8{0} ** 32,
             .secret_value = opened.secret,
             .age_add = opened.age_add,
-            .cipher_suite = quic.tls.cipher_suite.Suite.fromWire(
-                opened.cipher_suite_wire,
-            ) orelse return null,
+            .cipher_suite = cipher_suite,
             .issued_at_ms = opened.issued_at_ms,
             .lifetime_seconds = opened.lifetime_seconds,
         };

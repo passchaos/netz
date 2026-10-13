@@ -210,7 +210,7 @@ pub const ServerHelloOptions = struct {
     x25519_public_key: [32]u8,
     /// When present, this selected share replaces the legacy X25519 field.
     key_share: ?KeyShare = null,
-    select_psk: bool = false,
+    selected_psk_identity: ?u16 = null,
     cipher_suite: CipherSuite = .aes_128_gcm_sha256,
 };
 
@@ -219,7 +219,7 @@ pub const ParsedServerHello = struct {
     x25519_public_key: []const u8,
     selected_group: NamedGroup = .x25519,
     selected_key_share: []const u8 = &.{},
-    selected_psk: bool = false,
+    selected_psk_identity: ?u16 = null,
     cipher_suite: CipherSuite,
 
     pub fn keyShare(self: ParsedServerHello) []const u8 {
@@ -327,10 +327,11 @@ pub fn writeServerHello(list: *std.ArrayList(u8), allocator: std.mem.Allocator, 
         allocator,
         options.key_share orelse legacy_share,
     );
-    if (options.select_psk) {
-        try quic.resumption.tls_psk.appendServerSelection(
+    if (options.selected_psk_identity) |selected_identity| {
+        try quic.resumption.tls_psk.appendServerSelectionForIdentity(
             &extensions,
             allocator,
+            selected_identity,
         );
     }
 
@@ -635,7 +636,7 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
 
     var saw_supported_versions = false;
     var selected_share: ?ParsedKeyShare = null;
-    var selected_psk = false;
+    var selected_psk_identity: ?u16 = null;
     var seen_extensions = SeenExtensions{};
     var ext_cursor = wire.Cursor.init(extensions);
     while (!ext_cursor.eof()) {
@@ -651,9 +652,9 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
             ext_key_share => selected_share =
                 try parseServerKeyShare(payload),
             ext_pre_shared_key => {
-                _ = quic.resumption.tls_psk.parseServerSelection(payload) catch
+                selected_psk_identity = quic.resumption.tls_psk
+                    .parseServerSelection(payload) catch
                     return error.InvalidServerHello;
-                selected_psk = true;
             },
             else => {},
         }
@@ -668,7 +669,7 @@ pub fn parseServerHello(bytes: []const u8) Error!ParsedServerHello {
             &.{},
         .selected_group = key_share.group,
         .selected_key_share = key_share.key,
-        .selected_psk = selected_psk,
+        .selected_psk_identity = selected_psk_identity,
         .cipher_suite = cipher_suite,
     };
 }

@@ -484,6 +484,21 @@ test "QUIC TLS ServerHello and handshake secrets derive on both sides" {
     try std.testing.expect(!std.mem.eql(u8, &client_keys.client_quic.key, &client_keys.server_quic.key));
 }
 
+test "QUIC TLS ServerHello preserves a later PSK identity selection" {
+    const allocator = std.testing.allocator;
+    var server_hello: std.ArrayList(u8) = .empty;
+    defer server_hello.deinit(allocator);
+    try target.writeServerHello(&server_hello, allocator, .{
+        .random = [_]u8{0x45} ** 32,
+        .x25519_public_key = [_]u8{0x46} ** 32,
+        .selected_psk_identity = 1,
+    });
+    try std.testing.expectEqual(
+        @as(?u16, 1),
+        (try target.parseServerHello(server_hello.items)).selected_psk_identity,
+    );
+}
+
 test "QUIC TLS ClientHello offers X25519 and P-256 and server selects P-256" {
     const allocator = std.testing.allocator;
     const x25519_secret = [_]u8{0x41} ** 32;

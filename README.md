@@ -755,9 +755,10 @@ Current protocol coverage includes:
   including sparse import that advances past every protected 0-RTT nonce while
   tracking only packet numbers actually handed to the socket,
   plus integrated TLS 1.3 PSK-DHE resumption with origin/ALPN/age-bound owned
-  sessions, mandatory-last pre_shared_key binders, constant-time binder
-  verification, selected-identity signaling, unknown-identity full-handshake
-  fallback, and matching-identity bad-binder rejection,
+  sessions, mandatory-last multi-identity `pre_shared_key` offers, constant-time
+  index-aligned binder verification, later-identity selection, 0-RTT binding to
+  identity zero, unknown-identity full-handshake fallback, and matching-identity
+  bad-binder rejection,
   post-handshake NewSessionTicket issue/parse over 1-RTT CRYPTO, transcript-
   bound resumption PSK derivation, indexed bounded owning server ticket storage with cached LRU eviction, earliest-expiry scan skips, empty-store lookup skips, and single-lookup issue insertion,
   client cache insertion, and origin+ALPN automatic ticket selection on both

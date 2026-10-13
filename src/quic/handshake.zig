@@ -115,6 +115,16 @@ pub const ServerEarlyDataPolicy = struct {
     replay_key: []const u8 = &.{},
 };
 
+const SelectedServerPsk = struct {
+    secret: quic.tls.secret.Secret,
+    identity_index: u16,
+    age_within_tolerance: bool,
+
+    fn permitsEarlyData(self: SelectedServerPsk) bool {
+        return self.identity_index == 0 and self.age_within_tolerance;
+    }
+};
+
 pub const ServerOptions = struct {
     local_connection_id: []const u8,
     alpn_protocol: []const u8 = "h3",
@@ -814,6 +824,155 @@ fn cipherSuiteEnabled(
         if (suite == selected) return true;
     }
     return false;
+}
+
+fn selectServerPsk(
+    client_hello_bytes: []const u8,
+    cipher_suite: quic.tls_client_hello.CipherSuite,
+    configured: ServerPsk,
+) Error!?SelectedServerPsk {
+    const configured_secret = configured.secret_value orelse
+        quic.tls.secret.Secret.fromSha256(configured.secret);
+    if (configured_secret.hash != cipher_suite.hash()) return null;
+    const offer = try quic.resumption.tls_psk
+        .findClientOfferForIdentityForHash(
+        client_hello_bytes,
+        configured.identity,
+        configured_secret.hash,
+    ) orelse return null;
+    try quic.resumption.tls_psk.verifyClientOfferForSecret(
+        client_hello_bytes,
+        offer,
+        configured.identity,
+        configured_secret,
+        null,
+    );
+    return .{
+        .secret = configured_secret,
+        .identity_index = offer.selected_identity,
+        .age_within_tolerance = try quic.resumption.tls_psk
+            .ticketAgeWithinTolerance(offer, .{
+            .age_add = configured.age_add,
+            .issued_at_ms = configured.issued_at_ms,
+            .lifetime_seconds = configured.lifetime_seconds,
+            .now_ms = configured.now_ms,
+            .tolerance_ms = configured.age_tolerance_ms,
+        }),
+    };
+}
+
+fn lookupAutomaticServerPsk(
+    client_hello_bytes: []const u8,
+    cipher_suite: quic.tls_client_hello.CipherSuite,
+    automatic: quic.resumption.ticket.handshake.ServerAutoResume,
+) Error!?quic.resumption.ticket.store.Lease {
+    var offers = (try quic.resumption.tls_psk.parseClientOffers(
+        client_hello_bytes,
+    )).iterator();
+    while (offers.next()) |offered| {
+        var lease = (try quic.resumption.ticket.handshake.lookupServer(
+            automatic,
+            offered.identity,
+        )) orelse continue;
+        if (lease.secret_value.hash == cipher_suite.hash()) return lease;
+        lease.deinit();
+    }
+    return null;
+}
+
+test "QUIC server selects a later PSK identity without accepting its 0-RTT" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var hello: std.ArrayList(u8) = .empty;
+    defer hello.deinit(allocator);
+    try quic.tls_client_hello.writeClientHello(&hello, allocator, .{
+        .random = [_]u8{0x61} ** 32,
+        .x25519_public_key = [_]u8{0x62} ** 32,
+        .transport_parameters = &.{ 1, 2, 3 },
+        .cipher_suites = &.{.aes_128_gcm_sha256},
+    });
+    var first_secret = quic.tls.secret.Secret.fromSha256([_]u8{0x63} ** 32);
+    defer first_secret.deinit();
+    var later_secret = quic.tls.secret.Secret.fromSha256([_]u8{0x64} ** 32);
+    defer later_secret.deinit();
+    try quic.resumption.tls_psk.appendClientOffersForSecrets(
+        &hello,
+        allocator,
+        &.{
+            .{
+                .identity = "first-ticket",
+                .obfuscated_ticket_age = 11,
+                .psk_secret = first_secret,
+            },
+            .{
+                .identity = "later-ticket",
+                .obfuscated_ticket_age = 17,
+                .psk_secret = later_secret,
+            },
+        },
+        true,
+        null,
+    );
+
+    var later = (try selectServerPsk(
+        hello.items,
+        .aes_128_gcm_sha256,
+        .{
+            .identity = "later-ticket",
+            .secret = [_]u8{0x64} ** 32,
+            .age_add = 7,
+            .issued_at_ms = 1000,
+            .lifetime_seconds = 60,
+            .now_ms = 1010,
+        },
+    )).?;
+    defer later.secret.deinit();
+    try std.testing.expectEqual(@as(u16, 1), later.identity_index);
+    try std.testing.expect(!later.permitsEarlyData());
+
+    var first = (try selectServerPsk(
+        hello.items,
+        .aes_128_gcm_sha256,
+        .{
+            .identity = "first-ticket",
+            .secret = [_]u8{0x63} ** 32,
+            .age_add = 1,
+            .issued_at_ms = 1000,
+            .lifetime_seconds = 60,
+            .now_ms = 1010,
+        },
+    )).?;
+    defer first.secret.deinit();
+    try std.testing.expectEqual(@as(u16, 0), first.identity_index);
+    try std.testing.expect(first.permitsEarlyData());
+
+    var ticket_store = try quic.resumption.ticket.store.Store.init(
+        allocator,
+        threaded.io(),
+        2,
+    );
+    defer ticket_store.deinit();
+    try ticket_store.issue(.{
+        .identity = "later-ticket",
+        .secret = [_]u8{0x64} ** 32,
+        .secret_value = later_secret,
+        .age_add = 7,
+        .cipher_suite = .aes_128_gcm_sha256,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 60,
+    });
+    var lease = (try lookupAutomaticServerPsk(
+        hello.items,
+        .aes_128_gcm_sha256,
+        .{
+            .allocator = allocator,
+            .store = &ticket_store,
+            .now_ms = 1010,
+        },
+    )).?;
+    defer lease.deinit();
+    try std.testing.expectEqualStrings("later-ticket", lease.identity);
 }
 
 fn configuredGreaseQuicBit(
@@ -1787,8 +1946,11 @@ fn connectAttempt(
         return error.InvalidCipherSuite;
     }
     const offered_psk = resumption_session != null;
-    if (parsed_server.selected_psk and !offered_psk) return error.InvalidServerHello;
-    const selected_psk: ?quic.tls.secret.Secret = if (parsed_server.selected_psk)
+    const resumed = if (parsed_server.selected_psk_identity) |identity| blk: {
+        if (!offered_psk or identity != 0) return error.InvalidServerHello;
+        break :blk true;
+    } else false;
+    const selected_psk: ?quic.tls.secret.Secret = if (resumed)
         resumption_session.?.psk_secret
     else
         null;
@@ -1846,7 +2008,7 @@ fn connectAttempt(
         0,
         options.max_crypto_buffer,
         local_transport_parameters.grease_quic_bit,
-        !parsed_server.selected_psk and options.server_auth != null,
+        !resumed and options.server_auth != null,
         options.handshake_recovery,
     ) catch |err| {
         if (err == error.InvalidReservedBits) {
@@ -1872,7 +2034,7 @@ fn connectAttempt(
     defer server_handshake.deinit(endpoint.allocator);
     const server_flight = try splitServerFlight(
         server_handshake.crypto_data,
-        !parsed_server.selected_psk and options.server_auth != null,
+        !resumed and options.server_auth != null,
     );
     const encrypted_extensions = try quic.tls_client_hello.parseEncryptedExtensions(server_flight.encrypted_extensions);
     try ensureOfferedAlpn(options.alpn_protocols, encrypted_extensions.alpn);
@@ -1898,7 +2060,7 @@ fn connectAttempt(
     else
         try quic.zero_rtt.handshake.validateClientAcceptance(
             offer_early_data,
-            parsed_server.selected_psk,
+            resumed,
             encrypted_extensions.early_data_accepted,
             if (options.early_data) |early_data|
                 early_data.lease.session.transport_parameters
@@ -1915,7 +2077,7 @@ fn connectAttempt(
     defer if (peer_certificate) |*certificate| {
         certificate.deinit(endpoint.allocator);
     };
-    if (parsed_server.selected_psk) {
+    if (resumed) {
         if (server_flight.certificate != null or
             server_flight.certificate_verify != null)
         {
@@ -2080,7 +2242,7 @@ fn connectAttempt(
         encrypted_extensions.alpn,
         parsed_server.cipher_suite,
         retry_processed,
-        parsed_server.selected_psk,
+        resumed,
         early_data_status,
         try quic.tls.key_schedule.deriveResumptionMasterSecretFor(
             application.master_secret,
@@ -2510,29 +2672,6 @@ fn acceptInternal(
     var automatic_psk_lease: ?quic.resumption.ticket.store.Lease = null;
     defer if (automatic_psk_lease) |*lease| lease.deinit();
     var effective_psk = options.psk;
-    if (effective_psk == null) {
-        if (options.auto_resumption) |automatic| {
-            if (parsed_client.psk_offer) |offer| {
-                automatic_psk_lease = try quic.resumption.ticket.handshake.lookupServer(
-                    automatic,
-                    offer.identity,
-                );
-                if (automatic_psk_lease) |*lease| {
-                    effective_psk = .{
-                        .identity = lease.identity,
-                        .secret = lease.secret,
-                        .secret_value = lease.secret_value,
-                        .age_add = lease.age_add,
-                        .issued_at_ms = lease.issued_at_ms,
-                        .lifetime_seconds = lease.lifetime_seconds,
-                        .now_ms = automatic.now_ms,
-                        .age_tolerance_ms = automatic.age_tolerance_ms,
-                        .cipher_suite = lease.cipher_suite,
-                    };
-                }
-            }
-        }
-    }
     const alpn = try chooseAlpn(
         options.alpn_protocol,
         parsed_client.alpnProtocols(),
@@ -2542,6 +2681,31 @@ fn acceptInternal(
         options.cipher_suites,
         options.cipher_suite_policy,
     );
+    if (effective_psk == null) {
+        if (options.auto_resumption) |automatic| {
+            if (parsed_client.psk_offer != null) {
+                automatic_psk_lease = try lookupAutomaticServerPsk(
+                    client_initial.crypto_data,
+                    cipher_suite,
+                    automatic,
+                );
+                if (automatic_psk_lease != null) {
+                    const selected = &automatic_psk_lease.?;
+                    effective_psk = .{
+                        .identity = selected.identity,
+                        .secret = selected.secret,
+                        .secret_value = selected.secret_value,
+                        .age_add = selected.age_add,
+                        .issued_at_ms = selected.issued_at_ms,
+                        .lifetime_seconds = selected.lifetime_seconds,
+                        .now_ms = automatic.now_ms,
+                        .age_tolerance_ms = automatic.age_tolerance_ms,
+                        .cipher_suite = selected.cipher_suite,
+                    };
+                }
+            }
+        }
+    }
     if (effective_psk == null) {
         if (options.identity) |identity| {
             const supported = switch (identity.signer.scheme()) {
@@ -2591,6 +2755,7 @@ fn acceptInternal(
     var shared = server_key_exchange.shared_secret;
     defer shared.wipe();
     var selected_psk: ?quic.tls.secret.Secret = null;
+    var selected_psk_identity: ?u16 = null;
     var early_data_accepted = false;
     var early_data_keys: ?quic.zero_rtt.handshake.ClientKeys = null;
     const client_offered_early_data =
@@ -2600,47 +2765,18 @@ fn acceptInternal(
     if (client_offered_early_data and parsed_client.psk_offer == null) {
         return error.UnexpectedEarlyData;
     }
-    if (parsed_client.psk_offer) |offer| {
+    if (parsed_client.psk_offer != null) {
         if (effective_psk) |configured_psk| {
-            const configured_secret = configured_psk.secret_value orelse
-                quic.tls.secret.Secret.fromSha256(
-                    configured_psk.secret,
-                );
-            if (std.mem.eql(u8, offer.identity, configured_psk.identity) and
-                configured_secret.hash == cipher_suite.hash())
-            {
-                switch (configured_secret.hash) {
-                    .sha256 => try quic.resumption.tls_psk
-                        .verifyClientOffer(
-                        client_initial.crypto_data,
-                        offer,
-                        configured_psk.identity,
-                        try configured_secret.sha256(),
-                    ),
-                    .sha384 => try quic.resumption.tls_psk
-                        .verifyClientOfferSha384(
-                        client_initial.crypto_data,
-                        offer,
-                        configured_psk.identity,
-                        try configured_secret.sha384(),
-                    ),
-                    .sm3 => return error.InvalidClientHello,
-                }
-                const age_within_tolerance =
-                    try quic.resumption.tls_psk.ticketAgeWithinTolerance(
-                        offer,
-                        .{
-                            .age_add = configured_psk.age_add,
-                            .issued_at_ms = configured_psk.issued_at_ms,
-                            .lifetime_seconds = configured_psk.lifetime_seconds,
-                            .now_ms = configured_psk.now_ms,
-                            .tolerance_ms = configured_psk.age_tolerance_ms,
-                        },
-                    );
-                selected_psk = configured_secret;
+            if (try selectServerPsk(
+                client_initial.crypto_data,
+                cipher_suite,
+                configured_psk,
+            )) |selection| {
+                selected_psk = selection.secret;
+                selected_psk_identity = selection.identity_index;
                 const early_data_policy = options.early_data;
                 if (client_offered_early_data and
-                    age_within_tolerance and
+                    selection.permitsEarlyData() and
                     effective_options.retry_source_connection_id.len == 0 and
                     early_data_policy != null and
                     early_data_policy.?.accept and
@@ -2664,7 +2800,7 @@ fn acceptInternal(
                         .clientKeysForSecretAndVersion(
                         options.version.wireValue(),
                         configured_psk.cipher_suite,
-                        configured_secret,
+                        selection.secret,
                         client_initial.crypto_data,
                     );
                     early_data_accepted = true;
@@ -2779,7 +2915,7 @@ fn acceptInternal(
         .random = server_random,
         .x25519_public_key = legacy_server_public,
         .key_share = selected_server_share,
-        .select_psk = selected_psk != null,
+        .selected_psk_identity = selected_psk_identity,
         .cipher_suite = cipher_suite,
     });
     var transcript = handshake_transcript.Flow.init(
