@@ -154,9 +154,12 @@ benchmark response:
 - outbound Expect values use their list grammar; `100-continue` must be the
   sole expectation on an HTTP/1.1 request that will send non-empty content,
   and response writers reject the request-only field;
-- both owned and caller-storage request parsers enforce Host cardinality,
-  syntax, and absolute-/authority-form agreement before body parsing, so a
-  direct codec caller cannot accidentally omit the runtime validation step;
+- both owned and caller-storage request parsers enforce Host cardinality and
+  syntax before body parsing. For absolute-form and CONNECT requests, RFC 9112
+  makes the request-target authority authoritative, so parsers rebind the
+  exposed Host value to it without copying and never expose a conflicting wire
+  Host to application routing. Checked writers continue to reject a different
+  host, while allowing CONNECT's standard Host-without-target-port form;
 - persistent clients/connections retain request/response header descriptors,
   trailer rendering and encoding buffers;
 - server `Limits.request_head_timeout` applies one absolute deadline to each

@@ -642,7 +642,7 @@ pub fn parseRequestHead(
     try validateRequestTargetForMethod(method, request_line.target);
     const version = try Version.parse(request_line.version);
     try validateTransferEncodingForVersion(version, parsed.headers);
-    try validateRequestHostParts(
+    try normalizeParsedRequestHostParts(
         method,
         version,
         request_line.target,
@@ -786,8 +786,9 @@ fn parseHeadLines(
     }
 }
 
-/// Parse one complete request with strict Host cardinality, syntax, and
-/// request-target authority agreement before allocating or decoding its body.
+/// Parse one complete request with strict Host cardinality and syntax before
+/// allocating or decoding its body. Absolute-form and CONNECT targets replace
+/// the exposed Host value with their authoritative request-target authority.
 pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: ParseOptions) Error!Request {
     const head_end = std.mem.indexOf(u8, bytes, "\r\n\r\n") orelse return error.BufferTooShort;
     const head = bytes[0..head_end];
@@ -813,7 +814,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
-    try validateRequestHostParts(
+    try normalizeParsedRequestHostParts(
         method,
         version,
         request_parts.target,
@@ -882,7 +883,7 @@ pub fn validateRequestHead(
     );
     defer parsed.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed.headers);
-    try validateRequestHostParts(
+    try normalizeParsedRequestHostParts(
         method,
         version,
         parts.target,
@@ -2469,11 +2470,52 @@ fn validateRequestHostParts(
         absoluteFormAuthority(target) orelse return;
     try validateHostValue(target_authority);
     if (host) |host_value| {
-        if (!std.ascii.eqlIgnoreCase(
-            wire.trimOws(host_value),
-            target_authority,
-        )) return error.InvalidHost;
+        const normalized_host = wire.trimOws(host_value);
+        if (std.ascii.eqlIgnoreCase(normalized_host, target_authority)) return;
+        if (method == .CONNECT and std.ascii.eqlIgnoreCase(
+            normalized_host,
+            connectTargetHost(target_authority),
+        )) return;
+        return error.InvalidHost;
     }
+}
+
+fn normalizeParsedRequestHostParts(
+    method: Method,
+    version: Version,
+    target: []const u8,
+    headers: []Header,
+) Error!void {
+    const host_index = try validateHostHeaderBlockIndex(version, headers);
+    const absolute_authority = if (method == .CONNECT)
+        null
+    else
+        absoluteFormAuthority(target);
+    const target_authority = if (method == .CONNECT)
+        target
+    else
+        absolute_authority orelse return;
+    try validateHostValue(target_authority);
+
+    if (method == .CONNECT or absolute_authority != null) {
+        // RFC 9112 sections 3.2.2, 3.2.3, and 3.3 make the request-target
+        // authority authoritative for absolute-form and CONNECT requests.
+        // Rebinding only the descriptor preserves zero-copy parsing while
+        // preventing downstream routing from observing a conflicting Host.
+        if (host_index) |index| headers[index].value = target_authority;
+        return;
+    }
+}
+
+fn connectTargetHost(authority: []const u8) []const u8 {
+    if (authority[0] == '[') {
+        const closing = std.mem.indexOfScalar(u8, authority, ']') orelse
+            unreachable;
+        return authority[0 .. closing + 1];
+    }
+    const colon = std.mem.lastIndexOfScalar(u8, authority, ':') orelse
+        unreachable;
+    return authority[0..colon];
 }
 
 pub fn validateHostHeaderBlock(version: Version, headers: []const Header) Error!void {
@@ -2481,15 +2523,23 @@ pub fn validateHostHeaderBlock(version: Version, headers: []const Header) Error!
 }
 
 fn validateHostHeaderBlockValue(version: Version, headers: []const Header) Error!?[]const u8 {
-    var found_host: ?[]const u8 = null;
-    for (headers) |header| {
+    const index = try validateHostHeaderBlockIndex(version, headers);
+    return if (index) |value| headers[value].value else null;
+}
+
+fn validateHostHeaderBlockIndex(
+    version: Version,
+    headers: []const Header,
+) Error!?usize {
+    var found_index: ?usize = null;
+    for (headers, 0..) |header, index| {
         if (!header.eqlName("host")) continue;
-        if (found_host != null) return error.InvalidHost;
-        found_host = header.value;
+        if (found_index != null) return error.InvalidHost;
+        found_index = index;
         try validateHostValue(header.value);
     }
-    if (version == .http_1_1 and found_host == null) return error.InvalidHost;
-    return found_host;
+    if (version == .http_1_1 and found_index == null) return error.InvalidHost;
+    return found_index;
 }
 
 pub fn absoluteFormAuthority(target: []const u8) ?[]const u8 {
@@ -4497,18 +4547,62 @@ test "HTTP/1 validates Host authority rules" {
     const mismatched_connect =
         "CONNECT example.com:443 HTTP/1.1\r\n" ++
         "Host: other.example:443\r\n\r\n";
-    try std.testing.expectError(
-        error.InvalidHost,
-        parseRequest(allocator, mismatched_connect, .{}),
+    var normalized_connect = try parseRequest(
+        allocator,
+        mismatched_connect,
+        .{},
+    );
+    defer normalized_connect.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "example.com:443",
+        normalized_connect.header("host").?,
     );
     var borrowed_headers: [2]Header = undefined;
+    const borrowed_connect = try parseRequestHead(
+        mismatched_connect,
+        &borrowed_headers,
+        .{},
+    );
+    try std.testing.expectEqualStrings(
+        "example.com:443",
+        borrowed_connect.header("host").?,
+    );
+    try validateRequestHead(allocator, mismatched_connect, .{});
+
+    var invalid_connect_write: std.ArrayList(u8) = .empty;
+    defer invalid_connect_write.deinit(allocator);
     try std.testing.expectError(
         error.InvalidHost,
-        parseRequestHead(
-            mismatched_connect,
-            &borrowed_headers,
-            .{},
+        writeRequestChecked(
+            &invalid_connect_write,
+            allocator,
+            .CONNECT,
+            "example.com:443",
+            .http_1_1,
+            &.{.{ .name = "Host", .value = "other.example:443" }},
+            "",
         ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), invalid_connect_write.items.len);
+
+    try writeRequestChecked(
+        &invalid_connect_write,
+        allocator,
+        .CONNECT,
+        "example.com:443",
+        .http_1_1,
+        &.{.{ .name = "Host", .value = "example.com" }},
+        "",
+    );
+    invalid_connect_write.clearRetainingCapacity();
+    try writeRequestChecked(
+        &invalid_connect_write,
+        allocator,
+        .CONNECT,
+        "[2001:db8::1]:443",
+        .http_1_1,
+        &.{.{ .name = "Host", .value = "[2001:db8::1]" }},
+        "",
     );
 
     try std.testing.expectError(error.InvalidHost, validateHostValue(""));
@@ -4524,7 +4618,7 @@ test "HTTP/1 validates Host authority rules" {
     try validateHostValue("[2001:db8::1]:443");
 }
 
-test "HTTP/1 validates absolute-form authority against Host" {
+test "HTTP/1 parses absolute-form authority as the effective Host" {
     const allocator = std.testing.allocator;
 
     const matching = "GET http://example.com:8080/proxy?q=1 HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
@@ -4534,10 +4628,40 @@ test "HTTP/1 validates absolute-form authority against Host" {
     try std.testing.expectEqualStrings("example.com:8080", absoluteFormAuthority(req.target).?);
 
     const mismatch = "GET http://example.com/proxy HTTP/1.1\r\nHost: other.example\r\n\r\n";
+    var normalized = try parseRequest(allocator, mismatch, .{});
+    defer normalized.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "example.com",
+        normalized.header("host").?,
+    );
+    try validateRequestHost(normalized);
+    var borrowed_storage: [1]Header = undefined;
+    const borrowed = try parseRequestHead(
+        mismatch,
+        &borrowed_storage,
+        .{},
+    );
+    try std.testing.expectEqualStrings(
+        "example.com",
+        borrowed.header("host").?,
+    );
+    try validateRequestHead(allocator, mismatch, .{});
+
+    var rejected_write: std.ArrayList(u8) = .empty;
+    defer rejected_write.deinit(allocator);
     try std.testing.expectError(
         error.InvalidHost,
-        parseRequest(allocator, mismatch, .{}),
+        writeRequestChecked(
+            &rejected_write,
+            allocator,
+            .GET,
+            "http://example.com/proxy",
+            .http_1_1,
+            &.{.{ .name = "Host", .value = "other.example" }},
+            "",
+        ),
     );
+    try std.testing.expectEqual(@as(usize, 0), rejected_write.items.len);
 
     const invalid_authority = "GET http://user@example.com/proxy HTTP/1.1\r\nHost: user@example.com\r\n\r\n";
     try std.testing.expectError(error.MalformedStartLine, parseRequest(allocator, invalid_authority, .{}));
