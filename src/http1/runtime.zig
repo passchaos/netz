@@ -76,6 +76,197 @@ pub const WriteStrategy = enum {
     flatten,
 };
 
+const PreparedForwardProxyRequest = struct {
+    allocator: std.mem.Allocator,
+    endpoint: UriEndpoint,
+    absolute_target: []u8,
+    owned_headers: ?[]http1.Header,
+    options: RequestOptions,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+    ) Error!PreparedForwardProxyRequest {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) {
+            return error.UnsupportedScheme;
+        }
+        var endpoint = try uriEndpoint(allocator, uri, 80);
+        errdefer endpoint.deinit();
+        const origin_target = try uriTargetAlloc(allocator, uri);
+        defer allocator.free(origin_target);
+        const absolute_target = try std.fmt.allocPrint(
+            allocator,
+            "http://{s}{s}",
+            .{ endpoint.authority, origin_target },
+        );
+        errdefer allocator.free(absolute_target);
+
+        const owned_headers = if (proxy_options.headers.len == 0)
+            null
+        else blk: {
+            const count = std.math.add(
+                usize,
+                request_options.headers.len,
+                proxy_options.headers.len,
+            ) catch return error.IntegerOverflow;
+            const headers = try allocator.alloc(http1.Header, count);
+            @memcpy(
+                headers[0..request_options.headers.len],
+                request_options.headers,
+            );
+            @memcpy(
+                headers[request_options.headers.len..],
+                proxy_options.headers,
+            );
+            break :blk headers;
+        };
+        var options = request_options;
+        options.target = absolute_target;
+        options.host = endpoint.authority;
+        if (owned_headers) |headers| options.headers = headers;
+        return .{
+            .allocator = allocator,
+            .endpoint = endpoint,
+            .absolute_target = absolute_target,
+            .owned_headers = owned_headers,
+            .options = options,
+        };
+    }
+
+    fn deinit(self: *PreparedForwardProxyRequest) void {
+        if (self.owned_headers) |headers| self.allocator.free(headers);
+        self.allocator.free(self.absolute_target);
+        self.endpoint.deinit();
+        self.* = undefined;
+    }
+};
+
+fn requestUriViaProxyBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    proxy_uri: []const u8,
+    target_uri: []const u8,
+    request_options: RequestOptions,
+    proxy_options: ProxyOptions,
+    limits: Limits,
+    tls_options: TlsClientOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!OwnedResponse {
+    var client = try connectProxyUriBefore(
+        allocator,
+        io,
+        proxy_uri,
+        limits,
+        deadline,
+    );
+    defer client.close();
+
+    const target = std.Uri.parse(target_uri) catch return error.InvalidUri;
+    const is_http = std.ascii.eqlIgnoreCase(target.scheme, "http");
+    const is_https = std.ascii.eqlIgnoreCase(target.scheme, "https");
+    if (!is_http and !is_https) return error.UnsupportedScheme;
+    if (is_http) {
+        return if (deadline) |absolute|
+            client.requestForwardProxyUriWithDeadline(
+                target_uri,
+                request_options,
+                proxy_options,
+                absolute,
+            )
+        else
+            client.requestForwardProxyUri(
+                target_uri,
+                request_options,
+                proxy_options,
+            );
+    }
+
+    var endpoint = try uriEndpoint(allocator, target, 443);
+    defer endpoint.deinit();
+    const connect_target = try std.fmt.allocPrint(
+        allocator,
+        "{s}:{d}",
+        .{ endpoint.host_storage, endpoint.port },
+    );
+    defer allocator.free(connect_target);
+    try client.promoteConnectTunnelToTls(
+        connect_target,
+        endpoint.tls_host,
+        endpoint.authority,
+        proxy_options.headers,
+        tls_options,
+        deadline,
+    );
+    const origin_target = try uriTargetAlloc(allocator, target);
+    defer allocator.free(origin_target);
+    var options = request_options;
+    options.target = origin_target;
+    options.host = endpoint.authority;
+    return if (deadline) |absolute|
+        client.requestWithDeadline(options, absolute)
+    else
+        client.request(options);
+}
+
+fn connectProxyUriBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    proxy_uri: []const u8,
+    limits: Limits,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!Client {
+    const uri = std.Uri.parse(proxy_uri) catch return error.InvalidUri;
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http")) {
+        return error.UnsupportedScheme;
+    }
+    if (uri.query != null or uri.fragment != null) return error.InvalidUri;
+    const path = uriComponentBytes(uri.path);
+    if (path.len != 0 and !std.mem.eql(u8, path, "/")) {
+        return error.InvalidUri;
+    }
+    var endpoint = try uriEndpoint(allocator, uri, 80);
+    defer endpoint.deinit();
+    var client = if (deadline) |absolute| switch (endpoint.target) {
+        .host => try Client.connectHostWithDeadline(
+            allocator,
+            io,
+            endpoint.tls_host,
+            endpoint.port,
+            limits,
+            absolute,
+        ),
+        .ip => |address| try Client.connectWithDeadline(
+            allocator,
+            io,
+            address,
+            limits,
+            absolute,
+        ),
+    } else switch (endpoint.target) {
+        .host => try Client.connectHost(
+            allocator,
+            io,
+            endpoint.tls_host,
+            endpoint.port,
+            limits,
+        ),
+        .ip => |address| try Client.connect(
+            allocator,
+            io,
+            address,
+            limits,
+        ),
+    };
+    errdefer client.close();
+    const authority = try allocator.dupe(u8, endpoint.authority);
+    if (client.default_host) |old| allocator.free(old);
+    client.default_host = authority;
+    return client;
+}
+
 pub const Limits = struct {
     max_head_bytes: usize = 64 * 1024,
     /// Maximum request fields accepted by connection-owning `serve*` helpers.
@@ -168,6 +359,13 @@ pub const VailTlsClientOptions = struct {
     tls13_ticket_resumption: ?*const tls_stream.Tls13SessionTicket = null,
     max_server_handshake_size: usize = 256 * 1024,
     handshake_timeout: ?std.Io.Duration = null,
+};
+
+/// HTTP forward-proxy policy shared by one-shot cleartext and CONNECT-tunneled
+/// URI requests. These fields are sent only to the proxy: for HTTPS they are
+/// carried by CONNECT and never appear inside the authenticated origin tunnel.
+pub const ProxyOptions = struct {
+    headers: []const http1.Header = &.{},
 };
 
 /// Synchronous observer for HTTP/1 informational response heads.
@@ -3709,6 +3907,138 @@ pub const Client = struct {
         };
     }
 
+    /// Send one absolute-form request over an already connected HTTP proxy.
+    /// The target URI must use `http`; HTTPS uses CONNECT plus TLS through the
+    /// one-shot `requestUriViaProxy*` helpers below. Proxy-only headers are
+    /// appended after origin request fields and participate in ordinary
+    /// duplicate/framing validation before any bytes are written.
+    pub fn requestForwardProxyUri(
+        self: *Client,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+    ) Error!OwnedResponse {
+        var prepared = try PreparedForwardProxyRequest.init(
+            self.allocator,
+            uri_text,
+            request_options,
+            proxy_options,
+        );
+        defer prepared.deinit();
+        return self.request(prepared.options);
+    }
+
+    pub fn requestForwardProxyUriWithDeadline(
+        self: *Client,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        var prepared = try PreparedForwardProxyRequest.init(
+            self.allocator,
+            uri_text,
+            request_options,
+            proxy_options,
+        );
+        defer prepared.deinit();
+        return self.requestWithDeadline(prepared.options, deadline);
+    }
+
+    pub fn requestForwardProxyUriWithTimeout(
+        self: *Client,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestForwardProxyUriWithDeadline(
+            uri_text,
+            request_options,
+            proxy_options,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Perform a one-shot HTTP or HTTPS origin request through a cleartext
+    /// HTTP proxy. HTTP uses absolute-form directly. HTTPS sends CONNECT,
+    /// validates an empty successful response, then authenticates the origin
+    /// over TLS on the same byte stream before sending an origin-form request.
+    pub fn requestUriViaProxy(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        target_uri: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+    ) Error!OwnedResponse {
+        return requestUriViaProxyBefore(
+            allocator,
+            io,
+            proxy_uri,
+            target_uri,
+            request_options,
+            proxy_options,
+            limits,
+            tls_options,
+            null,
+        );
+    }
+
+    pub fn requestUriViaProxyWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        target_uri: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return requestUriViaProxyBefore(
+            allocator,
+            io,
+            proxy_uri,
+            target_uri,
+            request_options,
+            proxy_options,
+            limits,
+            tls_options,
+            deadline,
+        );
+    }
+
+    pub fn requestUriViaProxyWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        proxy_uri: []const u8,
+        target_uri: []const u8,
+        request_options: RequestOptions,
+        proxy_options: ProxyOptions,
+        limits: Limits,
+        tls_options: TlsClientOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriViaProxyWithDeadline(
+            allocator,
+            io,
+            proxy_uri,
+            target_uri,
+            request_options,
+            proxy_options,
+            limits,
+            tls_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     pub fn requestUri(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -4026,6 +4356,59 @@ pub const Client = struct {
             tls_options,
             .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
+    }
+
+    fn promoteConnectTunnelToTls(
+        self: *Client,
+        connect_target: []const u8,
+        tls_host: []const u8,
+        origin_authority: []const u8,
+        proxy_headers: []const http1.Header,
+        tls_options: TlsClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!void {
+        if (self.tls_conn != null or self.tls_vail_conn != null) {
+            return error.InvalidResponse;
+        }
+        const owned_authority = try self.allocator.dupe(
+            u8,
+            origin_authority,
+        );
+        errdefer self.allocator.free(owned_authority);
+        const tunnel = if (deadline) |absolute|
+            try self.openConnectTunnelWithDeadline(
+                connect_target,
+                proxy_headers,
+                absolute,
+            )
+        else
+            try self.openConnectTunnel(connect_target, proxy_headers);
+        if (tunnel.inbuf.items.len != 0 or tunnel.tls_conn != null or
+            tunnel.tls_vail_conn != null or tunnel.tls_server_conn != null)
+        {
+            return error.InvalidResponse;
+        }
+        const tls_conn = if (deadline) |absolute|
+            try TlsClientConnection.initWithDeadline(
+                self.allocator,
+                self.io,
+                self.stream,
+                tls_host,
+                tls_options,
+                absolute,
+            )
+        else
+            try TlsClientConnection.init(
+                self.allocator,
+                self.io,
+                self.stream,
+                tls_host,
+                tls_options,
+            );
+        if (self.default_host) |old| self.allocator.free(old);
+        self.default_host = owned_authority;
+        self.tls_conn = tls_conn;
+        self.writer_state.phase = .idle;
     }
 
     pub fn openConnectTunnelWithTimeout(
@@ -12799,6 +13182,7 @@ test {
     _ = @import("runtime/body_writer_tests.zig");
     _ = @import("runtime/header_timeout_tests.zig");
     _ = @import("runtime/response_timeout_tests.zig");
+    _ = @import("runtime/proxy_tests.zig");
     _ = @import("runtime/handoff_timeout_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");

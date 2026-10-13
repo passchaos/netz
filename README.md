@@ -214,7 +214,12 @@ Current protocol coverage includes:
   partial input, with the response budget spanning interim 1xx heads, and
   without timing message bodies), per-connection graceful shutdown that completes the active
   response with `Connection: close` and suppresses later requests, optional
-  Host/default-port, CONNECT authority, and absolute-form authority synthesis, `http://`/`https://` URI helpers
+  Host/default-port, CONNECT authority, and absolute-form authority synthesis,
+  `http://`/`https://` URI helpers, persistent HTTP forward-proxy requests with
+  fragment-free absolute-form targets, and one-shot HTTP/HTTPS proxy helpers
+  whose single deadline spans proxy DNS/TCP, CONNECT, origin TLS and the final
+  response while keeping proxy-only credentials outside the authenticated
+  origin request,
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, an opt-in vail HTTPS client
   for mTLS/ALPN/peer-chain/exporter/KeyUpdate access, and a `std.Io.async`
