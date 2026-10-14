@@ -820,6 +820,12 @@ silent alternative-service endpoint independently proves exponential
 suppression and same-deadline H1 fallback. The replay boundary is method-aware:
 GET falls back, but POST returns the H3 failure and never reaches the TCP
 server. HTTP/3 is opt-in and requires an explicit QUIC certificate policy.
+Cross-origin Alt-Svc redirects now require a distinct connector hook. The
+default hook preserves the new origin's URI/SNI policy while clearing QUIC
+resumption, address-validation, early-data, deterministic random/key inputs,
+and client identity unless forwarding was explicitly authorized; a custom
+connector without this boundary fails closed instead of falling back to its
+ordinary alternative-service dial.
 
 The four verified capture artifacts are
 `zig-out/http3-captures/run.0fFQq2` (v1 upload),

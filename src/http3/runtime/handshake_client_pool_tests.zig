@@ -319,6 +319,96 @@ test "HTTP/3 pool refuses Alt-Svc without an explicit route connector" {
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
 }
 
+test "HTTP/3 pool requires redirect-aware Alt-Svc isolation hook" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const Context = struct {
+        ordinary_alt_called: bool = false,
+        redirect_alt_called: bool = false,
+
+        fn connect(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: runtime.Limits,
+        ) runtime.Error!runtime.HandshakeClient {
+            return error.Unexpected;
+        }
+
+        fn connectAlt(
+            context_ptr: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: http3.AltSvcTarget,
+            _: runtime.Limits,
+        ) runtime.Error!runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            self.ordinary_alt_called = true;
+            return error.Unexpected;
+        }
+
+        fn connectAltRedirect(
+            context_ptr: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: http3.AltSvcTarget,
+            _: runtime.Limits,
+            redirect: runtime.HandshakeClientPoolRedirectConnectContext,
+        ) runtime.Error!runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            if (!redirect.cross_origin or redirect.forward_client_identity) {
+                return error.Unexpected;
+            }
+            self.redirect_alt_called = true;
+            return error.ConnectionRefused;
+        }
+    };
+    var context: Context = .{};
+    var pool = try runtime.HandshakeClientPool.init(
+        allocator,
+        threaded.io(),
+        .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .max_connections = 1,
+            .connector = .{
+                .context = &context,
+                .client_identity_configured = false,
+                .connect = Context.connect,
+                .connect_alt_svc = Context.connectAlt,
+                .connect_alt_svc_redirect = Context.connectAltRedirect,
+            },
+        },
+    );
+    defer pool.deinit();
+    try std.testing.expectError(
+        error.ConnectionRefused,
+        pool.requestUriAltSvcForRedirect(
+            "https://localhost/redirected",
+            .{
+                .alpn = "h3",
+                .connect_host = "127.0.0.1",
+                .origin_host = "localhost",
+                .port = 443,
+            },
+            .{},
+            .{
+                .cross_origin = true,
+                .forward_client_identity = false,
+            },
+        ),
+    );
+    try std.testing.expect(!context.ordinary_alt_called);
+    try std.testing.expect(context.redirect_alt_called);
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+}
+
 test "HTTP/3 pool preserves origin over Alt-Svc routing and reuses QUIC" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

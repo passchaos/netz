@@ -27,6 +27,29 @@ pub const RedirectConnectContext = struct {
     forward_client_identity: bool,
 };
 
+fn isolateRedirectOptions(
+    options_value: anytype,
+    forward_client_identity: bool,
+) @TypeOf(options_value) {
+    var options = options_value;
+    options.handshake.retry_source_connection_id = &.{};
+    options.handshake.server_name = null;
+    options.handshake.address_validation_token = &.{};
+    options.handshake.resumption_session = null;
+    options.handshake.resumption_server_id = null;
+    options.handshake.auto_resumption = null;
+    options.handshake.early_data = null;
+    options.handshake.random = null;
+    options.handshake.x25519_secret_key = null;
+    options.handshake.p256_secret_key = null;
+    options.handshake.p384_secret_key = null;
+    options.handshake.x25519_mlkem768_secret_key = null;
+    options.handshake.x25519_mlkem768_seed = null;
+    options.handshake.nist_hybrid_key_material = .{};
+    if (!forward_client_identity) options.handshake.client_identity = null;
+    return options;
+}
+
 pub fn DefaultConnectorContext(comptime Runtime: type) type {
     return struct {
         options: Runtime.HandshakeClientOptions,
@@ -37,6 +60,7 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
                 .client_identity_configured = self.options.handshake.client_identity != null,
                 .connect = connect,
                 .connect_alt_svc = connectAltSvc,
+                .connect_alt_svc_redirect = connectAltSvcRedirect,
                 .connect_redirect = connectRedirect,
             };
         }
@@ -96,27 +120,13 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
                 return error.Unexpected;
             std.Io.randomSecure(io, &local_cid) catch
                 return error.Unexpected;
-            var options = self.options;
+            var options = isolateRedirectOptions(
+                self.options,
+                redirect.forward_client_identity,
+            );
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;
-            options.handshake.retry_source_connection_id = &.{};
-            options.handshake.server_name = null;
-            options.handshake.address_validation_token = &.{};
-            options.handshake.resumption_session = null;
-            options.handshake.resumption_server_id = null;
-            options.handshake.auto_resumption = null;
-            options.handshake.early_data = null;
-            options.handshake.random = null;
-            options.handshake.x25519_secret_key = null;
-            options.handshake.p256_secret_key = null;
-            options.handshake.p384_secret_key = null;
-            options.handshake.x25519_mlkem768_secret_key = null;
-            options.handshake.x25519_mlkem768_seed = null;
-            options.handshake.nist_hybrid_key_material = .{};
-            if (!redirect.forward_client_identity) {
-                options.handshake.client_identity = null;
-            }
             return Runtime.HandshakeClient.connectUri(
                 allocator,
                 io,
@@ -144,6 +154,44 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
             std.Io.randomSecure(io, &local_cid) catch
                 return error.Unexpected;
             var options = self.options;
+            options.handshake.original_destination_connection_id =
+                &original_dcid;
+            options.handshake.local_connection_id = &local_cid;
+            return Runtime.HandshakeClient.connectUriAltSvc(
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                limits,
+                options,
+            );
+        }
+
+        fn connectAltSvcRedirect(
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            uri: std.Uri,
+            target: http3.AltSvcTarget,
+            limits: Runtime.Limits,
+            redirect: RedirectConnectContext,
+        ) Runtime.Error!Runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var original_dcid: [8]u8 = undefined;
+            var local_cid: [8]u8 = undefined;
+            std.Io.randomSecure(io, &original_dcid) catch
+                return error.Unexpected;
+            std.Io.randomSecure(io, &local_cid) catch
+                return error.Unexpected;
+            var options = if (redirect.cross_origin)
+                isolateRedirectOptions(
+                    self.options,
+                    redirect.forward_client_identity,
+                )
+            else
+                self.options;
             options.handshake.original_destination_connection_id =
                 &original_dcid;
             options.handshake.local_connection_id = &local_cid;
@@ -186,6 +234,19 @@ pub fn Connector(comptime Runtime: type) type {
             uri: std.Uri,
             target: http3.AltSvcTarget,
             limits: Runtime.Limits,
+        ) Runtime.Error!Runtime.HandshakeClient = null,
+        /// Redirect-aware Alt-Svc hook. A connector that accepts cross-origin
+        /// routes must clear every origin-bound resumption/token input before
+        /// authenticating the new origin.
+        connect_alt_svc_redirect: ?*const fn (
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            uri: std.Uri,
+            target: http3.AltSvcTarget,
+            limits: Runtime.Limits,
+            redirect: RedirectConnectContext,
         ) Runtime.Error!Runtime.HandshakeClient = null,
         /// Optional redirect-aware connection hook. When absent, the ordinary
         /// connector is called and remains responsible for scoping every
@@ -652,6 +713,23 @@ pub fn Pool(comptime Runtime: type) type {
         ) Runtime.Error!Client {
             switch (route) {
                 .alt_svc => |target| {
+                    if (redirect) |context| {
+                        if (context.cross_origin) {
+                            const connect_redirect = self.options.connector
+                                .connect_alt_svc_redirect orelse
+                                return error.InvalidHeader;
+                            return connect_redirect(
+                                self.options.connector.context,
+                                self.allocator,
+                                self.io,
+                                self.options.local_address,
+                                uri,
+                                target,
+                                self.options.limits,
+                                context,
+                            );
+                        }
+                    }
                     const connect_alt_svc = self.options.connector.connect_alt_svc orelse
                         return error.InvalidHeader;
                     return connect_alt_svc(
@@ -788,6 +866,25 @@ pub fn Pool(comptime Runtime: type) type {
             };
         }
 
+        pub fn requestUriAltSvcForRedirect(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+            redirect: RedirectConnectContext,
+        ) (Runtime.Error || Error)!Runtime.OwnedHandshakeResponse {
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                null,
+                redirect,
+                .{ .alt_svc = target },
+            ) catch |err| switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+        }
+
         pub fn requestUriAltSvcWithTimeout(
             self: *Self,
             uri_text: []const u8,
@@ -822,6 +919,28 @@ pub fn Pool(comptime Runtime: type) type {
                 request_options,
                 absolute,
                 null,
+                .{ .alt_svc = target },
+            );
+        }
+
+        pub fn requestUriAltSvcForRedirectWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+            redirect: RedirectConnectContext,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            const absolute = try deadline_policy.usableAwake(
+                self.io,
+                deadline,
+            );
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                absolute,
+                redirect,
                 .{ .alt_svc = target },
             );
         }
@@ -2072,4 +2191,30 @@ fn retryableStaleConnectionError(err: anyerror) bool {
         => true,
         else => false,
     };
+}
+
+test "HTTP/3 redirect options clear origin-bound handshake inputs" {
+    const Runtime = @import("../runtime.zig");
+    var session: @import("../../quic/mod.zig").resumption.Session = undefined;
+    const options: Runtime.HandshakeClientOptions = .{ .handshake = .{
+        .original_destination_connection_id = "original",
+        .local_connection_id = "local",
+        .retry_source_connection_id = "retry",
+        .server_name = "first.example",
+        .address_validation_token = "token",
+        .random = [_]u8{0x11} ** 32,
+        .x25519_secret_key = [_]u8{0x22} ** 32,
+        .resumption_session = &session,
+        .resumption_server_id = "first.example",
+    } };
+    const isolated = isolateRedirectOptions(options, false);
+    try std.testing.expectEqual(@as(usize, 0), isolated.handshake.retry_source_connection_id.len);
+    try std.testing.expect(isolated.handshake.server_name == null);
+    try std.testing.expectEqual(@as(usize, 0), isolated.handshake.address_validation_token.len);
+    try std.testing.expect(isolated.handshake.random == null);
+    try std.testing.expect(isolated.handshake.x25519_secret_key == null);
+    try std.testing.expect(isolated.handshake.resumption_session == null);
+    try std.testing.expect(isolated.handshake.resumption_server_id == null);
+    try std.testing.expect(isolated.handshake.auto_resumption == null);
+    try std.testing.expect(isolated.handshake.early_data == null);
 }

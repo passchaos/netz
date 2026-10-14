@@ -17,7 +17,7 @@ pub fn requestUri(
     uri_text: []const u8,
     request: client.RequestOptions,
 ) !client.OwnedResponse {
-    return requestUriBefore(pool, uri_text, request, null) catch |err| switch (err) {
+    return requestUriBefore(pool, uri_text, request, null, false, false) catch |err| switch (err) {
         error.Timeout,
         error.Canceled,
         error.ConcurrencyUnavailable,
@@ -52,6 +52,8 @@ pub fn requestUriWithDeadline(
         uri_text,
         request,
         try deadline_policy.usableAwake(pool.io, deadline),
+        false,
+        false,
     );
 }
 
@@ -60,6 +62,8 @@ fn requestUriBefore(
     uri_text: []const u8,
     request: client.RequestOptions,
     deadline: ?std.Io.Clock.Timestamp,
+    crossed_origin: bool,
+    forward_client_identity: bool,
 ) !client.OwnedResponse {
     const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
     const target = try uriTargetAlloc(pool.allocator, uri);
@@ -94,6 +98,8 @@ fn requestUriBefore(
             &alternative.?,
             request,
             deadline,
+            crossed_origin,
+            forward_client_identity,
         )) |owned| {
             _ = h3_state.cache.recordSuccess(origin);
             var result = owned;
@@ -111,9 +117,16 @@ fn requestUriBefore(
     var retry_stale = true;
     while (true) {
         var lease = if (deadline) |absolute|
-            try pool.acquireUriWithDeadline(uri_text, absolute)
+            try pool.acquireUriWithDeadlineAndOriginIsolation(
+                uri_text,
+                absolute,
+                crossed_origin,
+            )
         else
-            try pool.acquireUri(uri_text);
+            try pool.acquireUriWithOriginIsolation(
+                uri_text,
+                crossed_origin,
+            );
         defer if (lease.active) lease.discard();
         const response = if (deadline) |absolute|
             lease.connection().requestWithDeadline(target, request, absolute)
@@ -152,6 +165,8 @@ fn requestHttp3(
     alternative: *const alt_svc_cache.Alternative,
     request: client.RequestOptions,
     deadline: ?std.Io.Clock.Timestamp,
+    crossed_origin: bool,
+    forward_client_identity: bool,
 ) !client.OwnedResponse {
     var header_stack: [header_mapping.max_stack_headers]http3.Qpack.HeaderField =
         undefined;
@@ -179,6 +194,8 @@ fn requestHttp3(
             .trailers = trailers.items,
         },
         deadline,
+        crossed_origin,
+        forward_client_identity,
     );
     return .{
         .allocator = pool.allocator,
@@ -372,13 +389,13 @@ fn RedirectAdapter(comptime PoolType: type) type {
             crossed_origin: bool,
             policy: uri_redirect.Policy,
         ) PoolType.RequestOperationError!client.OwnedResponse {
-            _ = crossed_origin;
-            _ = policy;
             return requestUriBefore(
                 pool,
                 uri_text,
                 request_options,
                 deadline,
+                crossed_origin,
+                policy.allow_cross_origin_client_identity,
             );
         }
 

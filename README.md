@@ -210,6 +210,10 @@ Current protocol coverage includes:
   methods replay over the existing TCP pool by default, while non-idempotent
   requests surface the H3 failure without duplicate application delivery. One
   absolute deadline remains unchanged across the H3 attempt and TCP fallback.
+  Cross-origin redirects clear caller-supplied TCP TLS 1.2/1.3 tickets and
+  require an H3 redirect-aware connector that removes QUIC resumption,
+  address-validation, early-data, deterministic random/key material, and
+  disallowed client identity before dialing the next authority.
   The exclusive H3 backend retains its own explicit total/idle limits in
   addition to the TCP pool's limits,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked

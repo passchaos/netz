@@ -1183,6 +1183,13 @@ certificate policy when the caller configured only the TCP TLS backend. Its
 exclusive QUIC backend has separate explicit total/idle caps from the TCP pool;
 one cross-transport global admission budget remains future shared-multiplexing
 work rather than an implied property of this change.
+Cross-origin pooled redirects now also isolate caller-provided resumption
+inputs rather than relying only on cache keys: TCP acquisition clears explicit
+TLS 1.2/1.3 tickets, while Alt-Svc H3 requires a redirect-aware connector and
+the default implementation clears QUIC resumption sessions/server IDs,
+address-validation tokens, early data, deterministic random/key inputs and
+client identity unless policy explicitly allows it. Custom H3 connectors fail
+closed when they omit that hook.
 
 | Area | netz | hyper |
 | --- | --- | --- |

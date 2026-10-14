@@ -17,6 +17,7 @@ const pool_tickets = @import("client_pool/tickets.zig");
 const h3_support = @import("client_pool/http3.zig");
 const http3_runtime = @import("../http3/runtime.zig");
 const alt_svc_cache = @import("alt_svc_cache.zig");
+const tls_stream = @import("../tls/mod.zig").stream;
 
 pub const Error = client.Error || http3_runtime.Error ||
     http3_runtime.HandshakeClientPoolError || alt_svc_cache.Error || error{
@@ -136,6 +137,17 @@ pub const Pool = struct {
     }
 
     pub fn acquireUri(self: *Pool, uri_text: []const u8) Error!Lease {
+        return self.acquireUriWithOriginIsolation(uri_text, false);
+    }
+
+    /// Internal redirect hook: clear caller-supplied origin-bound resumption
+    /// material before a new cross-origin connection. Per-origin pool caches
+    /// remain eligible because their keys already include host and port.
+    pub fn acquireUriWithOriginIsolation(
+        self: *Pool,
+        uri_text: []const u8,
+        isolate_origin_state: bool,
+    ) Error!Lease {
         var key = try originKeyForUri(self.allocator, uri_text);
         var key_owned = true;
         defer if (key_owned) key.deinit();
@@ -145,6 +157,7 @@ pub const Pool = struct {
             &key_owned,
             null,
             null,
+            isolate_origin_state,
         ) catch |err| switch (err) {
             error.Timeout,
             error.Canceled,
@@ -171,6 +184,19 @@ pub const Pool = struct {
         uri_text: []const u8,
         deadline: std.Io.Clock.Timestamp,
     ) OperationError!Lease {
+        return self.acquireUriWithDeadlineAndOriginIsolation(
+            uri_text,
+            deadline,
+            false,
+        );
+    }
+
+    pub fn acquireUriWithDeadlineAndOriginIsolation(
+        self: *Pool,
+        uri_text: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        isolate_origin_state: bool,
+    ) OperationError!Lease {
         _ = try deadline_policy.usableAwake(self.io, deadline);
         var key = try originKeyForUri(self.allocator, uri_text);
         var key_owned = true;
@@ -184,6 +210,7 @@ pub const Pool = struct {
                 &key_owned,
                 &waiter,
                 deadline,
+                isolate_origin_state,
             ) catch |err| switch (err) {
                 error.ConnectionLimitReached => {
                     waiter.waitUntil(self.io, deadline) catch |wait_err| switch (wait_err) {
@@ -279,6 +306,7 @@ pub const Pool = struct {
         key_owned: *bool,
         waiter: ?*fifo_admission.Queue.Waiter,
         deadline: ?std.Io.Clock.Timestamp,
+        isolate_origin_state: bool,
     ) OperationError!Lease {
         var displaced: ?client.Connection = null;
         self.mutex.lockUncancelable(self.io);
@@ -352,7 +380,10 @@ pub const Pool = struct {
         else
             null;
         defer if (tls13_ticket) |*ticket| ticket.deinit();
-        var connection_options = self.options.client;
+        var connection_options = clientOptionsForOriginIsolation(
+            self.options.client,
+            isolate_origin_state,
+        );
         if (tls12_ticket) |*ticket| {
             connection_options.tls.tls12_ticket_resumption = ticket;
         }
@@ -604,6 +635,17 @@ fn nowMilliseconds(io: std.Io) u64 {
     return @intCast(@max(0, std.Io.Clock.awake.now(io).toMilliseconds()));
 }
 
+fn clientOptionsForOriginIsolation(
+    options: client.Options,
+    isolate_origin_state: bool,
+) client.Options {
+    if (!isolate_origin_state) return options;
+    var isolated = options;
+    isolated.tls.tls12_ticket_resumption = null;
+    isolated.tls.tls13_ticket_resumption = null;
+    return isolated;
+}
+
 test "unified HTTP pool validates idle limits" {
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
     defer threaded.deinit();
@@ -612,4 +654,19 @@ test "unified HTTP pool validates idle limits" {
         threaded.io(),
         .{ .max_idle_connections = 1, .max_idle_per_origin = 2 },
     ));
+}
+
+test "unified HTTP pool isolates explicit TLS tickets across origins" {
+    var tls12: tls_stream.Tls12SessionTicket = undefined;
+    var tls13: tls_stream.Tls13SessionTicket = undefined;
+    const options: client.Options = .{ .tls = .{
+        .tls12_ticket_resumption = &tls12,
+        .tls13_ticket_resumption = &tls13,
+    } };
+    const same_origin = clientOptionsForOriginIsolation(options, false);
+    try std.testing.expect(same_origin.tls.tls12_ticket_resumption != null);
+    try std.testing.expect(same_origin.tls.tls13_ticket_resumption != null);
+    const cross_origin = clientOptionsForOriginIsolation(options, true);
+    try std.testing.expect(cross_origin.tls.tls12_ticket_resumption == null);
+    try std.testing.expect(cross_origin.tls.tls13_ticket_resumption == null);
 }

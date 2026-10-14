@@ -70,7 +70,30 @@ pub const State = struct {
         alternative: *const alt_svc_cache.Alternative,
         options: runtime.UriRequestOptions,
         deadline: ?std.Io.Clock.Timestamp,
+        crossed_origin: bool,
+        forward_client_identity: bool,
     ) !runtime.OwnedHandshakeResponse {
+        if (crossed_origin) {
+            const redirect: runtime.HandshakeClientPoolRedirectConnectContext = .{
+                .cross_origin = true,
+                .forward_client_identity = forward_client_identity,
+            };
+            return if (deadline) |absolute|
+                self.pool.requestUriAltSvcForRedirectWithDeadline(
+                    uri_text,
+                    alternative.target(),
+                    options,
+                    redirect,
+                    absolute,
+                )
+            else
+                self.pool.requestUriAltSvcForRedirect(
+                    uri_text,
+                    alternative.target(),
+                    options,
+                    redirect,
+                );
+        }
         return if (deadline) |absolute|
             self.pool.requestUriAltSvcWithDeadline(
                 uri_text,
