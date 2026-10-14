@@ -9,6 +9,7 @@ const std = @import("std");
 const http3 = @import("../mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const fifo_admission = @import("../../internal/fifo_admission.zig");
+const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 
@@ -270,6 +271,9 @@ pub fn Options(comptime Runtime: type) type {
         idle: http3.origin_pool.Config = .{},
         /// Maximum idle, leased, and connecting clients. Zero is unbounded.
         max_connections: usize = 32,
+        /// Optional move-stable budget shared with independently owned pools.
+        /// The owner must keep it alive until this pool is deinitialized.
+        shared_connection_budget: ?*connection_budget.Budget = null,
         connector: Connector(Runtime),
     };
 }
@@ -363,6 +367,7 @@ pub fn Pool(comptime Runtime: type) type {
         /// leases remain valid but are discarded when returned.
         pub fn close(self: *Self) void {
             self.mutex.lockUncancelable(self.io);
+            var removed: usize = 0;
             if (!self.closed) {
                 self.closed = true;
                 const idle_count = self.idle.idleCount();
@@ -374,9 +379,11 @@ pub fn Pool(comptime Runtime: type) type {
                 );
                 std.debug.assert(self.connections >= idle_count);
                 self.connections -= idle_count;
+                removed = idle_count;
             }
             self.capacity_waiters.notifyAll(self.io);
             self.mutex.unlock(self.io);
+            self.releaseShared(removed);
         }
 
         pub fn acquireUri(
@@ -411,9 +418,12 @@ pub fn Pool(comptime Runtime: type) type {
             redirect: ?RedirectConnectContext,
             route: ConnectRoute,
         ) (Runtime.Error || Error)!Lease {
+            var blocked_on_shared = false;
             return self.acquireUriForWaiterBefore(
                 uri_text,
                 waiter,
+                null,
+                &blocked_on_shared,
                 null,
                 redirect,
                 route,
@@ -427,11 +437,14 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             uri_text: []const u8,
             waiter: ?*fifo_admission.Queue.Waiter,
+            shared_waiter: ?*connection_budget.Waiter,
+            blocked_on_shared: *bool,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
             route: ConnectRoute,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
+            blocked_on_shared.* = false;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
@@ -448,12 +461,14 @@ pub fn Pool(comptime Runtime: type) type {
             self.mutex.lockUncancelable(self.io);
             if (self.closed) {
                 if (waiter) |queued| _ = self.capacity_waiters.remove(queued);
+                self.cancelSharedWaiter(shared_waiter);
                 self.mutex.unlock(self.io);
                 var key = origin_key;
                 key.deinit();
                 return error.PoolClosed;
             }
             if (!self.capacity_waiters.mayAttempt(waiter)) {
+                self.cancelSharedWaiter(shared_waiter);
                 if (waiter) |queued| {
                     if (!queued.linked) {
                         self.capacity_waiters.enqueue(queued);
@@ -469,6 +484,7 @@ pub fn Pool(comptime Runtime: type) type {
             _ = self.pruneExpiredLocked();
             const reused = self.idle.acquire(origin, nowMillis(self.io));
             if (reused != null) {
+                self.cancelSharedWaiter(shared_waiter);
                 self.leased += 1;
             } else if (self.options.max_connections != 0 and
                 self.connections >= self.options.max_connections)
@@ -476,6 +492,7 @@ pub fn Pool(comptime Runtime: type) type {
                 // Only idle clients are eligible for replacement. Checked-out
                 // leases and connection attempts retain their reservation.
                 const displaced = self.idle.takeOldest() orelse {
+                    self.cancelSharedWaiter(shared_waiter);
                     if (waiter) |queued| {
                         if (!queued.linked) {
                             self.capacity_waiters.enqueue(queued);
@@ -488,6 +505,7 @@ pub fn Pool(comptime Runtime: type) type {
                     key.deinit();
                     return error.ConnectionLimitReached;
                 };
+                self.cancelSharedWaiter(shared_waiter);
                 // `connections` is intentionally unchanged: the evicted idle
                 // client's slot becomes this in-progress reservation.
                 self.finishAdmissionLocked(waiter);
@@ -502,6 +520,29 @@ pub fn Pool(comptime Runtime: type) type {
                     route,
                 );
             } else {
+                self.reserveShared(shared_waiter) catch |err| {
+                    if (err == error.ConnectionLimitReached) {
+                        if (self.idle.takeOldest()) |displaced| {
+                            self.cancelSharedWaiter(shared_waiter);
+                            self.finishAdmissionLocked(waiter);
+                            self.mutex.unlock(self.io);
+                            var old = displaced;
+                            old.deinit();
+                            return self.connectReservedBefore(
+                                uri,
+                                origin_key,
+                                deadline,
+                                redirect,
+                                route,
+                            );
+                        }
+                        blocked_on_shared.* = true;
+                    }
+                    self.mutex.unlock(self.io);
+                    var key = origin_key;
+                    key.deinit();
+                    return err;
+                };
                 self.connections += 1;
             }
             self.finishAdmissionLocked(waiter);
@@ -592,17 +633,26 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
             );
             var waiter: fifo_admission.Queue.Waiter = .{};
+            var shared_waiter: connection_budget.Waiter = .{};
             defer self.cancelCapacityWaiter(&waiter);
+            defer self.cancelSharedWaiter(&shared_waiter);
             while (true) {
+                var blocked_on_shared = false;
                 return self.acquireUriForWaiterBefore(
                     uri_text,
                     &waiter,
+                    &shared_waiter,
+                    &blocked_on_shared,
                     absolute,
                     null,
                     route,
                 ) catch |err| switch (err) {
                     error.ConnectionLimitReached => {
-                        waiter.waitUntil(self.io, absolute) catch |wait_err| switch (wait_err) {
+                        const blocked_waiter = if (blocked_on_shared)
+                            &shared_waiter
+                        else
+                            &waiter;
+                        blocked_waiter.waitUntil(self.io, absolute) catch |wait_err| switch (wait_err) {
                             error.Timeout => return error.Timeout,
                             error.Canceled => return error.Canceled,
                         };
@@ -643,6 +693,7 @@ pub fn Pool(comptime Runtime: type) type {
             if (self.closed) {
                 self.connections -= 1;
                 self.mutex.unlock(self.io);
+                self.releaseShared(1);
                 reservation_active = false;
                 client.deinit();
                 return error.PoolClosed;
@@ -959,21 +1010,30 @@ pub fn Pool(comptime Runtime: type) type {
             const path = try Runtime.uriRequestTargetAlloc(self.allocator, uri);
             defer self.allocator.free(path);
             var waiter: fifo_admission.Queue.Waiter = .{};
+            var shared_waiter: connection_budget.Waiter = .{};
             defer self.cancelCapacityWaiter(&waiter);
+            defer self.cancelSharedWaiter(&shared_waiter);
 
             var retry_stale = true;
             while (true) {
                 var lease = if (deadline) |absolute| acquire: {
                     while (true) {
+                        var blocked_on_shared = false;
                         break :acquire self.acquireUriForWaiterBefore(
                             uri_text,
                             &waiter,
+                            &shared_waiter,
+                            &blocked_on_shared,
                             absolute,
                             redirect,
                             route,
                         ) catch |err| switch (err) {
                             error.ConnectionLimitReached => {
-                                waiter.waitUntil(
+                                const blocked_waiter = if (blocked_on_shared)
+                                    &shared_waiter
+                                else
+                                    &waiter;
+                                blocked_waiter.waitUntil(
                                     self.io,
                                     absolute,
                                 ) catch |wait_err| switch (wait_err) {
@@ -1304,6 +1364,7 @@ pub fn Pool(comptime Runtime: type) type {
                 var key = origin_key;
                 key.deinit();
                 client.deinit();
+                self.releaseShared(1);
                 self.notifyCapacityWaiter();
                 return;
             }
@@ -1316,6 +1377,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.connections -= 1;
                 self.mutex.unlock(self.io);
                 client.deinit();
+                self.releaseShared(1);
                 self.notifyCapacityWaiter();
                 return;
             };
@@ -1331,6 +1393,11 @@ pub fn Pool(comptime Runtime: type) type {
             self.connections -= dropped;
             self.notifyCapacityWaiterLocked();
             self.mutex.unlock(self.io);
+            if (dropped != 0) {
+                self.releaseShared(dropped);
+            } else {
+                self.notifyShared();
+            }
         }
 
         fn discard(
@@ -1348,6 +1415,7 @@ pub fn Pool(comptime Runtime: type) type {
             self.connections -= 1;
             self.mutex.unlock(self.io);
             client.deinit();
+            self.releaseShared(1);
             // Do not let the next waiter establish a replacement before the
             // old QUIC endpoint has actually released its socket/resources.
             self.notifyCapacityWaiter();
@@ -1364,6 +1432,7 @@ pub fn Pool(comptime Runtime: type) type {
             self.connections -= 1;
             self.notifyCapacityWaiterLocked();
             self.mutex.unlock(self.io);
+            self.releaseShared(1);
         }
 
         fn pruneExpiredLocked(self: *Self) usize {
@@ -1371,7 +1440,35 @@ pub fn Pool(comptime Runtime: type) type {
             std.debug.assert(self.connections >= removed);
             self.connections -= removed;
             if (removed != 0) self.notifyCapacityWaiterLocked();
+            self.releaseShared(removed);
             return removed;
+        }
+
+        fn reserveShared(
+            self: *Self,
+            waiter: ?*connection_budget.Waiter,
+        ) connection_budget.Error!void {
+            const budget = self.options.shared_connection_budget orelse return;
+            try budget.tryReserve(waiter);
+        }
+
+        fn cancelSharedWaiter(
+            self: *Self,
+            waiter: ?*connection_budget.Waiter,
+        ) void {
+            const queued = waiter orelse return;
+            const budget = self.options.shared_connection_budget orelse return;
+            budget.cancel(queued);
+        }
+
+        fn releaseShared(self: *Self, count: usize) void {
+            const budget = self.options.shared_connection_budget orelse return;
+            budget.release(count);
+        }
+
+        fn notifyShared(self: *Self) void {
+            const budget = self.options.shared_connection_budget orelse return;
+            budget.notify();
         }
 
         fn finishAdmissionLocked(

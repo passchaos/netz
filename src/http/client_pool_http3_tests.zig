@@ -153,6 +153,7 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
     defer if (!h3_joined) h3_thread.join();
 
     var pool = try http.Pool.init(allocator, io, .{
+        .max_total_connections = 2,
         .client = .{ .tls = .{ .server_verifier = .{
             .pinned_ecdsa_p256_public_key = public_key,
         } } },
@@ -193,6 +194,7 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
     }
     try std.testing.expectEqual(@as(usize, 1), pool.http3ConnectionCount());
     try std.testing.expectEqual(@as(usize, 1), pool.http3IdleCount());
+    try std.testing.expectEqual(@as(usize, 2), pool.totalConnectionCount());
     try std.testing.expectEqual(@as(u64, 2), pool.altSvcStats().?.hits);
 
     release.set(io);
@@ -205,6 +207,155 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
     try std.testing.expectEqual(@as(usize, 1), tcp_worker.requests);
     try std.testing.expectEqual(@as(usize, 1), h3_worker.accepts);
     try std.testing.expectEqual(@as(usize, 2), h3_worker.requests);
+}
+
+test "unified HTTP pool global budget blocks HTTP3 behind idle TCP" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const identity: @FieldType(http1_runtime.TlsListenOptions, "identity") = .{
+        .certificate_chain = &.{&certificate_der},
+        .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+    };
+    var tcp_server = try http1_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = identity, .alpn_protocols = &.{"http/1.1"} },
+    );
+    defer tcp_server.deinit();
+    var silent_h3 = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer silent_h3.deinit();
+    const alt_svc = try std.fmt.allocPrint(
+        allocator,
+        "h3=\":{d}\"; ma=60",
+        .{silent_h3.address().ip4.port},
+    );
+    defer allocator.free(alt_svc);
+
+    const Worker = struct {
+        server: *http1_runtime.TlsServer,
+        alt_svc: []const u8,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/discover",
+                request.request.target,
+            );
+            try connection.writeResponse(.{
+                .headers = &.{.{ .name = "alt-svc", .value = self.alt_svc }},
+                .body = "discovered",
+                .request_method = request.request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+    var release: std.Io.Event = .unset;
+    var worker = Worker{
+        .server = &tcp_server,
+        .alt_svc = alt_svc,
+        .release = &release,
+    };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) {
+        release.set(io);
+        thread.join();
+    };
+
+    var pool = try http.Pool.init(allocator, io, .{
+        .max_total_connections = 1,
+        .client = .{ .tls = .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } } },
+        .http3 = .{
+            .handshake = .{
+                .connect_timeout = .fromSeconds(1),
+                .handshake = .{
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
+                    .server_auth = .{
+                        .pinned_ecdsa_p256_public_key = public_key,
+                    },
+                },
+            },
+        },
+    });
+    defer pool.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}",
+        .{tcp_server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    const discover_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/discover",
+        .{base},
+    );
+    defer allocator.free(discover_uri);
+    var discovered = try pool.requestUriWithTimeout(
+        discover_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer discovered.deinit();
+    try std.testing.expectEqual(http.Protocol.http1, discovered.protocol());
+    try std.testing.expectEqualStrings("discovered", discovered.body());
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.http3ConnectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.totalConnectionCount());
+
+    const blocked_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/blocked-h3",
+        .{base},
+    );
+    defer allocator.free(blocked_uri);
+    try std.testing.expectError(
+        error.Timeout,
+        pool.requestUriWithTimeout(
+            blocked_uri,
+            .{},
+            .fromMilliseconds(20),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.http3ConnectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.totalConnectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.totalWaitingCount());
+    try std.testing.expectEqual(@as(u64, 0), pool.altSvcStats().?.failures);
+
+    release.set(io);
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
 }
 
 test "unified HTTP pool backs off failed HTTP3 and preserves TCP reuse" {

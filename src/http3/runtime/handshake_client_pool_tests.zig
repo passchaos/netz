@@ -1,7 +1,47 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
+const connection_budget = @import("../../internal/connection_budget.zig");
 const tls_testing = @import("../../tls/testing.zig");
+
+test "HTTP/3 pool waits on a shared connection budget under one deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var budget = try connection_budget.Budget.create(allocator, io, 1);
+    defer budget.deinit();
+    try budget.tryReserve(null);
+
+    var connector = runtime.HandshakeClientPoolDefaultConnector{ .options = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+        },
+    } };
+    var pool = try runtime.HandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .loopback(0) },
+        .max_connections = 2,
+        .shared_connection_budget = budget,
+        .connector = connector.connector(),
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireUriWithTimeout(
+            "https://127.0.0.1:443/shared-budget",
+            .fromMilliseconds(10),
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
+    try std.testing.expectEqual(@as(usize, 0), budget.waitingCount());
+    try std.testing.expectEqual(@as(usize, 1), budget.connectionCount());
+    budget.release(1);
+}
 
 test "HTTP/3 URI connect timeout validates and preserves one deadline" {
     const quic = @import("../../quic/mod.zig");

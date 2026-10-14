@@ -1188,9 +1188,19 @@ attempt and H1 fallback, repeated advertisements preserve failure backoff, and
 POST is never replayed after an ambiguous H3 failure while GET may safely
 fallback. H3 remains opt-in so the unified layer never invents a weaker
 certificate policy when the caller configured only the TCP TLS backend. Its
-exclusive QUIC backend has separate explicit total/idle caps from the TCP pool;
-one cross-transport global admission budget remains future shared-multiplexing
-work rather than an implied property of this change.
+exclusive QUIC backend retains separate explicit total/idle caps from the TCP
+pool, while the unified owner now also supplies one move-stable cross-transport
+budget. Opt-in `max_total_connections` counts TCP and QUIC idle entries, leases,
+and in-progress connection attempts together; zero preserves the existing
+independent-backend limits. Both backends reserve only for a genuinely new
+connection, transfer the reservation across same-backend idle displacement,
+and release it on connector failure, non-reusable completion, idle eviction,
+expiry, or close. A shared allocation-free FIFO carries the original absolute
+deadline, pool close wakes both local and global waiters, and
+`totalConnectionCount` / `totalWaitingCount` expose exact aggregate state. A
+real TLS discovery regression holds the sole budget slot in an idle TCP
+connection and proves an Alt-Svc H3 request times out without starting QUIC or
+poisoning failure backoff; independent H3-pool coverage verifies waiter cleanup.
 Cross-origin pooled redirects now also isolate caller-provided resumption
 inputs rather than relying only on cache keys: TCP acquisition clears explicit
 TLS 1.2/1.3 tickets, while Alt-Svc H3 requires a redirect-aware connector and

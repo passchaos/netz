@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const alt_svc_cache = @import("../alt_svc_cache.zig");
+const connection_budget = @import("../../internal/connection_budget.zig");
 const http3 = @import("../../http3/mod.zig");
 const runtime = @import("../../http3/runtime.zig");
 
@@ -33,6 +34,7 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         options: Options,
+        shared_connection_budget: *connection_budget.Budget,
     ) !*State {
         const self = try allocator.create(State);
         errdefer allocator.destroy(self);
@@ -46,6 +48,7 @@ pub const State = struct {
             .limits = options.limits,
             .idle = options.idle,
             .max_connections = options.max_connections,
+            .shared_connection_budget = shared_connection_budget,
             .connector = self.connector.connector(),
         });
         return self;
