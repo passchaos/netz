@@ -36,7 +36,9 @@ pub const RedirectedResponse = types.RedirectedResponse;
 const max_stack_headers = header_mapping.max_stack_headers;
 const max_stack_trailers = header_mapping.max_stack_trailers;
 
-const ConnectionValue = union(Protocol) {
+const ConnectionProtocol = types.NegotiatedProtocol;
+
+const ConnectionValue = union(ConnectionProtocol) {
     http1: http1_runtime.Client,
     http2: http2_runtime.Connection,
 };
@@ -54,7 +56,10 @@ pub const Connection = struct {
     }
 
     pub fn protocol(self: Connection) Protocol {
-        return std.meta.activeTag(self.value);
+        return switch (self.value) {
+            .http1 => .http1,
+            .http2 => .http2,
+        };
     }
 
     pub fn isReusable(self: *const Connection) bool {

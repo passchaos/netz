@@ -3,10 +3,17 @@
 const std = @import("std");
 const http1_runtime = @import("../../http1/runtime.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
+const http3_runtime = @import("../../http3/runtime.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 
 pub const Protocol = enum {
+    http1,
+    http2,
+    http3,
+};
+
+pub const NegotiatedProtocol = enum {
     http1,
     http2,
 };
@@ -55,6 +62,7 @@ pub const Options = struct {
 pub const ResponseValue = union(Protocol) {
     http1: http1_runtime.OwnedResponse,
     http2: http2_runtime.OwnedResponse,
+    http3: http3_runtime.OwnedHandshakeResponse,
 };
 
 pub const OwnedResponse = struct {
@@ -66,6 +74,7 @@ pub const OwnedResponse = struct {
         switch (self.value) {
             .http1 => |*response| response.deinit(allocator),
             .http2 => |*response| response.deinit(allocator),
+            .http3 => |*response| response.deinit(allocator),
         }
         self.* = undefined;
     }
@@ -78,6 +87,7 @@ pub const OwnedResponse = struct {
         return switch (self.value) {
             .http1 => |response| response.response.status,
             .http2 => |response| response.status,
+            .http3 => |response| response.response.status,
         };
     }
 
@@ -85,6 +95,7 @@ pub const OwnedResponse = struct {
         return switch (self.value) {
             .http1 => |response| response.response.body,
             .http2 => |response| response.body,
+            .http3 => |response| response.response.body,
         };
     }
 
@@ -92,6 +103,7 @@ pub const OwnedResponse = struct {
         return switch (self.value) {
             .http1 => |response| findHeader(response.response.headers, name),
             .http2 => |response| findHeader(response.headers, name),
+            .http3 => |response| findHeader(response.response.headers, name),
         };
     }
 };
@@ -154,7 +166,7 @@ pub fn verifiedTlsOptions(
 pub fn selectedProtocol(
     selected_alpn: ?[]const u8,
     options: Options,
-) tls_stream.Error!Protocol {
+) tls_stream.Error!NegotiatedProtocol {
     if (selected_alpn) |alpn| {
         if (std.mem.eql(u8, alpn, "h2")) {
             if (options.protocol_policy == .http1_only) return error.InvalidAlpn;
@@ -183,15 +195,15 @@ fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {
 
 test "unified HTTP ALPN policy selects only permitted protocols" {
     try std.testing.expectEqual(
-        Protocol.http2,
+        NegotiatedProtocol.http2,
         try selectedProtocol("h2", .{}),
     );
     try std.testing.expectEqual(
-        Protocol.http1,
+        NegotiatedProtocol.http1,
         try selectedProtocol("http/1.1", .{}),
     );
     try std.testing.expectEqual(
-        Protocol.http1,
+        NegotiatedProtocol.http1,
         try selectedProtocol(null, .{}),
     );
     try std.testing.expectError(

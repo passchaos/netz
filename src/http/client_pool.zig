@@ -14,8 +14,12 @@ const http3 = @import("../http3/mod.zig");
 const origin_pool = @import("../http3/origin_pool.zig");
 const request_ops = @import("client_pool/requests.zig");
 const pool_tickets = @import("client_pool/tickets.zig");
+const h3_support = @import("client_pool/http3.zig");
+const http3_runtime = @import("../http3/runtime.zig");
+const alt_svc_cache = @import("alt_svc_cache.zig");
 
-pub const Error = client.Error || error{
+pub const Error = client.Error || http3_runtime.Error ||
+    http3_runtime.HandshakeClientPoolError || alt_svc_cache.Error || error{
     PoolClosed,
     ConnectionLimitReached,
     InvalidPoolOptions,
@@ -36,7 +40,13 @@ pub const Options = struct {
     max_tls12_session_tickets: usize = 32,
     /// Maximum cached RFC 8446 TLS 1.3 tickets across origin/ALPN keys.
     max_tls13_session_tickets: usize = 32,
+    /// Enable Alt-Svc-driven HTTP/3 with an explicit QUIC/TLS policy. Null
+    /// preserves the H1/H2-only behavior and never creates a UDP socket.
+    http3: ?h3_support.Options = null,
 };
+
+pub const Http3Options = h3_support.Options;
+pub const Http3FallbackPolicy = h3_support.FallbackPolicy;
 
 pub const Stats = origin_pool.Stats;
 const IdlePool = origin_pool.Pool(client.Connection);
@@ -52,6 +62,7 @@ pub const Pool = struct {
     connections: usize = 0,
     capacity_waiters: fifo_admission.Queue = .{},
     tickets: pool_tickets.Manager,
+    http3: ?*h3_support.State,
     closed: bool = false,
 
     pub fn init(
@@ -70,6 +81,11 @@ pub const Pool = struct {
         // than after a capacity slot has already been reserved.
         var validator = try client.Client.init(allocator, io, options.client);
         validator.deinit();
+        const http3_state = if (options.http3) |http3_options|
+            try h3_support.State.create(allocator, io, http3_options)
+        else
+            null;
+        errdefer if (http3_state) |state| state.deinit();
         return .{
             .allocator = allocator,
             .io = io,
@@ -86,6 +102,7 @@ pub const Pool = struct {
                 options.max_tls12_session_tickets,
                 options.max_tls13_session_tickets,
             ),
+            .http3 = http3_state,
         };
     }
 
@@ -97,6 +114,7 @@ pub const Pool = struct {
         std.debug.assert(self.capacity_waiters.count() == 0);
         self.idle.deinit();
         self.tickets.deinit();
+        if (self.http3) |state| state.deinit();
         self.* = undefined;
     }
 
@@ -114,6 +132,7 @@ pub const Pool = struct {
         self.capacity_waiters.notifyAll(self.io);
         self.mutex.unlock(self.io);
         self.tickets.clear();
+        if (self.http3) |state| state.close();
     }
 
     pub fn acquireUri(self: *Pool, uri_text: []const u8) Error!Lease {
@@ -236,6 +255,21 @@ pub const Pool = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.pruneExpiredLocked(nowMilliseconds(self.io));
+    }
+
+    pub fn altSvcStats(self: *Pool) ?alt_svc_cache.Stats {
+        const state = self.http3 orelse return null;
+        return state.cache.stats();
+    }
+
+    pub fn http3ConnectionCount(self: *Pool) usize {
+        const state = self.http3 orelse return 0;
+        return state.pool.connectionCount();
+    }
+
+    pub fn http3IdleCount(self: *Pool) usize {
+        const state = self.http3 orelse return 0;
+        return state.pool.idleCount();
     }
 
     fn acquireMaybeBefore(

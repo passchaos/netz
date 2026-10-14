@@ -120,6 +120,13 @@ fn responseLocation(
             }
             found = header.value;
         },
+        .http3 => |owned| for (owned.response.headers) |header| {
+            if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+            if (found != null or header.value.len == 0) {
+                return error.InvalidRedirect;
+            }
+            found = header.value;
+        },
     }
     return found;
 }

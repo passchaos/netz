@@ -3,6 +3,7 @@
 const std = @import("std");
 const http1 = @import("../../http1/mod.zig");
 const http2 = @import("../../http2/mod.zig");
+const http3 = @import("../../http3/mod.zig");
 const types = @import("types.zig");
 
 pub const max_stack_headers: usize = 32;
@@ -60,6 +61,38 @@ pub fn mapHttp2(
             .name = header.name,
             .value = header.value,
             .never_index = header.never_indexed,
+        };
+    }
+    return .{
+        .items = out,
+        .owned = if (headers.len <= stack.len) null else out,
+    };
+}
+
+pub const Http3Headers = struct {
+    items: []const http3.Qpack.HeaderField,
+    owned: ?[]http3.Qpack.HeaderField = null,
+
+    pub fn deinit(self: *Http3Headers, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = undefined;
+    }
+};
+
+pub fn mapHttp3(
+    allocator: std.mem.Allocator,
+    headers: []const types.Header,
+    stack: []http3.Qpack.HeaderField,
+) std.mem.Allocator.Error!Http3Headers {
+    const out = if (headers.len <= stack.len)
+        stack[0..headers.len]
+    else
+        try allocator.alloc(http3.Qpack.HeaderField, headers.len);
+    for (headers, out) |header, *mapped| {
+        mapped.* = .{
+            .name = header.name,
+            .value = header.value,
+            .never_indexed = header.never_indexed,
         };
     }
     return .{

@@ -21,6 +21,8 @@ pub const Pool = client_pool.Pool;
 pub const Lease = client_pool.Lease;
 pub const PoolOptions = client_pool.Options;
 pub const PoolStats = client_pool.Stats;
+pub const PoolHttp3Options = client_pool.Http3Options;
+pub const PoolHttp3FallbackPolicy = client_pool.Http3FallbackPolicy;
 pub const Protocol = client.Protocol;
 pub const ProtocolPolicy = client.ProtocolPolicy;
 pub const CleartextProtocol = client.CleartextProtocol;
@@ -43,4 +45,5 @@ test {
     _ = @import("alt_svc_cache_tests.zig");
     _ = @import("client_tests.zig");
     _ = @import("client_pool_tests.zig");
+    _ = @import("client_pool_http3_tests.zig");
 }

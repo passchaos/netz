@@ -1149,7 +1149,7 @@ TLS 1.3 independently.
 endpoint-role directions against OpenSSL, including an HTTP/1 request after
 the resumed handshake. The existing TLS 1.2 gate remains separate.
 
-The shared `http.Client` layer now fills the product-level boundary that Hyper
+The shared `http.Client`/`http.Pool` layer now fills the product-level boundary that Hyper
 deliberately leaves to hyper-util/reqwest: it opens TCP once, offers
 `h2,http/1.1` in one certificate-verified handshake, inspects the authenticated
 ALPN result, and transfers the same TLS connection into the selected netz H1
@@ -1171,6 +1171,18 @@ the already-audited pool primitives rather than creating a third approximate
 implementation. Local TLS coverage also follows a pooled redirect from an
 already-negotiated H1 origin to an already-negotiated H2 origin without opening
 either connection again.
+With explicit QUIC/TLS options, that pool now also consumes authenticated
+H1/H2 Alt-Svc advertisements and publishes H3 responses through the same owned
+protocol/status/header/body surface. A real H2-to-H3 regression requires one
+TCP discovery request followed by two requests on one QUIC connection. A
+separate silent-UDP regression proves one unchanged deadline spans the H3
+attempt and H1 fallback, repeated advertisements preserve failure backoff, and
+POST is never replayed after an ambiguous H3 failure while GET may safely
+fallback. H3 remains opt-in so the unified layer never invents a weaker
+certificate policy when the caller configured only the TCP TLS backend. Its
+exclusive QUIC backend has separate explicit total/idle caps from the TCP pool;
+one cross-transport global admission budget remains future shared-multiplexing
+work rather than an implied property of this change.
 
 | Area | netz | hyper |
 | --- | --- | --- |

@@ -810,6 +810,13 @@ and QPACK `:authority` remain the original origin while DNS/UDP uses the
 alternative host and port. A real handshake test sends two case-equivalent
 origin URIs through one advertised loopback service and requires one QUIC
 connection plus exact origin authority on both requests.
+The unified HTTP pool now closes the next product boundary: after an
+authenticated H2 response advertises H3, two later URI requests select H3 and
+reuse one QUIC connection while returning the common owned response type. A
+silent alternative-service endpoint independently proves exponential
+suppression and same-deadline H1 fallback. The replay boundary is method-aware:
+GET falls back, but POST returns the H3 failure and never reaches the TCP
+server. HTTP/3 is opt-in and requires an explicit QUIC certificate policy.
 
 The four verified capture artifacts are
 `zig-out/http3-captures/run.0fFQq2` (v1 upload),

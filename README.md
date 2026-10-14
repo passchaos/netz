@@ -184,8 +184,8 @@ Current protocol coverage includes:
   backpressure, bound every intermediate layer through reusable fixed-capacity
   queues, require an explicit EOF finish, and expose constructors on each
   protocol's streaming response-head type,
-- A unified `http.Client`/`http.Connection`/`http.Pool` surface for HTTP/1.1
-  and HTTP/2:
+- A unified `http.Client`/`http.Connection` surface for HTTP/1.1 and HTTP/2,
+  plus an optional HTTP/3-capable `http.Pool`:
   HTTPS performs one certificate-verified vail TLS 1.2/1.3 handshake offering
   `h2,http/1.1`, then transfers that exact authenticated transport into the
   selected runtime without reconnecting; explicit `http1_only`/`http2_only`
@@ -203,7 +203,15 @@ Current protocol coverage includes:
   monotonic idle retirement, and retries one stale reused connection only for
   idempotent methods. TLS 1.2/1.3 tickets are retained by exact origin and ALPN,
   and pool redirects release each completed hop before acquiring the next
-  origin,
+  origin. When callers explicitly configure QUIC/TLS verification, successful
+  H1/H2 responses populate the bounded Alt-Svc cache and later requests use the
+  origin-preserving H3 pool. H3 responses share the same owned protocol/status/
+  header/body surface. QUIC failures enter exponential backoff; only idempotent
+  methods replay over the existing TCP pool by default, while non-idempotent
+  requests surface the H3 failure without duplicate application delivery. One
+  absolute deadline remains unchanged across the H3 attempt and TCP fallback.
+  The exclusive H3 backend retains its own explicit total/idle limits in
+  addition to the TCP pool's limits,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the
