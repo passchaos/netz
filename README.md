@@ -1184,7 +1184,12 @@ Current protocol coverage includes:
   MQTT-over-WebSocket client/server adapters for MQTT 3.1, MQTT 3.1.1 and MQTT 5, with
   strict `mqtt` subprotocol
   negotiation, `ws://`/`wss://` client and server transports, WSS client
-  identities with system/caller CA or pin/custom server verification, MQTT
+  identities with system/caller CA or pin/custom server verification,
+  cleartext HTTP CONNECT proxy clients with isolated proxy/origin headers and
+  one deadline through CONNECT, origin TLS, Upgrade and MQTT CONNACK, plus
+  proxy-preserving MQTT 5 redirects whose deadline spans the complete chain,
+  and reconnect connectors that open a fresh tunnel while retaining WSS
+  ticket resumption, MQTT
   byte-stream reassembly across binary-message boundaries, and in-place client
   masking,
   an optional absolute CONNECT/CONNACK packet deadline shared by TCP, TLS, WS,
