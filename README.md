@@ -1191,6 +1191,11 @@ Current protocol coverage includes:
   identities with system/caller CA or pin/custom server verification,
   cleartext HTTP CONNECT proxy clients with isolated proxy/origin headers and
   one deadline through CONNECT, origin TLS, Upgrade and MQTT CONNACK, plus
+  bounded HTTP Upgrade redirects before MQTT CONNECT with WebSocket downgrade,
+  cross-origin credential and proxy policy preserved, HTTP-plus-MQTT nested
+  redirect chains that retain the actual authenticated broker URI for MQTT
+  authorization/loop/default-transport decisions, and reconnect connectors
+  that rebuild the HTTP chain while forwarding same-origin TLS tickets,
   proxy-preserving MQTT 5 redirects whose deadline spans the complete chain,
   and reconnect connectors that open a fresh tunnel while retaining WSS
   ticket resumption, MQTT

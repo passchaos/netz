@@ -2138,6 +2138,40 @@ pub const ConnectAttempt = struct {
     }
 };
 
+/// Final HTTP/1 Upgrade attempt plus the actual URI reached after a bounded
+/// redirect chain. `final_uri` is canonical after at least one redirect and
+/// otherwise preserves the caller's initial URI. This metadata lets layered
+/// protocols apply their own redirect policy to the authenticated peer rather
+/// than the authority requested before HTTP redirection.
+pub const RedirectConnectAttempt = struct {
+    allocator: std.mem.Allocator,
+    attempt: ConnectAttempt,
+    final_uri: []u8,
+    redirect_count: usize,
+
+    pub fn deinit(self: *RedirectConnectAttempt) void {
+        const allocator = self.allocator;
+        self.attempt.deinit();
+        allocator.free(self.final_uri);
+        self.* = undefined;
+    }
+
+    pub fn requireAccepted(self: *RedirectConnectAttempt) Error!Connection {
+        const connection = try self.attempt.requireAccepted();
+        const allocator = self.allocator;
+        allocator.free(self.final_uri);
+        self.* = undefined;
+        return connection;
+    }
+
+    pub fn takeAttempt(self: *RedirectConnectAttempt) ConnectAttempt {
+        const attempt = self.attempt;
+        self.allocator.free(self.final_uri);
+        self.* = undefined;
+        return attempt;
+    }
+};
+
 pub const Client = struct {
     /// Perform a cleartext WebSocket handshake on an already connected stream.
     /// This is primarily for adapters that must emit a transport preface before
@@ -3229,7 +3263,7 @@ pub const Client = struct {
         options: ConnectOptions,
         redirect_options: RedirectOptions,
     ) Error!Connection {
-        var attempt = try connectUriFollowingRedirectsAttemptBefore(
+        var result = try connectUriFollowingRedirectsDetailedAttemptBefore(
             allocator,
             io,
             uri_text,
@@ -3237,8 +3271,8 @@ pub const Client = struct {
             redirect_options,
             null,
         );
-        errdefer attempt.deinit();
-        return attempt.requireAccepted();
+        errdefer result.deinit();
+        return result.requireAccepted();
     }
 
     /// Preserve the final accepted or non-redirect rejection response after
@@ -3250,7 +3284,25 @@ pub const Client = struct {
         options: ConnectOptions,
         redirect_options: RedirectOptions,
     ) Error!ConnectAttempt {
-        return connectUriFollowingRedirectsAttemptBefore(
+        var result = try connectUriFollowingRedirectsDetailedAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            null,
+        );
+        return result.takeAttempt();
+    }
+
+    pub fn connectUriFollowingRedirectsDetailedAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+    ) Error!RedirectConnectAttempt {
+        return connectUriFollowingRedirectsDetailedAttemptBefore(
             allocator,
             io,
             uri_text,
@@ -3270,7 +3322,7 @@ pub const Client = struct {
         redirect_options: RedirectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!Connection {
-        var attempt = try connectUriFollowingRedirectsAttemptBefore(
+        var result = try connectUriFollowingRedirectsDetailedAttemptBefore(
             allocator,
             io,
             uri_text,
@@ -3278,8 +3330,8 @@ pub const Client = struct {
             redirect_options,
             try deadline_policy.usableAwake(io, deadline),
         );
-        errdefer attempt.deinit();
-        return attempt.requireAccepted();
+        errdefer result.deinit();
+        return result.requireAccepted();
     }
 
     pub fn connectUriFollowingRedirectsAttemptWithDeadline(
@@ -3290,7 +3342,26 @@ pub const Client = struct {
         redirect_options: RedirectOptions,
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
-        return connectUriFollowingRedirectsAttemptBefore(
+        var result = try connectUriFollowingRedirectsDetailedAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return result.takeAttempt();
+    }
+
+    pub fn connectUriFollowingRedirectsDetailedAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!RedirectConnectAttempt {
+        return connectUriFollowingRedirectsDetailedAttemptBefore(
             allocator,
             io,
             uri_text,
@@ -3338,14 +3409,33 @@ pub const Client = struct {
         );
     }
 
-    fn connectUriFollowingRedirectsAttemptBefore(
+    pub fn connectUriFollowingRedirectsDetailedAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) Error!RedirectConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingRedirectsDetailedAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectUriFollowingRedirectsDetailedAttemptBefore(
         allocator: std.mem.Allocator,
         io: std.Io,
         uri_text: []const u8,
         options: ConnectOptions,
         redirect_options: RedirectOptions,
         deadline: ?std.Io.Clock.Timestamp,
-    ) Error!ConnectAttempt {
+    ) Error!RedirectConnectAttempt {
         var chain = redirect.Chain.init(
             allocator,
             redirect_options.policy,
@@ -3353,7 +3443,8 @@ pub const Client = struct {
         defer chain.deinit();
         try chain.recordInitial(uri_text);
         var current_uri = try allocator.dupe(u8, uri_text);
-        defer allocator.free(current_uri);
+        var current_uri_owned = true;
+        defer if (current_uri_owned) allocator.free(current_uri);
         var hop_options = options;
 
         while (true) {
@@ -3400,13 +3491,27 @@ pub const Client = struct {
             if (attempt.accepted() or
                 !redirect.isRedirectStatus(attempt.status()))
             {
-                return attempt;
+                current_uri_owned = false;
+                return .{
+                    .allocator = allocator,
+                    .attempt = attempt,
+                    .final_uri = current_uri,
+                    .redirect_count = chain.redirects,
+                };
             }
-            const location = (try redirect.location(attempt.headers())) orelse
-                return attempt;
+            const location = try redirect.location(attempt.headers());
+            if (location == null) {
+                current_uri_owned = false;
+                return .{
+                    .allocator = allocator,
+                    .attempt = attempt,
+                    .final_uri = current_uri,
+                    .redirect_count = chain.redirects,
+                };
+            }
             var next = try chain.follow(
                 current_uri,
-                location,
+                location.?,
                 attempt.status(),
             );
             var next_owned = true;

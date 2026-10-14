@@ -28,6 +28,13 @@ pub const ClientIdentity = vail.tls.client_auth.ClientIdentity;
 pub const ClientCertificateVerifier = vail.tls.auth.ClientVerifier;
 pub const StapledOcspPolicy = websocket_runtime.StapledOcspPolicy;
 pub const HttpProxyOptions = websocket_runtime.HttpProxyOptions;
+pub const HttpRedirectPolicy = websocket_runtime.RedirectPolicy;
+pub const HttpRedirectProxy = websocket_runtime.RedirectProxy;
+
+pub const HttpRedirectOptions = struct {
+    policy: HttpRedirectPolicy = .{},
+    proxy: ?HttpRedirectProxy = null,
+};
 
 /// MQTT-over-WebSocket listener.
 ///
@@ -1940,6 +1947,184 @@ pub const Client = struct {
         );
     }
 
+    /// Follow bounded HTTP Upgrade redirects before sending MQTT CONNECT.
+    /// WebSocket redirect security policy controls downgrade, cross-origin
+    /// headers/client identity, loops, and optional proxy routing. The TLS
+    /// options remain sourced from `ConnectOptions` so callers configure one
+    /// WSS trust/identity policy for the complete MQTT connection attempt.
+    pub fn connectUriFollowingHttpRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectUriFollowingHttpRedirectsWithConnAck(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUriFollowingHttpRedirectsWithConnAck(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectUriFollowingHttpRedirectsAttempt(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriFollowingHttpRedirectsAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        var result = try connectUriFollowingHttpRedirectsDetailedAttempt(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            null,
+        );
+        return result.takeAttempt();
+    }
+
+    pub fn connectUriFollowingHttpRedirectsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.Connection {
+        var result = try connectUriFollowingHttpRedirectsWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            deadline,
+        );
+        defer result.connack.deinit(allocator);
+        return result.connection;
+    }
+
+    pub fn connectUriFollowingHttpRedirectsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingHttpRedirectsWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn connectUriFollowingHttpRedirectsWithConnAckWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        var attempt = try connectUriFollowingHttpRedirectsAttemptWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            deadline,
+        );
+        errdefer attempt.deinit(allocator);
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriFollowingHttpRedirectsWithConnAckWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingHttpRedirectsWithConnAckWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Apply one absolute deadline across the entire HTTP redirect chain,
+    /// final WebSocket Upgrade, MQTT CONNECT, enhanced authentication, and
+    /// CONNACK. No redirect or partial protocol progress renews the budget.
+    pub fn connectUriFollowingHttpRedirectsAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        var result = try connectUriFollowingHttpRedirectsDetailedAttempt(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return result.takeAttempt();
+    }
+
+    pub fn connectUriFollowingHttpRedirectsAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri: []const u8,
+        options: ConnectOptions,
+        redirect_options: HttpRedirectOptions,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingHttpRedirectsAttemptWithDeadline(
+            allocator,
+            io,
+            uri,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
     /// Establish MQTT over WS/WSS through a cleartext HTTP CONNECT proxy.
     /// Proxy headers are confined to CONNECT; `ConnectOptions.extra_headers`
     /// remain on the end-to-end WebSocket Upgrade. The MQTT subprotocol and
@@ -2159,6 +2344,7 @@ pub const Client = struct {
             policy,
             null,
             null,
+            null,
         );
     }
 
@@ -2178,6 +2364,7 @@ pub const Client = struct {
             uri_text,
             options,
             policy,
+            null,
             null,
             deadline,
         );
@@ -2220,6 +2407,7 @@ pub const Client = struct {
             uri_text,
             options,
             policy,
+            null,
             .{ .uri = proxy_uri, .options = proxy_options },
             null,
         );
@@ -2243,6 +2431,7 @@ pub const Client = struct {
             uri_text,
             options,
             policy,
+            null,
             .{ .uri = proxy_uri, .options = proxy_options },
             deadline,
         );
@@ -2267,6 +2456,75 @@ pub const Client = struct {
             options,
             proxy_options,
             policy,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    /// Follow both HTTP Upgrade redirects and MQTT 5 Server Reference
+    /// redirects. Every MQTT authority receives its own bounded HTTP redirect
+    /// chain, while loop/authorization policy remains independent at each
+    /// protocol layer.
+    pub fn connectUriFollowingAllRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        http_redirect_options: HttpRedirectOptions,
+        mqtt_policy: redirect.Policy,
+    ) runtime.Error!runtime.ConnectResult {
+        return connectUriFollowingRedirectsMaybeProxy(
+            allocator,
+            io,
+            uri_text,
+            options,
+            mqtt_policy,
+            http_redirect_options,
+            null,
+            null,
+        );
+    }
+
+    /// Preserve one absolute caller budget across both nested redirect layers,
+    /// every network/TLS/Upgrade attempt, MQTT enhanced authentication, and the
+    /// final CONNACK.
+    pub fn connectUriFollowingAllRedirectsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        http_redirect_options: HttpRedirectOptions,
+        mqtt_policy: redirect.Policy,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectResult {
+        return connectUriFollowingRedirectsMaybeProxy(
+            allocator,
+            io,
+            uri_text,
+            options,
+            mqtt_policy,
+            http_redirect_options,
+            null,
+            deadline,
+        );
+    }
+
+    pub fn connectUriFollowingAllRedirectsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        http_redirect_options: HttpRedirectOptions,
+        mqtt_policy: redirect.Policy,
+        timeout: std.Io.Duration,
+    ) runtime.Error!runtime.ConnectResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingAllRedirectsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            http_redirect_options,
+            mqtt_policy,
             .fromNow(io, .{ .raw = timeout, .clock = .awake }),
         );
     }
@@ -2318,12 +2576,82 @@ const ProxyTarget = struct {
     options: HttpProxyOptions,
 };
 
+const HttpRedirectAttempt = struct {
+    allocator: std.mem.Allocator,
+    attempt: runtime.ConnectAttempt,
+    final_uri: []u8,
+
+    fn deinit(self: *HttpRedirectAttempt) void {
+        const allocator = self.allocator;
+        self.attempt.deinit(allocator);
+        allocator.free(self.final_uri);
+        self.* = undefined;
+    }
+
+    fn takeAttempt(self: *HttpRedirectAttempt) runtime.ConnectAttempt {
+        const attempt = self.attempt;
+        self.allocator.free(self.final_uri);
+        self.* = undefined;
+        return attempt;
+    }
+};
+
+fn connectUriFollowingHttpRedirectsDetailedAttempt(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    uri: []const u8,
+    options: ConnectOptions,
+    redirect_options: HttpRedirectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) runtime.Error!HttpRedirectAttempt {
+    var ws_result = if (deadline) |absolute|
+        try websocket_runtime.Client
+            .connectUriFollowingRedirectsDetailedAttemptWithDeadline(
+            allocator,
+            io,
+            uri,
+            websocketConnectOptions(options),
+            websocketRedirectOptions(options, redirect_options),
+            absolute,
+        )
+    else
+        try websocket_runtime.Client.connectUriFollowingRedirectsDetailedAttempt(
+            allocator,
+            io,
+            uri,
+            websocketConnectOptions(options),
+            websocketRedirectOptions(options, redirect_options),
+        );
+    var ws_result_owned = true;
+    errdefer if (ws_result_owned) ws_result.deinit();
+    const final_uri = ws_result.final_uri;
+    const ws = try ws_result.attempt.requireAccepted();
+    ws_result_owned = false;
+    ws_result = undefined;
+    errdefer allocator.free(final_uri);
+    const attempt = if (deadline) |absolute|
+        try connectWebSocketAttemptBefore(
+            allocator,
+            ws,
+            options.mqtt,
+            absolute,
+        )
+    else
+        try connectWebSocketAttempt(allocator, ws, options.mqtt);
+    return .{
+        .allocator = allocator,
+        .attempt = attempt,
+        .final_uri = final_uri,
+    };
+}
+
 fn connectUriFollowingRedirectsMaybeProxy(
     allocator: std.mem.Allocator,
     io: std.Io,
     uri_text: []const u8,
     options: ConnectOptions,
     policy: redirect.Policy,
+    http_redirect_options: ?HttpRedirectOptions,
     proxy: ?ProxyTarget,
     deadline: ?std.Io.Clock.Timestamp,
 ) runtime.Error!runtime.ConnectResult {
@@ -2361,7 +2689,32 @@ fn connectUriFollowingRedirectsMaybeProxy(
         {
             return error.UnsupportedRedirectScheme;
         }
-        var attempt = if (proxy) |route|
+        var actual_http_uri: ?[]u8 = null;
+        defer if (actual_http_uri) |owned| allocator.free(owned);
+        var attempt = if (http_redirect_options) |http_redirect| blk: {
+            var result = if (usable_deadline) |absolute|
+                try connectUriFollowingHttpRedirectsDetailedAttempt(
+                    allocator,
+                    io,
+                    target.uri,
+                    options,
+                    http_redirect,
+                    absolute,
+                )
+            else
+                try connectUriFollowingHttpRedirectsDetailedAttempt(
+                    allocator,
+                    io,
+                    target.uri,
+                    options,
+                    http_redirect,
+                    null,
+                );
+            actual_http_uri = result.final_uri;
+            const inner = result.attempt;
+            result = undefined;
+            break :blk inner;
+        } else if (proxy) |route|
             if (usable_deadline) |absolute|
                 try Client.connectUriViaProxyAttemptWithDeadline(
                     allocator,
@@ -2398,11 +2751,18 @@ fn connectUriFollowingRedirectsMaybeProxy(
             );
         errdefer attempt.deinit(allocator);
         if (attempt.accepted()) return attempt.requireAccepted();
+        const redirect_from_uri = actual_http_uri orelse current_uri;
+        if (actual_http_uri != null) {
+            try chain.recordInitial(
+                redirect_from_uri,
+                try websocketRedirectTransport(redirect_from_uri),
+            );
+        }
         const reference = (try redirect.referenceForConnAck(
             attempt.connack.connack,
         )) orelse return error.ConnectRefused;
         var next = try chain.follow(
-            current_uri,
+            redirect_from_uri,
             reference,
             attempt.connack.connack.reason_code,
         );
@@ -2412,6 +2772,16 @@ fn connectUriFollowingRedirectsMaybeProxy(
         allocator.free(current_uri);
         current_uri = owned;
     }
+}
+
+fn websocketRedirectTransport(
+    uri_text: []const u8,
+) runtime.Error!redirect.Transport {
+    const uri = std.Uri.parse(uri_text) catch
+        return error.InvalidServerReference;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "ws")) return .websocket;
+    if (std.ascii.eqlIgnoreCase(uri.scheme, "wss")) return .websocket_tls;
+    return error.UnsupportedRedirectScheme;
 }
 
 /// Borrowed WS/WSS target for `mqtt.reconnect.Client`. URI/TLS/WebSocket
@@ -2603,6 +2973,110 @@ pub const ProxyReconnectConnector = struct {
                 tickets,
             ),
             self.proxy_options,
+            deadline,
+        );
+    }
+};
+
+/// Borrowed WS/WSS URI plus bounded HTTP redirect policy for
+/// `mqtt.reconnect.Client`. Each reconnect attempt starts a fresh redirect
+/// chain. TLS tickets are applied to the initial same-origin attempt; the
+/// WebSocket redirect policy clears them before any cross-origin hop.
+pub const HttpRedirectReconnectConnector = struct {
+    uri: []const u8,
+    options: ConnectOptions,
+    redirect_options: HttpRedirectOptions = .{},
+
+    pub fn connector(
+        self: *HttpRedirectReconnectConnector,
+    ) runtime.ClientConnector {
+        return .{
+            .context = self,
+            .connect_attempt = connectAttempt,
+            .connect_attempt_deadline = connectAttemptWithDeadline,
+            .connect_attempt_with_tls_tickets = connectAttemptWithTlsTickets,
+            .connect_attempt_with_tls_tickets_deadline = connectAttemptWithTlsTicketsAndDeadline,
+        };
+    }
+
+    fn connectAttempt(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *HttpRedirectReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectUriFollowingHttpRedirectsAttempt(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptions(self.options, mqtt_options),
+            self.redirect_options,
+        );
+    }
+
+    fn connectAttemptWithDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *HttpRedirectReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectUriFollowingHttpRedirectsAttemptWithDeadline(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptions(self.options, mqtt_options),
+            self.redirect_options,
+            deadline,
+        );
+    }
+
+    fn connectAttemptWithTlsTickets(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        tickets: runtime.ClientTlsSessionTickets,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *HttpRedirectReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectUriFollowingHttpRedirectsAttempt(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptionsWithTlsTickets(
+                self.options,
+                mqtt_options,
+                tickets,
+            ),
+            self.redirect_options,
+        );
+    }
+
+    fn connectAttemptWithTlsTicketsAndDeadline(
+        context: *anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        mqtt_options: runtime.ConnectOptions,
+        tickets: runtime.ClientTlsSessionTickets,
+        deadline: std.Io.Clock.Timestamp,
+    ) runtime.Error!runtime.ConnectAttempt {
+        const self: *HttpRedirectReconnectConnector =
+            @ptrCast(@alignCast(context));
+        return Client.connectUriFollowingHttpRedirectsAttemptWithDeadline(
+            allocator,
+            io,
+            self.uri,
+            reconnectOptionsWithTlsTickets(
+                self.options,
+                mqtt_options,
+                tickets,
+            ),
+            self.redirect_options,
             deadline,
         );
     }
@@ -2958,6 +3432,23 @@ test "MQTT WebSocket limits preserve TCP socket policy" {
         ocsp.vail_tls.?.stapled_ocsp,
     );
     try std.testing.expect(ocsp.vail_tls.?.request_ocsp);
+
+    const redirected = websocketRedirectOptions(
+        .{
+            .mqtt = .{ .client_id = "redirect-policy" },
+            .tls = .{ .verify_host = false },
+        },
+        .{
+            .policy = .{ .max_redirects = 7 },
+            .proxy = .{ .uri = "http://proxy.example:8080" },
+        },
+    );
+    try std.testing.expectEqual(@as(usize, 7), redirected.policy.max_redirects);
+    try std.testing.expect(!redirected.tls.verify_host);
+    try std.testing.expectEqualStrings(
+        "http://proxy.example:8080",
+        redirected.proxy.?.uri,
+    );
 }
 
 fn websocketConnectOptions(
@@ -3001,6 +3492,17 @@ fn websocketConnectOptions(
             }
         else
             null,
+    };
+}
+
+fn websocketRedirectOptions(
+    options: ConnectOptions,
+    redirect_options: HttpRedirectOptions,
+) websocket_runtime.RedirectOptions {
+    return .{
+        .policy = redirect_options.policy,
+        .tls = options.tls,
+        .proxy = redirect_options.proxy,
     };
 }
 

@@ -5758,6 +5758,7 @@ test {
     _ = @import("tls_runtime_tests.zig");
     _ = @import("websocket_runtime_tests.zig");
     _ = @import("websocket_runtime/proxy_tests.zig");
+    _ = @import("websocket_runtime/redirect_tests.zig");
     _ = @import("runtime/websocket_unix_tests.zig");
     _ = @import("websocket_keep_alive_tests.zig");
     _ = persistence.commit_log;
