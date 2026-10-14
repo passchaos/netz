@@ -497,7 +497,11 @@ Current protocol coverage includes:
   every completed hop releases its lease before the next URI is acquired, so
   same-origin redirects immediately reuse QPACK/QUIC/TLS state while
   cross-origin hops retain capacity/LRU policy and clear origin-bound default-
-  connector state. The single-UDP-owner shared pool provides matching
+  connector state. The exclusive pool also accepts an explicit Alt-Svc route
+  for acquire and complete-request timeout/deadline APIs: it keys reuse by the
+  original origin, authenticates SNI/certificates and emits `:authority` for
+  that origin, while dialing only the advertised alternative host and port.
+  The single-UDP-owner shared pool provides matching
   `beginUriFollowingRedirects*` transactions: they replay multi-packet bodies,
   consume only their current connection/stream events, and leave unrelated
   response, push, and unrouted events caller-owned. `PreparedEarlyRequest` plus

@@ -36,6 +36,7 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
                 .context = self,
                 .client_identity_configured = self.options.handshake.client_identity != null,
                 .connect = connect,
+                .connect_alt_svc = connectAltSvc,
                 .connect_redirect = connectRedirect,
             };
         }
@@ -125,6 +126,37 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
                 options,
             );
         }
+
+        fn connectAltSvc(
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            uri: std.Uri,
+            target: http3.AltSvcTarget,
+            limits: Runtime.Limits,
+        ) Runtime.Error!Runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            var original_dcid: [8]u8 = undefined;
+            var local_cid: [8]u8 = undefined;
+            std.Io.randomSecure(io, &original_dcid) catch
+                return error.Unexpected;
+            std.Io.randomSecure(io, &local_cid) catch
+                return error.Unexpected;
+            var options = self.options;
+            options.handshake.original_destination_connection_id =
+                &original_dcid;
+            options.handshake.local_connection_id = &local_cid;
+            return Runtime.HandshakeClient.connectUriAltSvc(
+                allocator,
+                io,
+                local_address,
+                uri,
+                target,
+                limits,
+                options,
+            );
+        }
     };
 }
 
@@ -143,6 +175,18 @@ pub fn Connector(comptime Runtime: type) type {
             uri: std.Uri,
             limits: Runtime.Limits,
         ) Runtime.Error!Runtime.HandshakeClient,
+        /// Optional origin-preserving alternative-service dial. When absent,
+        /// Alt-Svc acquisition fails rather than silently dialing the origin
+        /// or changing request authority.
+        connect_alt_svc: ?*const fn (
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            uri: std.Uri,
+            target: http3.AltSvcTarget,
+            limits: Runtime.Limits,
+        ) Runtime.Error!Runtime.HandshakeClient = null,
         /// Optional redirect-aware connection hook. When absent, the ordinary
         /// connector is called and remains responsible for scoping every
         /// origin-bound cache by the supplied target URI.
@@ -184,6 +228,10 @@ pub fn Pool(comptime Runtime: type) type {
         const Self = @This();
         const Client = Runtime.HandshakeClient;
         const IdlePool = http3.origin_pool.Pool(Client);
+        const ConnectRoute = union(enum) {
+            origin,
+            alt_svc: http3.AltSvcTarget,
+        };
 
         pub const Lease = struct {
             pool: *Self,
@@ -274,7 +322,25 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             uri_text: []const u8,
         ) (Runtime.Error || Error)!Lease {
-            return self.acquireUriForWaiter(uri_text, null, null);
+            return self.acquireUriForWaiter(
+                uri_text,
+                null,
+                null,
+                .origin,
+            );
+        }
+
+        pub fn acquireUriAltSvc(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+        ) (Runtime.Error || Error)!Lease {
+            return self.acquireUriForWaiter(
+                uri_text,
+                null,
+                null,
+                .{ .alt_svc = target },
+            );
         }
 
         fn acquireUriForWaiter(
@@ -282,12 +348,14 @@ pub fn Pool(comptime Runtime: type) type {
             uri_text: []const u8,
             waiter: ?*fifo_admission.Queue.Waiter,
             redirect: ?RedirectConnectContext,
+            route: ConnectRoute,
         ) (Runtime.Error || Error)!Lease {
             return self.acquireUriForWaiterBefore(
                 uri_text,
                 waiter,
                 null,
                 redirect,
+                route,
             ) catch |err| switch (err) {
                 error.Timeout => unreachable,
                 else => |other| return other,
@@ -300,11 +368,13 @@ pub fn Pool(comptime Runtime: type) type {
             waiter: ?*fifo_admission.Queue.Waiter,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
+            route: ConnectRoute,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
+            try validateConnectRoute(endpoint, route);
             const origin = try http3.requestOrigin(
                 uri.scheme,
                 endpoint.authority,
@@ -368,6 +438,7 @@ pub fn Pool(comptime Runtime: type) type {
                     origin_key,
                     deadline,
                     redirect,
+                    route,
                 );
             } else {
                 self.connections += 1;
@@ -389,6 +460,7 @@ pub fn Pool(comptime Runtime: type) type {
                 origin_key,
                 deadline,
                 redirect,
+                route,
             );
         }
 
@@ -411,6 +483,49 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: std.Io.Clock.Timestamp,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
+            return self.acquireUriRouteWithDeadline(
+                uri_text,
+                .origin,
+                deadline,
+            );
+        }
+
+        pub fn acquireUriAltSvcWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            timeout: std.Io.Duration,
+        ) (Runtime.Error || Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Lease {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.acquireUriAltSvcWithDeadline(
+                uri_text,
+                target,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn acquireUriAltSvcWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.Error || Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Lease {
+            return self.acquireUriRouteWithDeadline(
+                uri_text,
+                .{ .alt_svc = target },
+                deadline,
+            );
+        }
+
+        fn acquireUriRouteWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            route: ConnectRoute,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.Error || Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Lease {
             const absolute = try deadline_policy.usableAwake(
                 self.io,
                 deadline,
@@ -423,6 +538,7 @@ pub fn Pool(comptime Runtime: type) type {
                     &waiter,
                     absolute,
                     null,
+                    route,
                 ) catch |err| switch (err) {
                     error.ConnectionLimitReached => {
                         waiter.waitUntil(self.io, absolute) catch |wait_err| switch (wait_err) {
@@ -439,28 +555,13 @@ pub fn Pool(comptime Runtime: type) type {
             }
         }
 
-        fn connectReserved(
-            self: *Self,
-            uri: std.Uri,
-            origin_key_value: http3.OriginKey,
-        ) (Runtime.Error || Error)!Lease {
-            return self.connectReservedBefore(
-                uri,
-                origin_key_value,
-                null,
-                null,
-            ) catch |err| switch (err) {
-                error.Timeout => unreachable,
-                else => |other| return other,
-            };
-        }
-
         fn connectReservedBefore(
             self: *Self,
             uri: std.Uri,
             origin_key_value: http3.OriginKey,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
+            route: ConnectRoute,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
             var origin_key = origin_key_value;
@@ -468,9 +569,14 @@ pub fn Pool(comptime Runtime: type) type {
             var reservation_active = true;
             errdefer if (reservation_active) self.releaseReservation();
             var client = if (deadline) |absolute|
-                try self.connectClientBefore(uri, absolute, redirect)
+                try self.connectClientBefore(
+                    uri,
+                    absolute,
+                    redirect,
+                    route,
+                )
             else
-                try self.callConnector(uri, redirect);
+                try self.callConnector(uri, redirect, route);
             errdefer client.deinit();
             self.mutex.lockUncancelable(self.io);
             if (self.closed) {
@@ -502,6 +608,7 @@ pub fn Pool(comptime Runtime: type) type {
             uri: std.Uri,
             deadline: std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
+            route: ConnectRoute,
         ) (Runtime.Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Client {
             const ConnectResult = Runtime.Error!Client;
@@ -521,7 +628,7 @@ pub fn Pool(comptime Runtime: type) type {
             select.async(
                 .connected,
                 callConnector,
-                .{ self, uri, redirect },
+                .{ self, uri, redirect, route },
             );
             select.async(.timeout, waitUntil, .{ self.io, deadline });
             return switch (select.await() catch |err| switch (err) {
@@ -541,7 +648,24 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             uri: std.Uri,
             redirect: ?RedirectConnectContext,
+            route: ConnectRoute,
         ) Runtime.Error!Client {
+            switch (route) {
+                .alt_svc => |target| {
+                    const connect_alt_svc = self.options.connector.connect_alt_svc orelse
+                        return error.InvalidHeader;
+                    return connect_alt_svc(
+                        self.options.connector.context,
+                        self.allocator,
+                        self.io,
+                        self.options.local_address,
+                        uri,
+                        target,
+                        self.options.limits,
+                    );
+                },
+                .origin => {},
+            }
             if (redirect) |context| {
                 if (self.options.connector.connect_redirect) |connect_redirect| {
                     return connect_redirect(
@@ -572,6 +696,26 @@ pub fn Pool(comptime Runtime: type) type {
             try deadline.wait(io);
         }
 
+        fn validateConnectRoute(
+            endpoint: anytype,
+            route: ConnectRoute,
+        ) Runtime.Error!void {
+            switch (route) {
+                .origin => {},
+                .alt_svc => |target| {
+                    if (!http3.isHttp3Alpn(target.alpn) or
+                        target.connect_host.len == 0 or target.port == 0 or
+                        !std.ascii.eqlIgnoreCase(
+                            target.origin_host,
+                            endpoint.tls_host,
+                        ))
+                    {
+                        return error.InvalidHeader;
+                    }
+                },
+            }
+        }
+
         pub fn requestUri(
             self: *Self,
             uri_text: []const u8,
@@ -582,6 +726,7 @@ pub fn Pool(comptime Runtime: type) type {
                 request_options,
                 null,
                 null,
+                .origin,
             ) catch |err| switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
@@ -621,6 +766,63 @@ pub fn Pool(comptime Runtime: type) type {
                 request_options,
                 absolute,
                 null,
+                .origin,
+            );
+        }
+
+        pub fn requestUriAltSvc(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+        ) (Runtime.Error || Error)!Runtime.OwnedHandshakeResponse {
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                null,
+                null,
+                .{ .alt_svc = target },
+            ) catch |err| switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
+        }
+
+        pub fn requestUriAltSvcWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+            timeout: std.Io.Duration,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.requestUriAltSvcWithDeadline(
+                uri_text,
+                target,
+                request_options,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn requestUriAltSvcWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            const absolute = try deadline_policy.usableAwake(
+                self.io,
+                deadline,
+            );
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                absolute,
+                null,
+                .{ .alt_svc = target },
             );
         }
 
@@ -630,6 +832,7 @@ pub fn Pool(comptime Runtime: type) type {
             request_options: Runtime.UriRequestOptions,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
+            route: ConnectRoute,
         ) (Runtime.ReceiveTimeoutError || Error)!Runtime.OwnedHandshakeResponse {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
@@ -648,6 +851,7 @@ pub fn Pool(comptime Runtime: type) type {
                             &waiter,
                             absolute,
                             redirect,
+                            route,
                         ) catch |err| switch (err) {
                             error.ConnectionLimitReached => {
                                 waiter.waitUntil(
@@ -669,6 +873,7 @@ pub fn Pool(comptime Runtime: type) type {
                     uri_text,
                     null,
                     redirect,
+                    route,
                 );
                 defer if (lease.active) lease.discard();
                 const request: http3.Request = .{
@@ -851,6 +1056,7 @@ pub fn Pool(comptime Runtime: type) type {
                     hop_request,
                     deadline,
                     connector_redirect,
+                    .origin,
                 );
                 errdefer response.deinit(self.allocator);
                 if (!uri_redirect.isRedirectStatus(response.response.status)) {

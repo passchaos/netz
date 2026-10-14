@@ -803,7 +803,13 @@ an optional deployment cap, `ma=0`, `clear`, and removal when a replacement
 field omits HTTP/3. True LRU eviction bounds origin churn, while exponential
 failure backoff survives refreshes of the same alternative so a broken QUIC
 path is not retried after every successful TCP response. Allocation-failure
-coverage verifies that replacement never publishes a partial entry.
+coverage verifies that replacement never publishes a partial entry. The
+exclusive authenticated H3 pool now consumes these routes without confusing
+transport and authority identity: its cache key, TLS SNI/certificate policy,
+and QPACK `:authority` remain the original origin while DNS/UDP uses the
+alternative host and port. A real handshake test sends two case-equivalent
+origin URIs through one advertised loopback service and requires one QUIC
+connection plus exact origin authority on both requests.
 
 The four verified capture artifacts are
 `zig-out/http3-captures/run.0fFQq2` (v1 upload),

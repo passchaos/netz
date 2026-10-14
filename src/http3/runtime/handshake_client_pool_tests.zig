@@ -1,4 +1,5 @@
 const std = @import("std");
+const http3 = @import("../mod.zig");
 const runtime = @import("../runtime.zig");
 const tls_testing = @import("../../tls/testing.zig");
 
@@ -270,6 +271,180 @@ test "HTTP/3 pool request timeout rejects a non-positive budget" {
             .zero,
         ),
     );
+}
+
+test "HTTP/3 pool refuses Alt-Svc without an explicit route connector" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var context: u8 = 0;
+    var pool = try runtime.HandshakeClientPool.init(
+        allocator,
+        threaded.io(),
+        .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .max_connections = 1,
+            .connector = .{
+                .context = &context,
+                .client_identity_configured = false,
+                .connect = struct {
+                    fn connect(
+                        _: *anyopaque,
+                        _: std.mem.Allocator,
+                        _: std.Io,
+                        _: std.Io.net.IpAddress,
+                        _: std.Uri,
+                        _: runtime.Limits,
+                    ) runtime.Error!runtime.HandshakeClient {
+                        return error.Unexpected;
+                    }
+                }.connect,
+            },
+        },
+    );
+    defer pool.deinit();
+    try std.testing.expectError(
+        error.InvalidHeader,
+        pool.acquireUriAltSvc(
+            "https://localhost/",
+            .{
+                .alpn = "h3",
+                .connect_host = "127.0.0.1",
+                .origin_host = "localhost",
+                .port = 443,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());
+}
+
+test "HTTP/3 pool preserves origin over Alt-Svc routing and reuses QUIC" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const limits: runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const server_cid = [_]u8{ 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const Worker = struct {
+        server: *runtime.HandshakeServer,
+        accepts: usize = 0,
+        requests: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.accept();
+            self.accepts += 1;
+            defer session.deinit();
+            for (0..2) |index| {
+                var request = try session.receiveRequest();
+                defer request.deinit(self.server.allocator);
+                try std.testing.expect(std.ascii.eqlIgnoreCase(
+                    "origin.example:9443",
+                    request.request.authority.?,
+                ));
+                try std.testing.expectEqualStrings(
+                    if (index == 0) "/one" else "/two",
+                    request.request.path,
+                );
+                try session.sendResponse(request.stream_id, .{
+                    .status = 200,
+                    .request_method = request.request.method,
+                    .body = if (index == 0) "one" else "two",
+                });
+                self.requests += 1;
+            }
+        }
+    };
+    var worker = Worker{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var connector = runtime.HandshakeClientPoolDefaultConnector{ .options = .{
+        .handshake = .{
+            .original_destination_connection_id = &.{},
+            .local_connection_id = &.{},
+            .server_auth = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            },
+        },
+    } };
+    var pool = try runtime.HandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .unspecified(0) },
+        .limits = limits,
+        .idle = .{
+            .max_idle_per_origin = 1,
+            .max_idle_total = 1,
+        },
+        .max_connections = 1,
+        .connector = connector.connector(),
+    });
+    defer pool.deinit();
+    const target: http3.AltSvcTarget = .{
+        .alpn = "h3",
+        .connect_host = "127.0.0.1",
+        .origin_host = "origin.example",
+        .port = server.address().ip4.port,
+    };
+    var first = try pool.requestUriAltSvcWithTimeout(
+        "https://origin.example:9443/one",
+        target,
+        .{},
+        .fromSeconds(5),
+    );
+    defer first.deinit(allocator);
+    var second = try pool.requestUriAltSvcWithTimeout(
+        "https://ORIGIN.EXAMPLE:9443/two",
+        target,
+        .{},
+        .fromSeconds(5),
+    );
+    defer second.deinit(allocator);
+
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+    try std.testing.expectEqualStrings("one", first.response.body);
+    try std.testing.expectEqualStrings("two", second.response.body);
+    try std.testing.expectEqual(@as(usize, 1), worker.accepts);
+    try std.testing.expectEqual(@as(usize, 2), worker.requests);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(u64, 1), pool.stats().total_reused);
 }
 
 test "HTTP/3 handshake client pool replaces idle capacity across origins" {

@@ -12269,12 +12269,109 @@ pub const HandshakeClient = struct {
         limits: Limits,
         options: HandshakeClientOptions,
     ) Error!OwnedHandshakeResponse {
-        const deadline = try connectDeadline(io, options.connect_timeout);
+        if (!http3.isHttp3Alpn(target.alpn) or
+            target.connect_host.len == 0 or target.port == 0)
+        {
+            return error.InvalidHeader;
+        }
+        var origin = try uriEndpoint(allocator, uri);
+        defer origin.deinit();
+        if (!std.ascii.eqlIgnoreCase(
+            target.origin_host,
+            origin.tls_host,
+        )) return error.InvalidHeader;
+        const path = try uriRequestTargetAlloc(allocator, uri);
+        defer allocator.free(path);
+        var client = try connectUriAltSvc(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+        );
+        defer client.deinit();
+
+        return try client.request(.{
+            .method = request_options.method,
+            .path = path,
+            .scheme = "https",
+            .authority = origin.authority,
+            .headers = request_options.headers,
+            .body = request_options.body,
+            .trailers = request_options.trailers,
+        });
+    }
+
+    /// Establish HTTP/3 to an alternative service while authenticating and
+    /// addressing requests as the original URI origin. The alternative host
+    /// is only a transport route; SNI, certificate policy, and later
+    /// `:authority` remain bound to `uri`.
+    pub fn connectUriAltSvc(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+    ) Error!HandshakeClient {
+        return connectUriAltSvcBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+            try connectDeadline(io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectUriAltSvcWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
+        return connectUriAltSvcBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+            try cappedConnectDeadline(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    fn connectUriAltSvcBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!HandshakeClient {
         if (!http3.isHttp3Alpn(target.alpn)) return error.InvalidHeader;
         var origin = try uriEndpoint(allocator, uri);
         defer origin.deinit();
-        const path = try uriRequestTargetAlloc(allocator, uri);
-        defer allocator.free(path);
+        if (!std.ascii.eqlIgnoreCase(
+            target.origin_host,
+            origin.tls_host,
+        )) return error.InvalidHeader;
         const servers = try resolveHostPortAddressesBefore(
             allocator,
             io,
@@ -12288,7 +12385,7 @@ pub const HandshakeClient = struct {
         connect_options.connect_timeout = null;
         connect_options.handshake.server_name = origin.tls_host;
         connect_options.handshake.alpn_protocols = &.{target.alpn};
-        var client = try connectAnyResolvedAddress(
+        return connectAnyResolvedAddress(
             allocator,
             io,
             local_address,
@@ -12297,17 +12394,6 @@ pub const HandshakeClient = struct {
             connect_options,
             deadline,
         );
-        defer client.deinit();
-
-        return try client.request(.{
-            .method = request_options.method,
-            .path = path,
-            .scheme = "https",
-            .authority = origin.authority,
-            .headers = request_options.headers,
-            .body = request_options.body,
-            .trailers = request_options.trailers,
-        });
     }
 
     /// Resolve the first HTTP/3 Alt-Svc advertisement from any header list
