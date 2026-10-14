@@ -216,7 +216,7 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     if (server_worker.err) |err| return err;
 }
 
-test "HTTP/2 shared senders coalesce only an identical deadline" {
+test "HTTP/2 shared senders coalesce independent bodyless deadlines" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -355,15 +355,15 @@ test "HTTP/2 shared senders coalesce only an identical deadline" {
         );
     }
     const stats = dispatcher.stats();
-    try std.testing.expectEqual(@as(u64, 2), stats.batches);
-    try std.testing.expectEqual(@as(u64, 2), stats.coalesced_requests);
+    try std.testing.expectEqual(@as(u64, 1), stats.batches);
+    try std.testing.expectEqual(@as(u64, 3), stats.coalesced_requests);
     try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     server_thread.join();
     server_joined = true;
     if (server_worker.err) |err| return err;
 }
 
-test "HTTP/2 shared senders expire one identical-deadline batch" {
+test "HTTP/2 shared sender timeout preserves later-deadline sibling" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
@@ -393,15 +393,30 @@ test "HTTP/2 shared senders expire one identical-deadline batch" {
             defer first.deinit(self.server.allocator);
             var second = try connection.readRequest();
             defer second.deinit(self.server.allocator);
-            const first_is_one = std.mem.eql(u8, first.path, "/timeout-one");
-            const first_is_two = std.mem.eql(u8, first.path, "/timeout-two");
-            const second_is_one = std.mem.eql(u8, second.path, "/timeout-one");
-            const second_is_two = std.mem.eql(u8, second.path, "/timeout-two");
-            try std.testing.expect(
-                (first_is_one and second_is_two) or
-                    (first_is_two and second_is_one),
+            const timed = if (std.mem.eql(u8, first.path, "/timeout"))
+                &first
+            else if (std.mem.eql(u8, second.path, "/timeout"))
+                &second
+            else
+                return error.InvalidRequest;
+            const sibling = if (timed == &first) &second else &first;
+            try std.testing.expectEqualStrings("/sibling", sibling.path);
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(2),
             );
-            try std.Io.sleep(self.server.io, .fromMilliseconds(500), .awake);
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(timed.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+            try connection.writeResponse(sibling.stream_id, .{
+                .headers = &.{.{
+                    .name = "x-path",
+                    .value = sibling.path,
+                }},
+                .body = "sibling-finished",
+            });
         }
     };
 
@@ -411,6 +426,7 @@ test "HTTP/2 shared senders expire one identical-deadline batch" {
         io: std.Io,
         start: *std.Io.Event,
         deadline: *const std.Io.Clock.Timestamp,
+        response: ?runtime.OwnedResponse = null,
         err: ?anyerror = null,
 
         fn run(self: *@This()) void {
@@ -418,7 +434,7 @@ test "HTTP/2 shared senders expire one identical-deadline batch" {
                 self.err = err;
                 return;
             };
-            var response = self.sender.requestWithDeadline(
+            self.response = self.sender.requestWithDeadline(
                 self.uri,
                 .{},
                 self.deadline.*,
@@ -426,7 +442,6 @@ test "HTTP/2 shared senders expire one identical-deadline batch" {
                 self.err = err;
                 return;
             };
-            response.deinit(std.testing.allocator);
         }
     };
 
@@ -453,23 +468,27 @@ test "HTTP/2 shared senders expire one identical-deadline batch" {
         .{server.address().ip4.port},
     );
     defer allocator.free(base);
-    const first_uri = try std.fmt.allocPrint(allocator, "{s}/timeout-one", .{base});
+    const first_uri = try std.fmt.allocPrint(allocator, "{s}/timeout", .{base});
     defer allocator.free(first_uri);
-    const second_uri = try std.fmt.allocPrint(allocator, "{s}/timeout-two", .{base});
+    const second_uri = try std.fmt.allocPrint(allocator, "{s}/sibling", .{base});
     defer allocator.free(second_uri);
     const sender = dispatcher.sender();
     var start: std.Io.Event = .unset;
-    var deadline: std.Io.Clock.Timestamp = undefined;
+    var deadlines: [2]std.Io.Clock.Timestamp = undefined;
     var producers = [_]Producer{
-        .{ .sender = sender.clone(), .uri = first_uri, .io = io, .start = &start, .deadline = &deadline },
-        .{ .sender = sender.clone(), .uri = second_uri, .io = io, .start = &start, .deadline = &deadline },
+        .{ .sender = sender.clone(), .uri = first_uri, .io = io, .start = &start, .deadline = &deadlines[0] },
+        .{ .sender = sender.clone(), .uri = second_uri, .io = io, .start = &start, .deadline = &deadlines[1] },
     };
     var threads: [producers.len]std.Thread = undefined;
     for (&threads, &producers) |*thread, *producer| {
         thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
     }
-    deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+    deadlines[0] = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = .fromMilliseconds(250),
+        .clock = .awake,
+    });
+    deadlines[1] = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(2),
         .clock = .awake,
     });
     start.set(io);
@@ -483,13 +502,20 @@ test "HTTP/2 shared senders expire one identical-deadline batch" {
     dispatcher.close();
     try driver.await(io);
 
-    for (producers) |producer| {
-        try std.testing.expectEqual(error.Timeout, producer.err.?);
-    }
+    try std.testing.expectEqual(error.Timeout, producers[0].err.?);
+    try std.testing.expect(producers[0].response == null);
+    try std.testing.expect(producers[1].err == null);
+    var sibling_response = producers[1].response.?;
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualStrings("sibling-finished", sibling_response.body);
+    try std.testing.expectEqualStrings(
+        "/sibling",
+        findHeader(sibling_response.headers, "x-path").?,
+    );
     const stats = dispatcher.stats();
     try std.testing.expectEqual(@as(u64, 1), stats.batches);
     try std.testing.expectEqual(@as(u64, 2), stats.coalesced_requests);
-    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     server_thread.join();
     server_joined = true;
     if (server_worker.err) |err| return err;

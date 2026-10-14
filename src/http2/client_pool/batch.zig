@@ -21,54 +21,30 @@ pub const UriRequest = struct {
 const stack_request_count: usize = 16;
 const stack_target_bytes: usize = 1024;
 
-pub fn requestUriBatch(
-    pool: anytype,
-    requests: []const UriRequest,
-    responses: []runtime.OwnedResponse,
-) !void {
-    return requestUriBatchBefore(pool, requests, responses, null) catch |err| switch (err) {
-        error.Timeout, error.Canceled => unreachable,
-        else => |other| return other,
-    };
-}
+const PreparedUriBatch = struct {
+    native_requests: []runtime.RequestOptions,
+    target_storage: []u8,
+    has_body_or_trailers: bool,
+    requests_allocated: bool,
+    targets_allocated: bool,
 
-pub fn requestUriBatchWithTimeout(
-    pool: anytype,
-    requests: []const UriRequest,
-    responses: []runtime.OwnedResponse,
-    timeout: std.Io.Duration,
-) !void {
-    if (timeout.nanoseconds <= 0) return error.Timeout;
-    return requestUriBatchWithDeadline(
-        pool,
-        requests,
-        responses,
-        .fromNow(pool.io, .{ .raw = timeout, .clock = .awake }),
-    );
-}
+    fn deinit(self: *PreparedUriBatch, pool: anytype) void {
+        if (self.requests_allocated) {
+            pool.allocator.free(self.native_requests);
+        }
+        if (self.targets_allocated) {
+            pool.allocator.free(self.target_storage);
+        }
+        self.* = undefined;
+    }
+};
 
-pub fn requestUriBatchWithDeadline(
+fn prepareUriBatch(
     pool: anytype,
     requests: []const UriRequest,
-    responses: []runtime.OwnedResponse,
-    deadline: std.Io.Clock.Timestamp,
-) !void {
-    return requestUriBatchBefore(
-        pool,
-        requests,
-        responses,
-        try deadline_policy.usableAwake(pool.io, deadline),
-    );
-}
-
-fn requestUriBatchBefore(
-    pool: anytype,
-    requests: []const UriRequest,
-    responses: []runtime.OwnedResponse,
-    deadline: ?std.Io.Clock.Timestamp,
-) !void {
-    if (requests.len != responses.len) return error.InvalidResponse;
-    if (requests.len == 0) return;
+    request_stack: *[stack_request_count]runtime.RequestOptions,
+    target_stack: *[stack_target_bytes]u8,
+) !PreparedUriBatch {
     var has_body_or_trailers = false;
     for (requests) |item| {
         try header_message.validateHeaderBlock(
@@ -118,22 +94,19 @@ fn requestUriBatchBefore(
         ) catch return error.MessageTooLarge;
     }
 
-    var request_stack: [stack_request_count]runtime.RequestOptions = undefined;
-    const native_requests = if (requests.len <= request_stack.len)
-        request_stack[0..requests.len]
+    const requests_allocated = requests.len > request_stack.len;
+    const native_requests = if (requests_allocated)
+        try pool.allocator.alloc(runtime.RequestOptions, requests.len)
     else
-        try pool.allocator.alloc(runtime.RequestOptions, requests.len);
-    defer if (native_requests.ptr != request_stack[0..].ptr) {
-        pool.allocator.free(native_requests);
-    };
-    var target_stack: [stack_target_bytes]u8 = undefined;
-    const target_storage = if (total_target_bytes <= target_stack.len)
-        target_stack[0..total_target_bytes]
+        request_stack[0..requests.len];
+    errdefer if (requests_allocated) pool.allocator.free(native_requests);
+    const targets_allocated = total_target_bytes > target_stack.len;
+    const target_storage = if (targets_allocated)
+        try pool.allocator.alloc(u8, total_target_bytes)
     else
-        try pool.allocator.alloc(u8, total_target_bytes);
-    defer if (target_storage.ptr != target_stack[0..].ptr) {
-        pool.allocator.free(target_storage);
-    };
+        target_stack[0..total_target_bytes];
+    errdefer if (targets_allocated) pool.allocator.free(target_storage);
+
     var target_offset: usize = 0;
     for (requests, native_requests) |item, *native| {
         const uri = std.Uri.parse(item.uri) catch unreachable;
@@ -146,6 +119,235 @@ fn requestUriBatchBefore(
         native.scheme = null;
         native.authority = null;
     }
+    return .{
+        .native_requests = native_requests,
+        .target_storage = target_storage,
+        .has_body_or_trailers = has_body_or_trailers,
+        .requests_allocated = requests_allocated,
+        .targets_allocated = targets_allocated,
+    };
+}
+
+pub fn requestUriBatch(
+    pool: anytype,
+    requests: []const UriRequest,
+    responses: []runtime.OwnedResponse,
+) !void {
+    return requestUriBatchBefore(pool, requests, responses, null) catch |err| switch (err) {
+        error.Timeout, error.Canceled => unreachable,
+        else => |other| return other,
+    };
+}
+
+pub fn requestUriBatchWithTimeout(
+    pool: anytype,
+    requests: []const UriRequest,
+    responses: []runtime.OwnedResponse,
+    timeout: std.Io.Duration,
+) !void {
+    if (timeout.nanoseconds <= 0) return error.Timeout;
+    return requestUriBatchWithDeadline(
+        pool,
+        requests,
+        responses,
+        .fromNow(pool.io, .{ .raw = timeout, .clock = .awake }),
+    );
+}
+
+pub fn requestUriBatchWithDeadline(
+    pool: anytype,
+    requests: []const UriRequest,
+    responses: []runtime.OwnedResponse,
+    deadline: std.Io.Clock.Timestamp,
+) !void {
+    return requestUriBatchBefore(
+        pool,
+        requests,
+        responses,
+        try deadline_policy.usableAwake(pool.io, deadline),
+    );
+}
+
+/// Pool-backed bodyless batch with independent request deadlines. Capacity
+/// admission is retried after expiring only the earliest members; once a
+/// connection is leased, the runtime delivers every terminal result through
+/// `observer` using the original URI-batch index.
+pub fn requestUriBatchWithPerStreamDeadlines(
+    pool: anytype,
+    requests: []const UriRequest,
+    deadlines: []const ?std.Io.Clock.Timestamp,
+    observer: runtime.BatchOwnedResponseObserver,
+) !void {
+    if (requests.len != deadlines.len) return error.InvalidResponse;
+    if (requests.len == 0) return;
+    for (requests, deadlines) |item, deadline| {
+        if (item.request.body.len != 0 or item.request.trailers.len != 0) {
+            return error.InvalidContentLength;
+        }
+        if (deadline) |absolute| {
+            if (absolute.clock != .awake) return error.Timeout;
+        }
+    }
+
+    var request_stack: [stack_request_count]runtime.RequestOptions = undefined;
+    var target_stack: [stack_target_bytes]u8 = undefined;
+    var prepared = try prepareUriBatch(
+        pool,
+        requests,
+        &request_stack,
+        &target_stack,
+    );
+    defer prepared.deinit(pool);
+
+    var active_stack: [stack_request_count]bool = undefined;
+    const active = if (requests.len <= active_stack.len)
+        active_stack[0..requests.len]
+    else
+        try pool.allocator.alloc(bool, requests.len);
+    defer if (active.ptr != active_stack[0..].ptr) {
+        pool.allocator.free(active);
+    };
+    @memset(active, true);
+
+    var compact_requests_stack: [stack_request_count]runtime.RequestOptions =
+        undefined;
+    const compact_requests = if (requests.len <= compact_requests_stack.len)
+        compact_requests_stack[0..requests.len]
+    else
+        try pool.allocator.alloc(runtime.RequestOptions, requests.len);
+    defer if (compact_requests.ptr != compact_requests_stack[0..].ptr) {
+        pool.allocator.free(compact_requests);
+    };
+    var compact_deadlines_stack: [stack_request_count]?std.Io.Clock.Timestamp =
+        undefined;
+    const compact_deadlines = if (requests.len <= compact_deadlines_stack.len)
+        compact_deadlines_stack[0..requests.len]
+    else
+        try pool.allocator.alloc(?std.Io.Clock.Timestamp, requests.len);
+    defer if (compact_deadlines.ptr != compact_deadlines_stack[0..].ptr) {
+        pool.allocator.free(compact_deadlines);
+    };
+    var original_indices_stack: [stack_request_count]usize = undefined;
+    const original_indices = if (requests.len <= original_indices_stack.len)
+        original_indices_stack[0..requests.len]
+    else
+        try pool.allocator.alloc(usize, requests.len);
+    defer if (original_indices.ptr != original_indices_stack[0..].ptr) {
+        pool.allocator.free(original_indices);
+    };
+
+    while (true) {
+        var active_count: usize = 0;
+        var first_active: ?usize = null;
+        var earliest: ?std.Io.Clock.Timestamp = null;
+        for (active, deadlines, 0..) |*is_active, deadline, index| {
+            if (!is_active.*) continue;
+            if (deadline) |absolute| {
+                if (absolute.durationFromNow(pool.io).raw.nanoseconds <= 0) {
+                    is_active.* = false;
+                    observer.on_result(
+                        observer.context,
+                        index,
+                        .{ .err = error.Timeout },
+                    );
+                    continue;
+                }
+            }
+            first_active = first_active orelse index;
+            earliest = deadline_policy.earlier(earliest, deadline);
+            active_count += 1;
+        }
+        if (active_count == 0) return;
+
+        var lease = if (earliest) |absolute|
+            pool.acquireUriWithDeadline(
+                requests[first_active.?].uri,
+                absolute,
+            ) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => |other| return other,
+            }
+        else
+            try pool.acquireUri(requests[first_active.?].uri);
+        defer if (lease.active) lease.discard();
+
+        var compact_count: usize = 0;
+        for (active, deadlines, 0..) |*is_active, deadline, index| {
+            if (!is_active.*) continue;
+            if (deadline) |absolute| {
+                if (absolute.durationFromNow(pool.io).raw.nanoseconds <= 0) {
+                    is_active.* = false;
+                    observer.on_result(
+                        observer.context,
+                        index,
+                        .{ .err = error.Timeout },
+                    );
+                    continue;
+                }
+            }
+            compact_requests[compact_count] =
+                prepared.native_requests[index];
+            compact_deadlines[compact_count] = deadline;
+            original_indices[compact_count] = index;
+            compact_count += 1;
+        }
+        if (compact_count == 0) {
+            lease.release();
+            return;
+        }
+
+        const Mapping = struct {
+            observer: runtime.BatchOwnedResponseObserver,
+            original_indices: []const usize,
+
+            fn observe(
+                raw_context: *anyopaque,
+                compact_index: usize,
+                result: runtime.BatchOwnedResponseResult,
+            ) void {
+                const self: *@This() = @ptrCast(@alignCast(raw_context));
+                self.observer.on_result(
+                    self.observer.context,
+                    self.original_indices[compact_index],
+                    result,
+                );
+            }
+        };
+        var mapping: Mapping = .{
+            .observer = observer,
+            .original_indices = original_indices[0..compact_count],
+        };
+        lease.connection().requestBatchWithPerStreamDeadlines(
+            compact_requests[0..compact_count],
+            compact_deadlines[0..compact_count],
+            .{ .context = &mapping, .on_result = Mapping.observe },
+        ) catch |err| {
+            lease.discard();
+            return err;
+        };
+        lease.release();
+        return;
+    }
+}
+
+fn requestUriBatchBefore(
+    pool: anytype,
+    requests: []const UriRequest,
+    responses: []runtime.OwnedResponse,
+    deadline: ?std.Io.Clock.Timestamp,
+) !void {
+    if (requests.len != responses.len) return error.InvalidResponse;
+    if (requests.len == 0) return;
+    var request_stack: [stack_request_count]runtime.RequestOptions = undefined;
+    var target_stack: [stack_target_bytes]u8 = undefined;
+    var prepared = try prepareUriBatch(
+        pool,
+        requests,
+        &request_stack,
+        &target_stack,
+    );
+    defer prepared.deinit(pool);
+    const native_requests = prepared.native_requests;
 
     const retry_stale = allIdempotent(requests);
     var may_retry = retry_stale;
@@ -155,7 +357,7 @@ fn requestUriBatchBefore(
         else
             try pool.acquireUri(requests[0].uri);
         defer if (lease.active) lease.discard();
-        const result = if (has_body_or_trailers)
+        const result = if (prepared.has_body_or_trailers)
             if (deadline) |absolute|
                 lease.connection().requestBodyBatchIntoWithDeadline(
                     native_requests,

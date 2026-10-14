@@ -2,11 +2,12 @@
 //!
 //! Producers enqueue stack-owned commands and wait on per-command events. The
 //! driver is the only task allowed to touch the underlying pool. Compatible
-//! requests without individual deadlines, or requests sharing one exact
-//! absolute deadline, are coalesced into the pool's multiplexed URI batch.
-//! Bodyful batches use its full-duplex flow-control pump and terminal
-//! request-trailer path. Distinct deadlines remain isolated so one caller
-//! cannot cancel a sibling whose budget has not expired.
+//! bodyless requests can coalesce even with independent deadlines; the runtime
+//! resets and completes only expired streams. Bodyful batches use the pool's
+//! full-duplex flow-control pump and terminal request-trailer path when their
+//! commands are unbounded or share one exact absolute deadline. Distinct
+//! bodyful deadlines remain isolated until the upload scheduler gains the same
+//! per-stream cancellation boundary.
 
 const std = @import("std");
 const batch = @import("batch.zig");
@@ -345,14 +346,25 @@ pub fn Dispatcher(comptime PoolType: type) type {
             first.state = .in_flight;
             out[0] = first;
             var count: usize = 1;
+            var all_individual_deadline_eligible =
+                individualDeadlineEligible(first);
             while (count < state.options.max_batch_requests) {
                 const next = state.head orelse break;
-                if (!sameDeadline(first.deadline, next.deadline) or
-                    !sameOrigin(first.uri, next.uri)) break;
+                if (!sameOrigin(first.uri, next.uri)) break;
+                const deadline_matches = sameDeadline(
+                    first.deadline,
+                    next.deadline,
+                );
+                if (!deadline_matches and
+                    (!all_individual_deadline_eligible or
+                        !individualDeadlineEligible(next))) break;
                 detach(state, next);
                 next.state = .in_flight;
                 out[count] = next;
                 count += 1;
+                all_individual_deadline_eligible =
+                    all_individual_deadline_eligible and
+                    individualDeadlineEligible(next);
             }
             return count;
         }
@@ -388,6 +400,65 @@ pub fn Dispatcher(comptime PoolType: type) type {
                     .uri = command.uri,
                     .request = command.request,
                 };
+            }
+            if (!batchHasOneDeadline(commands)) {
+                var deadlines: [max_batch_limit]?std.Io.Clock.Timestamp =
+                    undefined;
+                var completed: [max_batch_limit]bool = @splat(false);
+                for (commands, deadlines[0..commands.len]) |command, *deadline| {
+                    deadline.* = command.deadline;
+                }
+                const ObserverContext = struct {
+                    state: *State,
+                    commands: []*Command,
+                    completed: []bool,
+
+                    fn observe(
+                        raw_context: *anyopaque,
+                        request_index: usize,
+                        result: runtime.BatchOwnedResponseResult,
+                    ) void {
+                        const self: *@This() = @ptrCast(@alignCast(raw_context));
+                        self.completed[request_index] = true;
+                        switch (result) {
+                            .response => |response| complete(
+                                self.state,
+                                self.commands[request_index],
+                                response,
+                                null,
+                            ),
+                            .err => |err| complete(
+                                self.state,
+                                self.commands[request_index],
+                                null,
+                                err,
+                            ),
+                        }
+                    }
+                };
+                var observer_context: ObserverContext = .{
+                    .state = state,
+                    .commands = commands,
+                    .completed = completed[0..commands.len],
+                };
+                state.pool.requestUriBatchWithPerStreamDeadlines(
+                    requests[0..commands.len],
+                    deadlines[0..commands.len],
+                    .{
+                        .context = &observer_context,
+                        .on_result = ObserverContext.observe,
+                    },
+                ) catch |err| {
+                    for (completed[0..commands.len], 0..) |
+                        was_completed,
+                        index,
+                    | {
+                        if (!was_completed) {
+                            complete(state, commands[index], null, err);
+                        }
+                    }
+                };
+                return;
             }
             const result = if (commands[0].deadline) |deadline|
                 state.pool.requestUriBatchWithDeadline(
@@ -464,6 +535,20 @@ pub fn Dispatcher(comptime PoolType: type) type {
                     left.raw.nanoseconds == right.raw.nanoseconds;
             }
             return rhs == null;
+        }
+
+        fn batchHasOneDeadline(commands: []*Command) bool {
+            for (commands[1..]) |command| {
+                if (!sameDeadline(commands[0].deadline, command.deadline)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        fn individualDeadlineEligible(command: *const Command) bool {
+            return command.request.body.len == 0 and
+                command.request.trailers.len == 0;
         }
 
         fn sameOrigin(lhs_text: []const u8, rhs_text: []const u8) bool {
