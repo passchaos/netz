@@ -120,10 +120,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'netz HTTP/2 pool multiplexed Hyper batch and redirect: transport=h2c requests=7 batch=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'netz HTTP/2 pool multiplexed Hyper batch, shared senders, and redirect: transport=h2c requests=10 batch=3 shared=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/pool-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server completed netz pool batch and redirect reuse: requests=7 batch=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'Hyper HTTP/2 server completed netz pool batch, shared senders, and redirect reuse: requests=10 batch=3 shared=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/pool-server.log"
 cat "$work/pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper h2c reuse interop passed'
@@ -265,10 +265,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'netz HTTP/2 pool multiplexed Hyper batch and redirect: transport=tls requests=7 batch=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'netz HTTP/2 pool multiplexed Hyper batch, shared senders, and redirect: transport=tls requests=10 batch=3 shared=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-pool-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server completed netz pool batch and redirect reuse: requests=7 batch=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'Hyper HTTP/2 server completed netz pool batch, shared senders, and redirect reuse: requests=10 batch=3 shared=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-pool-server.log"
 cat "$work/tls-pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper TLS reuse interop passed'

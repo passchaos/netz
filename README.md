@@ -396,7 +396,13 @@ Current protocol coverage includes:
   submitted through one lease before response reads, out-of-order streams map
   back to caller order, one absolute deadline spans admission and the complete
   batch, and a stale reused connection is retried only when every method is
-  idempotent,
+  idempotent. `SharedDispatcher` adds Hyper-shaped execution ownership: one
+  driver is the sole pool/frame reader, cloneable `SharedSender` handles feed a
+  bounded queue, and compatible concurrent bodyless commands are coalesced
+  into the same URI-batch core. Per-command deadline/cancel paths unlink queued
+  stack commands safely, queue overflow is explicit, and close wakes every
+  producer; bodyful or individually bounded requests execute alone so one
+  caller cannot cancel sibling streams,
   allocation-free HTTP/2 runtime
   SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, transactional single-reservation SETTINGS frames with payload length reuse and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,

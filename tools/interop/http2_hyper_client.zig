@@ -389,6 +389,99 @@ fn runPoolInterop(
         .fromSeconds(5),
     );
     defer for (&batch_responses) |*response| response.deinit(allocator);
+    var dispatcher = try netz.http2.client_pool.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 8, .max_batch_requests = 8 },
+    );
+    defer dispatcher.deinit();
+    const SharedProducer = struct {
+        sender: netz.http2.client_pool.SharedSender,
+        uri: []const u8,
+        response: ?netz.http2.runtime.OwnedResponse = null,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.response = self.sender.request(self.uri, .{}) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+    const shared_one_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-shared-one?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(shared_one_uri);
+    const shared_two_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://LOCALHOST:{d}/pool-shared-two?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(shared_two_uri);
+    const shared_three_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-shared-three?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(shared_three_uri);
+    const sender = dispatcher.sender();
+    var producers = [_]SharedProducer{
+        .{ .sender = sender.clone(), .uri = shared_one_uri },
+        .{ .sender = sender.clone(), .uri = shared_two_uri },
+        .{ .sender = sender.clone(), .uri = shared_three_uri },
+    };
+    var producer_threads: [producers.len]std.Thread = undefined;
+    for (&producer_threads, &producers) |*thread, *producer| {
+        thread.* = try std.Thread.spawn(.{}, SharedProducer.run, .{producer});
+    }
+    var queued_attempts: usize = 0;
+    while (dispatcher.queuedCount() != producers.len and
+        queued_attempts < 500) : (queued_attempts += 1)
+    {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    if (dispatcher.queuedCount() != producers.len) return error.Timeout;
+    const DriverWorker = struct {
+        dispatcher: *netz.http2.client_pool.SharedDispatcher,
+        err: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.dispatcher.run() catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var driver_worker = DriverWorker{ .dispatcher = &dispatcher };
+    const driver_thread = try std.Thread.spawn(
+        .{},
+        DriverWorker.run,
+        .{&driver_worker},
+    );
+    for (&producer_threads) |*thread| thread.join();
+    dispatcher.close();
+    driver_thread.join();
+    if (driver_worker.err) |err| return err;
+    const shared_expected = [_][]const u8{
+        "pool-shared-one",
+        "pool-shared-two",
+        "pool-shared-three",
+    };
+    for (&producers, shared_expected) |*producer, expected| {
+        if (producer.err) |err| return err;
+        if (!std.mem.eql(u8, producer.response.?.body, expected)) {
+            return error.InvalidResponse;
+        }
+    }
+    defer for (&producers) |*producer| {
+        if (producer.response) |*response| response.deinit(allocator);
+    };
+    const shared_stats = dispatcher.stats();
+    if (shared_stats.batches != 1 or
+        shared_stats.coalesced_requests != producers.len)
+    {
+        return error.InvalidResponse;
+    }
     const redirect_uri = try std.fmt.allocPrint(
         allocator,
         "{s}://localhost:{d}/pool-redirect-start?from=netz",
@@ -422,7 +515,7 @@ fn runPoolInterop(
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/2 pool multiplexed Hyper batch and redirect: transport={s} requests=7 batch=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz HTTP/2 pool multiplexed Hyper batch, shared senders, and redirect: transport={s} requests=10 batch=3 shared=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

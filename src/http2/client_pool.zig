@@ -15,6 +15,7 @@ const tls_stream = @import("../tls/mod.zig").stream;
 const tls_ticket_cache = @import("../tls/stream/client_ticket_cache.zig");
 const runtime = @import("runtime.zig");
 const batch = @import("client_pool/batch.zig");
+const shared = @import("client_pool/shared.zig");
 
 pub const Error = runtime.Error || error{
     PoolClosed,
@@ -62,6 +63,9 @@ const Slot = struct {
 };
 
 pub const Pool = struct {
+    pub const SharedRequestError = Error || shared.Error ||
+        std.Io.Timeout.Error || std.Io.Cancelable;
+
     allocator: std.mem.Allocator,
     io: std.Io,
     options: Options,
@@ -983,6 +987,12 @@ pub const Lease = struct {
         self.slot = undefined;
     }
 };
+
+pub const SharedDispatcher = shared.Dispatcher(Pool);
+pub const SharedSender = SharedDispatcher.Sender;
+pub const SharedOptions = shared.Options;
+pub const SharedError = shared.Error;
+pub const SharedStats = shared.Stats;
 
 fn transportForScheme(scheme: []const u8) Error!Transport {
     if (std.ascii.eqlIgnoreCase(scheme, "http")) return .cleartext;

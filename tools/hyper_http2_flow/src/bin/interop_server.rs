@@ -164,7 +164,7 @@ fn main() {
             // requests shared it. That can surface as a reset after all
             // asserted work, which is a valid shutdown for this scenario.
             let _ = connection.await;
-            println!("Hyper HTTP/2 server completed netz pool batch and redirect reuse: requests=7 batch=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
+            println!("Hyper HTTP/2 server completed netz pool batch, shared senders, and redirect reuse: requests=10 batch=3 shared=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
         } else {
             // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY,
             // synchronizes one RTT with PING, then narrows the boundary to the
@@ -330,7 +330,7 @@ async fn handle(
                 "unexpected HTTP/2 pooled redirected request",
             ));
         }
-        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 7 {
+        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 10 {
             signals.pool_finished.notify_one();
         }
         return Ok(Response::new(
@@ -347,6 +347,9 @@ async fn handle(
             "/pool-batch-one?from=netz" => Some(Bytes::from_static(b"pool-batch-one")),
             "/pool-batch-two?from=netz" => Some(Bytes::from_static(b"pool-batch-two")),
             "/pool-batch-three?from=netz" => Some(Bytes::from_static(b"pool-batch-three")),
+            "/pool-shared-one?from=netz" => Some(Bytes::from_static(b"pool-shared-one")),
+            "/pool-shared-two?from=netz" => Some(Bytes::from_static(b"pool-shared-two")),
+            "/pool-shared-three?from=netz" => Some(Bytes::from_static(b"pool-shared-three")),
             _ => None,
         };
         if let Some(body) = body {
