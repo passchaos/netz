@@ -92,11 +92,14 @@ grep -Fq \
   'response_head_timeout=5000ms' \
   "$work/netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
-  "$work/hyper-server.log"
-grep -Fq \
   'netz HTTP/1 pool reused Hyper connection: transport=cleartext requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/netz-client.log"
+grep -Fq \
+  'netz HTTP/1 client followed Hyper redirect: transport=cleartext status=200 redirects=1 method=POST->GET credentials=same-origin' \
+  "$work/netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, redirect, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 redirect=303/POST-to-GET pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  "$work/hyper-server.log"
 echo 'Hyper HTTP/1 server -> netz client interop passed'
 
 port=$(free_tcp_port)
@@ -223,11 +226,14 @@ grep -Fq \
   'response_head_timeout=5000ms' \
   "$work/tls-netz-client.log"
 grep -Fq \
-  'Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
-  "$work/tls-hyper-server.log"
-grep -Fq \
   'netz HTTP/1 pool reused Hyper connection: transport=tls requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-netz-client.log"
+grep -Fq \
+  'netz HTTP/1 client followed Hyper redirect: transport=tls status=200 redirects=1 method=POST->GET credentials=same-origin' \
+  "$work/tls-netz-client.log"
+grep -Fq \
+  'Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, redirect, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 redirect=303/POST-to-GET pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  "$work/tls-hyper-server.log"
 grep -Fq \
   'rustls HTTP/1 server sent TLS KeyUpdate request' \
   "$work/tls-hyper-server.log"

@@ -58,7 +58,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
         .expect("bind Hyper HTTP/1 server");
     println!("Hyper HTTP/1 interop server listening on 127.0.0.1:{port}");
     let mut connections = Vec::new();
-    for connection_index in 0..8 {
+    for connection_index in 0..10 {
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
         let tls_acceptor = cert_path.as_ref().map(|cert| {
@@ -152,6 +152,17 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         .expect("serve netz pooled HTTP/1 requests");
                     assert_eq!(requests.load(Ordering::SeqCst), 2);
                 }
+                8 | 9 => {
+                    server_http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(io),
+                            service_fn(move |request| {
+                                handle_redirect_request(request, connection_index)
+                            }),
+                        )
+                        .await
+                        .expect("serve netz HTTP redirect request");
+                }
                 _ => unreachable!(),
             }
         }));
@@ -159,7 +170,72 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, redirect, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 redirect=303/POST-to-GET pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio");
+}
+
+async fn handle_redirect_request(
+    request: Request<Incoming>,
+    connection_index: usize,
+) -> Result<Response<Body>, std::io::Error> {
+    if connection_index == 8 {
+        if request.method() != Method::POST
+            || request.uri().path_and_query().map(|value| value.as_str())
+                != Some("/redirect-start?from=netz")
+            || request.headers().get("authorization")
+                != Some(&HeaderValue::from_static("Bearer hyper-redirect"))
+            || request.headers().get("content-type")
+                != Some(&HeaderValue::from_static("text/plain"))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected netz redirect source request",
+            ));
+        }
+        let (body, trailers) = collect_body(request.into_body()).await?;
+        if body != b"redirect-body" || trailers.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unexpected netz redirect source body",
+            ));
+        }
+        let mut response = Response::new(body_with_trailers(
+            b"hyper-",
+            b"redirecting",
+            HeaderMap::new(),
+        ));
+        *response.status_mut() = StatusCode::SEE_OTHER;
+        response.headers_mut().insert(
+            "location",
+            HeaderValue::from_static("/redirect-final?from=hyper#not-on-wire"),
+        );
+        return Ok(response);
+    }
+
+    if request.method() != Method::GET
+        || request.uri().path_and_query().map(|value| value.as_str())
+            != Some("/redirect-final?from=hyper")
+        || request.headers().get("authorization")
+            != Some(&HeaderValue::from_static("Bearer hyper-redirect"))
+        || request.headers().contains_key("content-type")
+        || request.headers().contains_key("content-length")
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected netz redirected request",
+        ));
+    }
+    let (body, trailers) = collect_body(request.into_body()).await?;
+    if !body.is_empty() || trailers.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected netz redirected body",
+        ));
+    }
+    Ok(Response::new(body_with_trailers(
+        b"hyper-",
+        b"redirected",
+        HeaderMap::new(),
+    )))
 }
 
 async fn handle_pool_request(

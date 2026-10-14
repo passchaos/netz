@@ -482,6 +482,47 @@ pub fn main(init: std.process.Init) !void {
         "netz HTTP/1 pool reused Hyper connection: transport={s} requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
+
+    const redirect_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/redirect-start?from=netz",
+        .{ pool_scheme, port },
+    );
+    defer allocator.free(redirect_uri);
+    var redirected = try netz.http1.runtime.Client
+        .requestUriFollowingRedirectsDetailedWithTimeout(
+        allocator,
+        io,
+        redirect_uri,
+        .{
+            .method = .POST,
+            .headers = &.{
+                .{ .name = "Authorization", .value = "Bearer hyper-redirect" },
+                .{ .name = "Content-Type", .value = "text/plain" },
+            },
+            .body = "redirect-body",
+        },
+        limits,
+        .{ .tls = .{ .ca_bundle = if (tls_enabled) .{
+            .bundle = &ca_bundle,
+            .lock = &ca_lock,
+        } else null } },
+        .fromSeconds(5),
+    );
+    defer redirected.deinit();
+    if (redirected.response.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            redirected.response.response.body,
+            "hyper-redirected",
+        ) or redirected.redirect_count != 1)
+    {
+        return error.InvalidRedirectResponse;
+    }
+    std.debug.print(
+        "netz HTTP/1 client followed Hyper redirect: transport={s} status=200 redirects=1 method=POST->GET credentials=same-origin\n",
+        .{if (tls_enabled) "tls" else "cleartext"},
+    );
 }
 
 fn connect(

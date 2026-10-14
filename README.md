@@ -220,6 +220,10 @@ Current protocol coverage includes:
   whose single deadline spans proxy DNS/TCP, CONNECT, origin TLS and the final
   response while keeping proxy-only credentials outside the authenticated
   origin request,
+  plus bounded 300/301/302/303/307/308 URI redirect following with RFC 3986
+  relative resolution, canonical loop detection, HTTPS downgrade protection,
+  configurable POST rewrite semantics, 307/308 body replay, cross-origin
+  credential stripping, proxy retention and one deadline across the chain,
   with userinfo rejection, host-name DNS and IPv4/bracketed-IPv6 literal connect support, TLS client transport via Zig `std.crypto.tls`
   with host verification plus OS/custom CA bundles, an opt-in vail HTTPS client
   for mTLS/ALPN/peer-chain/exporter/KeyUpdate access, and a `std.Io.async`

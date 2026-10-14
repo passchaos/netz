@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const http1 = @import("mod.zig");
 const runtime_write = @import("runtime/write.zig");
+const uri_redirect = @import("runtime/redirect.zig");
 const body_writer = @import("runtime/body_writer.zig");
 const body_reader = @import("runtime/body_reader.zig");
 const message_framing = @import("runtime/message/framing.zig");
@@ -35,7 +36,7 @@ test "HTTP/1 connections keep optional write scratch compact" {
     }
 }
 
-pub const Error = http1.Error || tls_stream.Error || error{
+pub const Error = http1.Error || tls_stream.Error || uri_redirect.Error || error{
     HeadersTooLarge,
     BodyTooLarge,
     ConnectionClosed,
@@ -407,6 +408,19 @@ pub const VailTlsClientOptions = struct {
 /// carried by CONNECT and never appear inside the authenticated origin tunnel.
 pub const ProxyOptions = struct {
     headers: []const http1.Header = &.{},
+};
+
+pub const RedirectPolicy = uri_redirect.Policy;
+
+pub const RedirectProxy = struct {
+    uri: []const u8,
+    options: ProxyOptions = .{},
+};
+
+pub const RedirectOptions = struct {
+    policy: RedirectPolicy = .{},
+    tls: TlsClientOptions = .{},
+    proxy: ?RedirectProxy = null,
 };
 
 /// Synchronous observer for HTTP/1 informational response heads.
@@ -4145,6 +4159,267 @@ pub const Client = struct {
         );
     }
 
+    /// Follow bounded HTTP/HTTPS redirects and return the final response.
+    /// Relative Location values use RFC 3986 resolution. HTTPS-to-HTTP
+    /// downgrade and cross-origin credential forwarding are denied by default.
+    /// A configured proxy is reused through a fresh request/CONNECT per hop.
+    pub fn requestUriFollowingRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+    ) Error!OwnedResponse {
+        var result = try requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            null,
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailed(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+    ) Error!RedirectedResponse {
+        return requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            null,
+        );
+    }
+
+    /// Retain one absolute caller budget across all DNS/TCP, proxy CONNECT,
+    /// TLS, request writes, response entities, and redirect decisions.
+    pub fn requestUriFollowingRedirectsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!OwnedResponse {
+        var result = try requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!RedirectedResponse {
+        return requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) Error!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriFollowingRedirectsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) Error!RedirectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriFollowingRedirectsDetailedWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestUriFollowingRedirectsDetailedBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!RedirectedResponse {
+        var chain = uri_redirect.Chain.init(
+            allocator,
+            redirect_options.policy,
+        );
+        defer chain.deinit();
+        try chain.recordInitial(uri_text);
+        var current_uri = try allocator.dupe(u8, uri_text);
+        defer allocator.free(current_uri);
+        var hop_options = request_options;
+        var owned_headers: ?[]http1.Header = null;
+        defer if (owned_headers) |headers| allocator.free(headers);
+
+        while (true) {
+            var response = if (redirect_options.proxy) |proxy|
+                if (deadline) |absolute|
+                    try requestUriViaProxyWithDeadline(
+                        allocator,
+                        io,
+                        proxy.uri,
+                        current_uri,
+                        hop_options,
+                        proxy.options,
+                        limits,
+                        redirect_options.tls,
+                        absolute,
+                    )
+                else
+                    try requestUriViaProxy(
+                        allocator,
+                        io,
+                        proxy.uri,
+                        current_uri,
+                        hop_options,
+                        proxy.options,
+                        limits,
+                        redirect_options.tls,
+                    )
+            else if (deadline) |absolute|
+                try requestUriTlsWithDeadline(
+                    allocator,
+                    io,
+                    current_uri,
+                    hop_options,
+                    limits,
+                    redirect_options.tls,
+                    absolute,
+                )
+            else
+                try requestUriTls(
+                    allocator,
+                    io,
+                    current_uri,
+                    hop_options,
+                    limits,
+                    redirect_options.tls,
+                );
+            errdefer response.deinit(allocator);
+            if (!uri_redirect.isRedirectStatus(response.response.status)) {
+                return .{
+                    .allocator = allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            const location = try uri_redirect.location(
+                response.response.headers,
+            );
+            if (location == null) {
+                return .{
+                    .allocator = allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            var next = try chain.follow(
+                current_uri,
+                location.?,
+                response.response.status,
+            );
+            var next_owned = true;
+            defer if (next_owned) next.deinit();
+
+            const action = uri_redirect.methodAction(
+                redirect_options.policy,
+                response.response.status,
+                hop_options.method,
+            );
+            const remove_credentials = next.cross_origin and
+                !redirect_options.policy.forward_cross_origin_credentials;
+            hop_options.headers = try redirectHeaders(
+                allocator,
+                hop_options.headers,
+                remove_credentials,
+                action == .rewrite_get,
+                &owned_headers,
+            );
+            hop_options.host = null;
+            if (action == .rewrite_get) {
+                hop_options.method = .GET;
+                hop_options.body = &.{};
+                hop_options.trailers = &.{};
+            } else if (remove_credentials) {
+                // Trailer fields can carry the same credentials as head
+                // fields, while rewriting an arbitrary Trailer value safely
+                // would require owning and reparsing its name list. Drop the
+                // complete trailer section and its declaration cross-origin.
+                hop_options.trailers = &.{};
+            }
+
+            response.deinit(allocator);
+            allocator.free(current_uri);
+            current_uri = next.uri;
+            next_owned = false;
+        }
+    }
+
     pub fn requestUri(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -5865,6 +6140,54 @@ pub const OwnedRequest = struct {
     }
 };
 
+fn redirectHeaders(
+    allocator: std.mem.Allocator,
+    source: []const http1.Header,
+    remove_credentials: bool,
+    remove_body: bool,
+    owned: *?[]http1.Header,
+) std.mem.Allocator.Error![]const http1.Header {
+    var retained_count: usize = 0;
+    for (source) |header| {
+        if (!dropRedirectHeader(header.name, remove_credentials, remove_body)) {
+            retained_count += 1;
+        }
+    }
+    if (retained_count == source.len) return source;
+    if (retained_count == 0) {
+        if (owned.*) |old| allocator.free(old);
+        owned.* = null;
+        return &.{};
+    }
+    const headers = try allocator.alloc(http1.Header, retained_count);
+    var index: usize = 0;
+    for (source) |header| {
+        if (dropRedirectHeader(header.name, remove_credentials, remove_body)) {
+            continue;
+        }
+        headers[index] = header;
+        index += 1;
+    }
+    if (owned.*) |old| allocator.free(old);
+    owned.* = headers;
+    return headers;
+}
+
+fn dropRedirectHeader(
+    name: []const u8,
+    remove_credentials: bool,
+    remove_body: bool,
+) bool {
+    if (std.ascii.eqlIgnoreCase(name, "host")) return true;
+    if (remove_credentials and uri_redirect.isCrossOriginCredential(name)) {
+        return true;
+    }
+    if (remove_credentials and std.ascii.eqlIgnoreCase(name, "trailer")) {
+        return true;
+    }
+    return remove_body and uri_redirect.isBodyHeader(name);
+}
+
 pub const OwnedResponse = struct {
     bytes: []u8,
     response: http1.Response,
@@ -5873,6 +6196,27 @@ pub const OwnedResponse = struct {
         self.response.deinit(allocator);
         allocator.free(self.bytes);
         self.* = undefined;
+    }
+};
+
+pub const RedirectedResponse = struct {
+    allocator: std.mem.Allocator,
+    response: OwnedResponse,
+    final_uri: []u8,
+    redirect_count: usize,
+
+    pub fn deinit(self: *RedirectedResponse) void {
+        const allocator = self.allocator;
+        self.response.deinit(allocator);
+        allocator.free(self.final_uri);
+        self.* = undefined;
+    }
+
+    pub fn takeResponse(self: *RedirectedResponse) OwnedResponse {
+        const response = self.response;
+        self.allocator.free(self.final_uri);
+        self.* = undefined;
+        return response;
     }
 };
 
@@ -13289,6 +13633,7 @@ test {
     _ = @import("runtime/header_timeout_tests.zig");
     _ = @import("runtime/response_timeout_tests.zig");
     _ = @import("runtime/proxy_tests.zig");
+    _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/handoff_timeout_tests.zig");
     _ = @import("runtime/graceful_shutdown_tests.zig");
     _ = @import("runtime/tls_client_deadline_tests.zig");
