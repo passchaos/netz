@@ -534,6 +534,355 @@ test "HTTP/2 shared sender timeout preserves later-deadline sibling" {
     if (server_worker.err) |err| return err;
 }
 
+test "HTTP/2 shared task cancellation wakes blocked frame reader" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const ServerWorker = struct {
+        server: *runtime.Server,
+        io: std.Io,
+        requests_ready: std.Io.Event = .unset,
+        saw_cancel: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            const canceled = if (std.mem.eql(
+                u8,
+                first.path,
+                "/active-cancel",
+            ))
+                &first
+            else if (std.mem.eql(u8, second.path, "/active-cancel"))
+                &second
+            else
+                return error.InvalidRequest;
+            const sibling = if (canceled == &first) &second else &first;
+            try std.testing.expectEqualStrings(
+                "/active-sibling",
+                sibling.path,
+            );
+            self.requests_ready.set(self.io);
+
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(3),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(canceled.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+            self.saw_cancel = true;
+            try connection.writeResponse(sibling.stream_id, .{
+                .body = "active-sibling-finished",
+            });
+
+            var reused = try connection.readRequest();
+            defer reused.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/active-reuse", reused.path);
+            try connection.writeResponse(reused.stream_id, .{
+                .body = "active-reused",
+            });
+        }
+    };
+
+    const Producer = struct {
+        sender: pool_mod.SharedSender,
+        uri: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        response: ?runtime.OwnedResponse = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.response = self.sender.requestWithDeadline(
+                self.uri,
+                .{},
+                self.deadline,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var server_worker = ServerWorker{ .server = &server, .io = io };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerWorker.run,
+        .{&server_worker},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    var dispatcher = try pool_mod.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 4, .max_batch_requests = 4 },
+    );
+    defer dispatcher.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    const cancel_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/active-cancel",
+        .{base},
+    );
+    defer allocator.free(cancel_uri);
+    const sibling_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/active-sibling",
+        .{base},
+    );
+    defer allocator.free(sibling_uri);
+    const sender = dispatcher.sender();
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
+    var producers = [_]Producer{
+        .{ .sender = sender.clone(), .uri = cancel_uri, .deadline = deadline },
+        .{ .sender = sender.clone(), .uri = sibling_uri, .deadline = deadline },
+    };
+    var producer_futures = .{
+        try std.Io.concurrent(io, Producer.run, .{&producers[0]}),
+        try std.Io.concurrent(io, Producer.run, .{&producers[1]}),
+    };
+    try waitQueued(io, &dispatcher, producers.len);
+    var driver = try std.Io.concurrent(
+        io,
+        pool_mod.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    try server_worker.requests_ready.waitTimeout(io, .{
+        .deadline = .fromNow(io, .{
+            .raw = .fromSeconds(2),
+            .clock = .awake,
+        }),
+    });
+    const cancel_started = std.Io.Clock.awake.now(io);
+    producer_futures[0].cancel(io);
+    const cancel_elapsed = cancel_started.durationTo(
+        std.Io.Clock.awake.now(io),
+    );
+    try std.testing.expect(cancel_elapsed.nanoseconds <
+        std.Io.Duration.fromSeconds(2).nanoseconds);
+    try std.testing.expectEqual(error.Canceled, producers[0].err.?);
+    try std.testing.expect(producers[0].response == null);
+
+    producer_futures[1].await(io);
+    if (producers[1].err) |err| return err;
+    var sibling_response = producers[1].response.?;
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "active-sibling-finished",
+        sibling_response.body,
+    );
+
+    const reuse_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/active-reuse",
+        .{base},
+    );
+    defer allocator.free(reuse_uri);
+    var reused = try sender.requestWithTimeout(
+        reuse_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer reused.deinit(allocator);
+    try std.testing.expectEqualStrings("active-reused", reused.body);
+
+    dispatcher.close();
+    try driver.await(io);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    server_thread.join();
+    server_joined = true;
+    if (server_worker.err) |err| return err;
+    try std.testing.expect(server_worker.saw_cancel);
+}
+
+test "HTTP/2 shared task cancellation wakes pool capacity admission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const ServerWorker = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/capacity-reuse", request.path);
+            try connection.writeResponse(request.stream_id, .{
+                .body = "capacity-reused",
+            });
+        }
+    };
+    const Producer = struct {
+        sender: pool_mod.SharedSender,
+        uri: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            var response = self.sender.requestWithDeadline(
+                self.uri,
+                .{},
+                self.deadline,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            response.deinit(std.testing.allocator);
+        }
+    };
+
+    var server_worker = ServerWorker{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerWorker.run,
+        .{&server_worker},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+    });
+    defer pool.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    var seed = try pool.acquireUri(base);
+    defer if (seed.active) seed.discard();
+    var dispatcher = try pool_mod.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 2, .max_batch_requests = 2 },
+    );
+    defer dispatcher.deinit();
+    const canceled_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/capacity-cancel",
+        .{base},
+    );
+    defer allocator.free(canceled_uri);
+    const sender = dispatcher.sender();
+    var producer = Producer{
+        .sender = sender.clone(),
+        .uri = canceled_uri,
+        .deadline = .fromNow(io, .{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        }),
+    };
+    var producer_future = try std.Io.concurrent(
+        io,
+        Producer.run,
+        .{&producer},
+    );
+    try waitQueued(io, &dispatcher, 1);
+    var driver = try std.Io.concurrent(
+        io,
+        pool_mod.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    var capacity_waiting = false;
+    for (0..500) |_| {
+        if (pool.waitingCount() == 1) {
+            capacity_waiting = true;
+            break;
+        }
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    if (!capacity_waiting) return error.Timeout;
+
+    const cancel_started = std.Io.Clock.awake.now(io);
+    producer_future.cancel(io);
+    const cancel_elapsed = cancel_started.durationTo(
+        std.Io.Clock.awake.now(io),
+    );
+    try std.testing.expect(cancel_elapsed.nanoseconds <
+        std.Io.Duration.fromSeconds(2).nanoseconds);
+    try std.testing.expectEqual(error.Canceled, producer.err.?);
+    try std.testing.expectEqual(@as(usize, 0), pool.waitingCount());
+
+    seed.release();
+    const reuse_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/capacity-reuse",
+        .{base},
+    );
+    defer allocator.free(reuse_uri);
+    var reused = try sender.requestWithTimeout(
+        reuse_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer reused.deinit(allocator);
+    try std.testing.expectEqualStrings("capacity-reused", reused.body);
+
+    dispatcher.close();
+    try driver.await(io);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    server_thread.join();
+    server_joined = true;
+    if (server_worker.err) |err| return err;
+}
+
 test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
     const allocator = std.testing.allocator;
     const response_bytes = 64 * 1024;

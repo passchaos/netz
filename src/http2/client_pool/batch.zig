@@ -184,6 +184,24 @@ pub fn requestUriBatchWithPerStreamDeadlines(
         requests,
         deadlines,
         observer,
+        null,
+    );
+}
+
+pub fn requestUriBatchWithPerStreamDeadlinesAndCancellation(
+    pool: anytype,
+    requests: []const UriRequest,
+    deadlines: []const ?std.Io.Clock.Timestamp,
+    observer: runtime.BatchOwnedResponseObserver,
+    cancellation: runtime.BatchCancellationObserver,
+) !void {
+    return requestUriBatchWithPerStreamDeadlinesMode(
+        false,
+        pool,
+        requests,
+        deadlines,
+        observer,
+        cancellation,
     );
 }
 
@@ -202,6 +220,24 @@ pub fn requestUriBatchStreamingWithPerStreamDeadlines(
         requests,
         deadlines,
         observer,
+        null,
+    );
+}
+
+pub fn requestUriBatchStreamingWithPerStreamDeadlinesAndCancellation(
+    pool: anytype,
+    requests: []const UriRequest,
+    deadlines: []const ?std.Io.Clock.Timestamp,
+    observer: runtime.BatchStreamingResponseObserver,
+    cancellation: runtime.BatchCancellationObserver,
+) !void {
+    return requestUriBatchWithPerStreamDeadlinesMode(
+        true,
+        pool,
+        requests,
+        deadlines,
+        observer,
+        cancellation,
     );
 }
 
@@ -211,6 +247,7 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
     requests: []const UriRequest,
     deadlines: []const ?std.Io.Clock.Timestamp,
     observer: anytype,
+    cancellation: ?runtime.BatchCancellationObserver,
 ) !void {
     if (requests.len != deadlines.len) return error.InvalidResponse;
     if (requests.len == 0) return;
@@ -266,8 +303,25 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
     defer if (original_indices.ptr != original_indices_stack[0..].ptr) {
         pool.allocator.free(original_indices);
     };
+    const Lease = @typeInfo(@TypeOf(
+        pool.acquireUri(requests[0].uri),
+    )).error_union.payload;
 
     while (true) {
+        if (cancellation) |cancel| if (cancel.event.isSet()) {
+            for (active, 0..) |*is_active, index| {
+                if (!is_active.*) continue;
+                if (cancel.take_canceled(cancel.context, index)) {
+                    is_active.* = false;
+                    observer.on_result(
+                        observer.context,
+                        index,
+                        .{ .err = error.Canceled },
+                    );
+                }
+            }
+            cancel.acknowledge(cancel.context);
+        };
         var active_count: usize = 0;
         var first_active: ?usize = null;
         var earliest: ?std.Io.Clock.Timestamp = null;
@@ -290,7 +344,117 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
         }
         if (active_count == 0) return;
 
-        var lease = if (earliest) |absolute|
+        var lease: Lease = if (cancellation) |cancel| acquire: {
+            const AcquireResult = union(enum) {
+                lease: anyerror!Lease,
+                wake: std.Io.Cancelable!void,
+            };
+            const AcquireTask = struct {
+                fn run(
+                    task_pool: @TypeOf(pool),
+                    uri: []const u8,
+                    deadline: ?std.Io.Clock.Timestamp,
+                ) anyerror!Lease {
+                    return if (deadline) |absolute|
+                        task_pool.acquireUriWithDeadline(uri, absolute)
+                    else
+                        task_pool.acquireUri(uri);
+                }
+
+                fn wait(
+                    event: *std.Io.Event,
+                    io: std.Io,
+                ) std.Io.Cancelable!void {
+                    return event.wait(io);
+                }
+            };
+            var result_buffer: [2]AcquireResult = undefined;
+            var select: std.Io.Select(AcquireResult) = .init(
+                pool.io,
+                &result_buffer,
+            );
+            var select_drained = false;
+            defer if (!select_drained) {
+                while (select.cancel()) |late| switch (late) {
+                    .lease => |result| if (result) |acquired| {
+                        var abandoned = acquired;
+                        abandoned.discard();
+                    } else |_| {},
+                    .wake => {},
+                };
+            };
+            try select.concurrent(
+                .lease,
+                AcquireTask.run,
+                .{
+                    pool,
+                    requests[first_active.?].uri,
+                    earliest,
+                },
+            );
+            try select.concurrent(
+                .wake,
+                AcquireTask.wait,
+                .{ cancel.event, pool.io },
+            );
+
+            var acquired_lease: ?Lease = null;
+            var acquire_err: ?anyerror = null;
+            var woke = false;
+            const first_result = select.await() catch |err| {
+                while (select.cancel()) |late| switch (late) {
+                    .lease => |result| if (result) |acquired| {
+                        var abandoned = acquired;
+                        abandoned.discard();
+                    } else |_| {},
+                    .wake => {},
+                };
+                select_drained = true;
+                return err;
+            };
+            switch (first_result) {
+                .lease => |result| {
+                    if (result) |acquired| {
+                        acquired_lease = acquired;
+                    } else |err| {
+                        acquire_err = err;
+                    }
+                },
+                .wake => |result| {
+                    try result;
+                    woke = true;
+                },
+            }
+            while (select.cancel()) |late| switch (late) {
+                .lease => |result| {
+                    if (result) |acquired| {
+                        if (acquired_lease == null) {
+                            acquired_lease = acquired;
+                        } else {
+                            var duplicate = acquired;
+                            duplicate.discard();
+                        }
+                    } else |err| {
+                        if (err != error.Canceled and
+                            err != error.Timeout)
+                        {
+                            acquire_err = err;
+                        }
+                    }
+                },
+                .wake => |result| result catch |err| {
+                    if (err != error.Canceled) return err;
+                },
+            };
+            select_drained = true;
+            if (acquired_lease) |acquired| break :acquire acquired;
+            if (acquire_err) |err| switch (err) {
+                error.Timeout => continue,
+                else => |other| return other,
+            };
+            std.debug.assert(woke);
+            continue;
+        } else if (earliest) |absolute|
             pool.acquireUriWithDeadline(
                 requests[first_active.?].uri,
                 absolute,
@@ -326,6 +490,41 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
             lease.release();
             return;
         }
+
+        const CancellationMapping = struct {
+            cancellation: runtime.BatchCancellationObserver,
+            original_indices: []const usize,
+
+            fn take(
+                raw_context: *anyopaque,
+                compact_index: usize,
+            ) bool {
+                const self: *@This() = @ptrCast(@alignCast(raw_context));
+                return self.cancellation.take_canceled(
+                    self.cancellation.context,
+                    self.original_indices[compact_index],
+                );
+            }
+
+            fn acknowledge(raw_context: *anyopaque) void {
+                const self: *@This() = @ptrCast(@alignCast(raw_context));
+                self.cancellation.acknowledge(self.cancellation.context);
+            }
+        };
+        var cancellation_mapping: CancellationMapping = undefined;
+        const mapped_cancellation: ?runtime.BatchCancellationObserver =
+            if (cancellation) |cancel| blk: {
+                cancellation_mapping = .{
+                    .cancellation = cancel,
+                    .original_indices = original_indices[0..compact_count],
+                };
+                break :blk .{
+                    .event = cancel.event,
+                    .context = &cancellation_mapping,
+                    .take_canceled = CancellationMapping.take,
+                    .acknowledge = CancellationMapping.acknowledge,
+                };
+            } else null;
 
         const Mapping = if (streaming) struct {
             observer: runtime.BatchStreamingResponseObserver,
@@ -394,10 +593,37 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
         };
         const result = if (streaming)
             if (prepared.has_body_or_trailers)
+                if (mapped_cancellation) |cancel|
+                    lease.connection()
+                        .requestBodyBatchStreamingWithPerStreamDeadlinesAndCancellation(
+                        compact_requests[0..compact_count],
+                        pool.options.batch_body_chunk_size,
+                        compact_deadlines[0..compact_count],
+                        .{
+                            .context = &mapping,
+                            .on_head = Mapping.head,
+                            .on_data = Mapping.data,
+                            .on_result = Mapping.observe,
+                        },
+                        cancel,
+                    )
+                else
+                    lease.connection()
+                        .requestBodyBatchStreamingWithPerStreamDeadlines(
+                        compact_requests[0..compact_count],
+                        pool.options.batch_body_chunk_size,
+                        compact_deadlines[0..compact_count],
+                        .{
+                            .context = &mapping,
+                            .on_head = Mapping.head,
+                            .on_data = Mapping.data,
+                            .on_result = Mapping.observe,
+                        },
+                    )
+            else if (mapped_cancellation) |cancel|
                 lease.connection()
-                    .requestBodyBatchStreamingWithPerStreamDeadlines(
+                    .requestBatchStreamingWithPerStreamDeadlinesAndCancellation(
                     compact_requests[0..compact_count],
-                    pool.options.batch_body_chunk_size,
                     compact_deadlines[0..compact_count],
                     .{
                         .context = &mapping,
@@ -405,9 +631,11 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
                         .on_data = Mapping.data,
                         .on_result = Mapping.observe,
                     },
+                    cancel,
                 )
             else
-                lease.connection().requestBatchStreamingWithPerStreamDeadlines(
+                lease.connection()
+                    .requestBatchStreamingWithPerStreamDeadlines(
                     compact_requests[0..compact_count],
                     compact_deadlines[0..compact_count],
                     .{
@@ -418,11 +646,29 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
                     },
                 )
         else if (prepared.has_body_or_trailers)
-            lease.connection().requestBodyBatchWithPerStreamDeadlines(
+            if (mapped_cancellation) |cancel|
+                lease.connection()
+                    .requestBodyBatchWithPerStreamDeadlinesAndCancellation(
+                    compact_requests[0..compact_count],
+                    pool.options.batch_body_chunk_size,
+                    compact_deadlines[0..compact_count],
+                    .{ .context = &mapping, .on_result = Mapping.observe },
+                    cancel,
+                )
+            else
+                lease.connection().requestBodyBatchWithPerStreamDeadlines(
+                    compact_requests[0..compact_count],
+                    pool.options.batch_body_chunk_size,
+                    compact_deadlines[0..compact_count],
+                    .{ .context = &mapping, .on_result = Mapping.observe },
+                )
+        else if (mapped_cancellation) |cancel|
+            lease.connection()
+                .requestBatchWithPerStreamDeadlinesAndCancellation(
                 compact_requests[0..compact_count],
-                pool.options.batch_body_chunk_size,
                 compact_deadlines[0..compact_count],
                 .{ .context = &mapping, .on_result = Mapping.observe },
+                cancel,
             )
         else
             lease.connection().requestBatchWithPerStreamDeadlines(

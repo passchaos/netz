@@ -408,8 +408,11 @@ Current protocol coverage includes:
   expired or callback-rejected member is reset/completed, its upload cursor
   stops borrowing caller data, and only surviving streams emit request trailers
   while later siblings continue.
-  Per-command deadline/cancel paths unlink queued stack commands safely, queue
-  overflow is explicit, and close wakes every producer,
+  Canceling an in-flight producer task sets a reusable dispatcher event; the
+  driver races that event against pool-capacity admission or its sole frame
+  read, preserves a concurrently completed frame, and emits target-only CANCEL
+  without polling. Queued commands still unlink without wire I/O, queue
+  overflow is explicit, and close wakes every queued producer,
   allocation-free HTTP/2 runtime
   SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, transactional single-reservation SETTINGS frames with payload length reuse and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,
@@ -1536,8 +1539,9 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # multi-frame bodies/trailers, body-bearing cloneable shared senders with
 # distinct absolute deadlines plus terminal request trailers, three 64-KiB
 # callback-streamed SharedSender responses with final-head/trailer validation,
-# and bidirectional cancellation of a 128-KiB response at an 8-KiB stream
-# window while a concurrent sibling completes on the same connection.
+# active Shared producer cancellation while the sole reader is blocked, and
+# bidirectional cancellation of a 128-KiB response at an 8-KiB stream window
+# while a concurrent sibling completes on the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Negotiate `http/1.1` and `h2` with independent Hyper/rustls servers through
 # the same high-level authority pool, then prove one miss plus one reuse on each

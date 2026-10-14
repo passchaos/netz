@@ -502,6 +502,14 @@ test "public modules are reachable" {
         "requestUriBatchStreamingWithPerStreamDeadlines",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
+        "requestUriBatchWithPerStreamDeadlinesAndCancellation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
+        "requestUriBatchStreamingWithPerStreamDeadlinesAndCancellation",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.client_pool.SharedSender,
         "requestStreaming",
     ));
@@ -534,6 +542,10 @@ test "public modules are reachable" {
         "BatchStreamingResponseResult",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "BatchCancellationObserver",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "isReusable",
     ));
@@ -544,6 +556,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "requestBodyBatchStreamingWithPerStreamDeadlines",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchWithPerStreamDeadlinesAndCancellation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchStreamingWithPerStreamDeadlinesAndCancellation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchWithPerStreamDeadlinesAndCancellation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingWithPerStreamDeadlinesAndCancellation",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,

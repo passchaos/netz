@@ -165,7 +165,7 @@ fn main() {
             // requests shared it. That can surface as a reset after all
             // asserted work, which is a valid shutdown for this scenario.
             let _ = connection.await;
-            println!("Hyper HTTP/2 server completed netz pool batch, aggregate/streaming shared senders, and redirect reuse: requests=13 batch=3 shared=6 streamed_bytes=196608 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
+            println!("Hyper HTTP/2 server completed netz pool batch, aggregate/streaming shared senders, active cancellation, and redirect reuse: requests=15 batch=3 shared=8 streamed_bytes=196608 active_cancel=1 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
         } else {
             // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY,
             // synchronizes one RTT with PING, then narrows the boundary to the
@@ -331,7 +331,7 @@ async fn handle(
                 "unexpected HTTP/2 pooled redirected request",
             ));
         }
-        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 13 {
+        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 15 {
             signals.pool_finished.notify_one();
         }
         return Ok(Response::new(
@@ -469,6 +469,42 @@ async fn handle(
                 StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(body))])).boxed(),
             ));
         }
+    }
+    if request.uri().path_and_query().map(|value| value.as_str())
+        == Some("/pool-shared-active-cancel?from=netz")
+    {
+        ensure_request(
+            &request,
+            Method::GET,
+            "/pool-shared-active-cancel?from=netz",
+        )?;
+        signals.pool_requests.fetch_add(1, Ordering::AcqRel);
+        return Ok(Response::new(
+            StreamBody::new(CancelResponseFrames {
+                first: None,
+                signal: signals.pool_cancel.clone(),
+            })
+            .boxed(),
+        ));
+    }
+    if request.uri().path_and_query().map(|value| value.as_str())
+        == Some("/pool-shared-active-sibling?from=netz")
+    {
+        ensure_request(
+            &request,
+            Method::GET,
+            "/pool-shared-active-sibling?from=netz",
+        )?;
+        while !signals.pool_cancel.observed.load(Ordering::Acquire) {
+            signals.pool_cancel.notified.notified().await;
+        }
+        signals.pool_requests.fetch_add(1, Ordering::AcqRel);
+        return Ok(Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"active-sibling-finished"),
+            ))]))
+            .boxed(),
+        ));
     }
     if request.uri().path_and_query().map(|value| value.as_str()) == Some("/cancel?from=netz") {
         ensure_request(&request, Method::GET, "/cancel?from=netz")?;
@@ -609,6 +645,7 @@ struct CancelSignal {
 #[derive(Default)]
 struct LifecycleSignals {
     cancel: Arc<CancelSignal>,
+    pool_cancel: Arc<CancelSignal>,
     graceful_started: Notify,
     graceful_release: Notify,
     pool_requests: AtomicUsize,

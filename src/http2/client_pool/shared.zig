@@ -64,6 +64,7 @@ pub fn Dispatcher(comptime PoolType: type) type {
             next: ?*Command = null,
             state: CommandState = .idle,
             abandoned: bool = false,
+            cancel_requested: bool = false,
             streaming: ?StreamingCallbacks = null,
             response: ?runtime.OwnedResponse = null,
             streaming_response: ?runtime.StreamingResponse = null,
@@ -78,6 +79,9 @@ pub fn Dispatcher(comptime PoolType: type) type {
             options: Options,
             mutex: std.Io.Mutex = .init,
             ready: std.Io.Condition = .init,
+            // Producers coalesce wakeups here; the sole driver resets it only
+            // after consuming every cancellation bit under `mutex`.
+            cancel_wake: std.Io.Event = .unset,
             head: ?*Command = null,
             tail: ?*Command = null,
             queued: usize = 0,
@@ -344,9 +348,7 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 );
                 if (wait_err) |err| {
                     if (cancelQueued(self.state, &command)) return err;
-                    self.state.mutex.lockUncancelable(self.state.io);
-                    command.abandoned = true;
-                    self.state.mutex.unlock(self.state.io);
+                    abandonInFlight(self.state, &command);
                     command.done.waitUncancelable(self.state.io);
                     discardResult(self.state, &command);
                     return err;
@@ -375,9 +377,7 @@ pub fn Dispatcher(comptime PoolType: type) type {
                     if (cancelQueued(self.state, &command)) {
                         return @errorCast(err);
                     }
-                    self.state.mutex.lockUncancelable(self.state.io);
-                    command.abandoned = true;
-                    self.state.mutex.unlock(self.state.io);
+                    abandonInFlight(self.state, &command);
                     command.done.waitUncancelable(self.state.io);
                     discardResult(self.state, &command);
                     return @errorCast(err);
@@ -513,6 +513,20 @@ pub fn Dispatcher(comptime PoolType: type) type {
             return true;
         }
 
+        fn abandonInFlight(state: *State, command: *Command) void {
+            var wake_driver = false;
+            state.mutex.lockUncancelable(state.io);
+            command.abandoned = true;
+            if (command.state == .in_flight and
+                !command.cancel_requested)
+            {
+                command.cancel_requested = true;
+                wake_driver = true;
+            }
+            state.mutex.unlock(state.io);
+            if (wake_driver) state.cancel_wake.set(state.io);
+        }
+
         fn waitForCompletion(
             state: *State,
             command: *Command,
@@ -594,108 +608,103 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 executeStreamingBatch(state, commands);
                 return;
             }
-            if (commands.len == 1) {
-                const command = commands[0];
-                const result = if (command.deadline) |deadline|
-                    state.pool.requestUriWithDeadline(
-                        command.uri,
-                        command.request,
-                        deadline,
-                    )
-                else
-                    state.pool.requestUri(command.uri, command.request);
-                if (result) |response| {
-                    complete(state, command, response, null);
-                } else |err| {
-                    complete(state, command, null, err);
-                }
-                return;
-            }
             var requests: [max_batch_limit]batch.UriRequest = undefined;
-            var responses: [max_batch_limit]runtime.OwnedResponse = undefined;
-            for (commands, requests[0..commands.len]) |command, *request| {
+            var deadlines: [max_batch_limit]?std.Io.Clock.Timestamp = undefined;
+            var completed: [max_batch_limit]bool = @splat(false);
+            for (
+                commands,
+                requests[0..commands.len],
+                deadlines[0..commands.len],
+            ) |command, *request, *deadline| {
                 request.* = .{
                     .uri = command.uri,
                     .request = command.request,
                 };
+                deadline.* = command.deadline;
             }
-            if (!batchHasOneDeadline(commands)) {
-                var deadlines: [max_batch_limit]?std.Io.Clock.Timestamp =
-                    undefined;
-                var completed: [max_batch_limit]bool = @splat(false);
-                for (commands, deadlines[0..commands.len]) |command, *deadline| {
-                    deadline.* = command.deadline;
-                }
-                const ObserverContext = struct {
-                    state: *State,
-                    commands: []*Command,
-                    completed: []bool,
+            const ObserverContext = struct {
+                state: *State,
+                commands: []*Command,
+                completed: []bool,
 
-                    fn observe(
-                        raw_context: *anyopaque,
-                        request_index: usize,
-                        result: runtime.BatchOwnedResponseResult,
-                    ) void {
-                        const self: *@This() = @ptrCast(@alignCast(raw_context));
-                        self.completed[request_index] = true;
-                        switch (result) {
-                            .response => |response| complete(
-                                self.state,
-                                self.commands[request_index],
-                                response,
-                                null,
-                            ),
-                            .err => |err| complete(
-                                self.state,
-                                self.commands[request_index],
-                                null,
-                                err,
-                            ),
-                        }
-                    }
-                };
-                var observer_context: ObserverContext = .{
-                    .state = state,
-                    .commands = commands,
-                    .completed = completed[0..commands.len],
-                };
-                state.pool.requestUriBatchWithPerStreamDeadlines(
-                    requests[0..commands.len],
-                    deadlines[0..commands.len],
-                    .{
-                        .context = &observer_context,
-                        .on_result = ObserverContext.observe,
-                    },
-                ) catch |err| {
-                    for (completed[0..commands.len], 0..) |
+                fn takeCanceled(
+                    raw_context: *anyopaque,
+                    request_index: usize,
+                ) bool {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    self.state.mutex.lockUncancelable(self.state.io);
+                    defer self.state.mutex.unlock(self.state.io);
+                    if (self.completed[request_index]) return false;
+                    const command = self.commands[request_index];
+                    if (!command.cancel_requested) return false;
+                    command.cancel_requested = false;
+                    return true;
+                }
+
+                fn acknowledge(raw_context: *anyopaque) void {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    self.state.mutex.lockUncancelable(self.state.io);
+                    defer self.state.mutex.unlock(self.state.io);
+                    for (self.completed, self.commands) |
                         was_completed,
-                        index,
+                        command,
                     | {
-                        if (!was_completed) {
-                            complete(state, commands[index], null, err);
-                        }
+                        if (!was_completed and command.cancel_requested) return;
                     }
-                };
-                return;
-            }
-            const result = if (commands[0].deadline) |deadline|
-                state.pool.requestUriBatchWithDeadline(
-                    requests[0..commands.len],
-                    responses[0..commands.len],
-                    deadline,
-                )
-            else
-                state.pool.requestUriBatch(
-                    requests[0..commands.len],
-                    responses[0..commands.len],
-                );
-            result catch |err| {
-                for (commands) |command| complete(state, command, null, err);
-                return;
+                    self.state.cancel_wake.reset();
+                }
+
+                fn observe(
+                    raw_context: *anyopaque,
+                    request_index: usize,
+                    result: runtime.BatchOwnedResponseResult,
+                ) void {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    self.completed[request_index] = true;
+                    switch (result) {
+                        .response => |response| complete(
+                            self.state,
+                            self.commands[request_index],
+                            response,
+                            null,
+                        ),
+                        .err => |err| complete(
+                            self.state,
+                            self.commands[request_index],
+                            null,
+                            err,
+                        ),
+                    }
+                }
             };
-            for (commands, responses[0..commands.len]) |command, response| {
-                complete(state, command, response, null);
-            }
+            var observer_context: ObserverContext = .{
+                .state = state,
+                .commands = commands,
+                .completed = completed[0..commands.len],
+            };
+            state.pool.requestUriBatchWithPerStreamDeadlinesAndCancellation(
+                requests[0..commands.len],
+                deadlines[0..commands.len],
+                .{
+                    .context = &observer_context,
+                    .on_result = ObserverContext.observe,
+                },
+                .{
+                    .event = &state.cancel_wake,
+                    .context = &observer_context,
+                    .take_canceled = ObserverContext.takeCanceled,
+                    .acknowledge = ObserverContext.acknowledge,
+                },
+            ) catch |err| {
+                for (completed[0..commands.len], 0..) |
+                    was_completed,
+                    index,
+                | {
+                    if (!was_completed) {
+                        complete(state, commands[index], null, err);
+                    }
+                }
+            };
         }
 
         fn executeStreamingBatch(state: *State, commands: []*Command) void {
@@ -719,6 +728,33 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 state: *State,
                 commands: []*Command,
                 completed: []bool,
+
+                fn takeCanceled(
+                    raw_context: *anyopaque,
+                    request_index: usize,
+                ) bool {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    self.state.mutex.lockUncancelable(self.state.io);
+                    defer self.state.mutex.unlock(self.state.io);
+                    if (self.completed[request_index]) return false;
+                    const command = self.commands[request_index];
+                    if (!command.cancel_requested) return false;
+                    command.cancel_requested = false;
+                    return true;
+                }
+
+                fn acknowledge(raw_context: *anyopaque) void {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    self.state.mutex.lockUncancelable(self.state.io);
+                    defer self.state.mutex.unlock(self.state.io);
+                    for (self.completed, self.commands) |
+                        was_completed,
+                        command,
+                    | {
+                        if (!was_completed and command.cancel_requested) return;
+                    }
+                    self.state.cancel_wake.reset();
+                }
 
                 fn head(
                     raw_context: *anyopaque,
@@ -770,7 +806,8 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 .commands = commands,
                 .completed = completed[0..commands.len],
             };
-            state.pool.requestUriBatchStreamingWithPerStreamDeadlines(
+            state.pool
+                .requestUriBatchStreamingWithPerStreamDeadlinesAndCancellation(
                 requests[0..commands.len],
                 deadlines[0..commands.len],
                 .{
@@ -778,6 +815,12 @@ pub fn Dispatcher(comptime PoolType: type) type {
                     .on_head = ObserverContext.head,
                     .on_data = ObserverContext.data,
                     .on_result = ObserverContext.observe,
+                },
+                .{
+                    .event = &state.cancel_wake,
+                    .context = &observer_context,
+                    .take_canceled = ObserverContext.takeCanceled,
+                    .acknowledge = ObserverContext.acknowledge,
                 },
             ) catch |err| {
                 for (completed[0..commands.len], 0..) |
@@ -879,27 +922,6 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 state.pool.allocator,
             );
             command.streaming_response = null;
-        }
-
-        fn sameDeadline(
-            lhs: ?std.Io.Clock.Timestamp,
-            rhs: ?std.Io.Clock.Timestamp,
-        ) bool {
-            if (lhs) |left| {
-                const right = rhs orelse return false;
-                return left.clock == right.clock and
-                    left.raw.nanoseconds == right.raw.nanoseconds;
-            }
-            return rhs == null;
-        }
-
-        fn batchHasOneDeadline(commands: []*Command) bool {
-            for (commands[1..]) |command| {
-                if (!sameDeadline(commands[0].deadline, command.deadline)) {
-                    return false;
-                }
-            }
-            return true;
         }
 
         fn sameOrigin(lhs_text: []const u8, rhs_text: []const u8) bool {

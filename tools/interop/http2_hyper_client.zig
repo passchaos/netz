@@ -728,6 +728,111 @@ fn runPoolInterop(
     {
         return error.InvalidResponse;
     }
+
+    var cancel_dispatcher = try netz.http2.client_pool.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 4, .max_batch_requests = 4 },
+    );
+    defer cancel_dispatcher.deinit();
+    const active_cancel_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-shared-active-cancel?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(active_cancel_uri);
+    const active_sibling_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://LOCALHOST:{d}/pool-shared-active-sibling?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(active_sibling_uri);
+    const cancel_sender = cancel_dispatcher.sender();
+    const cancel_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
+    var cancel_producers = [_]SharedProducer{
+        .{
+            .sender = cancel_sender.clone(),
+            .uri = active_cancel_uri,
+            .deadline = cancel_deadline,
+            .request = .{},
+        },
+        .{
+            .sender = cancel_sender.clone(),
+            .uri = active_sibling_uri,
+            .deadline = cancel_deadline,
+            .request = .{},
+        },
+    };
+    var cancel_future = try std.Io.concurrent(
+        io,
+        SharedProducer.run,
+        .{&cancel_producers[0]},
+    );
+    queued_attempts = 0;
+    while (cancel_dispatcher.queuedCount() != 1 and
+        queued_attempts < 500) : (queued_attempts += 1)
+    {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    if (cancel_dispatcher.queuedCount() != 1) return error.Timeout;
+    var sibling_future = try std.Io.concurrent(
+        io,
+        SharedProducer.run,
+        .{&cancel_producers[1]},
+    );
+    queued_attempts = 0;
+    while (cancel_dispatcher.queuedCount() != cancel_producers.len and
+        queued_attempts < 500) : (queued_attempts += 1)
+    {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    if (cancel_dispatcher.queuedCount() != cancel_producers.len) {
+        return error.Timeout;
+    }
+    var cancel_driver = try std.Io.concurrent(
+        io,
+        netz.http2.client_pool.SharedDispatcher.run,
+        .{&cancel_dispatcher},
+    );
+    try std.Io.sleep(io, .fromMilliseconds(100), .awake);
+    const cancel_started = std.Io.Clock.awake.now(io);
+    cancel_future.cancel(io);
+    const cancel_elapsed = cancel_started.durationTo(
+        std.Io.Clock.awake.now(io),
+    );
+    const active_cancel_err = cancel_producers[0].err orelse
+        return error.InvalidResponse;
+    if (cancel_elapsed.nanoseconds >=
+        std.Io.Duration.fromSeconds(2).nanoseconds or
+        active_cancel_err != error.Canceled or
+        cancel_producers[0].response != null)
+    {
+        return error.InvalidResponse;
+    }
+    sibling_future.await(io);
+    if (cancel_producers[1].err) |err| return err;
+    if (!std.mem.eql(
+        u8,
+        cancel_producers[1].response.?.body,
+        "active-sibling-finished",
+    )) {
+        return error.InvalidResponse;
+    }
+    defer if (cancel_producers[1].response) |*response| {
+        response.deinit(allocator);
+    };
+    cancel_dispatcher.close();
+    try cancel_driver.await(io);
+    const cancel_stats = cancel_dispatcher.stats();
+    if (cancel_stats.batches != 1 or
+        cancel_stats.coalesced_requests != cancel_producers.len)
+    {
+        return error.InvalidResponse;
+    }
     const redirect_uri = try std.fmt.allocPrint(
         allocator,
         "{s}://localhost:{d}/pool-redirect-start?from=netz",
@@ -761,7 +866,7 @@ fn runPoolInterop(
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/2 pool multiplexed Hyper batch, aggregate/streaming shared senders, and redirect: transport={s} requests=13 batch=3 shared=6 streamed_bytes=196608 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz HTTP/2 pool multiplexed Hyper batch, aggregate/streaming shared senders, active cancellation, and redirect: transport={s} requests=15 batch=3 shared=8 streamed_bytes=196608 active_cancel=1 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

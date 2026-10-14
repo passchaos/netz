@@ -1298,22 +1298,34 @@ callback-streaming final head and DATA path that transfers only owned terminal
 headers, trailers, and the exact byte count. Streaming callbacks execute on the
 sole driver under the existing borrowed-reader guard; callback rejection
 restores charged connection credit, cancels only that stream, and leaves later
-siblings and the pooled connection usable. The full-duplex scheduler stops an
-expired body cursor before releasing borrowed caller storage, keeps round-robin
-WINDOW_UPDATE progress for siblings, and encodes terminal trailers one
-surviving stream at a time so an expired trailer cannot mutate live HPACK state.
+siblings and the pooled connection usable. Canceling a producer task marks its
+stack command under the dispatcher mutex and sets a reusable `std.Io.Event`.
+The driver uses `std.Io.Select` to race that event against both FIFO pool
+admission and the sole frame read. If the event and read complete together it
+drains the select and processes the frame first, so cancellation cannot consume
+and lose a peer frame; a truly canceled cleartext or TLS incremental read keeps
+its partial prefix for the next call. Event reset and a second cancellation are
+serialized under the same mutex, preventing a lost wake without fixed polling
+or a cross-thread `Future.cancel`. The full-duplex scheduler stops an expired
+or actively canceled body cursor before releasing borrowed caller storage,
+keeps round-robin WINDOW_UPDATE progress for siblings, and encodes terminal
+trailers one surviving stream at a time so a canceled trailer cannot mutate
+live HPACK state.
 Real regressions cover independently bounded bodyless requests, a partial-
 response timeout, a 32-KiB flow-blocked upload timeout whose 32-KiB sibling and
 trailers complete, three differently bounded shared body/trailer uploads in one
-batch, and a four-command streaming batch where callback rejection and a
-partial-body deadline each receive target-only CANCEL while two 64-KiB siblings
-plus a later ordinary request finish on the same connection. The full-duplex
-regression uses 4-KiB stream windows; a companion reset regression reuses the
-connection after an unsent trailer transaction is discarded. The Hyper h2c/TLS
-gate covers thirteen requests on one connection: three explicit batch requests,
-three independent body-bearing aggregate shared senders, three 64-KiB streaming
-shared senders whose heads, DATA bytes, and trailers are validated, and the
-redirect chain.
+batch, a four-command streaming batch where callback rejection and a partial-
+body deadline each receive target-only CANCEL while two 64-KiB siblings plus a
+later ordinary request finish, an active cancellation with no peer response
+bytes while a sibling and reuse complete, and cancellation while the only pool
+connection remains leased. The full-duplex regression uses 4-KiB stream
+windows; a companion reset regression reuses the connection after an unsent
+trailer transaction is discarded. The Hyper h2c/TLS gate covers fifteen
+requests on one connection: three explicit batch requests, three independent
+body-bearing aggregate shared senders, three 64-KiB streaming shared senders,
+an actively canceled Shared request plus its gated sibling, and the redirect
+chain. Both transports require the active cancellation to complete well before
+its five-second request deadline, then validate sibling and connection reuse.
 The pool adapter preserves stack-first URI target preparation, maps compacted
 active requests back to their original command indices, and retries capacity
 admission after expiring only the earliest deadline. This carries the low-level

@@ -4981,6 +4981,32 @@ pub const Connection = struct {
             16 * 1024,
             deadlines,
             .{ .owned = observer },
+            null,
+        ) catch |err| return @errorCast(err);
+    }
+
+    /// Active-cancellation form. `cancellation.event` interrupts a blocked
+    /// frame read; the observer consumes only selected request indices.
+    pub fn requestBatchWithPerStreamDeadlinesAndCancellation(
+        self: *Connection,
+        requests: []const RequestOptions,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedResponseObserver,
+        cancellation: BatchCancellationObserver,
+    ) ResponseTimeoutError!void {
+        for (requests) |request_options| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+        }
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            16 * 1024,
+            deadlines,
+            .{ .owned = observer },
+            cancellation,
         ) catch |err| return @errorCast(err);
     }
 
@@ -5006,6 +5032,32 @@ pub const Connection = struct {
             16 * 1024,
             deadlines,
             .{ .streaming = observer },
+            null,
+        );
+    }
+
+    /// Active-cancellation form of
+    /// `requestBatchStreamingWithPerStreamDeadlines`.
+    pub fn requestBatchStreamingWithPerStreamDeadlinesAndCancellation(
+        self: *Connection,
+        requests: []const RequestOptions,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchStreamingResponseObserver,
+        cancellation: BatchCancellationObserver,
+    ) anyerror!void {
+        for (requests) |request_options| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+        }
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            16 * 1024,
+            deadlines,
+            .{ .streaming = observer },
+            cancellation,
         );
     }
 
@@ -5026,6 +5078,27 @@ pub const Connection = struct {
             body_chunk_size,
             deadlines,
             .{ .owned = observer },
+            null,
+        ) catch |err| return @errorCast(err);
+    }
+
+    /// Active-cancellation form of
+    /// `requestBodyBatchWithPerStreamDeadlines`.
+    pub fn requestBodyBatchWithPerStreamDeadlinesAndCancellation(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedResponseObserver,
+        cancellation: BatchCancellationObserver,
+    ) ResponseTimeoutError!void {
+        if (body_chunk_size == 0) return error.InvalidFrameSize;
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            body_chunk_size,
+            deadlines,
+            .{ .owned = observer },
+            cancellation,
         ) catch |err| return @errorCast(err);
     }
 
@@ -5045,6 +5118,27 @@ pub const Connection = struct {
             body_chunk_size,
             deadlines,
             .{ .streaming = observer },
+            null,
+        );
+    }
+
+    /// Active-cancellation form of
+    /// `requestBodyBatchStreamingWithPerStreamDeadlines`.
+    pub fn requestBodyBatchStreamingWithPerStreamDeadlinesAndCancellation(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchStreamingResponseObserver,
+        cancellation: BatchCancellationObserver,
+    ) anyerror!void {
+        if (body_chunk_size == 0) return error.InvalidFrameSize;
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            body_chunk_size,
+            deadlines,
+            .{ .streaming = observer },
+            cancellation,
         );
     }
 
@@ -5054,6 +5148,7 @@ pub const Connection = struct {
         body_chunk_size: usize,
         deadlines: []const ?std.Io.Clock.Timestamp,
         observer: IndividualBatchObserver,
+        cancellation: ?BatchCancellationObserver,
     ) anyerror!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.callback_reader_active) return error.UnexpectedFrame;
@@ -5096,15 +5191,16 @@ pub const Connection = struct {
         defer if (controls.ptr != controls_stack[0..].ptr) {
             self.allocator.free(controls);
         };
-        var admitted_stack: [16]bool = undefined;
-        const admitted = if (requests.len <= admitted_stack.len)
-            admitted_stack[0..requests.len]
+        const Admission = enum { pending, admitted, timed_out, canceled };
+        var admissions_stack: [16]Admission = undefined;
+        const admissions = if (requests.len <= admissions_stack.len)
+            admissions_stack[0..requests.len]
         else
-            try self.allocator.alloc(bool, requests.len);
-        defer if (admitted.ptr != admitted_stack[0..].ptr) {
-            self.allocator.free(admitted);
+            try self.allocator.alloc(Admission, requests.len);
+        defer if (admissions.ptr != admissions_stack[0..].ptr) {
+            self.allocator.free(admissions);
         };
-        @memset(admitted, false);
+        @memset(admissions, .pending);
 
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
@@ -5123,13 +5219,25 @@ pub const Connection = struct {
             state.deinit(self.allocator);
         };
 
+        const cancellation_pending = if (cancellation) |cancel|
+            cancel.event.isSet()
+        else
+            false;
         for (requests, deadlines, 0..) |
             request_options,
             deadline,
             request_index,
         | {
+            if (cancellation_pending and cancellation.?.take_canceled(
+                cancellation.?.context,
+                request_index,
+            )) {
+                admissions[request_index] = .canceled;
+                continue;
+            }
             if (deadline) |absolute| {
                 if (absolute.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                    admissions[request_index] = .timed_out;
                     continue;
                 }
             }
@@ -5149,15 +5257,19 @@ pub const Connection = struct {
                 .request_index = request_index,
                 .deadline = deadline,
             };
-            admitted[request_index] = true;
+            admissions[request_index] = .admitted;
             started += 1;
         }
+        if (cancellation_pending) cancellation.?.acknowledge(
+            cancellation.?.context,
+        );
 
-        for (admitted, 0..) |was_admitted, request_index| {
-            if (!was_admitted) {
-                observer.reportError(request_index, error.Timeout);
-            }
-        }
+        for (admissions, 0..) |admission, request_index| switch (admission) {
+            .admitted => {},
+            .timed_out => observer.reportError(request_index, error.Timeout),
+            .canceled => observer.reportError(request_index, error.Canceled),
+            .pending => unreachable,
+        };
         if (started == 0) return;
 
         var views_stack: [16]BatchDataView = undefined;
@@ -5229,18 +5341,21 @@ pub const Connection = struct {
             states[0..started],
             controls[0..started],
             observer,
+            cancellation,
         );
         try self.writeRequestTrailersWithPerStreamDeadlines(
             requests,
             states[0..started],
             controls[0..started],
             observer,
+            cancellation,
         );
 
         self.readResponseBatchWithPerStreamDeadlines(
             states[0..started],
             controls[0..started],
             observer,
+            cancellation,
         ) catch |err| {
             self.abortIndividualResponseBatch(
                 states[0..started],
@@ -6350,6 +6465,7 @@ pub const Connection = struct {
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
         observer: IndividualBatchObserver,
+        cancellation: ?BatchCancellationObserver,
     ) ResponseTimeoutError!void {
         for (states, controls) |*state, *control| {
             if (control.reported) continue;
@@ -6357,6 +6473,14 @@ pub const Connection = struct {
             if (trailers.len == 0) continue;
 
             while (!control.reported) {
+                if (try self.cancelIndividualBatchRequests(
+                    states,
+                    controls,
+                    observer,
+                    cancellation,
+                )) {
+                    continue;
+                }
                 if (try self.expireIndividualBatchDeadlines(
                     states,
                     controls,
@@ -6560,6 +6684,7 @@ pub const Connection = struct {
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
         observer: IndividualBatchObserver,
+        cancellation: ?BatchCancellationObserver,
     ) anyerror!void {
         std.debug.assert(views.len == offsets.len);
         std.debug.assert(views.len == round_reserved.len);
@@ -6582,6 +6707,14 @@ pub const Connection = struct {
                 }
             }
             if (remaining_streams == 0) break;
+            if (try self.cancelIndividualBatchRequests(
+                states,
+                controls,
+                observer,
+                cancellation,
+            )) {
+                continue;
+            }
             if (try self.expireIndividualBatchDeadlines(
                 states,
                 controls,
@@ -6675,6 +6808,7 @@ pub const Connection = struct {
                 states,
                 controls,
                 observer,
+                cancellation,
             );
         }
     }
@@ -7182,6 +7316,7 @@ pub const Connection = struct {
         request_index: usize,
         deadline: ?std.Io.Clock.Timestamp,
         reported: bool = false,
+        terminate_requested: bool = false,
         unreleased_connection_bytes: usize = 0,
     };
 
@@ -7392,35 +7527,76 @@ pub const Connection = struct {
         observer: IndividualBatchObserver,
     ) Error!bool {
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
-        var expired_count: usize = 0;
-        var unreleased: usize = 0;
-        for (controls) |control| {
+        for (controls) |*control| {
             if (control.reported) continue;
             const deadline = control.deadline orelse continue;
-            if (deadline.raw.nanoseconds > now_ns) {
-                continue;
+            if (deadline.raw.nanoseconds <= now_ns) {
+                control.terminate_requested = true;
             }
-            expired_count += 1;
+        }
+        return self.finishTerminatedIndividualBatch(
+            states,
+            controls,
+            observer,
+            error.Timeout,
+        );
+    }
+
+    fn cancelIndividualBatchRequests(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: IndividualBatchObserver,
+        cancellation: ?BatchCancellationObserver,
+    ) Error!bool {
+        const cancel = cancellation orelse return false;
+        if (!cancel.event.isSet()) return false;
+        for (controls) |*control| {
+            if (control.reported) continue;
+            if (cancel.take_canceled(
+                cancel.context,
+                control.request_index,
+            )) {
+                control.terminate_requested = true;
+            }
+        }
+        cancel.acknowledge(cancel.context);
+        return self.finishTerminatedIndividualBatch(
+            states,
+            controls,
+            observer,
+            error.Canceled,
+        );
+    }
+
+    fn finishTerminatedIndividualBatch(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: IndividualBatchObserver,
+        err: anyerror,
+    ) Error!bool {
+        var terminate_count: usize = 0;
+        var unreleased: usize = 0;
+        for (controls) |control| {
+            if (control.reported or !control.terminate_requested) continue;
+            terminate_count += 1;
             unreleased = std.math.add(
                 usize,
                 unreleased,
                 control.unreleased_connection_bytes,
             ) catch return error.MessageTooLarge;
         }
-        if (expired_count == 0) return false;
+        if (terminate_count == 0) return false;
 
         if (unreleased != 0) {
             try self.releaseConnectionCapacity(unreleased);
         }
-        try self.prepareLocallyResetStreams(expired_count);
+        try self.prepareLocallyResetStreams(terminate_count);
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
         for (states, controls) |state, control| {
-            if (control.reported) continue;
-            const deadline = control.deadline orelse continue;
-            if (deadline.raw.nanoseconds > now_ns) {
-                continue;
-            }
+            if (control.reported or !control.terminate_requested) continue;
             try http2.ResetStreamPayload.write(
                 batch,
                 self.allocator,
@@ -7428,17 +7604,14 @@ pub const Connection = struct {
                 .cancel,
             );
         }
-        self.transportForIo().writeAll(batch.items) catch |err| {
+        self.transportForIo().writeAll(batch.items) catch |wire_err| {
             self.aggregate_timeout_unusable = true;
-            return err;
+            return wire_err;
         };
         for (states, controls) |*state, *control| {
-            if (control.reported) continue;
-            const deadline = control.deadline orelse continue;
-            if (deadline.raw.nanoseconds > now_ns) {
-                continue;
-            }
+            if (control.reported or !control.terminate_requested) continue;
             control.unreleased_connection_bytes = 0;
+            control.terminate_requested = false;
             self.rememberLocallyResetStreamAssumeCapacity(state.stream_id);
             self.releaseLocalStream(state.stream_id);
             self.releasePeerStream(state.stream_id);
@@ -7446,7 +7619,7 @@ pub const Connection = struct {
             state.done = true;
             state.request_done = true;
             control.reported = true;
-            observer.reportError(control.request_index, error.Timeout);
+            observer.reportError(control.request_index, err);
         }
         return true;
     }
@@ -7467,12 +7640,28 @@ pub const Connection = struct {
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
         observer: IndividualBatchObserver,
+        cancellation: ?BatchCancellationObserver,
     ) anyerror!void {
         const deadline = earliestIndividualBatchDeadline(controls);
-        const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| switch (err) {
-            error.Timeout => return,
-            else => |other| return other,
-        }).frame;
+        const read_result: InterruptibleFrameRead = if (cancellation) |cancel|
+            self.readBufferedFrameWithDeadlineOrWake(
+                deadline,
+                cancel.event,
+            ) catch |err| switch (err) {
+                error.Timeout => return,
+                else => |other| return other,
+            }
+        else
+            .{ .frame = (self.readBufferedFrameWithDeadline(
+                deadline,
+            ) catch |err| switch (err) {
+                error.Timeout => return,
+                else => |other| return other,
+            }) };
+        const frame = switch (read_result) {
+            .frame => |borrowed| borrowed.frame,
+            .wake => return,
+        };
         if (try self.handleConnectionFrame(frame)) return;
         if (frame.header.frame_type == .goaway) {
             try self.recordPeerGoAway(
@@ -7660,6 +7849,7 @@ pub const Connection = struct {
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
         observer: IndividualBatchObserver,
+        cancellation: ?BatchCancellationObserver,
     ) anyerror!void {
         while (true) {
             var unfinished: usize = 0;
@@ -7668,6 +7858,14 @@ pub const Connection = struct {
             }
             if (unfinished == 0) return;
 
+            if (try self.cancelIndividualBatchRequests(
+                states,
+                controls,
+                observer,
+                cancellation,
+            )) {
+                continue;
+            }
             if (try self.expireIndividualBatchDeadlines(
                 states,
                 controls,
@@ -7679,6 +7877,7 @@ pub const Connection = struct {
                 states,
                 controls,
                 observer,
+                cancellation,
             );
         }
     }
@@ -10144,6 +10343,69 @@ pub const Connection = struct {
             )) continue;
             return frame;
         }
+    }
+
+    const InterruptibleFrameRead = union(enum) {
+        frame: frame_io.BorrowedFrame,
+        wake,
+    };
+
+    /// Race the sole frame reader against a reusable cross-task wake event.
+    /// If both finish together, preserve the frame result before observing the
+    /// wake so a completed frame can never disappear during cancellation.
+    fn readBufferedFrameWithDeadlineOrWake(
+        self: *Connection,
+        deadline: ?std.Io.Clock.Timestamp,
+        wake: *std.Io.Event,
+    ) anyerror!InterruptibleFrameRead {
+        const Result = union(enum) {
+            frame: Error!frame_io.BorrowedFrame,
+            wake: std.Io.Cancelable!void,
+        };
+        const Task = struct {
+            fn read(
+                connection: *Connection,
+                absolute: ?std.Io.Clock.Timestamp,
+            ) Error!frame_io.BorrowedFrame {
+                return connection.readBufferedFrameWithDeadline(absolute);
+            }
+
+            fn wait(
+                event: *std.Io.Event,
+                io: std.Io,
+            ) std.Io.Cancelable!void {
+                return event.wait(io);
+            }
+        };
+        var result_buffer: [2]Result = undefined;
+        var select: std.Io.Select(Result) = .init(self.io, &result_buffer);
+        defer select.cancelDiscard();
+        try select.concurrent(.frame, Task.read, .{ self, deadline });
+        try select.concurrent(.wake, Task.wait, .{ wake, self.io });
+        switch (try select.await()) {
+            .frame => |result| return .{ .frame = try result },
+            .wake => |result| try result,
+        }
+
+        var completed_frame: ?frame_io.BorrowedFrame = null;
+        var read_err: ?anyerror = null;
+        while (select.cancel()) |late| switch (late) {
+            .frame => |result| {
+                if (result) |frame| {
+                    completed_frame = frame;
+                } else |err| {
+                    if (err != error.Canceled and err != error.Timeout) {
+                        read_err = err;
+                    }
+                }
+            },
+            .wake => |result| result catch |err| {
+                if (err != error.Canceled) return err;
+            },
+        };
+        if (completed_frame) |frame| return .{ .frame = frame };
+        if (read_err) |err| return err;
+        return .wake;
     }
 
     fn readBufferedFrameRawWithDeadline(
@@ -17198,6 +17460,20 @@ pub const BatchStreamingResponseObserver = struct {
         request_index: usize,
         result: BatchStreamingResponseResult,
     ) void,
+};
+
+/// Cross-task wake source for independently-deadlined request batches.
+/// `take_canceled` consumes one request's cancellation bit. `acknowledge`
+/// resets `event` only after checking for cancellations that raced the scan.
+/// Both callbacks run on the sole connection reader.
+pub const BatchCancellationObserver = struct {
+    event: *std.Io.Event,
+    context: *anyopaque,
+    take_canceled: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+    ) bool,
+    acknowledge: *const fn (context: *anyopaque) void,
 };
 
 fn countInformationalResponse(
