@@ -212,6 +212,7 @@ test "HTTP/3 pool acquire deadline bounds a custom connector" {
         .max_connections = 1,
         .connector = .{
             .context = &context,
+            .client_identity_configured = false,
             .connect = SlowConnector.connect,
         },
     });
@@ -238,6 +239,7 @@ test "HTTP/3 pool request timeout rejects a non-positive budget" {
     var context: u8 = 0;
     const connector: runtime.HandshakeClientPoolConnector = .{
         .context = &context,
+        .client_identity_configured = false,
         .connect = struct {
             fn connect(
                 _: *anyopaque,
@@ -416,6 +418,7 @@ test "HTTP/3 handshake client pool replaces idle capacity across origins" {
         .max_connections = 1,
         .connector = .{
             .context = &connector,
+            .client_identity_configured = false,
             .connect = CountingConnector.connect,
         },
     });

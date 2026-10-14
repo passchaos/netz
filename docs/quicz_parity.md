@@ -1380,7 +1380,7 @@ marks GOAWAY before release and proves the connection is not cached. A
 two-server TLS/QUIC regression also constrains the total to one connection,
 leaves origin A idle, then requests origin B and proves that the idle A client
 is closed and its slot transferred before B is dialed; a second B request
-reuses that replacement while the pool remains at exactly one connection. Each
+reuses that replacement while the pool remains at exactly one connection.
 Another real TLS/QUIC regression holds the only slot, queues two waiters in a
 known order, and verifies ordered admission as each predecessor is discarded.
 URI clients additionally accept one absolute connect budget spanning hostname
@@ -1407,6 +1407,21 @@ detailed result owns its final URI and hop count. Authenticated in-process tests
 cover two independent servers, and the repository-pinned quic-go gate verifies
 the two-connection 303 flow for QUIC v1 and v2 while its cancellation,
 informational and reverse-role scenarios remain green.
+The exclusive `HandshakeClientPool` exposes the same ordinary, detailed,
+timeout and absolute-deadline redirect family. Each fully consumed response is
+released before the next URI acquisition, preserving one whole-chain deadline,
+stale-idempotent retry and pool capacity/LRU rules. Same-origin 303 hops reuse
+the exact authenticated connection and its QPACK state; cross-origin 307 keeps
+the method/body and ordinary fields while stripping credentials and trailers.
+The default connector receives an explicit redirect security context, clears
+manual/automatic resumption, early data, address-validation tokens, configured
+server identity and deterministic ephemeral inputs on an origin boundary, and
+the connector contract declares whether mTLS identity is configured so the
+pool can reject that boundary before second-hop I/O. Local TLS/QUIC tests cover
+same- and cross-origin paths. The repository-pinned quic-go v1/v2 gate now runs
+the original two-connection one-shot redirect followed by a pooled redirect
+whose two requests use one additional connection; the independent server
+requires four requests on exactly three connections.
 `SharedHandshakeClientPool` now owns one `std.Io` UDP endpoint and one QUIC
 dispatcher across all pooled origins. Its CID-routed handshake inboxes keep
 TLS workers off the socket, successful clients move into stable heap storage

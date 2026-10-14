@@ -87,10 +87,11 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 	defer packetConn.Close()
 
 	var negotiatedVersion atomic.Uint32
+	var connectionCount atomic.Uint32
 	cancelResponseStarted := make(chan struct{})
 	siblingStarted := make(chan struct{})
 	cancellationObserved := make(chan struct{})
-	results := make(chan error, 2)
+	results := make(chan error, 4)
 	server := &http3.Server{
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{certificate},
@@ -99,6 +100,7 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 		QUICConfig: quicConfig(v2Only),
 		ConnContext: func(ctx context.Context, connection *quic.Conn) context.Context {
 			negotiatedVersion.Store(uint32(connection.ConnectionState().Version))
+			connectionCount.Add(1)
 			return ctx
 		},
 	}
@@ -120,7 +122,11 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 	serveErrors := make(chan error, 1)
 	go func() { serveErrors <- server.Serve(packetConn) }()
 	fmt.Printf("quic-go HTTP/3 interop server listening=%s ca_out=%s\n", packetConn.LocalAddr(), caOut)
-	for range 2 {
+	expectedRequests := 2
+	if redirect {
+		expectedRequests = 4
+	}
+	for range expectedRequests {
 		select {
 		case err := <-results:
 			if err != nil {
@@ -138,7 +144,10 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 	}
 	version := checkedVersion(negotiatedVersion.Load(), v2Only)
 	if redirect {
-		fmt.Printf("quic-go HTTP/3 server verified netz redirect: version=%d status=303 method=POST-to-GET credentials=same-origin connections=2\n", version)
+		if connectionCount.Load() != 3 {
+			log.Fatalf("unexpected redirect connection count %d", connectionCount.Load())
+		}
+		fmt.Printf("quic-go HTTP/3 server verified netz redirects: version=%d requests=4 redirects=2 method=POST-to-GET credentials=same-origin connections=3 pooled_connections=1\n", version)
 		return
 	}
 	fmt.Printf("quic-go HTTP/3 server interoperated with netz: version=%d cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=%d large_response=%d request_body=12 request_trailers=1 response_body=16 response_trailers=1\n", version, streamReceiveWindow, cancellationResponseSize)

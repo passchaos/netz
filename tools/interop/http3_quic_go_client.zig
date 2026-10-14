@@ -784,6 +784,64 @@ fn runRedirect(
         "netz HTTP/3 client followed quic-go redirect: version={d} status=200 redirects=1 method=POST->GET credentials=same-origin connections=2\n",
         .{if (version == .version_2) @as(u8, 2) else 1},
     );
+
+    var pool_connector =
+        netz.http3.runtime.HandshakeClientPoolDefaultConnector{ .options = .{
+            .handshake = .{
+                .original_destination_connection_id = &.{},
+                .local_connection_id = &.{},
+                .version = version,
+                .available_versions = if (version == .version_2)
+                    &.{.version_2}
+                else
+                    &.{ .version_1, .version_2 },
+                .server_name = "localhost",
+                .server_auth = server_verifier,
+                .max_crypto_buffer = 64 * 1024,
+            },
+        } };
+    var pool = try netz.http3.runtime.HandshakeClientPool.init(
+        allocator,
+        io,
+        .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .limits = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 16,
+            } },
+            .max_connections = 1,
+            .connector = pool_connector.connector(),
+        },
+    );
+    defer pool.deinit();
+    var pooled = try pool.requestUriFollowingRedirectsDetailedWithTimeout(
+        uri_text,
+        .{
+            .method = "POST",
+            .headers = &.{
+                .{ .name = "authorization", .value = "Bearer quic-go-redirect" },
+                .{ .name = "content-type", .value = "text/plain" },
+            },
+            .body = "redirect-body",
+        },
+        .{},
+        .fromSeconds(10),
+    );
+    defer pooled.deinit();
+    if (pooled.response.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            pooled.response.response.body,
+            "quic-go-redirected",
+        ) or pooled.redirect_count != 1 or
+        pool.connectionCount() != 1 or pool.idleCount() != 1)
+    {
+        return error.InvalidRedirectResponse;
+    }
+    std.debug.print(
+        "netz HTTP/3 pool reused quic-go connection through redirect: version={d} requests=2 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=quic-go-netpoll\n",
+        .{if (version == .version_2) @as(u8, 2) else 1},
+    );
 }
 
 fn runInformational(

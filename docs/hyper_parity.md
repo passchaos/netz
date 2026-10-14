@@ -1224,6 +1224,13 @@ single timestamp spans FIFO capacity waiting, a new DNS/TCP/TLS connection when
 needed, stale-idempotent retry, and the complete response. HTTP/2 pooled
 one-shot requests expose the same contract through TLS and SETTINGS bootstrap;
 both pools provide relative-timeout wrappers that convert once at API entry.
+The exclusive authenticated HTTP/3 pool now exposes the same ordinary,
+detailed, timeout and absolute-deadline redirect family as its one-shot URI
+client. Each intermediate response is complete before its lease is released,
+so same-origin 303 reuses the QPACK/QUIC connection while cross-origin 307
+retains method/body and isolates credentials, trailers, mTLS identity and
+origin-bound default-connector state. The quic-go v1/v2 gate requires its two
+pooled redirect requests to share one connection.
 
 Both protocol `Limits` now also expose a TCP connect timeout used by literal-IP,
 hostname, URI, Unix-socket and pooled connection paths. Host resolution and all

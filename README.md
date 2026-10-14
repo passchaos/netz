@@ -466,7 +466,12 @@ Current protocol coverage includes:
   QPACK credential/representation cleanup, method/DATA/trailer replay policy,
   fresh QUIC CIDs and ephemeral handshake inputs per hop, cross-origin
   client-identity/resumption isolation, final-URI metadata and one deadline
-  across the complete chain. `PreparedEarlyRequest` plus
+  across the complete chain. The exclusive authenticated client pool exposes
+  the same ordinary, detailed, timeout, and absolute-deadline redirect forms;
+  every completed hop releases its lease before the next URI is acquired, so
+  same-origin redirects immediately reuse QPACK/QUIC/TLS state while
+  cross-origin hops retain capacity/LRU policy and clear origin-bound default-
+  connector state. `PreparedEarlyRequest` plus
   `HandshakeClient.connectWithEarlyRequest` provide a typed one-request 0-RTT
   path: the owned offer carries a complete literal/static-QPACK request and
   the mandatory SETTINGS/QPACK critical-stream prefixes, reports accepted

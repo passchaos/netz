@@ -10,6 +10,7 @@ const http3 = @import("../mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const fifo_admission = @import("../../internal/fifo_admission.zig");
 const http_method = @import("../../internal/http_method.zig");
+const uri_redirect = @import("../../http1/runtime/redirect.zig");
 
 pub const Error = error{
     InvalidPoolOptions,
@@ -17,12 +18,26 @@ pub const Error = error{
     PoolClosed,
 };
 
+/// Security context for a connector invocation caused by an HTTP redirect.
+/// Custom connectors can use this to clear origin-bound tickets, cached
+/// address-validation tokens, deterministic key material, and other state
+/// that must not cross an authority boundary.
+pub const RedirectConnectContext = struct {
+    cross_origin: bool,
+    forward_client_identity: bool,
+};
+
 pub fn DefaultConnectorContext(comptime Runtime: type) type {
     return struct {
         options: Runtime.HandshakeClientOptions,
 
         pub fn connector(self: *@This()) Connector(Runtime) {
-            return .{ .context = self, .connect = connect };
+            return .{
+                .context = self,
+                .client_identity_configured = self.options.handshake.client_identity != null,
+                .connect = connect,
+                .connect_redirect = connectRedirect,
+            };
         }
 
         fn connect(
@@ -53,12 +68,73 @@ pub fn DefaultConnectorContext(comptime Runtime: type) type {
                 options,
             );
         }
+
+        fn connectRedirect(
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            uri: std.Uri,
+            limits: Runtime.Limits,
+            redirect: RedirectConnectContext,
+        ) Runtime.Error!Runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!redirect.cross_origin) {
+                return connect(
+                    context,
+                    allocator,
+                    io,
+                    local_address,
+                    uri,
+                    limits,
+                );
+            }
+            var original_dcid: [8]u8 = undefined;
+            var local_cid: [8]u8 = undefined;
+            std.Io.randomSecure(io, &original_dcid) catch
+                return error.Unexpected;
+            std.Io.randomSecure(io, &local_cid) catch
+                return error.Unexpected;
+            var options = self.options;
+            options.handshake.original_destination_connection_id =
+                &original_dcid;
+            options.handshake.local_connection_id = &local_cid;
+            options.handshake.retry_source_connection_id = &.{};
+            options.handshake.server_name = null;
+            options.handshake.address_validation_token = &.{};
+            options.handshake.resumption_session = null;
+            options.handshake.resumption_server_id = null;
+            options.handshake.auto_resumption = null;
+            options.handshake.early_data = null;
+            options.handshake.random = null;
+            options.handshake.x25519_secret_key = null;
+            options.handshake.p256_secret_key = null;
+            options.handshake.p384_secret_key = null;
+            options.handshake.x25519_mlkem768_secret_key = null;
+            options.handshake.x25519_mlkem768_seed = null;
+            options.handshake.nist_hybrid_key_material = .{};
+            if (!redirect.forward_client_identity) {
+                options.handshake.client_identity = null;
+            }
+            return Runtime.HandshakeClient.connectUri(
+                allocator,
+                io,
+                local_address,
+                uri,
+                limits,
+                options,
+            );
+        }
     };
 }
 
 pub fn Connector(comptime Runtime: type) type {
     return struct {
         context: *anyopaque,
+        /// Must reflect whether this connector can present a client
+        /// certificate. Pool redirects use it to enforce the default
+        /// cross-origin identity boundary before any second-hop I/O.
+        client_identity_configured: bool,
         connect: *const fn (
             context: *anyopaque,
             allocator: std.mem.Allocator,
@@ -67,6 +143,18 @@ pub fn Connector(comptime Runtime: type) type {
             uri: std.Uri,
             limits: Runtime.Limits,
         ) Runtime.Error!Runtime.HandshakeClient,
+        /// Optional redirect-aware connection hook. When absent, the ordinary
+        /// connector is called and remains responsible for scoping every
+        /// origin-bound cache by the supplied target URI.
+        connect_redirect: ?*const fn (
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            local_address: std.Io.net.IpAddress,
+            uri: std.Uri,
+            limits: Runtime.Limits,
+            redirect: RedirectConnectContext,
+        ) Runtime.Error!Runtime.HandshakeClient = null,
     };
 }
 
@@ -186,18 +274,20 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             uri_text: []const u8,
         ) (Runtime.Error || Error)!Lease {
-            return self.acquireUriForWaiter(uri_text, null);
+            return self.acquireUriForWaiter(uri_text, null, null);
         }
 
         fn acquireUriForWaiter(
             self: *Self,
             uri_text: []const u8,
             waiter: ?*fifo_admission.Queue.Waiter,
+            redirect: ?RedirectConnectContext,
         ) (Runtime.Error || Error)!Lease {
             return self.acquireUriForWaiterBefore(
                 uri_text,
                 waiter,
                 null,
+                redirect,
             ) catch |err| switch (err) {
                 error.Timeout => unreachable,
                 else => |other| return other,
@@ -209,6 +299,7 @@ pub fn Pool(comptime Runtime: type) type {
             uri_text: []const u8,
             waiter: ?*fifo_admission.Queue.Waiter,
             deadline: ?std.Io.Clock.Timestamp,
+            redirect: ?RedirectConnectContext,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -272,7 +363,12 @@ pub fn Pool(comptime Runtime: type) type {
                 self.mutex.unlock(self.io);
                 var old = displaced;
                 old.deinit();
-                return self.connectReservedBefore(uri, origin_key, deadline);
+                return self.connectReservedBefore(
+                    uri,
+                    origin_key,
+                    deadline,
+                    redirect,
+                );
             } else {
                 self.connections += 1;
             }
@@ -288,7 +384,12 @@ pub fn Pool(comptime Runtime: type) type {
                 return lease;
             }
 
-            return self.connectReservedBefore(uri, origin_key, deadline);
+            return self.connectReservedBefore(
+                uri,
+                origin_key,
+                deadline,
+                redirect,
+            );
         }
 
         pub fn acquireUriWithTimeout(
@@ -321,6 +422,7 @@ pub fn Pool(comptime Runtime: type) type {
                     uri_text,
                     &waiter,
                     absolute,
+                    null,
                 ) catch |err| switch (err) {
                     error.ConnectionLimitReached => {
                         waiter.waitUntil(self.io, absolute) catch |wait_err| switch (wait_err) {
@@ -346,6 +448,7 @@ pub fn Pool(comptime Runtime: type) type {
                 uri,
                 origin_key_value,
                 null,
+                null,
             ) catch |err| switch (err) {
                 error.Timeout => unreachable,
                 else => |other| return other,
@@ -357,6 +460,7 @@ pub fn Pool(comptime Runtime: type) type {
             uri: std.Uri,
             origin_key_value: http3.OriginKey,
             deadline: ?std.Io.Clock.Timestamp,
+            redirect: ?RedirectConnectContext,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
             var origin_key = origin_key_value;
@@ -364,16 +468,9 @@ pub fn Pool(comptime Runtime: type) type {
             var reservation_active = true;
             errdefer if (reservation_active) self.releaseReservation();
             var client = if (deadline) |absolute|
-                try self.connectClientBefore(uri, absolute)
+                try self.connectClientBefore(uri, absolute, redirect)
             else
-                try self.options.connector.connect(
-                    self.options.connector.context,
-                    self.allocator,
-                    self.io,
-                    self.options.local_address,
-                    uri,
-                    self.options.limits,
-                );
+                try self.callConnector(uri, redirect);
             errdefer client.deinit();
             self.mutex.lockUncancelable(self.io);
             if (self.closed) {
@@ -404,6 +501,7 @@ pub fn Pool(comptime Runtime: type) type {
             self: *Self,
             uri: std.Uri,
             deadline: std.Io.Clock.Timestamp,
+            redirect: ?RedirectConnectContext,
         ) (Runtime.Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Client {
             const ConnectResult = Runtime.Error!Client;
@@ -420,7 +518,11 @@ pub fn Pool(comptime Runtime: type) type {
                 } else |_| {},
                 .timeout => {},
             };
-            select.async(.connected, callConnector, .{ self, uri });
+            select.async(
+                .connected,
+                callConnector,
+                .{ self, uri, redirect },
+            );
             select.async(.timeout, waitUntil, .{ self.io, deadline });
             return switch (select.await() catch |err| switch (err) {
                 error.Canceled => return error.Canceled,
@@ -435,7 +537,24 @@ pub fn Pool(comptime Runtime: type) type {
             };
         }
 
-        fn callConnector(self: *Self, uri: std.Uri) Runtime.Error!Client {
+        fn callConnector(
+            self: *Self,
+            uri: std.Uri,
+            redirect: ?RedirectConnectContext,
+        ) Runtime.Error!Client {
+            if (redirect) |context| {
+                if (self.options.connector.connect_redirect) |connect_redirect| {
+                    return connect_redirect(
+                        self.options.connector.context,
+                        self.allocator,
+                        self.io,
+                        self.options.local_address,
+                        uri,
+                        self.options.limits,
+                        context,
+                    );
+                }
+            }
             return self.options.connector.connect(
                 self.options.connector.context,
                 self.allocator,
@@ -458,41 +577,15 @@ pub fn Pool(comptime Runtime: type) type {
             uri_text: []const u8,
             request_options: Runtime.UriRequestOptions,
         ) (Runtime.Error || Error)!Runtime.OwnedHandshakeResponse {
-            const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
-            var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
-            defer endpoint.deinit();
-            const path = try Runtime.uriRequestTargetAlloc(self.allocator, uri);
-            defer self.allocator.free(path);
-
-            var retry_stale = true;
-            while (true) {
-                var lease = try self.acquireUri(uri_text);
-                defer if (lease.active) lease.discard();
-                const response = lease.client().request(.{
-                    .method = request_options.method,
-                    .path = path,
-                    .scheme = "https",
-                    .authority = endpoint.authority,
-                    .headers = request_options.headers,
-                    .body = request_options.body,
-                    .trailers = request_options.trailers,
-                }) catch |err| {
-                    const reused = lease.was_reused;
-                    lease.discard();
-                    if (retry_stale and reused and
-                        http_method.isIdempotent(request_options.method) and
-                        retryableStaleConnectionError(err))
-                    {
-                        retry_stale = false;
-                        continue;
-                    }
-                    return err;
-                };
-                var owned_response = response;
-                errdefer owned_response.deinit(self.allocator);
-                lease.release();
-                return owned_response;
-            }
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                null,
+                null,
+            ) catch |err| switch (err) {
+                error.Timeout, error.ConcurrencyUnavailable => unreachable,
+                else => |other| return @errorCast(other),
+            };
         }
 
         /// Carry one deadline through FIFO admission, connector execution,
@@ -523,6 +616,21 @@ pub fn Pool(comptime Runtime: type) type {
                 self.io,
                 deadline,
             );
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                absolute,
+                null,
+            );
+        }
+
+        fn requestUriBefore(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            deadline: ?std.Io.Clock.Timestamp,
+            redirect: ?RedirectConnectContext,
+        ) (Runtime.ReceiveTimeoutError || Error)!Runtime.OwnedHandshakeResponse {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
@@ -533,30 +641,37 @@ pub fn Pool(comptime Runtime: type) type {
 
             var retry_stale = true;
             while (true) {
-                var lease = while (true) {
-                    break self.acquireUriForWaiterBefore(
-                        uri_text,
-                        &waiter,
-                        absolute,
-                    ) catch |err| switch (err) {
-                        error.ConnectionLimitReached => {
-                            waiter.waitUntil(
-                                self.io,
-                                absolute,
-                            ) catch |wait_err| switch (wait_err) {
-                                error.Timeout => return error.Timeout,
-                                error.Canceled => return error.Canceled,
-                            };
-                            if (absolute.durationFromNow(
-                                self.io,
-                            ).raw.nanoseconds <= 0) return error.Timeout;
-                            continue;
-                        },
-                        else => |other| return other,
-                    };
-                };
+                var lease = if (deadline) |absolute| acquire: {
+                    while (true) {
+                        break :acquire self.acquireUriForWaiterBefore(
+                            uri_text,
+                            &waiter,
+                            absolute,
+                            redirect,
+                        ) catch |err| switch (err) {
+                            error.ConnectionLimitReached => {
+                                waiter.waitUntil(
+                                    self.io,
+                                    absolute,
+                                ) catch |wait_err| switch (wait_err) {
+                                    error.Timeout => return error.Timeout,
+                                    error.Canceled => return error.Canceled,
+                                };
+                                if (absolute.durationFromNow(
+                                    self.io,
+                                ).raw.nanoseconds <= 0) return error.Timeout;
+                                continue;
+                            },
+                            else => |other| return other,
+                        };
+                    }
+                } else try self.acquireUriForWaiter(
+                    uri_text,
+                    null,
+                    redirect,
+                );
                 defer if (lease.active) lease.discard();
-                const stream_id = lease.client().sendRequest(.{
+                const request: http3.Request = .{
                     .method = request_options.method,
                     .path = path,
                     .scheme = "https",
@@ -564,7 +679,25 @@ pub fn Pool(comptime Runtime: type) type {
                     .headers = request_options.headers,
                     .body = request_options.body,
                     .trailers = request_options.trailers,
-                }) catch |err| {
+                };
+                if (deadline == null) {
+                    var response = lease.client().request(request) catch |err| {
+                        const reused = lease.was_reused;
+                        lease.discard();
+                        if (retry_stale and reused and
+                            http_method.isIdempotent(request_options.method) and
+                            retryableStaleConnectionError(err))
+                        {
+                            retry_stale = false;
+                            continue;
+                        }
+                        return err;
+                    };
+                    errdefer response.deinit(self.allocator);
+                    lease.release();
+                    return response;
+                }
+                const stream_id = lease.client().sendRequest(request) catch |err| {
                     const reused = lease.was_reused;
                     lease.discard();
                     if (retry_stale and reused and
@@ -578,7 +711,7 @@ pub fn Pool(comptime Runtime: type) type {
                 };
                 var response = lease.client().receiveResponseWithDeadline(
                     stream_id,
-                    absolute,
+                    deadline.?,
                 ) catch |err| {
                     const reused = lease.was_reused;
                     lease.discard();
@@ -594,6 +727,203 @@ pub fn Pool(comptime Runtime: type) type {
                 errdefer response.deinit(self.allocator);
                 lease.release();
                 return response;
+            }
+        }
+
+        pub fn requestUriFollowingRedirects(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+        ) (Runtime.RedirectError || Error)!Runtime.OwnedHandshakeResponse {
+            var result = try self.requestUriFollowingRedirectsDetailedBefore(
+                uri_text,
+                request_options,
+                redirect_options,
+                null,
+            );
+            return result.takeResponse();
+        }
+
+        pub fn requestUriFollowingRedirectsDetailed(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+        ) (Runtime.RedirectError || Error)!Runtime.RedirectedHandshakeResponse {
+            return self.requestUriFollowingRedirectsDetailedBefore(
+                uri_text,
+                request_options,
+                redirect_options,
+                null,
+            );
+        }
+
+        pub fn requestUriFollowingRedirectsWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.RedirectTimeoutError || Error)!Runtime.OwnedHandshakeResponse {
+            var result = try self.requestUriFollowingRedirectsDetailedBefore(
+                uri_text,
+                request_options,
+                redirect_options,
+                try deadline_policy.usableAwake(self.io, deadline),
+            );
+            return result.takeResponse();
+        }
+
+        pub fn requestUriFollowingRedirectsDetailedWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            deadline: std.Io.Clock.Timestamp,
+        ) (Runtime.RedirectTimeoutError || Error)!Runtime.RedirectedHandshakeResponse {
+            return self.requestUriFollowingRedirectsDetailedBefore(
+                uri_text,
+                request_options,
+                redirect_options,
+                try deadline_policy.usableAwake(self.io, deadline),
+            );
+        }
+
+        pub fn requestUriFollowingRedirectsWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            timeout: std.Io.Duration,
+        ) (Runtime.RedirectTimeoutError || Error)!Runtime.OwnedHandshakeResponse {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.requestUriFollowingRedirectsWithDeadline(
+                uri_text,
+                request_options,
+                redirect_options,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn requestUriFollowingRedirectsDetailedWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            timeout: std.Io.Duration,
+        ) (Runtime.RedirectTimeoutError || Error)!Runtime.RedirectedHandshakeResponse {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.requestUriFollowingRedirectsDetailedWithDeadline(
+                uri_text,
+                request_options,
+                redirect_options,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        fn requestUriFollowingRedirectsDetailedBefore(
+            self: *Self,
+            uri_text: []const u8,
+            request_options: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) (Runtime.RedirectTimeoutError || Error)!Runtime.RedirectedHandshakeResponse {
+            const policy = redirect_options.policy;
+            var chain = uri_redirect.Chain.init(self.allocator, policy);
+            defer chain.deinit();
+            try chain.recordInitial(uri_text);
+            var current_uri = try self.allocator.dupe(u8, uri_text);
+            defer self.allocator.free(current_uri);
+            var hop_request = request_options;
+            var owned_headers: ?[]http3.Qpack.HeaderField = null;
+            defer if (owned_headers) |headers| self.allocator.free(headers);
+            var crossed_origin = false;
+
+            while (true) {
+                const connector_redirect: ?RedirectConnectContext =
+                    if (crossed_origin) .{
+                        .cross_origin = true,
+                        .forward_client_identity = policy.allow_cross_origin_client_identity,
+                    } else null;
+                var response = try self.requestUriBefore(
+                    current_uri,
+                    hop_request,
+                    deadline,
+                    connector_redirect,
+                );
+                errdefer response.deinit(self.allocator);
+                if (!uri_redirect.isRedirectStatus(response.response.status)) {
+                    return .{
+                        .allocator = self.allocator,
+                        .response = response,
+                        .final_uri = try uri_redirect.canonicalize(
+                            self.allocator,
+                            current_uri,
+                        ),
+                        .redirect_count = chain.redirects,
+                    };
+                }
+                const location = try redirectLocation(
+                    response.response.headers,
+                );
+                if (location == null) {
+                    return .{
+                        .allocator = self.allocator,
+                        .response = response,
+                        .final_uri = try uri_redirect.canonicalize(
+                            self.allocator,
+                            current_uri,
+                        ),
+                        .redirect_count = chain.redirects,
+                    };
+                }
+                var next = try chain.follow(
+                    current_uri,
+                    location.?,
+                    response.response.status,
+                );
+                var next_owned = true;
+                defer if (next_owned) next.deinit();
+                const next_uri = std.Uri.parse(next.uri) catch
+                    return error.InvalidUri;
+                if (!std.ascii.eqlIgnoreCase(next_uri.scheme, "https")) {
+                    return error.InsecureRedirect;
+                }
+                if (next.cross_origin) {
+                    try uri_redirect.enforceClientIdentityPolicy(
+                        policy,
+                        true,
+                        self.options.connector.client_identity_configured,
+                    );
+                    crossed_origin = true;
+                }
+                const action = uri_redirect.methodActionBytes(
+                    policy,
+                    response.response.status,
+                    hop_request.method,
+                );
+                const remove_credentials = next.cross_origin and
+                    !policy.forward_cross_origin_credentials;
+                hop_request.headers = try redirectHeaders(
+                    self.allocator,
+                    hop_request.headers,
+                    remove_credentials,
+                    action == .rewrite_get,
+                    &owned_headers,
+                );
+                if (action == .rewrite_get) {
+                    hop_request.method = "GET";
+                    hop_request.body = &.{};
+                    hop_request.trailers = &.{};
+                } else if (remove_credentials) {
+                    hop_request.trailers = &.{};
+                }
+
+                response.deinit(self.allocator);
+                self.allocator.free(current_uri);
+                current_uri = next.uri;
+                next_owned = false;
             }
         }
 
@@ -762,6 +1092,7 @@ pub fn Pool(comptime Runtime: type) type {
             var context: u8 = 0;
             const connector: Connector(Runtime) = .{
                 .context = &context,
+                .client_identity_configured = false,
                 .connect = struct {
                     fn connect(
                         _: *anyopaque,
@@ -918,6 +1249,7 @@ test "HTTP/3 handshake client pool reuses one authenticated connection" {
         } },
         .connector = .{
             .context = &connect_context,
+            .client_identity_configured = false,
             .connect = CountingConnector.connect,
         },
     });
@@ -1268,10 +1600,7 @@ test "HTTP/3 handshake client pool discards GOAWAY leases" {
             .max_datagram_size = 4096,
             .max_frames_per_datagram = 8,
         } },
-        .connector = .{
-            .context = &connect_context,
-            .connect = connect_context.connector().connect,
-        },
+        .connector = connect_context.connector(),
     });
     defer pool.deinit();
     const uri = try std.fmt.allocPrint(
@@ -1331,6 +1660,7 @@ test "HTTP/3 handshake client pool releases failed reservations" {
         .max_connections = 1,
         .connector = .{
             .context = &refusing,
+            .client_identity_configured = false,
             .connect = Refusing.connect,
         },
     });
@@ -1448,6 +1778,75 @@ test "HTTP/3 handshake client pool zero idle capacity releases totals" {
     server_thread.join();
     joined = true;
     if (shared.err) |err| return err;
+}
+
+fn redirectLocation(
+    headers: []const http3.Qpack.HeaderField,
+) uri_redirect.Error!?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+        if (found != null or header.value.len == 0) {
+            return error.InvalidRedirect;
+        }
+        found = header.value;
+    }
+    return found;
+}
+
+fn redirectHeaders(
+    allocator: std.mem.Allocator,
+    source: []const http3.Qpack.HeaderField,
+    remove_credentials: bool,
+    remove_body: bool,
+    owned: *?[]http3.Qpack.HeaderField,
+) std.mem.Allocator.Error![]const http3.Qpack.HeaderField {
+    var retained_count: usize = 0;
+    for (source) |header| {
+        if (!dropRedirectHeader(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) retained_count += 1;
+    }
+    if (retained_count == source.len) return source;
+    if (retained_count == 0) {
+        if (owned.*) |old| allocator.free(old);
+        owned.* = null;
+        return &.{};
+    }
+    const headers = try allocator.alloc(
+        http3.Qpack.HeaderField,
+        retained_count,
+    );
+    var index: usize = 0;
+    for (source) |header| {
+        if (dropRedirectHeader(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) continue;
+        headers[index] = header;
+        index += 1;
+    }
+    if (owned.*) |old| allocator.free(old);
+    owned.* = headers;
+    return headers;
+}
+
+fn dropRedirectHeader(
+    name: []const u8,
+    remove_credentials: bool,
+    remove_body: bool,
+) bool {
+    if (std.ascii.eqlIgnoreCase(name, "host")) return true;
+    if (remove_credentials and uri_redirect.isCrossOriginCredential(name)) {
+        return true;
+    }
+    if (remove_credentials and std.ascii.eqlIgnoreCase(name, "trailer")) {
+        return true;
+    }
+    return remove_body and uri_redirect.isBodyHeader(name);
 }
 
 fn nowMillis(io: std.Io) u64 {

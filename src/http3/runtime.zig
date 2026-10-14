@@ -12113,6 +12113,7 @@ pub const HandshakeClient = struct {
             hop_options.handshake.address_validation_token = &.{};
             hop_options.handshake.resumption_session = null;
             hop_options.handshake.resumption_server_id = null;
+            hop_options.handshake.auto_resumption = null;
             hop_options.handshake.random = null;
             hop_options.handshake.x25519_secret_key = null;
             hop_options.handshake.p256_secret_key = null;
@@ -17780,6 +17781,8 @@ pub const HandshakeClientPoolOptions =
     handshake_client_pool.Options(@This());
 pub const HandshakeClientPoolConnector =
     handshake_client_pool.Connector(@This());
+pub const HandshakeClientPoolRedirectConnectContext =
+    handshake_client_pool.RedirectConnectContext;
 pub const HandshakeClientPoolDefaultConnector =
     handshake_client_pool.DefaultConnectorContext(@This());
 pub const HandshakeClientPoolStats = http3.origin_pool.Stats;
@@ -33387,6 +33390,7 @@ test {
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");
     _ = @import("runtime/handshake_client_pool_tests.zig");
+    _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
     _ = @import("runtime/development_streaming_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
