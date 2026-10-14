@@ -146,6 +146,112 @@ pub const RunOptions = struct {
     finite_test: bool = false,
 };
 
+const AutosavePolicy = union(enum) {
+    disabled,
+    periodic: u32,
+    changes: u32,
+
+    fn fromConfig(config: mqtt.broker_config.Config) AutosavePolicy {
+        if (!config.persistence or config.autosave_interval == 0) {
+            return .disabled;
+        }
+        return if (config.autosave_on_changes)
+            .{ .changes = config.autosave_interval }
+        else
+            .{ .periodic = config.autosave_interval };
+    }
+
+    fn changeThreshold(self: AutosavePolicy) ?usize {
+        return switch (self) {
+            .changes => |value| value,
+            .disabled, .periodic => null,
+        };
+    }
+
+    fn intervalSeconds(self: AutosavePolicy) u32 {
+        return switch (self) {
+            .disabled => 0,
+            .periodic, .changes => |value| value,
+        };
+    }
+
+    fn name(self: AutosavePolicy) []const u8 {
+        return switch (self) {
+            .disabled => "disabled",
+            .periodic => "time",
+            .changes => "changes",
+        };
+    }
+};
+
+const AutosaveController = struct {
+    broker: *mqtt.broker.Broker,
+    io: std.Io,
+    persistence_path: ?[]const u8,
+    policy: AutosavePolicy,
+    next_periodic_ns: ?i96,
+
+    fn init(
+        broker: *mqtt.broker.Broker,
+        io: std.Io,
+        persistence_path: ?[]const u8,
+        policy: AutosavePolicy,
+    ) AutosaveController {
+        var self = AutosaveController{
+            .broker = broker,
+            .io = io,
+            .persistence_path = persistence_path,
+            .policy = policy,
+            .next_periodic_ns = null,
+        };
+        self.resetPeriodicDeadline();
+        return self;
+    }
+
+    fn apply(self: *AutosaveController, policy: AutosavePolicy) void {
+        self.broker.setPersistentChangeAutosaveThreshold(
+            policy.changeThreshold(),
+        ) catch unreachable;
+        self.policy = policy;
+        self.resetPeriodicDeadline();
+    }
+
+    fn tick(self: *AutosaveController) !void {
+        const deadline = self.next_periodic_ns orelse return;
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (now < deadline) return;
+        self.resetPeriodicDeadlineFrom(now);
+        self.broker.saveLiveSnapshot(
+            std.Io.Dir.cwd(),
+            self.persistence_path orelse unreachable,
+        ) catch |err| switch (err) {
+            error.SnapshotBusy => {},
+            else => return err,
+        };
+    }
+
+    fn noteCheckpoint(self: *AutosaveController) void {
+        self.resetPeriodicDeadline();
+    }
+
+    fn resetPeriodicDeadline(self: *AutosaveController) void {
+        self.resetPeriodicDeadlineFrom(
+            std.Io.Clock.awake.now(self.io).nanoseconds,
+        );
+    }
+
+    fn resetPeriodicDeadlineFrom(
+        self: *AutosaveController,
+        now_ns: i96,
+    ) void {
+        self.next_periodic_ns = switch (self.policy) {
+            .periodic => |seconds| now_ns +| @as(i96, seconds) *
+                std.time.ns_per_s,
+            .disabled, .changes => null,
+        };
+    }
+};
+
 const ConfiguredServer = union(enum) {
     mqtt: mqtt.runtime.Server,
     mqtt_tls: mqtt.tls_runtime.Server,
@@ -457,12 +563,12 @@ pub fn run(
             .max_queued_per_session = config.effectiveMaxQueuedMessages(),
             .max_queued_payload_bytes_per_session = config.max_queued_bytes,
         },
-        .persistent_change_autosave = if (config.persistence and
-            config.autosave_on_changes and
-            config.autosave_interval != 0) .{
+        .persistent_change_autosave = if (config.persistence) .{
             .dir = std.Io.Dir.cwd(),
             .sub_path = persistence_path.?,
-            .max_changes = config.autosave_interval,
+            .max_changes = @max(config.autosave_interval, 1),
+            .enabled = config.autosave_on_changes and
+                config.autosave_interval != 0,
         } else null,
     });
     defer broker.deinit();
@@ -772,6 +878,12 @@ pub fn run(
             .listeners = active_endpoints,
             .shutdown = &shutdown,
         } };
+    var autosave = AutosaveController.init(
+        &broker,
+        io,
+        persistence_path,
+        AutosavePolicy.fromConfig(config),
+    );
     if (config.persistence or reload_signal != null or bridges.len() != 0) {
         try serveWithManagement(
             allocator,
@@ -781,12 +893,7 @@ pub fn run(
             config_path,
             &shutdown,
             &bridges,
-            persistence_path,
-            if (!config.autosave_on_changes and
-                config.autosave_interval != 0)
-                config.autosave_interval
-            else
-                null,
+            &autosave,
             if (has_reloadable_files) &security else null,
             if (has_reloadable_files) &identities else null,
         );
@@ -807,18 +914,16 @@ fn serveWithManagement(
     config_path: []const u8,
     shutdown: *std.Io.Event,
     bridges: *configured_bridges.Set,
-    persistence_path: ?[]const u8,
-    interval_seconds: ?u32,
+    autosave: *AutosaveController,
     security: ?*reloadable_security.Security,
     identities: ?*reloadable_identity.Set,
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
         bridges: ?anyerror,
-        periodic_timer: std.Io.Cancelable!void,
-        signal_poll: std.Io.Cancelable!void,
+        management_tick: std.Io.Cancelable!void,
     };
-    const result_buffer = try allocator.alloc(Result, 4);
+    const result_buffer = try allocator.alloc(Result, 3);
     defer allocator.free(result_buffer);
     var select: std.Io.Select(Result) = .init(io, result_buffer);
     defer select.cancelDiscard();
@@ -826,19 +931,11 @@ fn serveWithManagement(
     defer bridges.requestStop();
     try select.concurrent(.serve, serveResult, .{ broker, service });
     try select.concurrent(.bridges, bridgeSetResult, .{bridges});
-    if (interval_seconds) |seconds| {
+    if (comptime builtin.os.tag == .linux or
+        autosave.persistence_path != null)
+    {
         try select.concurrent(
-            .periodic_timer,
-            waitInterval,
-            .{ io, std.Io.Clock.Duration{
-                .raw = .fromSeconds(seconds),
-                .clock = .awake,
-            } },
-        );
-    }
-    if (comptime builtin.os.tag == .linux) {
-        try select.concurrent(
-            .signal_poll,
+            .management_tick,
             waitInterval,
             .{ io, checkpoint_signal_poll_interval },
         );
@@ -859,36 +956,18 @@ fn serveWithManagement(
                 if (maybe_error) |err| return err;
                 return error.UnexpectedBridgeExit;
             },
-            .periodic_timer => |result| {
-                try result;
-                broker.saveLiveSnapshot(
-                    std.Io.Dir.cwd(),
-                    persistence_path orelse unreachable,
-                ) catch |err| switch (err) {
-                    error.SnapshotBusy => {},
-                    else => return err,
-                };
-                const seconds = interval_seconds orelse unreachable;
-                try select.concurrent(
-                    .periodic_timer,
-                    waitInterval,
-                    .{ io, std.Io.Clock.Duration{
-                        .raw = .fromSeconds(seconds),
-                        .clock = .awake,
-                    } },
-                );
-            },
-            .signal_poll => |result| {
+            .management_tick => |result| {
                 try result;
                 if (CheckpointSignal.take()) {
                     broker.saveLiveSnapshot(
                         std.Io.Dir.cwd(),
-                        persistence_path orelse unreachable,
+                        autosave.persistence_path orelse unreachable,
                     ) catch |err| switch (err) {
                         error.SnapshotBusy => CheckpointSignal.request(),
                         else => return err,
                     };
                     if (!CheckpointSignal.take()) {
+                        autosave.noteCheckpoint();
                         std.debug.print(
                             "netz MQTT persistence checkpoint completed: " ++
                                 "source=SIGUSR1 server_io=zio-std-io\n",
@@ -907,6 +986,7 @@ fn serveWithManagement(
                         config_path,
                         broker,
                         bridges,
+                        autosave,
                         security,
                         identities,
                     )) {
@@ -918,8 +998,8 @@ fn serveWithManagement(
                                 @errorName(failure.err),
                             },
                         ),
-                        .success => |security_reloaded| {
-                            if (security_reloaded) {
+                        .success => |success| {
+                            if (success.security_reloaded) {
                                 std.debug.print(
                                     "netz MQTT security reload completed: " ++
                                         "source=SIGHUP server_io=zio-std-io\n",
@@ -931,11 +1011,23 @@ fn serveWithManagement(
                                     "source=SIGHUP server_io=zio-std-io\n",
                                 .{},
                             );
+                            if (autosave.persistence_path != null) {
+                                std.debug.print(
+                                    "netz MQTT persistence autosave reload " ++
+                                        "completed: mode={s} interval={d} " ++
+                                        "source=SIGHUP server_io=zio-std-io\n",
+                                    .{
+                                        success.autosave_policy.name(),
+                                        success.autosave_policy.intervalSeconds(),
+                                    },
+                                );
+                            }
                         },
                     }
                 }
+                try autosave.tick();
                 try select.concurrent(
-                    .signal_poll,
+                    .management_tick,
                     waitInterval,
                     .{ io, checkpoint_signal_poll_interval },
                 );
@@ -959,11 +1051,15 @@ fn bridgesUseQoS2(bridges: []const mqtt.broker_config.Bridge) bool {
 const ReloadComponent = enum {
     configuration,
     bridge,
+    persistence,
     security,
 };
 
 const ReloadOutcome = union(enum) {
-    success: bool,
+    success: struct {
+        security_reloaded: bool,
+        autosave_policy: AutosavePolicy,
+    },
     failure: struct {
         component: ReloadComponent,
         err: anyerror,
@@ -976,6 +1072,7 @@ fn reloadConfiguredState(
     config_path: []const u8,
     broker: *mqtt.broker.Broker,
     bridges: *configured_bridges.Set,
+    autosave: *AutosaveController,
     security: ?*reloadable_security.Security,
     identities: ?*reloadable_identity.Set,
 ) ReloadOutcome {
@@ -989,6 +1086,14 @@ fn reloadConfiguredState(
         .err = err,
     } };
     defer reloaded_config.deinit(allocator);
+    const reloaded_autosave = autosavePolicyForReload(
+        allocator,
+        reloaded_config,
+        autosave.persistence_path,
+    ) catch |err| return .{ .failure = .{
+        .component = .persistence,
+        .err = err,
+    } };
     var prepared_bridges = bridges.prepareReload(
         reloaded_config.bridges,
     ) catch |err| return .{ .failure = .{
@@ -1004,8 +1109,12 @@ fn reloadConfiguredState(
             .component = .bridge,
             .err = err,
         } };
+        autosave.apply(reloaded_autosave);
         bridge_commit.commit();
-        return .{ .success = false };
+        return .{ .success = .{
+            .security_reloaded = false,
+            .autosave_policy = reloaded_autosave,
+        } };
     };
     var prepared_security = policy.prepareReload() catch |err|
         return .{ .failure = .{
@@ -1033,6 +1142,7 @@ fn reloadConfiguredState(
         &prepared_identities,
     );
     policy.lock.unlock(policy.io);
+    autosave.apply(reloaded_autosave);
     bridge_commit.commit();
     _ = broker.disconnectUnauthorizedConnections(.{
         .context = &retired_security,
@@ -1041,7 +1151,28 @@ fn reloadConfiguredState(
     });
     retired_security.deinit();
     retired_identities.deinit();
-    return .{ .success = true };
+    return .{ .success = .{
+        .security_reloaded = true,
+        .autosave_policy = reloaded_autosave,
+    } };
+}
+
+fn autosavePolicyForReload(
+    allocator: std.mem.Allocator,
+    config: mqtt.broker_config.Config,
+    persistence_path: ?[]const u8,
+) !AutosavePolicy {
+    if (config.persistence != (persistence_path != null)) {
+        return error.PersistenceConfigurationRequiresRestart;
+    }
+    if (persistence_path) |expected| {
+        const actual = try config.persistencePath(allocator);
+        defer allocator.free(actual);
+        if (!std.mem.eql(u8, actual, expected)) {
+            return error.PersistenceConfigurationRequiresRestart;
+        }
+    }
+    return AutosavePolicy.fromConfig(config);
 }
 
 const Service = union(enum) {

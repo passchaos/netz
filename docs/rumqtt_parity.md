@@ -666,6 +666,14 @@ has narrower persistence-plugin integration than Mosquitto, but supports both
 elapsed-time and persistent-change-count live autosave. An
 `autosave_interval` of zero disables either runtime trigger, matching
 Mosquitto, without disabling startup restore or the final shutdown snapshot.
+Linux SIGHUP can atomically switch that policy among elapsed-time,
+persistent-change-count, and disabled modes while retaining the original
+snapshot target. A fixed management tick applies the new interval before its
+next due check; change-count enablement services any durable debt since the
+last snapshot, while periodic/manual writes acknowledge the same generation so
+switching modes cannot duplicate an already persisted checkpoint. Changing
+`persistence`, `persistence_location`, or `persistence_file` remains a
+restart-only operation and fails the complete reload transaction.
 On Linux the production config runner also maps `SIGUSR1` to an on-demand live
 checkpoint. Its signal handler performs only a lock-free atomic flag store; a
 bounded `std.Io` supervisor poll consumes the request and runs normal locked,
@@ -3311,10 +3319,15 @@ reload disconnects nobody. Another starts with client A accepted and client B
 revoked, swaps the CRL through SIGHUP and proves
 that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Bridge
-definitions are the exception: `bridge_reload_type lazy|immediate` selects
+definitions are one exception: `bridge_reload_type lazy|immediate` selects
 per-bridge generation replacement on the same SIGHUP without rebinding
-listeners. Listener topology, anonymous policy, limits, and persistence
-settings still require restart.
+listeners. Autosave policy is the other: `autosave_interval` and
+`autosave_on_changes` switch atomically among time, durable-change, and disabled
+modes. The process gate exercises every transition, rejects a changed
+persistence target without changing the active policy, and restores retained
+state from debt written immediately when change autosave is re-enabled.
+Listener topology, anonymous policy, limits, and the persistence enable/target
+still require restart.
 The complete configuration gate now passes with OpenSSL 3.6.5, including exact
 CertificateRequest CA-name decoding, live client-CA rotation, mTLS, CRL and
 TLS/WSS rollback. The earlier 3.6.5 failure was a process-gate synchronization

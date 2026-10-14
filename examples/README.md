@@ -570,12 +570,16 @@ later TLS/WSS handshakes without rebinding the listener. In-flight handshakes
 retain their complete TLS policy generation until completion, while established
 TLS connections retain traffic keys and authenticated peer metadata without
 depending on the old files. Listener topology, anonymous policy, limits, and
-persistence settings remain fixed until restart.
+the persistence enable/location/file remain fixed until restart.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime
-autosave while preserving startup restore and the final shutdown snapshot. On
-Linux, `SIGUSR1` requests an immediate live checkpoint through an
+autosave while preserving startup restore and the final shutdown snapshot.
+SIGHUP on Linux may change `autosave_interval` and `autosave_on_changes` among
+periodic, durable-change-count, and disabled modes without rebinding listeners.
+All bridge/security/persistence reload inputs are prepared before commit; a
+changed persistence target fails the whole transaction and preserves the old
+autosave policy. On Linux, `SIGUSR1` requests an immediate live checkpoint through an
 allocation-free signal flag consumed by the normal `std.Io` supervisor; it
 never performs allocator, locking, or filesystem work in the signal handler.
 Run the end-to-end gate with

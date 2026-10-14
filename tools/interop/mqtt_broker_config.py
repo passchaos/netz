@@ -3330,6 +3330,173 @@ def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
             )
 
 
+def run_autosave_reload_case(broker: Path, directory: Path) -> None:
+    port = free_port()
+    snapshot = directory / "autosave-reload.db"
+    rejected_snapshot = directory / "autosave-reload-rejected.db"
+    config = directory / "autosave-reload.conf"
+    retained_topic = "persistence/autosave-reload/disabled"
+    retained_payload = b"reload-debt"
+
+    def write_config(
+        interval: int,
+        on_changes: bool,
+        persistence_file: str = snapshot.name,
+        max_connections: int = 4,
+    ) -> None:
+        config.write_text(
+            "persistence true\n"
+            f"persistence_location {directory}\n"
+            f"persistence_file {persistence_file}\n"
+            f"autosave_interval {interval}\n"
+            f"autosave_on_changes {str(on_changes).lower()}\n"
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            f"max_connections {max_connections}\n"
+        )
+
+    def wait_snapshot(path: Path, label: str, timeout: float = 5) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.is_file() and path.stat().st_size != 0:
+                return
+            time.sleep(0.02)
+        raise AssertionError(f"{label}: snapshot was not written")
+
+    def expect_no_snapshot(path: Path, label: str) -> None:
+        time.sleep(1.3)
+        if path.exists():
+            raise AssertionError(f"{label}: unexpected snapshot {path}")
+
+    def publish_retained(client: socket.socket, topic: str, payload: bytes) -> None:
+        client.sendall(publish_packet(topic, payload, retain=True))
+        mqtt_ping(client)
+
+    write_config(0, False)
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 4 clients" not in ready:
+        raise RuntimeError(f"autosave reload broker failed to start: {ready}")
+    listener = process.stdout.readline().strip()
+    if not listener.startswith("mqtt "):
+        raise RuntimeError(f"autosave reload listener missing: {listener}")
+
+    publisher = socket.create_connection(("127.0.0.1", port), timeout=5)
+    publisher.settimeout(5)
+    try:
+        publisher.sendall(connect_packet("autosave-reload-publisher"))
+        if connack_reason(read_mqtt_packet(publisher)) != 0:
+            raise AssertionError("autosave reload publisher CONNECT failed")
+        publish_retained(
+            publisher,
+            "persistence/autosave-reload/baseline",
+            b"baseline",
+        )
+        expect_no_snapshot(snapshot, "initial disabled policy")
+
+        write_config(1, True)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence autosave reload completed: mode=changes interval=1",
+            "change-count autosave reload",
+        )
+        publish_retained(
+            publisher,
+            "persistence/autosave-reload/changes",
+            b"changes",
+        )
+        wait_snapshot(snapshot, "change-count autosave")
+
+        snapshot.unlink()
+        write_config(1, False)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence autosave reload completed: mode=time interval=1",
+            "periodic autosave reload",
+        )
+        wait_snapshot(snapshot, "periodic autosave", timeout=3)
+
+        snapshot.unlink()
+        write_config(0, False)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence autosave reload completed: mode=disabled interval=0",
+            "disabled autosave reload",
+        )
+        publish_retained(publisher, retained_topic, retained_payload)
+        expect_no_snapshot(snapshot, "reloaded disabled policy")
+
+        write_config(1, True, rejected_snapshot.name)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence reload failed: "
+            "error=PersistenceConfigurationRequiresRestart",
+            "non-reloadable persistence target",
+        )
+        expect_no_snapshot(snapshot, "failed reload rollback")
+        if rejected_snapshot.exists():
+            raise AssertionError("failed reload wrote the rejected target")
+
+        write_config(1, True)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence autosave reload completed: mode=changes interval=1",
+            "restored change-count policy",
+        )
+        wait_snapshot(snapshot, "change debt after policy restore")
+        mqtt_ping(publisher)
+    finally:
+        publisher.close()
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+    write_config(0, False, max_connections=1)
+    restored = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert restored.stdout is not None
+    ready = restored.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"autosave reload restore failed: {ready}")
+    listener = restored.stdout.readline().strip()
+    if not listener.startswith("mqtt "):
+        raise RuntimeError(f"autosave reload restore listener missing: {listener}")
+    subscriber = socket.create_connection(("127.0.0.1", port), timeout=5)
+    subscriber.settimeout(5)
+    try:
+        subscriber.sendall(connect_packet("autosave-reload-restored"))
+        if connack_reason(read_mqtt_packet(subscriber)) != 0:
+            raise AssertionError("autosave reload restore CONNECT failed")
+        subscriber.sendall(subscribe_packet(1, retained_topic))
+        if read_mqtt_packet(subscriber) != bytes.fromhex("900400010000"):
+            raise AssertionError("autosave reload restore SUBACK mismatch")
+        expected = publish_packet(retained_topic, retained_payload, retain=True)
+        if read_mqtt_packet(subscriber) != expected:
+            raise AssertionError("autosave reload did not restore retained state")
+        subscriber.sendall(bytes.fromhex("e000"))
+    finally:
+        subscriber.close()
+    if restored.wait(timeout=5) != 0:
+        raise RuntimeError(
+            "autosave reload restored broker failed: " + restored.stdout.read()
+        )
+
+
 def run_retain_source_case(broker: Path, directory: Path) -> None:
     for proto_ver in (5, 4):
         for per_listener in (False, True):
@@ -5546,6 +5713,7 @@ def main() -> None:
         run_crl_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
+        run_autosave_reload_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
         run_tls_listener_case(args.broker, directory)
         run_modern_tls_identity_case(args.broker, directory)
@@ -5598,7 +5766,8 @@ def main() -> None:
         "atomic password/ACL with selective live credential revocation and "
         "TLS/WSS identity/key-password/CA/CRL "
         "SIGHUP reload with rollback, "
-        "disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
+        "dynamic time/change/disabled autosave SIGHUP reload with fixed-target "
+        "rollback, disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
     )
 

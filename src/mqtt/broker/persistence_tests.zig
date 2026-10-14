@@ -28,6 +28,24 @@ fn createAutosaveBroker(
     sub_path: []const u8,
     max_changes: usize,
 ) !Broker {
+    return createAutosaveBrokerEnabled(
+        allocator,
+        io,
+        dir,
+        sub_path,
+        max_changes,
+        true,
+    );
+}
+
+fn createAutosaveBrokerEnabled(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    sub_path: []const u8,
+    max_changes: usize,
+    enabled: bool,
+) !Broker {
     return Broker.listen(
         allocator,
         io,
@@ -41,9 +59,96 @@ fn createAutosaveBroker(
                 .dir = dir,
                 .sub_path = sub_path,
                 .max_changes = max_changes,
+                .enabled = enabled,
             },
         },
     );
+}
+
+test "MQTT persistent change autosave switches runtime policy atomically" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var no_target = try createBroker(allocator, io);
+    defer no_target.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        no_target.setPersistentChangeAutosaveThreshold(1),
+    );
+
+    var broker = try createAutosaveBrokerEnabled(
+        allocator,
+        io,
+        tmp.dir,
+        "dynamic.db",
+        1,
+        false,
+    );
+    defer broker.deinit();
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        broker.persistentChangeAutosaveThreshold(),
+    );
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/dynamic/baseline",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "baseline",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "dynamic.db", .{}),
+    );
+
+    // A periodic/manual snapshot acknowledges the configured target even while
+    // mutation-count autosave is disabled. Enabling must not duplicate it.
+    try broker.saveLiveSnapshot(tmp.dir, "dynamic.db");
+    try tmp.dir.deleteFile(io, "dynamic.db");
+    try broker.setPersistentChangeAutosaveThreshold(1);
+    try std.testing.expectEqual(
+        @as(?usize, 1),
+        broker.persistentChangeAutosaveThreshold(),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "dynamic.db", .{}),
+    );
+
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/dynamic/enabled",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "enabled",
+    });
+    _ = try tmp.dir.statFile(io, "dynamic.db", .{});
+
+    try broker.setPersistentChangeAutosaveThreshold(null);
+    try tmp.dir.deleteFile(io, "dynamic.db");
+    try broker.publishLocal(.{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = true,
+        .topic = "autosave/dynamic/disabled",
+        .packet_id = null,
+        .properties = &.{},
+        .payload = "disabled",
+    });
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(io, "dynamic.db", .{}),
+    );
+    try broker.setPersistentChangeAutosaveThreshold(1);
+    _ = try tmp.dir.statFile(io, "dynamic.db", .{});
 }
 
 fn delayedWill(

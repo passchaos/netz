@@ -126,6 +126,9 @@ pub const ChangeAutosaveOptions = struct {
     dir: std.Io.Dir,
     sub_path: []const u8,
     max_changes: usize,
+    /// Keep the target configured while a periodic controller owns scheduling.
+    /// Runtime policy can enable this threshold without reallocating the path.
+    enabled: bool = true,
 };
 
 pub const Options = struct {
@@ -2124,6 +2127,7 @@ pub const Broker = struct {
     /// its caller's broker mutation is already committed; returning the I/O
     /// error would falsely invite the caller to retry that mutation.
     persistent_change_autosave_error: ?anyerror = null,
+    persistent_change_autosave_enabled: std.atomic.Value(bool) = .init(false),
     /// Cumulative lifecycle counters protected by `state_mutex`. The traffic
     /// and PUBLISH counters below are lock-free. All are process-local like
     /// Mosquitto's `$SYS` counters and are not restored from snapshots.
@@ -2314,6 +2318,12 @@ pub const Broker = struct {
             .will_publishers = will_publishers,
             .slots = slots,
             .session_delivery_writers = session_delivery_writers,
+            .persistent_change_autosave_enabled = .init(
+                if (options.persistent_change_autosave) |autosave|
+                    autosave.enabled
+                else
+                    false,
+            ),
             .started_at_ns = started_at_ns,
             // Establish a zero-counter baseline at process start so the first
             // periodic `$SYS` update covers the complete initial interval.
@@ -2444,6 +2454,42 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         return self.persistent_change_autosave_error;
+    }
+
+    /// Atomically enable, disable, or retune mutation-count autosave for the
+    /// already-owned target. Enabling a threshold immediately services any
+    /// durable change debt accumulated since the last snapshot of that target.
+    pub fn setPersistentChangeAutosaveThreshold(
+        self: *Broker,
+        threshold: ?usize,
+    ) Error!void {
+        if (threshold == 0 or
+            (threshold != null and
+                self.options.persistent_change_autosave == null))
+        {
+            return error.InvalidProperty;
+        }
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        if (threshold) |value| {
+            self.options.persistent_change_autosave.?.max_changes = value;
+            self.persistent_change_autosave_enabled.store(true, .release);
+            self.autosavePersistentChangesIfNeededLocked();
+        } else {
+            self.persistent_change_autosave_enabled.store(false, .release);
+        }
+    }
+
+    pub fn persistentChangeAutosaveThreshold(self: *Broker) ?usize {
+        if (!self.persistent_change_autosave_enabled.load(.acquire)) {
+            return null;
+        }
+        self.persistence_mutex.lockUncancelable(self.io);
+        defer self.persistence_mutex.unlock(self.io);
+        if (!self.persistent_change_autosave_enabled.load(.acquire)) {
+            return null;
+        }
+        return self.options.persistent_change_autosave.?.max_changes;
     }
 
     /// Enqueue a canonical publication for an existing offline Session.
@@ -3278,13 +3324,14 @@ pub const Broker = struct {
     /// mutation. Encoding and filesystem failures are recorded for inspection
     /// but never retroactively fail the already-committed broker operation.
     fn autosavePersistentChangesIfNeeded(self: *Broker) void {
-        if (self.options.persistent_change_autosave == null) return;
+        if (!self.persistent_change_autosave_enabled.load(.acquire)) return;
         self.persistence_mutex.lockUncancelable(self.io);
         defer self.persistence_mutex.unlock(self.io);
         self.autosavePersistentChangesIfNeededLocked();
     }
 
     fn autosavePersistentChangesIfNeededLocked(self: *Broker) void {
+        if (!self.persistent_change_autosave_enabled.load(.acquire)) return;
         const autosave = self.options.persistent_change_autosave orelse return;
         const captured_generation, const encoded = blk: {
             self.state_mutex.lockUncancelable(self.io);
