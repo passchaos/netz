@@ -470,6 +470,39 @@ pub const UriEndpoint = struct {
             .ip => |address| address.connect(io, .{ .mode = .stream }),
         };
     }
+
+    pub fn connectWithDeadline(
+        self: UriEndpoint,
+        io: std.Io,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!net.Stream {
+        const absolute = try deadline_policy.usableAwake(io, deadline);
+        return switch (self.target) {
+            .host => |host| tcp_connect.hostWithDeadline(
+                io,
+                host,
+                self.port,
+                absolute,
+            ),
+            .ip => |address| tcp_connect.ipWithDeadline(
+                io,
+                address,
+                absolute,
+            ),
+        };
+    }
+
+    pub fn connectWithTimeout(
+        self: UriEndpoint,
+        io: std.Io,
+        timeout: std.Io.Duration,
+    ) Error!net.Stream {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.connectWithDeadline(
+            io,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
 };
 
 pub fn uriEndpoint(allocator: std.mem.Allocator, uri: std.Uri, default_port: u16) Error!UriEndpoint {
@@ -2574,6 +2607,63 @@ pub const Client = struct {
     response_head_deadline: ?std.Io.Clock.Timestamp = null,
     response_deadline: ?std.Io.Clock.Timestamp = null,
     response_head_sequence_active: bool = false,
+
+    /// Adopt an already connected cleartext stream. Ownership transfers at
+    /// entry and every failure closes the stream. The authority is copied for
+    /// later requests that omit Host.
+    pub fn adoptStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        authority: []const u8,
+        limits: Limits,
+    ) Error!Client {
+        var stream_owned = true;
+        errdefer if (stream_owned) stream.close(io);
+        if (authority.len == 0) return error.InvalidHost;
+        if (limits.tcp_nodelay) try setTcpNoDelay(stream);
+        const owned_authority = try allocator.dupe(u8, authority);
+        stream_owned = false;
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = stream,
+            .limits = limits,
+            .default_host = owned_authority,
+        };
+    }
+
+    /// Adopt a certificate-verified vail TLS connection whose ALPN result is
+    /// compatible with HTTP/1.1. A missing ALPN is accepted for legacy HTTPS;
+    /// any selected protocol other than `http/1.1` fails closed. Ownership of
+    /// `tls_connection` transfers at entry.
+    pub fn adoptNegotiatedTls(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        tls_connection: *tls_stream.ClientConnection,
+        authority: []const u8,
+        limits: Limits,
+    ) Error!Client {
+        var tls_owned = true;
+        errdefer if (tls_owned) tls_connection.deinit();
+        if (authority.len == 0) return error.InvalidHost;
+        if (tls_connection.negotiatedAlpn()) |alpn| {
+            if (!std.mem.eql(u8, alpn, "http/1.1")) {
+                return error.InvalidAlpn;
+            }
+        }
+        if (limits.tcp_nodelay) try setTcpNoDelay(tls_connection.stream);
+        const owned_authority = try allocator.dupe(u8, authority);
+        tls_owned = false;
+        return .{
+            .io = io,
+            .allocator = allocator,
+            .stream = tls_connection.stream,
+            .limits = limits,
+            .default_host = owned_authority,
+            .tls_vail_conn = tls_connection,
+        };
+    }
 
     fn transport(self: *Client) RuntimeTransport {
         if (self.tls_vail_conn) |conn| return .{ .tls_vail = conn };

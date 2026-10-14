@@ -35,12 +35,16 @@ path = "src/bin/cancel_server.rs"
 name = "netz-hyper-http2-cancel-client"
 path = "src/bin/cancel_client.rs"
 
+[[bin]]
+name = "netz-hyper-unified-server"
+path = "src/bin/unified_server.rs"
+
 [dependencies]
 bytes = "1.2"
 futures-util = "0.3"
 getrandom = "0.2"
 http-body-util = "0.1"
-hyper = { path = "../../../../Work/hyper", features = ["client", "http2", "server"] }
+hyper = { path = "../../../../Work/hyper", features = ["client", "http1", "http2", "server"] }
 h2 = "0.4.15"
 http = "1"
 pin-project-lite = "0.2"

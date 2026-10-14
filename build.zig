@@ -1668,6 +1668,27 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const http_unified_hyper_client = b.addExecutable(.{
+        .name = "netz-http-unified-hyper-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http_unified_hyper_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http_unified_hyper = b.addSystemCommand(
+        &.{"tools/interop/http_unified_hyper.sh"},
+    );
+    http_unified_hyper.addArtifactArg(http_unified_hyper_client);
+    const http_unified_hyper_step = b.step(
+        "interop-http-unified-hyper",
+        "Run unified netz HTTP client ALPN/reuse interop with Hyper",
+    );
+    http_unified_hyper_step.dependOn(&http_unified_hyper.step);
+
     const grpc_cpp_client = b.addExecutable(.{
         .name = "netz-grpc-cpp-client",
         .root_module = b.createModule(.{

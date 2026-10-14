@@ -1753,6 +1753,133 @@ fn ServeTask(comptime HandlerContext: type) type {
 }
 
 pub const Client = struct {
+    /// Adopt an already connected cleartext stream and perform the HTTP/2
+    /// prior-knowledge preface/SETTINGS bootstrap. Ownership transfers at
+    /// entry; the authority is copied for later requests.
+    pub fn adoptPriorKnowledgeStream(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        authority: []const u8,
+        limits: Limits,
+    ) Error!Connection {
+        if (authority.len == 0) {
+            stream.close(io);
+            return error.InvalidHeader;
+        }
+        var connection = try connectStream(allocator, io, stream, limits);
+        errdefer connection.close();
+        connection.default_authority = try allocator.dupe(u8, authority);
+        connection.default_scheme = "http";
+        return connection;
+    }
+
+    pub fn adoptPriorKnowledgeStreamWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        stream: net.Stream,
+        authority: []const u8,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        if (authority.len == 0) {
+            stream.close(io);
+            return error.InvalidHeader;
+        }
+        var connection = try connectStreamBefore(
+            allocator,
+            io,
+            stream,
+            limits,
+            deadline,
+        );
+        errdefer connection.close();
+        connection.default_authority = try allocator.dupe(u8, authority);
+        connection.default_scheme = "http";
+        return connection;
+    }
+
+    /// Adopt a certificate-verified TLS connection already negotiated as
+    /// `h2`, then complete the HTTP/2 bootstrap. Ownership transfers at entry.
+    pub fn adoptNegotiatedTls(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        tls_connection: *tls_stream.ClientConnection,
+        authority: []const u8,
+        limits: Limits,
+    ) Error!Connection {
+        return adoptNegotiatedTlsMaybeBefore(
+            allocator,
+            io,
+            tls_connection,
+            authority,
+            limits,
+            null,
+        );
+    }
+
+    pub fn adoptNegotiatedTlsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        tls_connection: *tls_stream.ClientConnection,
+        authority: []const u8,
+        limits: Limits,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        _ = try deadline_policy.usableAwake(io, deadline);
+        return adoptNegotiatedTlsMaybeBefore(
+            allocator,
+            io,
+            tls_connection,
+            authority,
+            limits,
+            deadline,
+        );
+    }
+
+    fn adoptNegotiatedTlsMaybeBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        tls_connection: *tls_stream.ClientConnection,
+        authority: []const u8,
+        limits: Limits,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var tls_owned = true;
+        errdefer if (tls_owned) tls_connection.deinit();
+        try validateLocalLimits(limits);
+        if (authority.len == 0) return error.InvalidHeader;
+        const selected = tls_connection.negotiatedAlpn() orelse
+            return error.InvalidAlpn;
+        if (!std.mem.eql(u8, selected, "h2")) return error.InvalidAlpn;
+        if (limits.tcp_nodelay) {
+            try socket_options.setTcpNoDelay(tls_connection.stream);
+        }
+        const owned_authority = try allocator.dupe(u8, authority);
+        errdefer allocator.free(owned_authority);
+        tls_owned = false;
+        var connection = if (deadline) |absolute|
+            try connectTransportBefore(
+                allocator,
+                io,
+                tls_connection.stream,
+                .{ .tls_client = tls_connection },
+                limits,
+                absolute,
+            )
+        else
+            try connectTransport(
+                allocator,
+                io,
+                tls_connection.stream,
+                .{ .tls_client = tls_connection },
+                limits,
+            );
+        connection.default_authority = owned_authority;
+        connection.default_scheme = "https";
+        return connection;
+    }
+
     pub fn connect(allocator: std.mem.Allocator, io: std.Io, address: net.IpAddress, limits: Limits) Error!Connection {
         try validateLocalLimits(limits);
         const stream = try tcp_connect.ip(io, address, limits.connect_timeout);
