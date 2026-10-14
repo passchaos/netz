@@ -21,6 +21,7 @@ const handshake_client_pool = @import("runtime/handshake_client_pool.zig");
 const endpoint_handler_supervisor =
     @import("runtime/endpoint_handler_supervisor.zig");
 const runtime_error = @import("runtime/error.zig");
+const uri_redirect = @import("../http1/runtime/redirect.zig");
 const server_response = @import("runtime/server/response.zig");
 const body_sender = @import("runtime/send/body.zig");
 const message_sender = @import("runtime/send/message.zig");
@@ -195,6 +196,9 @@ pub const Error = runtime_error.Error;
 pub const HandshakeWorkerError = runtime_error.HandshakeWorkerError;
 pub const HandshakeAdmissionError = runtime_error.HandshakeAdmissionError;
 pub const ReceiveTimeoutError = runtime_error.ReceiveTimeoutError;
+pub const RedirectError = runtime_error.Error || uri_redirect.Error;
+pub const RedirectTimeoutError = runtime_error.ReceiveTimeoutError ||
+    uri_redirect.Error;
 pub const OwnedConnectDatagram = connect_datagram.Owned;
 pub const ShutdownState = stream_lifecycle.ShutdownState;
 pub const GoAwayRetryDisposition = stream_lifecycle.GoAwayRetryDisposition;
@@ -559,6 +563,79 @@ const receiveRuntimeStreamBytesUntil = development_receive.streamBytesUntil;
 
 pub const UriEndpoint = client_uri.Endpoint;
 pub const UriRequestOptions = client_uri.RequestOptions;
+pub const RedirectPolicy = uri_redirect.Policy;
+pub const RedirectOptions = struct {
+    policy: RedirectPolicy = .{},
+};
+
+fn redirectH3Location(
+    headers: []const http3.Qpack.HeaderField,
+) RedirectError!?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+        if (found != null or header.value.len == 0) {
+            return error.InvalidRedirect;
+        }
+        found = header.value;
+    }
+    return found;
+}
+
+fn redirectH3Headers(
+    allocator: std.mem.Allocator,
+    source: []const http3.Qpack.HeaderField,
+    remove_credentials: bool,
+    remove_body: bool,
+    owned: *?[]http3.Qpack.HeaderField,
+) std.mem.Allocator.Error![]const http3.Qpack.HeaderField {
+    var retained_count: usize = 0;
+    for (source) |header| {
+        if (!dropRedirectH3Header(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) retained_count += 1;
+    }
+    if (retained_count == source.len) return source;
+    if (retained_count == 0) {
+        if (owned.*) |old| allocator.free(old);
+        owned.* = null;
+        return &.{};
+    }
+    const headers = try allocator.alloc(
+        http3.Qpack.HeaderField,
+        retained_count,
+    );
+    var index: usize = 0;
+    for (source) |header| {
+        if (dropRedirectH3Header(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) continue;
+        headers[index] = header;
+        index += 1;
+    }
+    if (owned.*) |old| allocator.free(old);
+    owned.* = headers;
+    return headers;
+}
+
+fn dropRedirectH3Header(
+    name: []const u8,
+    remove_credentials: bool,
+    remove_body: bool,
+) bool {
+    if (std.ascii.eqlIgnoreCase(name, "host")) return true;
+    if (remove_credentials and uri_redirect.isCrossOriginCredential(name)) {
+        return true;
+    }
+    if (remove_credentials and std.ascii.eqlIgnoreCase(name, "trailer")) {
+        return true;
+    }
+    return remove_body and uri_redirect.isBodyHeader(name);
+}
 pub const uriEndpoint = client_uri.parseEndpoint;
 pub const uriRequestTargetAlloc = client_uri.requestTargetAlloc;
 
@@ -11753,6 +11830,305 @@ pub const HandshakeClient = struct {
         );
     }
 
+    pub fn requestUriFollowingRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+    ) RedirectTimeoutError!OwnedHandshakeResponse {
+        var result = try requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            redirect_options,
+            null,
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailed(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+    ) RedirectTimeoutError!RedirectedHandshakeResponse {
+        return requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            redirect_options,
+            null,
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) RedirectTimeoutError!OwnedHandshakeResponse {
+        var result = try requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) RedirectTimeoutError!RedirectedHandshakeResponse {
+        return requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) RedirectTimeoutError!OwnedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriFollowingRedirectsWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) RedirectTimeoutError!RedirectedHandshakeResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriFollowingRedirectsDetailedWithDeadline(
+            allocator,
+            io,
+            local_address,
+            uri,
+            request_options,
+            limits,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestUriFollowingRedirectsDetailedBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        initial_uri: std.Uri,
+        request_options: UriRequestOptions,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        redirect_options: RedirectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) RedirectTimeoutError!RedirectedHandshakeResponse {
+        var chain = uri_redirect.Chain.init(
+            allocator,
+            redirect_options.policy,
+        );
+        defer chain.deinit();
+        var current_uri = try std.fmt.allocPrint(
+            allocator,
+            "{f}",
+            .{initial_uri.fmt(.all)},
+        );
+        defer allocator.free(current_uri);
+        try chain.recordInitial(current_uri);
+        var hop_request = request_options;
+        var hop_options = options;
+        const original_cid = try allocator.alloc(
+            u8,
+            options.handshake.original_destination_connection_id.len,
+        );
+        defer allocator.free(original_cid);
+        const local_cid = try allocator.alloc(
+            u8,
+            options.handshake.local_connection_id.len,
+        );
+        defer allocator.free(local_cid);
+        var owned_headers: ?[]http3.Qpack.HeaderField = null;
+        defer if (owned_headers) |headers| allocator.free(headers);
+
+        while (true) {
+            const parsed_uri = std.Uri.parse(current_uri) catch
+                return error.InvalidUri;
+            var response = if (deadline) |absolute|
+                try requestUriWithDeadline(
+                    allocator,
+                    io,
+                    local_address,
+                    parsed_uri,
+                    hop_request,
+                    limits,
+                    hop_options,
+                    absolute,
+                )
+            else
+                try requestUri(
+                    allocator,
+                    io,
+                    local_address,
+                    parsed_uri,
+                    hop_request,
+                    limits,
+                    hop_options,
+                );
+            errdefer response.deinit(allocator);
+            if (!uri_redirect.isRedirectStatus(response.response.status)) {
+                return .{
+                    .allocator = allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            const location = try redirectH3Location(response.response.headers);
+            if (location == null) {
+                return .{
+                    .allocator = allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            var next = try chain.follow(
+                current_uri,
+                location.?,
+                response.response.status,
+            );
+            var next_owned = true;
+            defer if (next_owned) next.deinit();
+            const next_uri = std.Uri.parse(next.uri) catch
+                return error.InvalidUri;
+            if (!std.ascii.eqlIgnoreCase(next_uri.scheme, "https")) {
+                return error.InsecureRedirect;
+            }
+
+            const action = uri_redirect.methodActionBytes(
+                redirect_options.policy,
+                response.response.status,
+                hop_request.method,
+            );
+            const remove_credentials = next.cross_origin and
+                !redirect_options.policy.forward_cross_origin_credentials;
+            if (next.cross_origin) {
+                try uri_redirect.enforceClientIdentityPolicy(
+                    redirect_options.policy,
+                    true,
+                    hop_options.handshake.client_identity != null,
+                );
+            }
+            hop_request.headers = try redirectH3Headers(
+                allocator,
+                hop_request.headers,
+                remove_credentials,
+                action == .rewrite_get,
+                &owned_headers,
+            );
+            if (action == .rewrite_get) {
+                hop_request.method = "GET";
+                hop_request.body = &.{};
+                hop_request.trailers = &.{};
+            } else if (remove_credentials) {
+                hop_request.trailers = &.{};
+            }
+
+            try std.Io.randomSecure(io, original_cid);
+            try std.Io.randomSecure(io, local_cid);
+            hop_options.handshake.original_destination_connection_id = original_cid;
+            hop_options.handshake.local_connection_id = local_cid;
+            hop_options.handshake.retry_source_connection_id = &.{};
+            hop_options.handshake.server_name = null;
+            hop_options.handshake.address_validation_token = &.{};
+            hop_options.handshake.resumption_session = null;
+            hop_options.handshake.resumption_server_id = null;
+            hop_options.handshake.random = null;
+            hop_options.handshake.x25519_secret_key = null;
+            hop_options.handshake.p256_secret_key = null;
+            hop_options.handshake.p384_secret_key = null;
+            hop_options.handshake.x25519_mlkem768_secret_key = null;
+            hop_options.handshake.x25519_mlkem768_seed = null;
+            hop_options.handshake.nist_hybrid_key_material = .{};
+            hop_options.handshake.early_data = null;
+
+            response.deinit(allocator);
+            allocator.free(current_uri);
+            current_uri = next.uri;
+            next_owned = false;
+        }
+    }
+
     pub fn requestUri(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -17436,6 +17812,29 @@ pub const OwnedHandshakeResponse = struct {
         self.response.deinit(allocator);
         allocator.free(self.stream_bytes);
         self.* = undefined;
+    }
+};
+
+pub const RedirectedHandshakeResponse = struct {
+    allocator: std.mem.Allocator,
+    response: OwnedHandshakeResponse,
+    final_uri: []u8,
+    redirect_count: usize,
+
+    pub fn deinit(self: *RedirectedHandshakeResponse) void {
+        const allocator = self.allocator;
+        self.response.deinit(allocator);
+        allocator.free(self.final_uri);
+        self.* = undefined;
+    }
+
+    pub fn takeResponse(
+        self: *RedirectedHandshakeResponse,
+    ) OwnedHandshakeResponse {
+        const response = self.response;
+        self.allocator.free(self.final_uri);
+        self.* = undefined;
+        return response;
     }
 };
 
@@ -32985,6 +33384,7 @@ test {
     _ = @import("runtime/server/tests/receive.zig");
     _ = @import("runtime/client/tests/protected.zig");
     _ = @import("runtime/client/tests/deadline.zig");
+    _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");
     _ = @import("runtime/handshake_client_pool_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");

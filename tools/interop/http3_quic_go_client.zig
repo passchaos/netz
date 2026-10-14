@@ -49,6 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var version: netz.quic.Version = .version_1;
     var version_set = false;
     var informational = false;
+    var redirect = false;
     for (args[3..]) |arg| {
         if (std.mem.eql(u8, arg, "--version=2") and !version_set) {
             version = .version_2;
@@ -57,10 +58,13 @@ pub fn main(init: std.process.Init) !void {
             !informational)
         {
             informational = true;
+        } else if (std.mem.eql(u8, arg, "--redirect") and !redirect) {
+            redirect = true;
         } else {
             return error.InvalidArgument;
         }
     }
+    if (informational and redirect) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -81,6 +85,16 @@ pub fn main(init: std.process.Init) !void {
         .now_seconds = now.toSeconds(),
     };
     const server_verifier = bundle_verifier.clientVerifier();
+    if (redirect) {
+        try runRedirect(
+            allocator,
+            io,
+            port,
+            version,
+            server_verifier,
+        );
+        return;
+    }
 
     var original_dcid: [8]u8 = undefined;
     var client_cid: [8]u8 = undefined;
@@ -704,6 +718,72 @@ fn receiveBenchmarkResponses(
         seen[index] = true;
         complete += 1;
     }
+}
+
+fn runRedirect(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+    version: netz.quic.Version,
+    server_verifier: netz.quic.tls.auth.ClientVerifier,
+) !void {
+    var original_dcid: [8]u8 = undefined;
+    var client_cid: [8]u8 = undefined;
+    try std.Io.randomSecure(io, &original_dcid);
+    try std.Io.randomSecure(io, &client_cid);
+    const uri_text = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/redirect-start?from=netz",
+        .{port},
+    );
+    defer allocator.free(uri_text);
+    var result = try netz.http3.runtime.HandshakeClient
+        .requestUriFollowingRedirectsDetailedWithTimeout(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        try std.Uri.parse(uri_text),
+        .{
+            .method = "POST",
+            .headers = &.{
+                .{ .name = "authorization", .value = "Bearer quic-go-redirect" },
+                .{ .name = "content-type", .value = "text/plain" },
+            },
+            .body = "redirect-body",
+        },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .version = version,
+            .available_versions = if (version == .version_2)
+                &.{.version_2}
+            else
+                &.{ .version_1, .version_2 },
+            .server_name = "localhost",
+            .server_auth = server_verifier,
+            .max_crypto_buffer = 64 * 1024,
+        } },
+        .{},
+        .fromSeconds(10),
+    );
+    defer result.deinit();
+    if (result.response.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            result.response.response.body,
+            "quic-go-redirected",
+        ) or result.redirect_count != 1)
+    {
+        return error.InvalidRedirectResponse;
+    }
+    std.debug.print(
+        "netz HTTP/3 client followed quic-go redirect: version={d} status=200 redirects=1 method=POST->GET credentials=same-origin connections=2\n",
+        .{if (version == .version_2) @as(u8, 2) else 1},
+    );
 }
 
 fn runInformational(

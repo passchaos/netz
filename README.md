@@ -455,7 +455,11 @@ Current protocol coverage includes:
   handshake-backed protected client/server
   runtime with `https://` URI endpoint parsing/DNS/literal target resolution
   plus `HandshakeClient.connectUri` / `requestUri` for public H3 client
-  tooling. `PreparedEarlyRequest` plus
+  tooling and bounded authenticated URI redirects with RFC 3986 resolution,
+  QPACK credential/representation cleanup, method/DATA/trailer replay policy,
+  fresh QUIC CIDs and ephemeral handshake inputs per hop, cross-origin
+  client-identity/resumption isolation, final-URI metadata and one deadline
+  across the complete chain. `PreparedEarlyRequest` plus
   `HandshakeClient.connectWithEarlyRequest` provide a typed one-request 0-RTT
   path: the owned offer carries a complete literal/static-QPACK request and
   the mandatory SETTINGS/QPACK critical-stream prefixes, reports accepted

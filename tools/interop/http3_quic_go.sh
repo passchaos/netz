@@ -630,6 +630,43 @@ grep -Fq \
 cat "$work/netz-client.log"
 cat "$work/quic-go-server.log"
 
+port=$(free_udp_port)
+"$work/quic-go-http3-peer" \
+  -mode server -redirect -addr "127.0.0.1:$port" \
+  -ca-out "$work/quic-go-redirect-ca.pem" \
+  "${go_version_args[@]}" \
+  >"$work/quic-go-redirect-server.log" 2>&1 &
+server_pid=$!
+for _ in $(seq 1 200); do
+  if [[ -s "$work/quic-go-redirect-ca.pem" ]] && \
+      grep -q 'quic-go HTTP/3 interop server listening=' \
+        "$work/quic-go-redirect-server.log"; then
+    break
+  fi
+  if ! kill -0 "$server_pid" 2>/dev/null; then
+    cat "$work/quic-go-redirect-server.log" >&2
+    exit 1
+  fi
+  sleep 0.05
+done
+if ! timeout 20s "$client" "$port" "$work/quic-go-redirect-ca.pem" \
+    --redirect "${netz_version_args[@]}" \
+    >"$work/netz-redirect-client.log" 2>&1; then
+  cat "$work/netz-redirect-client.log" >&2
+  cat "$work/quic-go-redirect-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  "netz HTTP/3 client followed quic-go redirect: version=$version status=200 redirects=1 method=POST->GET credentials=same-origin connections=2" \
+  "$work/netz-redirect-client.log"
+grep -Fq \
+  "quic-go HTTP/3 server verified netz redirect: version=$version status=303 method=POST-to-GET credentials=same-origin connections=2" \
+  "$work/quic-go-redirect-server.log"
+cat "$work/netz-redirect-client.log"
+cat "$work/quic-go-redirect-server.log"
+
 cat >"$work/netz-ca.pem" <<'EOF'
 -----BEGIN CERTIFICATE-----
 MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=

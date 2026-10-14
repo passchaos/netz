@@ -1395,6 +1395,18 @@ also expose explicit per-call timeout counterparts. The
 one-shot `requestUriWithDeadline` path carries that same timestamp through DNS,
 all QUIC/TLS connection attempts, request transmission, and response assembly;
 its relative-timeout counterpart converts the budget once before any work.
+The owning URI client now applies that same deadline across bounded
+300/301/302/303/307/308 chains. Each hop performs a fresh QUIC/TLS handshake
+with new original/local Connection IDs and fresh ephemeral inputs; explicit
+Retry tokens, early data and resumption state are not replayed blindly.
+Cross-origin client identities are denied by default and explicit resumption
+state is cleared. QPACK Authorization/Cookie/Host/trailer fields receive the
+same isolation as H1/H2; 303 rewrites non-HEAD requests to GET and removes DATA
+plus representation fields, while 307/308 retain safe borrowed bodies. The
+detailed result owns its final URI and hop count. Authenticated in-process tests
+cover two independent servers, and the repository-pinned quic-go gate verifies
+the two-connection 303 flow for QUIC v1 and v2 while its cancellation,
+informational and reverse-role scenarios remain green.
 `SharedHandshakeClientPool` now owns one `std.Io` UDP endpoint and one QUIC
 dispatcher across all pooled origins. Its CID-routed handshake inboxes keep
 TLS workers off the socket, successful clients move into stable heap storage

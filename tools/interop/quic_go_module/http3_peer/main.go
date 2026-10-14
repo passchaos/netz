@@ -39,11 +39,12 @@ func main() {
 	caPath := flag.String("ca", "", "PEM trust anchor for client mode")
 	caOut := flag.String("ca-out", "", "PEM output path for server mode")
 	v2Only := flag.Bool("v2-only", false, "require QUIC v2")
+	redirect := flag.Bool("redirect", false, "serve HTTP redirect interoperability scenario")
 	flag.Parse()
 
 	switch *mode {
 	case "server":
-		runServer(*address, *caOut, *v2Only)
+		runServer(*address, *caOut, *v2Only, *redirect)
 	case "client":
 		runClient(*address, *caPath, *v2Only)
 	default:
@@ -67,7 +68,7 @@ func quicConfig(v2Only bool) *quic.Config {
 	}
 }
 
-func runServer(address, caOut string, v2Only bool) {
+func runServer(address, caOut string, v2Only, redirect bool) {
 	if caOut == "" {
 		log.Fatal("-ca-out is required in server mode")
 	}
@@ -102,6 +103,10 @@ func runServer(address, caOut string, v2Only bool) {
 		},
 	}
 	server.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if redirect {
+			results <- serveRedirect(writer, request)
+			return
+		}
 		switch request.URL.RequestURI() {
 		case "/cancel?from=netz":
 			results <- serveCancellation(writer, request, cancelResponseStarted, siblingStarted, cancellationObserved)
@@ -132,7 +137,45 @@ func runServer(address, caOut string, v2Only bool) {
 		log.Fatalf("close HTTP/3 server: %v", err)
 	}
 	version := checkedVersion(negotiatedVersion.Load(), v2Only)
+	if redirect {
+		fmt.Printf("quic-go HTTP/3 server verified netz redirect: version=%d status=303 method=POST-to-GET credentials=same-origin connections=2\n", version)
+		return
+	}
 	fmt.Printf("quic-go HTTP/3 server interoperated with netz: version=%d cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=%d large_response=%d request_body=12 request_trailers=1 response_body=16 response_trailers=1\n", version, streamReceiveWindow, cancellationResponseSize)
+}
+
+func serveRedirect(writer http.ResponseWriter, request *http.Request) error {
+	switch request.URL.RequestURI() {
+	case "/redirect-start?from=netz":
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return fmt.Errorf("read redirect source body: %w", err)
+		}
+		if request.Method != http.MethodPost || string(body) != "redirect-body" ||
+			request.Header.Get("Authorization") != "Bearer quic-go-redirect" ||
+			request.Header.Get("Content-Type") != "text/plain" {
+			return fmt.Errorf("invalid redirect source: method=%s body=%q headers=%v", request.Method, body, request.Header)
+		}
+		writer.Header().Set("Location", "/redirect-final?from=quic-go#not-on-wire")
+		writer.WriteHeader(http.StatusSeeOther)
+		_, err = io.WriteString(writer, "redirecting")
+		return err
+	case "/redirect-final?from=quic-go":
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return fmt.Errorf("read redirected body: %w", err)
+		}
+		if request.Method != http.MethodGet || len(body) != 0 ||
+			request.Header.Get("Authorization") != "Bearer quic-go-redirect" ||
+			request.Header.Get("Content-Type") != "" ||
+			request.Header.Get("Content-Length") != "" {
+			return fmt.Errorf("invalid redirected request: method=%s body=%q headers=%v", request.Method, body, request.Header)
+		}
+		_, err = io.WriteString(writer, "quic-go-redirected")
+		return err
+	default:
+		return fmt.Errorf("unexpected redirect target %q", request.URL.RequestURI())
+	}
 }
 
 func serveCancellation(writer http.ResponseWriter, request *http.Request, started, siblingStarted, observed chan struct{}) error {
