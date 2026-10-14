@@ -168,10 +168,10 @@ pub fn requestUriBatchWithDeadline(
     );
 }
 
-/// Pool-backed bodyless batch with independent request deadlines. Capacity
+/// Pool-backed request batch with independent request deadlines. Capacity
 /// admission is retried after expiring only the earliest members; once a
-/// connection is leased, the runtime delivers every terminal result through
-/// `observer` using the original URI-batch index.
+/// connection is leased, the full-duplex runtime delivers every terminal
+/// result through `observer` using the original URI-batch index.
 pub fn requestUriBatchWithPerStreamDeadlines(
     pool: anytype,
     requests: []const UriRequest,
@@ -180,10 +180,7 @@ pub fn requestUriBatchWithPerStreamDeadlines(
 ) !void {
     if (requests.len != deadlines.len) return error.InvalidResponse;
     if (requests.len == 0) return;
-    for (requests, deadlines) |item, deadline| {
-        if (item.request.body.len != 0 or item.request.trailers.len != 0) {
-            return error.InvalidContentLength;
-        }
+    for (deadlines) |deadline| {
         if (deadline) |absolute| {
             if (absolute.clock != .awake) return error.Timeout;
         }
@@ -317,11 +314,20 @@ pub fn requestUriBatchWithPerStreamDeadlines(
             .observer = observer,
             .original_indices = original_indices[0..compact_count],
         };
-        lease.connection().requestBatchWithPerStreamDeadlines(
-            compact_requests[0..compact_count],
-            compact_deadlines[0..compact_count],
-            .{ .context = &mapping, .on_result = Mapping.observe },
-        ) catch |err| {
+        const result = if (prepared.has_body_or_trailers)
+            lease.connection().requestBodyBatchWithPerStreamDeadlines(
+                compact_requests[0..compact_count],
+                pool.options.batch_body_chunk_size,
+                compact_deadlines[0..compact_count],
+                .{ .context = &mapping, .on_result = Mapping.observe },
+            )
+        else
+            lease.connection().requestBatchWithPerStreamDeadlines(
+                compact_requests[0..compact_count],
+                compact_deadlines[0..compact_count],
+                .{ .context = &mapping, .on_result = Mapping.observe },
+            );
+        result catch |err| {
             lease.discard();
             return err;
         };

@@ -4969,6 +4969,48 @@ pub const Connection = struct {
         deadlines: []const ?std.Io.Clock.Timestamp,
         observer: BatchOwnedResponseObserver,
     ) ResponseTimeoutError!void {
+        for (requests) |request_options| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+        }
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            16 * 1024,
+            deadlines,
+            observer,
+        );
+    }
+
+    /// Full-duplex body/trailer form of
+    /// `requestBatchWithPerStreamDeadlines`. Upload DATA advances round-robin;
+    /// an expired member stops borrowing its body immediately and only live
+    /// streams commit terminal request trailers.
+    pub fn requestBodyBatchWithPerStreamDeadlines(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
+        if (body_chunk_size == 0) return error.InvalidFrameSize;
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            body_chunk_size,
+            deadlines,
+            observer,
+        );
+    }
+
+    fn requestBatchWithPerStreamDeadlinesChunked(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
@@ -4978,14 +5020,17 @@ pub const Connection = struct {
             return error.UnexpectedFrame;
         }
         for (requests, deadlines) |request_options, deadline| {
-            if (request_options.body.len != 0 or
-                request_options.trailers.len != 0)
-            {
-                return error.InvalidContentLength;
-            }
             if (methodIsConnect(request_options.method)) {
                 return error.InvalidHeader;
             }
+            try validateHeaderBlock(
+                request_options.trailers,
+                .request_trailers,
+            );
+            try validateHeaderListSize(
+                request_options.trailers,
+                self.peer_max_header_list_size,
+            );
             if (deadline) |absolute| {
                 if (absolute.clock != .awake) return error.Timeout;
             }
@@ -5044,7 +5089,7 @@ pub const Connection = struct {
                     continue;
                 }
             }
-            const pending = try self.appendBodylessRequestToBatch(
+            const pending = try self.appendRequestHeadToBatch(
                 request_options,
                 batch,
                 staged_encoder,
@@ -5053,6 +5098,8 @@ pub const Connection = struct {
                 .stream_id = pending.stream_id,
                 .request_method = pending.request_method,
                 .extended_connect = pending.extended_connect,
+                .request_done = request_options.body.len == 0 and
+                    request_options.trailers.len == 0,
             };
             controls[started] = .{
                 .request_index = request_index,
@@ -5073,6 +5120,50 @@ pub const Connection = struct {
         }
         if (started == 0) return;
 
+        var views_stack: [16]BatchDataView = undefined;
+        const views = if (started <= views_stack.len)
+            views_stack[0..started]
+        else
+            try self.allocator.alloc(BatchDataView, started);
+        defer if (views.ptr != views_stack[0..].ptr) {
+            self.allocator.free(views);
+        };
+        var offsets_stack: [16]usize = undefined;
+        const offsets = if (started <= offsets_stack.len)
+            offsets_stack[0..started]
+        else
+            try self.allocator.alloc(usize, started);
+        defer if (offsets.ptr != offsets_stack[0..].ptr) {
+            self.allocator.free(offsets);
+        };
+        var round_reserved_stack: [16]usize = undefined;
+        const round_reserved = if (started <= round_reserved_stack.len)
+            round_reserved_stack[0..started]
+        else
+            try self.allocator.alloc(usize, started);
+        defer if (round_reserved.ptr != round_reserved_stack[0..].ptr) {
+            self.allocator.free(round_reserved);
+        };
+        @memset(offsets, 0);
+        for (views, controls[0..started], states[0..started]) |
+            *view,
+            control,
+            state,
+        | {
+            const request_options = requests[control.request_index];
+            view.* = .{
+                .stream_id = state.stream_id,
+                .body = request_options.body,
+                .ends_with_trailers = request_options.trailers.len != 0,
+            };
+        }
+        try self.prepareBodyBatchData(views, body_chunk_size);
+        for (states[0..started], views) |state, view| {
+            if (view.body.len != 0) {
+                _ = try self.sendStreamWindow(state.stream_id);
+            }
+        }
+
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
         self.transportForIo().writeAll(batch.items) catch |err| {
@@ -5089,6 +5180,22 @@ pub const Connection = struct {
         };
         self.commitStagedHpackEncoder();
         request_heads_committed = true;
+
+        try self.writeRequestBodyBatchDataWithPerStreamDeadlines(
+            views,
+            offsets,
+            round_reserved,
+            body_chunk_size,
+            states[0..started],
+            controls[0..started],
+            observer,
+        );
+        try self.writeRequestTrailersWithPerStreamDeadlines(
+            requests,
+            states[0..started],
+            controls[0..started],
+            observer,
+        );
 
         self.readResponseBatchWithPerStreamDeadlines(
             states[0..started],
@@ -6197,6 +6304,70 @@ pub const Connection = struct {
         }
     }
 
+    fn writeRequestTrailersWithPerStreamDeadlines(
+        self: *Connection,
+        requests: []const RequestOptions,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
+        for (states, controls) |*state, *control| {
+            if (control.reported) continue;
+            const trailers = requests[control.request_index].trailers;
+            if (trailers.len == 0) continue;
+
+            while (!control.reported) {
+                if (try self.expireIndividualBatchDeadlines(
+                    states,
+                    controls,
+                    observer,
+                )) {
+                    continue;
+                }
+                const batch = &self.write_batch;
+                batch.clearRetainingCapacity();
+                const encoder = try self.prepareStagedHpackEncoder();
+                try self.appendRequestTrailersToBatch(
+                    state.stream_id,
+                    trailers,
+                    batch,
+                    encoder,
+                );
+
+                const deadline = earliestIndividualBatchDeadline(controls);
+                var committed: usize = 0;
+                if (deadline) |absolute| {
+                    self.transportForIo().writeAllWithDeadline(
+                        batch.items,
+                        &committed,
+                        absolute,
+                    ) catch |err| {
+                        if (err == error.Timeout and committed == 0) {
+                            continue;
+                        }
+                        self.aggregate_timeout_unusable = true;
+                        return err;
+                    };
+                } else {
+                    self.transportForIo().writeAll(batch.items) catch |err| {
+                        self.aggregate_timeout_unusable = true;
+                        return err;
+                    };
+                }
+                self.commitStagedHpackEncoder();
+                state.request_done = true;
+                if (state.done) {
+                    try self.finishIndividualBatchResponse(
+                        state,
+                        control,
+                        observer,
+                    );
+                }
+                break;
+            }
+        }
+    }
+
     fn hasRequestTrailers(requests: []const RequestOptions) bool {
         for (requests) |request_options| {
             if (request_options.trailers.len != 0) return true;
@@ -6336,6 +6507,134 @@ pub const Connection = struct {
                 context,
                 consume,
                 frame,
+            );
+        }
+    }
+
+    fn writeRequestBodyBatchDataWithPerStreamDeadlines(
+        self: *Connection,
+        views: []const BatchDataView,
+        offsets: []usize,
+        round_reserved: []usize,
+        application_chunk_size: usize,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
+        std.debug.assert(views.len == offsets.len);
+        std.debug.assert(views.len == round_reserved.len);
+        std.debug.assert(views.len == states.len);
+        std.debug.assert(views.len == controls.len);
+        const frame_limit = self.outboundFramePayloadLimit();
+        var remaining_streams: usize = 0;
+        for (views, controls) |view, control| {
+            remaining_streams += @intFromBool(
+                !control.reported and view.body.len != 0,
+            );
+        }
+        var next_stream: usize = 0;
+
+        while (remaining_streams != 0) {
+            for (views, offsets, controls) |view, *offset, control| {
+                if (control.reported and offset.* < view.body.len) {
+                    offset.* = view.body.len;
+                    remaining_streams -= 1;
+                }
+            }
+            if (remaining_streams == 0) break;
+            if (try self.expireIndividualBatchDeadlines(
+                states,
+                controls,
+                observer,
+            )) {
+                continue;
+            }
+
+            self.batch_data_headers.clearRetainingCapacity();
+            self.batch_data_parts.clearRetainingCapacity();
+            @memset(round_reserved, 0);
+            var made_progress = false;
+            var reserved_connection_bytes: usize = 0;
+            var wire_write_started = false;
+            errdefer if (!wire_write_started) {
+                self.send_connection_window.update(
+                    @intCast(reserved_connection_bytes),
+                ) catch unreachable;
+                for (views, round_reserved) |view, bytes| {
+                    if (bytes == 0) continue;
+                    (self.sendStreamWindow(view.stream_id) catch unreachable)
+                        .update(@intCast(bytes)) catch unreachable;
+                }
+            };
+
+            const pass_start = next_stream;
+            var scanned: usize = 0;
+            while (scanned < views.len) : (scanned += 1) {
+                const index = (pass_start + scanned) % views.len;
+                if (controls[index].reported) continue;
+                const view = views[index];
+                const offset = &offsets[index];
+                if (offset.* == view.body.len) continue;
+                if (self.send_connection_window.available() == 0) break;
+                const stream_window = try self.sendStreamWindow(
+                    view.stream_id,
+                );
+                const contribution_len = @min(
+                    application_chunk_size,
+                    view.body.len - offset.*,
+                    self.send_connection_window.available(),
+                    stream_window.available(),
+                );
+                if (contribution_len == 0) continue;
+                try self.appendBodyBatchContribution(
+                    view,
+                    offset,
+                    contribution_len,
+                    frame_limit,
+                    stream_window,
+                );
+                reserved_connection_bytes += contribution_len;
+                round_reserved[index] = contribution_len;
+                if (offset.* == view.body.len) remaining_streams -= 1;
+                made_progress = true;
+                next_stream = (index + 1) % views.len;
+            }
+
+            if (made_progress) {
+                wire_write_started = true;
+                const wire_parts = self.batch_data_parts.items;
+                const transport = self.transportForIo();
+                (if (wire_parts.len == 2)
+                    transport.writeAllParts(wire_parts[0], wire_parts[1])
+                else
+                    transport.writeAllSlices(wire_parts)) catch |err| {
+                    self.aggregate_timeout_unusable = true;
+                    return err;
+                };
+                for (views, offsets, states, controls, round_reserved) |
+                    view,
+                    offset,
+                    *state,
+                    *control,
+                    bytes,
+                | {
+                    if (bytes == 0 or control.reported or
+                        offset != view.body.len) continue;
+                    state.request_done = !view.ends_with_trailers;
+                    if (state.done and state.request_done) {
+                        try self.finishIndividualBatchResponse(
+                            state,
+                            control,
+                            observer,
+                        );
+                    }
+                }
+                continue;
+            }
+            try self.readOneIndividualBatchResponseFrame(
+                states,
+                controls,
+                observer,
             );
         }
     }
@@ -7014,6 +7313,133 @@ pub const Connection = struct {
         return earliest;
     }
 
+    fn readOneIndividualBatchResponseFrame(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
+        const deadline = earliestIndividualBatchDeadline(controls);
+        const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| switch (err) {
+            error.Timeout => return,
+            else => |other| return other,
+        }).frame;
+        if (try self.handleConnectionFrame(frame)) return;
+        if (frame.header.frame_type == .goaway) {
+            try self.recordPeerGoAway(
+                try http2.GoAwayPayload.parse(frame),
+            );
+            return error.ConnectionGoAway;
+        }
+
+        const state_index = findBatchResponseStateIndex(
+            states,
+            frame.header.stream_id,
+        ) orelse return error.UnexpectedFrame;
+        const state = &states[state_index];
+        const control = &controls[state_index];
+        if (control.reported) {
+            if (frame.header.frame_type == .rst_stream) {
+                try self.recordResetStream(
+                    try http2.ResetStreamPayload.parse(frame),
+                );
+                return;
+            }
+            return error.UnexpectedFrame;
+        }
+
+        const connection_before = self.recv_connection_window.value;
+        if (frame.header.frame_type == .data) {
+            control.unreleased_connection_bytes = std.math.add(
+                usize,
+                control.unreleased_connection_bytes,
+                frame.payload.len,
+            ) catch return error.MessageTooLarge;
+        }
+        var read_timed_out = false;
+        self.processBodyBatchResponseFrame(
+            false,
+            states,
+            null,
+            deadline,
+            &read_timed_out,
+            {},
+            undefined,
+            frame,
+        ) catch |err| {
+            if (self.recv_connection_window.value > connection_before) {
+                clearIndividualBatchConnectionCredit(controls);
+            }
+            if (err == error.Timeout) {
+                // A HEADERS/CONTINUATION sequence is connection-serial. If it
+                // stalls across the earliest member deadline, no sibling frame
+                // can legally make progress until the block finishes.
+                self.aggregate_timeout_unusable = true;
+                return error.Timeout;
+            }
+            if (err == error.StreamReset) {
+                if (control.unreleased_connection_bytes != 0) {
+                    try self.releaseConnectionCapacity(
+                        control.unreleased_connection_bytes,
+                    );
+                    control.unreleased_connection_bytes = 0;
+                }
+                state.done = true;
+                state.request_done = true;
+                control.reported = true;
+                observer.on_result(
+                    observer.context,
+                    control.request_index,
+                    .{ .err = error.StreamReset },
+                );
+                return;
+            }
+            if (self.serve_read_connection_error != null or
+                self.aggregate_timeout_unusable)
+            {
+                return @errorCast(err);
+            }
+            if (self.serve_read_stream_error) |stream_error| {
+                if (stream_error.stream_id == state.stream_id) {
+                    if (control.unreleased_connection_bytes != 0) {
+                        try self.releaseConnectionCapacity(
+                            control.unreleased_connection_bytes,
+                        );
+                        control.unreleased_connection_bytes = 0;
+                    }
+                    try self.writeLocalErrorResetStream(
+                        state.stream_id,
+                        stream_error.code,
+                    );
+                    self.releaseLocalStream(state.stream_id);
+                    self.releasePeerStream(state.stream_id);
+                    self.forgetStreamWindows(state.stream_id);
+                    self.serve_read_stream_error = null;
+                    state.done = true;
+                    state.request_done = true;
+                    control.reported = true;
+                    observer.on_result(
+                        observer.context,
+                        control.request_index,
+                        .{ .err = err },
+                    );
+                    return;
+                }
+            }
+            return @errorCast(err);
+        };
+        if (self.recv_connection_window.value > connection_before) {
+            clearIndividualBatchConnectionCredit(controls);
+        }
+        if (state.done and state.request_done) {
+            try self.finishIndividualBatchResponse(
+                state,
+                control,
+                observer,
+            );
+        }
+    }
+
     fn readResponseBatchWithPerStreamDeadlines(
         self: *Connection,
         states: []BatchResponseState,
@@ -7034,126 +7460,11 @@ pub const Connection = struct {
             )) {
                 continue;
             }
-            const deadline = earliestIndividualBatchDeadline(controls);
-            const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| switch (err) {
-                error.Timeout => continue,
-                else => |other| return other,
-            }).frame;
-            if (try self.handleConnectionFrame(frame)) continue;
-            if (frame.header.frame_type == .goaway) {
-                try self.recordPeerGoAway(
-                    try http2.GoAwayPayload.parse(frame),
-                );
-                return error.ConnectionGoAway;
-            }
-
-            const state_index = findBatchResponseStateIndex(
+            try self.readOneIndividualBatchResponseFrame(
                 states,
-                frame.header.stream_id,
-            ) orelse return error.UnexpectedFrame;
-            const state = &states[state_index];
-            const control = &controls[state_index];
-            if (control.reported) {
-                if (frame.header.frame_type == .rst_stream) {
-                    try self.recordResetStream(
-                        try http2.ResetStreamPayload.parse(frame),
-                    );
-                    continue;
-                }
-                return error.UnexpectedFrame;
-            }
-
-            const connection_before = self.recv_connection_window.value;
-            if (frame.header.frame_type == .data) {
-                control.unreleased_connection_bytes = std.math.add(
-                    usize,
-                    control.unreleased_connection_bytes,
-                    frame.payload.len,
-                ) catch return error.MessageTooLarge;
-            }
-            var read_timed_out = false;
-            self.processBodyBatchResponseFrame(
-                false,
-                states,
-                null,
-                deadline,
-                &read_timed_out,
-                {},
-                undefined,
-                frame,
-            ) catch |err| {
-                if (self.recv_connection_window.value > connection_before) {
-                    clearIndividualBatchConnectionCredit(controls);
-                }
-                if (err == error.Timeout) {
-                    // A HEADERS/CONTINUATION sequence is connection-serial.
-                    // If it stalls across the earliest member deadline, no
-                    // sibling frame can legally make progress until the block
-                    // finishes, so retain the established fail-closed rule.
-                    self.aggregate_timeout_unusable = true;
-                    return error.Timeout;
-                }
-                if (err == error.StreamReset) {
-                    if (control.unreleased_connection_bytes != 0) {
-                        try self.releaseConnectionCapacity(
-                            control.unreleased_connection_bytes,
-                        );
-                        control.unreleased_connection_bytes = 0;
-                    }
-                    state.done = true;
-                    state.request_done = true;
-                    control.reported = true;
-                    observer.on_result(
-                        observer.context,
-                        control.request_index,
-                        .{ .err = error.StreamReset },
-                    );
-                    continue;
-                }
-                if (self.serve_read_connection_error != null or
-                    self.aggregate_timeout_unusable)
-                {
-                    return @errorCast(err);
-                }
-                if (self.serve_read_stream_error) |stream_error| {
-                    if (stream_error.stream_id == state.stream_id) {
-                        if (control.unreleased_connection_bytes != 0) {
-                            try self.releaseConnectionCapacity(
-                                control.unreleased_connection_bytes,
-                            );
-                            control.unreleased_connection_bytes = 0;
-                        }
-                        try self.writeLocalErrorResetStream(
-                            state.stream_id,
-                            stream_error.code,
-                        );
-                        self.releaseLocalStream(state.stream_id);
-                        self.releasePeerStream(state.stream_id);
-                        self.forgetStreamWindows(state.stream_id);
-                        self.serve_read_stream_error = null;
-                        state.done = true;
-                        state.request_done = true;
-                        control.reported = true;
-                        observer.on_result(
-                            observer.context,
-                            control.request_index,
-                            .{ .err = err },
-                        );
-                        continue;
-                    }
-                }
-                return @errorCast(err);
-            };
-            if (self.recv_connection_window.value > connection_before) {
-                clearIndividualBatchConnectionCredit(controls);
-            }
-            if (state.done) {
-                try self.finishIndividualBatchResponse(
-                    state,
-                    control,
-                    observer,
-                );
-            }
+                controls,
+                observer,
+            );
         }
     }
 

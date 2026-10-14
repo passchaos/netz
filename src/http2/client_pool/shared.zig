@@ -2,12 +2,10 @@
 //!
 //! Producers enqueue stack-owned commands and wait on per-command events. The
 //! driver is the only task allowed to touch the underlying pool. Compatible
-//! bodyless requests can coalesce even with independent deadlines; the runtime
-//! resets and completes only expired streams. Bodyful batches use the pool's
-//! full-duplex flow-control pump and terminal request-trailer path when their
-//! commands are unbounded or share one exact absolute deadline. Distinct
-//! bodyful deadlines remain isolated until the upload scheduler gains the same
-//! per-stream cancellation boundary.
+//! requests can coalesce even with independent deadlines. The full-duplex
+//! runtime stops only an expired stream's body cursor, emits its CANCEL, and
+//! commits terminal request trailers only for surviving streams. One driver
+//! remains the sole pool, HPACK, and frame-reader owner.
 
 const std = @import("std");
 const batch = @import("batch.zig");
@@ -346,25 +344,13 @@ pub fn Dispatcher(comptime PoolType: type) type {
             first.state = .in_flight;
             out[0] = first;
             var count: usize = 1;
-            var all_individual_deadline_eligible =
-                individualDeadlineEligible(first);
             while (count < state.options.max_batch_requests) {
                 const next = state.head orelse break;
                 if (!sameOrigin(first.uri, next.uri)) break;
-                const deadline_matches = sameDeadline(
-                    first.deadline,
-                    next.deadline,
-                );
-                if (!deadline_matches and
-                    (!all_individual_deadline_eligible or
-                        !individualDeadlineEligible(next))) break;
                 detach(state, next);
                 next.state = .in_flight;
                 out[count] = next;
                 count += 1;
-                all_individual_deadline_eligible =
-                    all_individual_deadline_eligible and
-                    individualDeadlineEligible(next);
             }
             return count;
         }
@@ -544,11 +530,6 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 }
             }
             return true;
-        }
-
-        fn individualDeadlineEligible(command: *const Command) bool {
-            return command.request.body.len == 0 and
-                command.request.trailers.len == 0;
         }
 
         fn sameOrigin(lhs_text: []const u8, rhs_text: []const u8) bool {

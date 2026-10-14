@@ -794,6 +794,220 @@ test "HTTP/2 per-stream batch deadline cancels one response and reuses sibling" 
     if (shared.err) |err| return err;
 }
 
+test "HTTP/2 per-stream deadline cancels one upload and preserves sibling trailers" {
+    const allocator = std.testing.allocator;
+    const timed_body = [_]u8{'t'} ** (32 * 1024);
+    const sibling_body = [_]u8{'s'} ** (32 * 1024);
+    const limits: Limits = .{
+        .max_body_bytes = sibling_body.len,
+        .initial_window_size = 4096,
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        timed_bytes: usize = 0,
+        sibling_bytes: usize = 0,
+        saw_cancel: bool = false,
+        saw_sibling_trailers: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn readApplicationFrame(
+            connection: *runtime.Connection,
+            frame_allocator: std.mem.Allocator,
+        ) !runtime.OwnedFrame {
+            while (true) {
+                var owned = try runtime.testing.readOwnedFrame(connection);
+                if (try runtime.testing.handleConnectionFrame(
+                    connection,
+                    owned.frame,
+                )) {
+                    owned.deinit(frame_allocator);
+                    continue;
+                }
+                return owned;
+            }
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first_head = try readApplicationFrame(
+                &connection,
+                self.server.allocator,
+            );
+            defer first_head.deinit(self.server.allocator);
+            var second_head = try readApplicationFrame(
+                &connection,
+                self.server.allocator,
+            );
+            defer second_head.deinit(self.server.allocator);
+            try std.testing.expectEqual(http2.FrameType.headers, first_head.frame.header.frame_type);
+            try std.testing.expectEqual(http2.FrameType.headers, second_head.frame.header.frame_type);
+            try std.testing.expectEqual(@as(u31, 1), first_head.frame.header.stream_id);
+            try std.testing.expectEqual(@as(u31, 3), second_head.frame.header.stream_id);
+            try runtime.testing.addActivePeerStream(&connection, 1);
+            try runtime.testing.addActivePeerStream(&connection, 3);
+
+            while (!self.saw_cancel or !self.saw_sibling_trailers) {
+                var owned = try readApplicationFrame(
+                    &connection,
+                    self.server.allocator,
+                );
+                defer owned.deinit(self.server.allocator);
+                const frame = owned.frame;
+                switch (frame.header.frame_type) {
+                    .data => {
+                        const data = try http2.DataPayload.parse(frame);
+                        if (frame.header.stream_id == 1) {
+                            self.timed_bytes += data.data.len;
+                        } else if (frame.header.stream_id == 3) {
+                            self.sibling_bytes += data.data.len;
+                            try connection.sendWindowUpdate(
+                                3,
+                                @intCast(frame.payload.len),
+                            );
+                        } else {
+                            return error.InvalidStreamId;
+                        }
+                    },
+                    .rst_stream => {
+                        const reset = try http2.ResetStreamPayload.parse(frame);
+                        try std.testing.expectEqual(@as(u31, 1), reset.stream_id);
+                        try std.testing.expectEqual(http2.ErrorCode.cancel, reset.error_code);
+                        self.saw_cancel = true;
+                    },
+                    .headers => {
+                        if (frame.header.stream_id == 1) {
+                            return error.UnexpectedFrame;
+                        }
+                        try std.testing.expectEqual(@as(u31, 3), frame.header.stream_id);
+                        try std.testing.expect(
+                            (frame.header.flags & flag_end_stream) != 0,
+                        );
+                        self.saw_sibling_trailers = true;
+                    },
+                    else => return error.UnexpectedFrame,
+                }
+            }
+            try std.testing.expect(self.timed_bytes < timed_body.len);
+            try std.testing.expectEqual(sibling_body.len, self.sibling_bytes);
+            try runtime.testing.writeRawFrame(
+                &connection,
+                .headers,
+                flag_end_headers,
+                3,
+                &.{0x88},
+            );
+            try runtime.testing.writeRawFrame(
+                &connection,
+                .data,
+                flag_end_stream,
+                3,
+                "sibling-finished",
+            );
+        }
+    };
+
+    const ResultSlot = struct {
+        response: ?runtime.OwnedResponse = null,
+        err: ?anyerror = null,
+    };
+    const ResultContext = struct {
+        slots: [2]ResultSlot = .{ .{}, .{} },
+
+        fn observe(
+            raw_context: *anyopaque,
+            index: usize,
+            result: runtime.BatchOwnedResponseResult,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw_context));
+            switch (result) {
+                .response => |response| self.slots[index].response = response,
+                .err => |err| self.slots[index].err = err,
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{
+            .method = "POST",
+            .path = "/timed-upload",
+            .authority = "localhost",
+            .body = &timed_body,
+            .trailers = &.{.{
+                .name = "x-upload-finished",
+                .value = "timed",
+            }},
+        },
+        .{
+            .method = "POST",
+            .path = "/sibling-upload",
+            .authority = "localhost",
+            .body = &sibling_body,
+            .trailers = &.{.{
+                .name = "x-upload-finished",
+                .value = "sibling",
+            }},
+        },
+    };
+    const deadlines = [_]?std.Io.Clock.Timestamp{
+        .fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .awake }),
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    };
+    var result_context: ResultContext = .{};
+    client.requestBodyBatchWithPerStreamDeadlines(
+        &requests,
+        1024,
+        &deadlines,
+        .{
+            .context = &result_context,
+            .on_result = ResultContext.observe,
+        },
+    ) catch |err| {
+        std.debug.print("per-stream upload client failed: {s}\n", .{@errorName(err)});
+        if (shared.err) |server_err| {
+            std.debug.print("per-stream upload server failed: {s}\n", .{@errorName(server_err)});
+        }
+        return err;
+    };
+    try std.testing.expectEqual(error.Timeout, result_context.slots[0].err.?);
+    try std.testing.expect(result_context.slots[0].response == null);
+    try std.testing.expect(result_context.slots[1].err == null);
+    var sibling_response = result_context.slots[1].response.?;
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualStrings("sibling-finished", sibling_response.body);
+    try std.testing.expect(client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), client.activeLocalStreamCount());
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
 test "HTTP/2 response body batch resumes fairly under small windows" {
     const allocator = std.testing.allocator;
     const parallel = 5;

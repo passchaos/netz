@@ -433,15 +433,16 @@ fn runPoolInterop(
     );
     defer allocator.free(shared_three_uri);
     const sender = dispatcher.sender();
-    const shared_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
-        .raw = .fromSeconds(5),
-        .clock = .awake,
-    });
+    const shared_deadlines = [_]std.Io.Clock.Timestamp{
+        .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }),
+        .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }),
+        .fromNow(io, .{ .raw = .fromSeconds(7), .clock = .awake }),
+    };
     var producers = [_]SharedProducer{
         .{
             .sender = sender.clone(),
             .uri = shared_one_uri,
-            .deadline = shared_deadline,
+            .deadline = shared_deadlines[0],
             .request = .{
                 .method = "POST",
                 .body = "shared-body-one",
@@ -454,7 +455,7 @@ fn runPoolInterop(
         .{
             .sender = sender.clone(),
             .uri = shared_two_uri,
-            .deadline = shared_deadline,
+            .deadline = shared_deadlines[1],
             .request = .{
                 .method = "POST",
                 .body = "shared-body-two",
@@ -467,7 +468,7 @@ fn runPoolInterop(
         .{
             .sender = sender.clone(),
             .uri = shared_three_uri,
-            .deadline = shared_deadline,
+            .deadline = shared_deadlines[2],
             .request = .{
                 .method = "POST",
                 .body = "shared-body-three",

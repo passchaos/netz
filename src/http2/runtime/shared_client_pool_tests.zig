@@ -108,10 +108,15 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
         sender: pool_mod.SharedSender,
         uri: []const u8,
         request: runtime.RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
         response: ?runtime.OwnedResponse = null,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            self.response = self.sender.request(self.uri, self.request) catch |err| {
+            self.response = self.sender.requestWithDeadline(
+                self.uri,
+                self.request,
+                self.deadline,
+            ) catch |err| {
                 self.err = err;
                 return;
             };
@@ -145,10 +150,16 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     const first_body = [_]u8{'a'} ** (32 * 1024);
     const second_body = [_]u8{'b'} ** (32 * 1024);
     const third_body = [_]u8{'c'} ** (32 * 1024);
+    const deadlines = [_]std.Io.Clock.Timestamp{
+        .fromNow(io, .{ .raw = .fromSeconds(5), .clock = .awake }),
+        .fromNow(io, .{ .raw = .fromSeconds(6), .clock = .awake }),
+        .fromNow(io, .{ .raw = .fromSeconds(7), .clock = .awake }),
+    };
     var producers = [_]Producer{
         .{
             .sender = sender.clone(),
             .uri = first_uri,
+            .deadline = deadlines[0],
             .request = .{
                 .method = "POST",
                 .body = &first_body,
@@ -161,6 +172,7 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
         .{
             .sender = sender.clone(),
             .uri = second_uri,
+            .deadline = deadlines[1],
             .request = .{
                 .method = "POST",
                 .body = &second_body,
@@ -173,6 +185,7 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
         .{
             .sender = sender.clone(),
             .uri = third_uri,
+            .deadline = deadlines[2],
             .request = .{
                 .method = "POST",
                 .body = &third_body,
