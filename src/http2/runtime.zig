@@ -21,6 +21,7 @@ const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const content_coding = @import("../http/content_coding.zig");
+const uri_redirect = @import("../http1/runtime/redirect.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
 
@@ -82,7 +83,8 @@ const appendHeaderBlockBytes = frame_wire.appendHeaderBlock;
 const writeFrameTransport = frame_io.writeTransport;
 const writeFrameTransportWithDeadline = frame_io.writeTransportWithDeadline;
 
-pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error || error{
+pub const Error = http2.Error || http1_runtime.Error || tls_stream.Error ||
+    uri_redirect.Error || error{
     ConnectionClosed,
     UnexpectedFrame,
     InvalidFrame,
@@ -110,6 +112,13 @@ pub const ResponseTimeoutError = Error || std.Io.Timeout.Error;
 pub const RequestTimeoutError = Error || std.Io.Timeout.Error;
 
 const ReadExactError = net.Stream.Reader.Error || error{ConnectionClosed};
+
+pub const RedirectPolicy = uri_redirect.Policy;
+
+pub const RedirectOptions = struct {
+    policy: RedirectPolicy = .{},
+    tls: TlsConnectOptions = .{},
+};
 
 const ServeReadConnectionError = enum {
     compression,
@@ -2874,6 +2883,239 @@ pub const Client = struct {
                     &.{},
                 );
             }
+        }
+    }
+
+    pub fn requestUriFollowingRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+    ) ResponseTimeoutError!OwnedResponse {
+        var result = try requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            null,
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailed(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+    ) ResponseTimeoutError!RedirectedResponse {
+        return requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            null,
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!OwnedResponse {
+        var result = try requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!RedirectedResponse {
+        return requestUriFollowingRedirectsDetailedBefore(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriFollowingRedirectsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) ResponseTimeoutError!RedirectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestUriFollowingRedirectsDetailedWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            request_options,
+            limits,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestUriFollowingRedirectsDetailedBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        request_options: RequestOptions,
+        limits: Limits,
+        redirect_options: RedirectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!RedirectedResponse {
+        var chain = uri_redirect.Chain.init(
+            allocator,
+            redirect_options.policy,
+        );
+        defer chain.deinit();
+        try chain.recordInitial(uri_text);
+        var current_uri = try allocator.dupe(u8, uri_text);
+        defer allocator.free(current_uri);
+        var hop_options = request_options;
+        var hop_tls = redirect_options.tls;
+        var owned_headers: ?[]http2.Hpack.HeaderField = null;
+        defer if (owned_headers) |headers| allocator.free(headers);
+
+        while (true) {
+            var response = if (deadline) |absolute|
+                try requestUriTlsWithDeadline(
+                    allocator,
+                    io,
+                    current_uri,
+                    hop_options,
+                    limits,
+                    hop_tls,
+                    absolute,
+                )
+            else
+                try requestUriTls(
+                    allocator,
+                    io,
+                    current_uri,
+                    hop_options,
+                    limits,
+                    hop_tls,
+                );
+            errdefer response.deinit(allocator);
+            if (!uri_redirect.isRedirectStatus(response.status)) {
+                return .{
+                    .allocator = allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            const location = try redirectLocation(response.headers);
+            if (location == null) {
+                return .{
+                    .allocator = allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            var next = try chain.follow(current_uri, location.?, response.status);
+            var next_owned = true;
+            defer if (next_owned) next.deinit();
+
+            const action = uri_redirect.methodActionBytes(
+                redirect_options.policy,
+                response.status,
+                hop_options.method,
+            );
+            const remove_credentials = next.cross_origin and
+                !redirect_options.policy.forward_cross_origin_credentials;
+            if (next.cross_origin) {
+                try uri_redirect.enforceClientIdentityPolicy(
+                    redirect_options.policy,
+                    true,
+                    hop_tls.client_identity != null,
+                );
+                hop_tls.tls12_ticket_resumption = null;
+                hop_tls.tls13_ticket_resumption = null;
+            }
+            hop_options.headers = try redirectH2Headers(
+                allocator,
+                hop_options.headers,
+                remove_credentials,
+                action == .rewrite_get,
+                &owned_headers,
+            );
+            hop_options.authority = null;
+            hop_options.scheme = null;
+            if (action == .rewrite_get) {
+                hop_options.method = "GET";
+                hop_options.protocol = null;
+                hop_options.body = &.{};
+                hop_options.trailers = &.{};
+            } else if (remove_credentials) {
+                hop_options.trailers = &.{};
+            }
+
+            response.deinit(allocator);
+            allocator.free(current_uri);
+            current_uri = next.uri;
+            next_owned = false;
         }
     }
 
@@ -15271,6 +15513,75 @@ fn RequestBatchHandlerTask(
     };
 }
 
+fn redirectLocation(
+    headers: []const http2.Hpack.HeaderField,
+) Error!?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+        if (found != null or header.value.len == 0) {
+            return error.InvalidRedirect;
+        }
+        found = header.value;
+    }
+    return found;
+}
+
+fn redirectH2Headers(
+    allocator: std.mem.Allocator,
+    source: []const http2.Hpack.HeaderField,
+    remove_credentials: bool,
+    remove_body: bool,
+    owned: *?[]http2.Hpack.HeaderField,
+) std.mem.Allocator.Error![]const http2.Hpack.HeaderField {
+    var retained_count: usize = 0;
+    for (source) |header| {
+        if (!dropRedirectH2Header(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) retained_count += 1;
+    }
+    if (retained_count == source.len) return source;
+    if (retained_count == 0) {
+        if (owned.*) |old| allocator.free(old);
+        owned.* = null;
+        return &.{};
+    }
+    const headers = try allocator.alloc(
+        http2.Hpack.HeaderField,
+        retained_count,
+    );
+    var index: usize = 0;
+    for (source) |header| {
+        if (dropRedirectH2Header(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) continue;
+        headers[index] = header;
+        index += 1;
+    }
+    if (owned.*) |old| allocator.free(old);
+    owned.* = headers;
+    return headers;
+}
+
+fn dropRedirectH2Header(
+    name: []const u8,
+    remove_credentials: bool,
+    remove_body: bool,
+) bool {
+    if (std.ascii.eqlIgnoreCase(name, "host")) return true;
+    if (remove_credentials and uri_redirect.isCrossOriginCredential(name)) {
+        return true;
+    }
+    if (remove_credentials and std.ascii.eqlIgnoreCase(name, "trailer")) {
+        return true;
+    }
+    return remove_body and uri_redirect.isBodyHeader(name);
+}
+
 pub const RequestOptions = struct {
     method: []const u8 = "GET",
     path: []const u8 = "/",
@@ -15539,6 +15850,27 @@ pub const OwnedResponse = struct {
             out,
             scratch,
         );
+    }
+};
+
+pub const RedirectedResponse = struct {
+    allocator: std.mem.Allocator,
+    response: OwnedResponse,
+    final_uri: []u8,
+    redirect_count: usize,
+
+    pub fn deinit(self: *RedirectedResponse) void {
+        const allocator = self.allocator;
+        self.response.deinit(allocator);
+        allocator.free(self.final_uri);
+        self.* = undefined;
+    }
+
+    pub fn takeResponse(self: *RedirectedResponse) OwnedResponse {
+        const response = self.response;
+        self.allocator.free(self.final_uri);
+        self.* = undefined;
+        return response;
     }
 };
 
@@ -35445,6 +35777,7 @@ test {
     _ = @import("runtime/ping_timeout_tests.zig");
     _ = @import("runtime/refusal_tests.zig");
     _ = @import("runtime/handshake_timeout_tests.zig");
+    _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/unix_tests.zig");
 }

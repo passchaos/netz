@@ -14,7 +14,13 @@ pub fn main(init: std.process.Init) !void {
     const port = try std.fmt.parseInt(u16, args[1], 10);
     if (port == 0) return error.InvalidArgument;
     const pool_mode = std.mem.eql(u8, args[args.len - 1], "--pool");
-    const effective_len = args.len - @intFromBool(pool_mode);
+    const redirect_mode = std.mem.eql(
+        u8,
+        args[args.len - 1],
+        "--redirect",
+    );
+    if (pool_mode and redirect_mode) return error.InvalidArgument;
+    const effective_len = args.len - @intFromBool(pool_mode or redirect_mode);
     if (effective_len != 2 and effective_len != 3) {
         return error.InvalidArgument;
     }
@@ -48,6 +54,17 @@ pub fn main(init: std.process.Init) !void {
     }
     if (pool_mode) {
         return runPoolInterop(
+            allocator,
+            io,
+            port,
+            tls_enabled,
+            &ca_bundle,
+            &ca_lock,
+            limits,
+        );
+    }
+    if (redirect_mode) {
+        return runRedirectInterop(
             allocator,
             io,
             port,
@@ -247,6 +264,58 @@ pub fn main(init: std.process.Init) !void {
     );
     std.debug.print(
         "netz HTTP/2 client drained Hyper GOAWAY: transport={s} active_stream=9 new_request_refused=true client_io=zio-std-io server_io=hyper-tokio\n",
+        .{if (tls_enabled) "tls" else "h2c"},
+    );
+}
+
+fn runRedirectInterop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    port: u16,
+    tls_enabled: bool,
+    ca_bundle: *std.crypto.Certificate.Bundle,
+    ca_lock: *std.Io.RwLock,
+    limits: netz.http2.runtime.Limits,
+) !void {
+    const scheme = if (tls_enabled) "https" else "http";
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/redirect-start?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(uri);
+    var result = try netz.http2.runtime.Client
+        .requestUriFollowingRedirectsDetailedWithTimeout(
+        allocator,
+        io,
+        uri,
+        .{
+            .method = "POST",
+            .headers = &.{
+                .{ .name = "authorization", .value = "Bearer hyper-h2-redirect" },
+                .{ .name = "content-type", .value = "text/plain" },
+            },
+            .body = "redirect-body",
+        },
+        limits,
+        .{ .tls = .{ .ca_bundle = if (tls_enabled) .{
+            .bundle = ca_bundle,
+            .lock = ca_lock,
+        } else null } },
+        .fromSeconds(5),
+    );
+    defer result.deinit();
+    if (result.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            result.response.body,
+            "hyper-h2-redirected",
+        ) or result.redirect_count != 1)
+    {
+        return error.InvalidRedirectResponse;
+    }
+    std.debug.print(
+        "netz HTTP/2 client followed Hyper redirect: transport={s} status=200 redirects=1 method=POST->GET credentials=same-origin\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

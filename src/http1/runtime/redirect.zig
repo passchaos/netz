@@ -11,6 +11,7 @@ pub const Error = std.mem.Allocator.Error || error{
     RedirectLoop,
     RedirectRejected,
     InsecureRedirect,
+    CrossOriginIdentityRestricted,
 };
 
 pub const Policy = struct {
@@ -22,6 +23,8 @@ pub const Policy = struct {
     /// Forward Authorization, Proxy-Authorization, Cookie, and Cookie2 fields
     /// to a different scheme/host/port origin.
     forward_cross_origin_credentials: bool = false,
+    /// Permit a TLS client certificate to be offered to another origin.
+    allow_cross_origin_client_identity: bool = false,
     context: ?*anyopaque = null,
     authorize: ?*const fn (
         context: ?*anyopaque,
@@ -151,9 +154,20 @@ pub fn methodAction(
     status: u16,
     method: http1.Method,
 ) MethodAction {
-    if (status == 303 and method != .HEAD) return .rewrite_get;
+    return methodActionBytes(policy, status, method.string());
+}
+
+pub fn methodActionBytes(
+    policy: Policy,
+    status: u16,
+    method: []const u8,
+) MethodAction {
+    if (status == 303 and !std.mem.eql(u8, method, "HEAD")) {
+        return .rewrite_get;
+    }
     if ((status == 301 or status == 302) and
-        policy.rewrite_post_301_302_to_get and method == .POST)
+        policy.rewrite_post_301_302_to_get and
+        std.mem.eql(u8, method, "POST"))
     {
         return .rewrite_get;
     }
@@ -175,6 +189,18 @@ pub fn isBodyHeader(name: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "digest") or
         std.ascii.eqlIgnoreCase(name, "repr-digest") or
         std.ascii.eqlIgnoreCase(name, "want-repr-digest");
+}
+
+pub fn enforceClientIdentityPolicy(
+    policy: Policy,
+    cross_origin: bool,
+    has_identity: bool,
+) Error!void {
+    if (cross_origin and has_identity and
+        !policy.allow_cross_origin_client_identity)
+    {
+        return error.CrossOriginIdentityRestricted;
+    }
 }
 
 pub fn canonicalize(
@@ -343,4 +369,8 @@ test "HTTP redirect method and header policy is explicit" {
     try std.testing.expect(isBodyHeader("Content-Length"));
     try std.testing.expect(isBodyHeader("Expect"));
     try std.testing.expect(!isBodyHeader("Accept"));
+    try std.testing.expectError(
+        error.CrossOriginIdentityRestricted,
+        enforceClientIdentityPolicy(.{}, true, true),
+    );
 }

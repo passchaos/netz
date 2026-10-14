@@ -129,6 +129,28 @@ cat "$work/pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper h2c reuse interop passed'
 
 port=$(free_tcp_port)
+"$server_binary" "$port" --redirect >"$work/redirect-server.log" 2>&1 &
+server_pid=$!
+wait_for_server "$work/redirect-server.log" \
+  'Hyper HTTP/2 interop server listening'
+if ! timeout 10s "$client" "$port" --redirect \
+    >"$work/redirect-client.log" 2>&1; then
+  cat "$work/redirect-client.log" >&2
+  cat "$work/redirect-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz HTTP/2 client followed Hyper redirect: transport=h2c status=200 redirects=1 method=POST->GET credentials=same-origin' \
+  "$work/redirect-client.log"
+grep -Fq \
+  'Hyper HTTP/2 server verified netz redirect: status=303 method=POST-to-GET credentials=same-origin connections=2 client_io=zio-std-io server_io=hyper-tokio' \
+  "$work/redirect-server.log"
+cat "$work/redirect-client.log"
+echo 'netz HTTP/2 redirect -> Hyper h2c interop passed'
+
+port=$(free_tcp_port)
 
 "$server" "$port" >"$work/netz-server.log" 2>&1 &
 server_pid=$!
@@ -250,6 +272,29 @@ grep -Fq \
   "$work/tls-pool-server.log"
 cat "$work/tls-pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper TLS reuse interop passed'
+
+port=$(free_tcp_port)
+"$server_binary" "$port" "$work/cert.pem" "$work/key.pem" --redirect \
+  >"$work/tls-redirect-server.log" 2>&1 &
+server_pid=$!
+wait_for_server "$work/tls-redirect-server.log" \
+  'Hyper HTTP/2 interop server listening'
+if ! timeout 10s "$client" "$port" "$work/cert.pem" --redirect \
+    >"$work/tls-redirect-client.log" 2>&1; then
+  cat "$work/tls-redirect-client.log" >&2
+  cat "$work/tls-redirect-server.log" >&2
+  exit 1
+fi
+wait "$server_pid"
+server_pid=
+grep -Fq \
+  'netz HTTP/2 client followed Hyper redirect: transport=tls status=200 redirects=1 method=POST->GET credentials=same-origin' \
+  "$work/tls-redirect-client.log"
+grep -Fq \
+  'Hyper HTTP/2 server verified netz redirect: status=303 method=POST-to-GET credentials=same-origin connections=2 client_io=zio-std-io server_io=hyper-tokio' \
+  "$work/tls-redirect-server.log"
+cat "$work/tls-redirect-client.log"
+echo 'netz HTTP/2 redirect -> Hyper TLS interop passed'
 
 port=$(free_tcp_port)
 "$server" "$port" --tls >"$work/tls-netz-server.log" 2>&1 &

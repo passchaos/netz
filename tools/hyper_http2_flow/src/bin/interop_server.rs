@@ -45,17 +45,25 @@ fn main() {
         .expect("valid port");
     assert_ne!(port, 0);
     let first = args.next();
-    let (tls_paths, pool_mode) = match first.as_deref() {
-        Some("--pool") => (None, true),
+    let (tls_paths, pool_mode, redirect_mode) = match first.as_deref() {
+        Some("--pool") => (None, true, false),
+        Some("--redirect") => (None, false, true),
         Some(cert) => {
             let key = args.next().expect("TLS private key argument");
             let mode = args.next();
             if let Some(value) = mode.as_deref() {
-                assert_eq!(value, "--pool", "unexpected mode");
+                assert!(
+                    value == "--pool" || value == "--redirect",
+                    "unexpected mode"
+                );
             }
-            (Some((cert.to_owned(), key)), mode.is_some())
+            (
+                Some((cert.to_owned(), key)),
+                mode.as_deref() == Some("--pool"),
+                mode.as_deref() == Some("--redirect"),
+            )
         }
-        None => (None, false),
+        None => (None, false, false),
     };
     assert!(args.next().is_none(), "unexpected extra argument");
 
@@ -69,6 +77,35 @@ fn main() {
             .expect("bind Hyper interoperability server");
         println!("Hyper HTTP/2 interop server listening on 127.0.0.1:{port}");
         io::stdout().flush().expect("flush readiness line");
+
+        if redirect_mode {
+            for redirect_index in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept redirect client");
+                stream.set_nodelay(true).expect("redirect TCP_NODELAY");
+                let io = match tls_paths.as_ref() {
+                    Some((cert, key)) => {
+                        let tls = TlsAcceptor::from(tls_server_config(cert, key))
+                            .accept(stream)
+                            .await
+                            .expect("accept redirect TLS with h2 ALPN");
+                        assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+                        MaybeTls::Server(tls)
+                    }
+                    None => MaybeTls::Clear(stream),
+                };
+                server_http2::Builder::new(TokioExecutor)
+                    .serve_connection(
+                        TokioIo::new(io),
+                        service_fn(move |request| {
+                            handle_redirect(request, redirect_index)
+                        }),
+                    )
+                    .await
+                    .expect("serve netz HTTP/2 redirect request");
+            }
+            println!("Hyper HTTP/2 server verified netz redirect: status=303 method=POST-to-GET credentials=same-origin connections=2 client_io=zio-std-io server_io=hyper-tokio");
+            return;
+        }
 
         let (stream, _) = listener.accept().await.expect("accept netz client");
         stream.set_nodelay(true).expect("server TCP_NODELAY");
@@ -143,6 +180,81 @@ fn main() {
             );
         }
     });
+}
+
+async fn handle_redirect(
+    request: Request<Incoming>,
+    redirect_index: usize,
+) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, io::Error> {
+    if redirect_index == 0 {
+        if request.method() != Method::POST
+            || request.uri().path_and_query().map(|value| value.as_str())
+                != Some("/redirect-start?from=netz")
+            || request.headers().get("authorization")
+                != Some(&HeaderValue::from_static("Bearer hyper-h2-redirect"))
+            || request.headers().get("content-type")
+                != Some(&HeaderValue::from_static("text/plain"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 redirect source request",
+            ));
+        }
+        let collected = request
+            .into_body()
+            .collect()
+            .await
+            .map_err(io::Error::other)?;
+        if collected.to_bytes() != b"redirect-body".as_slice() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 redirect source body",
+            ));
+        }
+        let mut response = Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"redirecting"),
+            ))]))
+            .boxed(),
+        );
+        *response.status_mut() = StatusCode::SEE_OTHER;
+        response.headers_mut().insert(
+            "location",
+            HeaderValue::from_static("/redirect-final?from=hyper#not-on-wire"),
+        );
+        return Ok(response);
+    }
+
+    if request.method() != Method::GET
+        || request.uri().path_and_query().map(|value| value.as_str())
+            != Some("/redirect-final?from=hyper")
+        || request.headers().get("authorization")
+            != Some(&HeaderValue::from_static("Bearer hyper-h2-redirect"))
+        || request.headers().contains_key("content-type")
+        || request.headers().contains_key("content-length")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected HTTP/2 redirected request",
+        ));
+    }
+    let collected = request
+        .into_body()
+        .collect()
+        .await
+        .map_err(io::Error::other)?;
+    if !collected.to_bytes().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected HTTP/2 redirected body",
+        ));
+    }
+    Ok(Response::new(
+        StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+            Bytes::from_static(b"hyper-h2-redirected"),
+        ))]))
+        .boxed(),
+    ))
 }
 
 fn tls_server_config(cert_path: &str, key_path: &str) -> Arc<rustls::ServerConfig> {
