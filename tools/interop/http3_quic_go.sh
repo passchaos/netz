@@ -665,7 +665,10 @@ grep -Fq \
   "netz HTTP/3 pool reused quic-go connection through redirect: version=$version requests=2 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=quic-go-netpoll" \
   "$work/netz-redirect-client.log"
 grep -Fq \
-  "quic-go HTTP/3 server verified netz redirects: version=$version requests=4 redirects=2 method=POST-to-GET credentials=same-origin connections=3 pooled_connections=1" \
+  "netz HTTP/3 shared pool routed quic-go redirect transaction: version=$version requests=2 redirects=1 idle=1 total=1 routes=1 unrelated_events_preserved=true client_io=zio-std-io server_io=quic-go-netpoll" \
+  "$work/netz-redirect-client.log"
+grep -Fq \
+  "quic-go HTTP/3 server verified netz redirects: version=$version requests=6 redirects=3 method=POST-to-GET credentials=same-origin connections=4 exclusive_pool_connections=1 shared_pool_connections=1" \
   "$work/quic-go-redirect-server.log"
 cat "$work/netz-redirect-client.log"
 cat "$work/quic-go-redirect-server.log"

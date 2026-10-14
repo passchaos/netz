@@ -471,7 +471,10 @@ Current protocol coverage includes:
   every completed hop releases its lease before the next URI is acquired, so
   same-origin redirects immediately reuse QPACK/QUIC/TLS state while
   cross-origin hops retain capacity/LRU policy and clear origin-bound default-
-  connector state. `PreparedEarlyRequest` plus
+  connector state. The single-UDP-owner shared pool provides matching
+  `beginUriFollowingRedirects*` transactions: they replay multi-packet bodies,
+  consume only their current connection/stream events, and leave unrelated
+  response, push, and unrouted events caller-owned. `PreparedEarlyRequest` plus
   `HandshakeClient.connectWithEarlyRequest` provide a typed one-request 0-RTT
   path: the owned offer carries a complete literal/static-QPACK request and
   the mandatory SETTINGS/QPACK critical-stream prefixes, reports accepted

@@ -10,6 +10,8 @@ const http3 = @import("../mod.zig");
 const quic = @import("../../quic/mod.zig");
 const owned_receive_race = @import("../../quic/owned_receive_race.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
+const owning_pool = @import("handshake_client_pool.zig");
+const shared_redirect = @import("shared_handshake_client_pool/redirect.zig");
 
 const supported_versions = [_]u32{
     quic.Version.version_1.wireValue(),
@@ -113,9 +115,13 @@ pub fn Pool(comptime Runtime: type) type {
             original_dcid: *const [8]u8,
             local_cid: *const [8]u8,
             deadline: ?std.Io.Clock.Timestamp,
+            redirect: ?owning_pool.RedirectConnectContext,
 
             fn connect(self: *@This()) ConnectCompletion {
                 var options = self.pool.options.client;
+                if (self.redirect) |redirect| {
+                    applyRedirectConnectionSecurity(&options, redirect);
+                }
                 options.handshake.original_destination_connection_id =
                     self.original_dcid;
                 options.handshake.local_connection_id = self.local_cid;
@@ -343,6 +349,92 @@ pub fn Pool(comptime Runtime: type) type {
             }
         };
 
+        pub const RedirectOperationError =
+            Runtime.RedirectTimeoutError || Error;
+
+        const RedirectAdapter = struct {
+            pub fn acquire(
+                pool: *Self,
+                uri_text: []const u8,
+                deadline: ?std.Io.Clock.Timestamp,
+                redirect: ?owning_pool.RedirectConnectContext,
+            ) RedirectOperationError!Lease {
+                const absolute = if (deadline) |caller_deadline|
+                    try deadline_policy.capTimeout(
+                        pool.io,
+                        caller_deadline,
+                        pool.options.client.connect_timeout,
+                    )
+                else
+                    deadline_policy.fromTimeout(
+                        pool.io,
+                        pool.options.client.connect_timeout,
+                    ) catch return error.HandshakeTimeout;
+                return pool.acquireUriBefore(
+                    uri_text,
+                    absolute,
+                    redirect,
+                ) catch |err| return @errorCast(err);
+            }
+        };
+
+        /// A redirect transaction consumes only events matching its current
+        /// lease and request stream. Unrelated pool events remain caller-owned.
+        pub const RedirectTransaction = shared_redirect.Transaction(
+            Runtime,
+            Self,
+            RedirectAdapter,
+            RedirectOperationError,
+        );
+        pub const RedirectedResponse = shared_redirect.RedirectedResponse;
+
+        pub fn beginUriFollowingRedirects(
+            self: *Self,
+            uri_text: []const u8,
+            request: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+        ) RedirectOperationError!RedirectTransaction {
+            return RedirectTransaction.init(
+                self,
+                uri_text,
+                request,
+                redirect_options,
+                null,
+            );
+        }
+
+        pub fn beginUriFollowingRedirectsWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            request: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            timeout: std.Io.Duration,
+        ) RedirectOperationError!RedirectTransaction {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.beginUriFollowingRedirectsWithDeadline(
+                uri_text,
+                request,
+                redirect_options,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn beginUriFollowingRedirectsWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            request: Runtime.UriRequestOptions,
+            redirect_options: Runtime.RedirectOptions,
+            deadline: std.Io.Clock.Timestamp,
+        ) RedirectOperationError!RedirectTransaction {
+            return RedirectTransaction.init(
+                self,
+                uri_text,
+                request,
+                redirect_options,
+                try deadline_policy.usableAwake(self.io, deadline),
+            );
+        }
+
         pub fn init(
             allocator: std.mem.Allocator,
             io: std.Io,
@@ -468,7 +560,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.io,
                 self.options.client.connect_timeout,
             ) catch return error.HandshakeTimeout;
-            return self.acquireUriBefore(uri_text, deadline);
+            return self.acquireUriBefore(uri_text, deadline, null);
         }
 
         pub fn acquireUriWithTimeout(
@@ -495,13 +587,14 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 self.options.client.connect_timeout,
             );
-            return self.acquireUriBefore(uri_text, absolute);
+            return self.acquireUriBefore(uri_text, absolute, null);
         }
 
         fn acquireUriBefore(
             self: *Self,
             uri_text: []const u8,
             deadline: ?std.Io.Clock.Timestamp,
+            redirect: ?owning_pool.RedirectConnectContext,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -549,6 +642,7 @@ pub fn Pool(comptime Runtime: type) type {
                     &endpoint,
                     peer,
                     deadline,
+                    redirect,
                 ) catch |err| {
                     last_error = err;
                     if (shouldTryNextAddress(err)) continue;
@@ -594,6 +688,7 @@ pub fn Pool(comptime Runtime: type) type {
             uri_endpoint: *const Runtime.UriEndpoint,
             peer: std.Io.net.IpAddress,
             deadline: ?std.Io.Clock.Timestamp,
+            redirect: ?owning_pool.RedirectConnectContext,
         ) !Connected {
             var original_dcid: [8]u8 = undefined;
             var local_cid: [8]u8 = undefined;
@@ -634,6 +729,7 @@ pub fn Pool(comptime Runtime: type) type {
                 .original_dcid = &original_dcid,
                 .local_cid = &local_cid,
                 .deadline = deadline,
+                .redirect = redirect,
             };
             const Wake = union(enum) {
                 connected: ConnectCompletion,
@@ -1755,6 +1851,30 @@ fn multiEndpointReceiveTimeout(
         .clock = .awake,
         .raw = .fromNanoseconds(@max(nanoseconds, 0)),
     } } else .none;
+}
+
+fn applyRedirectConnectionSecurity(
+    options: anytype,
+    redirect: owning_pool.RedirectConnectContext,
+) void {
+    if (!redirect.cross_origin) return;
+    options.handshake.retry_source_connection_id = &.{};
+    options.handshake.server_name = null;
+    options.handshake.address_validation_token = &.{};
+    options.handshake.resumption_session = null;
+    options.handshake.resumption_server_id = null;
+    options.handshake.auto_resumption = null;
+    options.handshake.early_data = null;
+    options.handshake.random = null;
+    options.handshake.x25519_secret_key = null;
+    options.handshake.p256_secret_key = null;
+    options.handshake.p384_secret_key = null;
+    options.handshake.x25519_mlkem768_secret_key = null;
+    options.handshake.x25519_mlkem768_seed = null;
+    options.handshake.nist_hybrid_key_material = .{};
+    if (!redirect.forward_client_identity) {
+        options.handshake.client_identity = null;
+    }
 }
 
 fn shouldTryNextAddress(err: anyerror) bool {

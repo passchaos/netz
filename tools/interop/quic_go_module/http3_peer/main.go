@@ -91,7 +91,7 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 	cancelResponseStarted := make(chan struct{})
 	siblingStarted := make(chan struct{})
 	cancellationObserved := make(chan struct{})
-	results := make(chan error, 4)
+	results := make(chan error, 6)
 	server := &http3.Server{
 		TLSConfig: &tls.Config{
 			Certificates: []tls.Certificate{certificate},
@@ -124,7 +124,7 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 	fmt.Printf("quic-go HTTP/3 interop server listening=%s ca_out=%s\n", packetConn.LocalAddr(), caOut)
 	expectedRequests := 2
 	if redirect {
-		expectedRequests = 4
+		expectedRequests = 6
 	}
 	for range expectedRequests {
 		select {
@@ -144,10 +144,10 @@ func runServer(address, caOut string, v2Only, redirect bool) {
 	}
 	version := checkedVersion(negotiatedVersion.Load(), v2Only)
 	if redirect {
-		if connectionCount.Load() != 3 {
+		if connectionCount.Load() != 4 {
 			log.Fatalf("unexpected redirect connection count %d", connectionCount.Load())
 		}
-		fmt.Printf("quic-go HTTP/3 server verified netz redirects: version=%d requests=4 redirects=2 method=POST-to-GET credentials=same-origin connections=3 pooled_connections=1\n", version)
+		fmt.Printf("quic-go HTTP/3 server verified netz redirects: version=%d requests=6 redirects=3 method=POST-to-GET credentials=same-origin connections=4 exclusive_pool_connections=1 shared_pool_connections=1\n", version)
 		return
 	}
 	fmt.Printf("quic-go HTTP/3 server interoperated with netz: version=%d cancel=H3_REQUEST_CANCELLED concurrent_sibling=true stream_window=%d large_response=%d request_body=12 request_trailers=1 response_body=16 response_trailers=1\n", version, streamReceiveWindow, cancellationResponseSize)

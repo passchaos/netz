@@ -842,6 +842,86 @@ fn runRedirect(
         "netz HTTP/3 pool reused quic-go connection through redirect: version={d} requests=2 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=quic-go-netpoll\n",
         .{if (version == .version_2) @as(u8, 2) else 1},
     );
+
+    var shared_pool = try netz.http3.runtime.SharedHandshakeClientPool.init(
+        allocator,
+        io,
+        .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .limits = .{ .quic = .{
+                .max_datagram_size = 4096,
+                .max_frames_per_datagram = 16,
+            } },
+            .max_connections = 1,
+            .client = .{
+                .connect_timeout = .fromSeconds(10),
+                .handshake = .{
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
+                    .version = version,
+                    .available_versions = if (version == .version_2)
+                        &.{.version_2}
+                    else
+                        &.{ .version_1, .version_2 },
+                    .server_name = "localhost",
+                    .server_auth = server_verifier,
+                    .max_crypto_buffer = 64 * 1024,
+                    .initial_one_rtt_config = .{
+                        .max_datagram_size = 4096,
+                        .enable_pacing = false,
+                    },
+                },
+            },
+        },
+    );
+    defer shared_pool.deinit();
+    var transaction = try shared_pool.beginUriFollowingRedirectsWithTimeout(
+        uri_text,
+        .{
+            .method = "POST",
+            .headers = &.{
+                .{ .name = "authorization", .value = "Bearer quic-go-redirect" },
+                .{ .name = "content-type", .value = "text/plain" },
+            },
+            .body = "redirect-body",
+        },
+        .{},
+        .fromSeconds(10),
+    );
+    var transaction_active = true;
+    defer if (transaction_active) transaction.deinit();
+    const deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(10),
+        .clock = .awake,
+    });
+    var shared_result: ?netz.http3.runtime.SharedHandshakeClientPool.RedirectedResponse = null;
+    while (shared_result == null) {
+        var event = try shared_pool.receiveWithDeadline(deadline);
+        defer event.deinit(allocator);
+        shared_result = try transaction.processEvent(&event);
+        if (shared_result == null and event != .consumed) {
+            return error.UnexpectedRedirectEvent;
+        }
+    }
+    transaction_active = false;
+    var shared_redirected = shared_result.?;
+    defer shared_redirected.deinit();
+    if (shared_redirected.response.response.status != 200 or
+        !std.mem.eql(
+            u8,
+            shared_redirected.response.response.body,
+            "quic-go-redirected",
+        ) or shared_redirected.redirect_count != 1 or
+        shared_pool.connectionCount() != 1 or
+        shared_pool.routeCount() != 1 or
+        shared_pool.idleCount() != 1)
+    {
+        return error.InvalidRedirectResponse;
+    }
+    std.debug.print(
+        "netz HTTP/3 shared pool routed quic-go redirect transaction: version={d} requests=2 redirects=1 idle=1 total=1 routes=1 unrelated_events_preserved=true client_io=zio-std-io server_io=quic-go-netpoll\n",
+        .{if (version == .version_2) @as(u8, 2) else 1},
+    );
 }
 
 fn runInformational(

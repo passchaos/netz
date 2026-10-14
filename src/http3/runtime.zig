@@ -33392,6 +33392,7 @@ test {
     _ = @import("runtime/handshake_client_pool_tests.zig");
     _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/development_streaming_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
     _ = @import("runtime/development/server_peer/state_tests.zig");

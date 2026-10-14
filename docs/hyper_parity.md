@@ -1231,6 +1231,14 @@ so same-origin 303 reuses the QPACK/QUIC connection while cross-origin 307
 retains method/body and isolates credentials, trailers, mTLS identity and
 origin-bound default-connector state. The quic-go v1/v2 gate requires its two
 pooled redirect requests to share one connection.
+The dispatcher-shared HTTP/3 pool keeps its single UDP receive owner instead of
+adding a blocking request wrapper. Its redirect transaction consumes only
+events matching the current connection handle and request stream, replays
+bounded body slices through the nonblocking send surface, drains every
+intermediate response, and leaves unrelated response/push/unrouted events
+untouched. Same- and cross-origin TLS tests cover lease release/reacquisition,
+credential isolation and final idle routing; the same quic-go gate requires
+this third two-request redirect to use one shared-endpoint connection.
 
 Both protocol `Limits` now also expose a TCP connect timeout used by literal-IP,
 hostname, URI, Unix-socket and pooled connection paths. Host resolution and all

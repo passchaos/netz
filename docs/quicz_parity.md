@@ -1418,10 +1418,8 @@ manual/automatic resumption, early data, address-validation tokens, configured
 server identity and deterministic ephemeral inputs on an origin boundary, and
 the connector contract declares whether mTLS identity is configured so the
 pool can reject that boundary before second-hop I/O. Local TLS/QUIC tests cover
-same- and cross-origin paths. The repository-pinned quic-go v1/v2 gate now runs
-the original two-connection one-shot redirect followed by a pooled redirect
-whose two requests use one additional connection; the independent server
-requires four requests on exactly three connections.
+same- and cross-origin paths. The repository-pinned quic-go v1/v2 gate requires
+the exclusive pool's two redirect requests to use one connection.
 `SharedHandshakeClientPool` now owns one `std.Io` UDP endpoint and one QUIC
 dispatcher across all pooled origins. Its CID-routed handshake inboxes keep
 TLS workers off the socket, successful clients move into stable heap storage
@@ -1434,6 +1432,18 @@ turn for established pool connections: its dispatcher applies borrowed packet
 views synchronously, while returned response/push events own all header state
 needed after the receive storage is reused. The existing owning
 `processResponsePacket` entry point remains source-compatible.
+`beginUriFollowingRedirects*` adds the matching event-driven redirect boundary
+without introducing a competing UDP reader. Its transaction replays borrowed
+bodies through bounded one-packet DATA attempts, consumes only events matching
+its current connection handle and request stream, drains each intermediate
+response, releases that lease, and then acquires the next origin under the same
+absolute deadline. Unrelated response, push and unrouted events remain
+caller-owned. Same-origin 303 tests force a multi-packet POST and prove the
+second GET reuses the same route; cross-origin 307 tests preserve method/body
+and ordinary fields while stripping credentials and trailers before a fresh
+route is promoted. The quic-go v1/v2 process gate now runs one-shot, exclusive-
+pool, and shared-pool redirects: six requests and three redirects must use
+exactly four connections, with one connection for each pool's two requests.
 The batch suppresses repeated unconsumed DATA-ready notifications for one
 connection/stream without dropping later application state. A real two-origin
 TLS regression waits until both servers have submitted their responses,
