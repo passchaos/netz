@@ -21,6 +21,7 @@ const limits: netz.http2.runtime.Limits = .{
 
 const ScenarioId = enum {
     http2_consecutive_x1_empty,
+    http2_shared_consecutive_x1_empty,
     http2_consecutive_x1_req_10b,
     http2_consecutive_x1_res_10b,
     http2_consecutive_x1_req_100kb,
@@ -44,6 +45,7 @@ const Scenario = struct {
     parallel: usize = 1,
     warmups: usize = warmup_iterations,
     measured: usize = iterations,
+    shared_sender: bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -89,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
             };
             const scenarios = [_]ScenarioServer{
                 .{ .id = .http2_consecutive_x1_empty, .request_body = "", .parallel = 1 },
+                .{ .id = .http2_shared_consecutive_x1_empty, .request_body = "", .parallel = 1 },
                 .{ .id = .http2_consecutive_x1_req_10b, .request_body = request_body, .parallel = 1 },
                 .{
                     .id = .http2_consecutive_x1_res_10b,
@@ -288,6 +291,15 @@ pub fn main(init: std.process.Init) !void {
             },
         },
         .{
+            .id = .http2_shared_consecutive_x1_empty,
+            .request = .{
+                .path = "/hello",
+                .scheme = "http",
+                .authority = authority,
+            },
+            .shared_sender = true,
+        },
+        .{
             .id = .http2_consecutive_x1_req_10b,
             .request = .{
                 .method = "POST",
@@ -385,6 +397,17 @@ pub fn main(init: std.process.Init) !void {
     for (scenarios) |scenario| {
         if (options.scenario != null and
             scenario.id != options.scenario.?) continue;
+        if (scenario.shared_sender) {
+            try benchmarkSharedScenario(
+                allocator,
+                io,
+                server.address(),
+                scenario,
+                &counting,
+                options.stats,
+            );
+            continue;
+        }
         var client = try netz.http2.runtime.Client.connect(
             allocator,
             io,
@@ -454,6 +477,96 @@ pub fn main(init: std.process.Init) !void {
 
     server_task.await(io);
     if (shared.err) |err| return err;
+}
+
+fn benchmarkSharedScenario(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    address: std.Io.net.IpAddress,
+    scenario: Scenario,
+    counting: *CountingAllocator,
+    print_stats: bool,
+) !void {
+    var pool = try netz.http2.client_pool.Pool.init(allocator, io, .{
+        .max_connections = 1,
+        .max_idle_connections = 1,
+        .max_idle_per_authority = 1,
+        .limits = limits,
+    });
+    defer pool.deinit();
+    var dispatcher = try netz.http2.client_pool.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 1, .max_batch_requests = 1 },
+    );
+    defer dispatcher.deinit();
+    var driver = try std.Io.concurrent(
+        io,
+        netz.http2.client_pool.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    defer _ = driver.cancel(io) catch {};
+    const uri = try std.fmt.allocPrint(
+        allocator,
+        "http://127.0.0.1:{d}/hello",
+        .{address.ip4.port},
+    );
+    defer allocator.free(uri);
+    const sender = dispatcher.sender();
+
+    for (0..scenario.warmups) |_| {
+        var response = try sender.request(uri, scenario.request);
+        defer response.deinit(allocator);
+        if (response.status != 200 or response.body.len != 0) {
+            return error.UnexpectedResponse;
+        }
+    }
+
+    const allocations_before = counting.snapshot();
+    const start = nowNs(io);
+    var status_total: usize = 0;
+    for (0..scenario.measured) |_| {
+        var response = try sender.request(uri, scenario.request);
+        defer response.deinit(allocator);
+        if (response.status != 200 or response.body.len != 0) {
+            return error.UnexpectedResponse;
+        }
+        status_total += response.status;
+    }
+    const elapsed = nowNs(io) -| start;
+    const allocations_after = counting.snapshot();
+    dispatcher.close();
+    try driver.await(io);
+
+    const requests_per_second = if (elapsed == 0)
+        0
+    else
+        (@as(u64, scenario.measured) *| std.time.ns_per_s) / elapsed;
+    std.debug.print(
+        \\HTTP/2 SharedSender h2c runtime benchmark
+        \\  io backend: zio-std-io
+        \\  scenario: {s}
+        \\  parallel requests: 1
+        \\  warmup iterations: {d}
+        \\  iterations: {d}
+        \\  status total: {d}
+        \\  ns/op: {d}
+        \\  ns/request: {d}
+        \\  requests/s: {d}
+        \\
+    , .{
+        @tagName(scenario.id),
+        scenario.warmups,
+        scenario.measured,
+        status_total,
+        elapsed / scenario.measured,
+        elapsed / scenario.measured,
+        requests_per_second,
+    });
+    if (print_stats) {
+        printAllocationDelta(allocations_before, allocations_after);
+    }
 }
 
 fn parseOptions(

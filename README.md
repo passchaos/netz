@@ -1728,6 +1728,9 @@ taskset -c 0 zig build bench-http1-body -Doptimize=ReleaseFast -- \
 zig build bench-http1-hyper -Doptimize=ReleaseFast
 zig build bench-http2-hpack -Doptimize=ReleaseFast
 taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast
+# Isolate SharedSender queue/pool/observer overhead on one h2c connection.
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
+  --scenario=http2_shared_consecutive_x1_empty
 # Compare netz and Hyper clients against one fixed Hyper server while each
 # batch cancels a flow-blocked response, waits for server-observed cancellation,
 # completes its concurrent sibling, and proves connection reuse.

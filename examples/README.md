@@ -700,6 +700,17 @@ benchmark uses the runtime's default automatic Date and Hyper-style receive
 windows so steady-state wire sizes and flow-control shape match the reference. The 100-KiB
 server path consumes DATA through `readRequestStreaming` without aggregation.
 
+The `http2_shared_consecutive_x1_empty` scenario keeps the same one-connection,
+empty-response wire shape while routing every sequential request through the
+bounded `SharedDispatcher` and a cloneable `SharedSender`. It isolates sender
+queue, pool lease, per-stream observer, and active-cancellation wake readiness
+from HTTP/2 payload work:
+
+```sh
+taskset -c 0 zig build bench-http2-h2c -Doptimize=ReleaseFast -- \
+  --scenario=http2_shared_consecutive_x1_empty
+```
+
 `bench-http2-flow` exercises the same ten 1-MiB responses with an 8-KiB stream
 window and the RFC default 65,535-byte connection window. The server's batch
 scheduler advances streams round-robin, waits for WINDOW_UPDATE only when every
