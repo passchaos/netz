@@ -21,6 +21,7 @@ const message_state = @import("runtime/message/state.zig");
 const handshake_headers = @import("runtime/handshake/headers.zig");
 const handshake_storage = @import("runtime/handshake/storage.zig");
 const origin_policy = @import("runtime/origin_policy.zig");
+const redirect = @import("runtime/redirect.zig");
 const stream_io = @import("../internal/stream_io.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
@@ -44,7 +45,7 @@ const max_batched_payload_slices: usize = 64;
 // connection) while covering typical WebSocket/TLS records in one read.
 const transport_read_scratch_len: usize = 16 * 1024;
 
-pub const Error = websocket.Error || http1_runtime.Error ||
+pub const Error = websocket.Error || http1_runtime.Error || redirect.Error ||
     http2_runtime.Error || tls_stream.Error || error{
     HeadersTooLarge,
     ConnectionClosed,
@@ -2000,6 +2001,18 @@ pub const PendingUpgrade = struct {
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
 pub const StapledOcspPolicy = tls_client_identity.StapledOcspPolicy;
 pub const HttpProxyOptions = http1_runtime.ProxyOptions;
+pub const RedirectPolicy = redirect.Policy;
+
+pub const RedirectProxy = struct {
+    uri: []const u8,
+    options: HttpProxyOptions = .{},
+};
+
+pub const RedirectOptions = struct {
+    policy: RedirectPolicy = .{},
+    tls: http1_runtime.TlsClientOptions = .{},
+    proxy: ?RedirectProxy = null,
+};
 
 /// Result of an HTTP/1 Upgrade attempt before a non-101 response is mapped to
 /// the compatibility `InvalidResponse` error. Rejection status, headers,
@@ -3204,6 +3217,225 @@ pub const Client = struct {
         );
     }
 
+    /// Follow bounded HTTP Upgrade redirects until one WebSocket is accepted.
+    /// Relative Location values use RFC 3986 resolution. By default WSS cannot
+    /// downgrade to WS, cross-origin custom fields are stripped, and a client
+    /// certificate cannot cross origins. `redirect_options.proxy`, when set,
+    /// opens a fresh CONNECT tunnel for every hop.
+    pub fn connectUriFollowingRedirects(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+    ) Error!Connection {
+        var attempt = try connectUriFollowingRedirectsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            null,
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    /// Preserve the final accepted or non-redirect rejection response after
+    /// consuming and closing every intermediate redirect response.
+    pub fn connectUriFollowingRedirectsAttempt(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+    ) Error!ConnectAttempt {
+        return connectUriFollowingRedirectsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            null,
+        );
+    }
+
+    /// Retain one absolute caller budget across all DNS/TCP, proxy CONNECT,
+    /// origin TLS, rejection draining, and Upgrade work in the redirect chain.
+    pub fn connectUriFollowingRedirectsWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!Connection {
+        var attempt = try connectUriFollowingRedirectsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+        errdefer attempt.deinit();
+        return attempt.requireAccepted();
+    }
+
+    pub fn connectUriFollowingRedirectsAttemptWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        return connectUriFollowingRedirectsAttemptBefore(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            try deadline_policy.usableAwake(io, deadline),
+        );
+    }
+
+    pub fn connectUriFollowingRedirectsWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) Error!Connection {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingRedirectsWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn connectUriFollowingRedirectsAttemptWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        timeout: std.Io.Duration,
+    ) Error!ConnectAttempt {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return connectUriFollowingRedirectsAttemptWithDeadline(
+            allocator,
+            io,
+            uri_text,
+            options,
+            redirect_options,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectUriFollowingRedirectsAttemptBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        uri_text: []const u8,
+        options: ConnectOptions,
+        redirect_options: RedirectOptions,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!ConnectAttempt {
+        var chain = redirect.Chain.init(
+            allocator,
+            redirect_options.policy,
+        );
+        defer chain.deinit();
+        try chain.recordInitial(uri_text);
+        var current_uri = try allocator.dupe(u8, uri_text);
+        defer allocator.free(current_uri);
+        var hop_options = options;
+
+        while (true) {
+            var attempt = if (redirect_options.proxy) |proxy|
+                if (deadline) |absolute|
+                    try connectUriViaProxyAttemptWithDeadline(
+                        allocator,
+                        io,
+                        proxy.uri,
+                        current_uri,
+                        hop_options,
+                        proxy.options,
+                        redirect_options.tls,
+                        absolute,
+                    )
+                else
+                    try connectUriViaProxyAttempt(
+                        allocator,
+                        io,
+                        proxy.uri,
+                        current_uri,
+                        hop_options,
+                        proxy.options,
+                        redirect_options.tls,
+                    )
+            else if (deadline) |absolute|
+                try connectUriTlsAttemptWithDeadline(
+                    allocator,
+                    io,
+                    current_uri,
+                    hop_options,
+                    redirect_options.tls,
+                    absolute,
+                )
+            else
+                try connectUriTlsAttempt(
+                    allocator,
+                    io,
+                    current_uri,
+                    hop_options,
+                    redirect_options.tls,
+                );
+            errdefer attempt.deinit();
+            if (attempt.accepted() or
+                !redirect.isRedirectStatus(attempt.status()))
+            {
+                return attempt;
+            }
+            const location = (try redirect.location(attempt.headers())) orelse
+                return attempt;
+            var next = try chain.follow(
+                current_uri,
+                location,
+                attempt.status(),
+            );
+            var next_owned = true;
+            defer if (next_owned) next.deinit();
+            if (next.cross_origin) {
+                try redirect.enforceClientIdentityPolicy(
+                    redirect_options.policy,
+                    true,
+                    hasClientIdentity(hop_options),
+                );
+                hop_options.host = "";
+                if (!redirect_options.policy.forward_cross_origin_headers) {
+                    hop_options.extra_headers = &.{};
+                }
+                clearRedirectTlsTickets(&hop_options);
+            }
+            if (!next.secure) {
+                // An explicitly permitted downgrade cannot carry TLS-only
+                // configuration into the cleartext URI helper.
+                hop_options.tls_identity = null;
+                hop_options.vail_tls = null;
+            }
+            attempt.deinit();
+            allocator.free(current_uri);
+            current_uri = next.uri;
+            next_owned = false;
+        }
+    }
+
     pub fn connectUriTls(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -3972,6 +4204,31 @@ pub const ConnectOptions = struct {
     /// vail path uses this value when its nested option leaves one unset.
     tls_handshake_timeout: ?std.Io.Duration = null,
 };
+
+fn hasClientIdentity(options: ConnectOptions) bool {
+    if (options.vail_tls) |tls| {
+        if (tls.identity != null) return true;
+    }
+    if (options.tls_identity) |tls| {
+        if (tls.identity != null) return true;
+    }
+    return false;
+}
+
+fn clearRedirectTlsTickets(options: *ConnectOptions) void {
+    if (options.vail_tls) |configured| {
+        var tls = configured;
+        tls.tls12_ticket_resumption = null;
+        tls.tls13_ticket_resumption = null;
+        options.vail_tls = tls;
+    }
+    if (options.tls_identity) |configured| {
+        var tls = configured;
+        tls.tls12_ticket_resumption = null;
+        tls.tls13_ticket_resumption = null;
+        options.tls_identity = tls;
+    }
+}
 
 pub const OwnedMessage = common.OwnedMessage;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
@@ -16635,6 +16892,7 @@ test {
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
     _ = @import("runtime/proxy_tests.zig");
+    _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");
     _ = @import("runtime/handshake_header_tests.zig");
 }

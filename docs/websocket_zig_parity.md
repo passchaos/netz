@@ -9,7 +9,7 @@ superiority.
 
 | Area | netz | `websocket.zig` reference |
 | --- | --- | --- |
-| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, two-phase application admission before 101 with request metadata, custom acceptance fields, and final 3xx-5xx rejection, client `ConnectAttempt` access to rejected status/headers/trailers/bounded body while legacy `connect*` retains `InvalidResponse`, strict duplicate critical-header checks, upgrade-body rejection, single-reservation transactional 101 encoding with exact-capacity and fail-first-allocation coverage, optional client DNS/TCP connect budgets, caller-owned relative/absolute connection deadlines spanning DNS/TCP, TLS where applicable, and the complete HTTP Upgrade, cleartext HTTP-proxy CONNECT for WS/WSS with isolated proxy/origin headers and one deadline across proxy connection, CONNECT, origin TLS, and Upgrade, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, pre-101 handler callbacks and custom response headers, a Unix listener, client TCP/TLS connect timeouts, a server-side handshake timeout, worker pools and coordinated shutdown |
+| HTTP/1 Upgrade client/server | Covered, including host names, IPv4/IPv6, Unix-domain listener/client transports, two-phase application admission before 101 with request metadata, custom acceptance fields, and final 3xx-5xx rejection, client `ConnectAttempt` access to rejected status/headers/trailers/bounded body while legacy `connect*` retains `InvalidResponse`, bounded 300/301/302/303/307/308 following with RFC 3986 relative resolution, canonical loop detection, one chain deadline, WSS downgrade and cross-origin credential policy, strict duplicate critical-header checks, upgrade-body rejection, single-reservation transactional 101 encoding with exact-capacity and fail-first-allocation coverage, optional client DNS/TCP connect budgets, caller-owned relative/absolute connection deadlines spanning DNS/TCP, TLS where applicable, and the complete HTTP Upgrade, cleartext HTTP-proxy CONNECT for WS/WSS with isolated proxy/origin headers and one deadline across proxy connection, CONNECT, origin TLS, and Upgrade, including a fresh tunnel on every redirected authority, optional absolute request/response-head deadlines over WS/WSS that are not renewed by trickled bytes, and long-running bounded TCP/Unix/TLS supervisors with graceful cancellation plus accept/connection error policy | Covered with configurable handshake parsing, pre-101 handler callbacks and custom response headers, a Unix listener, client TCP/TLS connect timeouts, a server-side handshake timeout, worker pools and coordinated shutdown |
 | WSS client/server | Covered through shared TLS transports with host/CA verification, separate resolved-address plus TLS-host connection, optional client identities, caller-provided server identities, optional/required client certificates, verified peer chains and concurrent serving | Client covered; 0.16 README labels the branch experimental, while the audited server API terminates cleartext WebSocket |
 | HTTP/2 and HTTP/3 WebSocket (RFC 8441/RFC 9220) | Covered through extended CONNECT client/server adapters. The authenticated HTTP/3 path negotiates CONNECT over QUIC/TLS, preserves masking direction, subprotocol, Origin and permessage-deflate validation, and exchanges data/control/Close frames across split HTTP/3 DATA framing | Neither transport is present in the audited source |
 | permessage-deflate | Negotiated and exercised by HTTP/1, H2, and H3 runtimes with actual LZ77/Huffman compression and expansion fallback. Client response validation is bound to the exact RFC 7692 offer on every transport, including the rule that `client_max_window_bits` must be authorized by the offer, its offered value is only a hint, and offered `server_max_window_bits` is a hard upper bound. All three additionally support explicit context-takeover opt-in across ordinary, sliced, fragmented, deadline-resumable, allocating, caller-buffer, and raw-frame APIs while retaining no-context as the default policy | Negotiation/decompression exists, but audited 0.16 client/server send compression code is disabled |
@@ -210,6 +210,21 @@ Authenticated transport tests cover 103 followed by body/trailers, automatic
 Content-Length, split DATA without Content-Length, legacy draining, body-limit
 cancellation, explicit server rejection and dropped pending requests, and a
 successful sibling request on both reused client and server sessions.
+
+HTTP/1 URI clients now optionally follow bounded 300/301/302/303/307/308
+responses rather than forcing applications to reconstruct each Upgrade from a
+`ConnectAttempt`. `Location` uses RFC 3986 resolution, dot-segment removal and
+fragment stripping; canonical scheme/host/default-port URI records detect
+loops before another dial. One caller deadline covers every DNS/TCP, proxy
+CONNECT, TLS, rejection drain and Upgrade in the chain. WSS-to-WS downgrade is
+rejected by default. On a cross-origin hop, explicit Host is resynthesized,
+all caller `extra_headers` are dropped unless policy opts in, TLS resumption
+tickets are cleared, and a configured client certificate is refused unless a
+separate policy opt-in permits it. Server trust and hostname verification apply
+independently to every WSS authority. A configured cleartext proxy is retained,
+but each hop gets a new authority-form CONNECT and proxy fields never enter the
+origin Upgrade. Missing Location leaves the final 3xx `ConnectAttempt`
+inspectable; duplicate or empty Location fails closed.
 
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration

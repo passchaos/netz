@@ -986,6 +986,10 @@ Current protocol coverage includes:
   Host/port synthesis, and cleartext HTTP-proxy CONNECT helpers for both WS and
   WSS whose caller-owned deadline spans proxy DNS/TCP, CONNECT, origin TLS and
   Upgrade while proxy-only headers remain isolated from the origin handshake,
+  plus bounded HTTP redirect following with RFC 3986 relative-Location
+  resolution, loop detection, one whole-chain deadline, proxy retention,
+  authenticated WSS revalidation, default WSS-to-WS downgrade rejection, and
+  cross-origin Upgrade-header/client-certificate isolation,
   shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
   optional client authentication and concurrent serving, and RFC 8441
@@ -2188,6 +2192,13 @@ var ws = try netz.websocket.runtime.Client.connectUriViaProxyWithTimeout(
 );
 defer ws.close();
 ```
+
+`Client.connectUriFollowingRedirects*` follows bounded 300/301/302/303/307/308
+responses. Relative `Location` values are resolved against the prior URI, one
+deadline spans the complete chain, and `RedirectOptions.proxy` reopens CONNECT
+for each hop. Cross-origin hops strip `extra_headers` and refuse to forward a
+client certificate by default; WSS-to-WS downgrade also requires explicit
+policy opt-in.
 
 Servers can inspect and reject the HTTP Upgrade before sending 101:
 
