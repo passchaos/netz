@@ -1917,6 +1917,37 @@ pub const SystemMetric = enum {
     }
 };
 
+pub const ListenerAdmissionSnapshot = struct {
+    allow_zero_length_client_id: bool,
+    prefix_storage: [client_id_mod.max_prefix_len]u8 = undefined,
+    prefix_len: u6,
+
+    pub fn init(
+        allow_zero_length_client_id: bool,
+        prefix: []const u8,
+    ) Error!ListenerAdmissionSnapshot {
+        try validateAutoClientIdPrefix(prefix);
+        var result = ListenerAdmissionSnapshot{
+            .allow_zero_length_client_id = allow_zero_length_client_id,
+            .prefix_len = @intCast(prefix.len),
+        };
+        @memcpy(result.prefix_storage[0..prefix.len], prefix);
+        return result;
+    }
+
+    pub fn autoClientIdPrefix(
+        self: *const ListenerAdmissionSnapshot,
+    ) []const u8 {
+        std.debug.assert(self.prefix_len <= self.prefix_storage.len);
+        return self.prefix_storage[0..self.prefix_len];
+    }
+};
+
+pub const ListenerAdmissionProvider = struct {
+    context: *anyopaque,
+    snapshot: *const fn (context: *anyopaque) ListenerAdmissionSnapshot,
+};
+
 pub const Listener = struct {
     source: runtime.PendingSource,
     namespace: listener_namespace.Namespace = .{},
@@ -1928,6 +1959,10 @@ pub const Listener = struct {
     /// advertised capabilities listener-specific. Borrowed property strings
     /// must remain alive throughout `serveListeners`.
     accept: ?runtime.AcceptOptions = null,
+    /// Optional move-stable provider for admission fields that can change while
+    /// the listener remains bound. One owned snapshot is taken after CONNECT
+    /// parsing and before any Session, Will, or route mutation.
+    admission_policy: ?ListenerAdmissionProvider = null,
     /// Additional listener-local CONNECT authorization. Callback state is
     /// borrowed and must remain alive throughout `serveListeners`.
     authorization: ListenerAuthorization = .{},
@@ -1958,6 +1993,7 @@ pub const ListenerEndpoint = struct {
     /// Null inherits `Broker.Options.accept`; borrowed values must remain alive
     /// throughout `serveListenersUntil`.
     accept: ?runtime.AcceptOptions = null,
+    admission_policy: ?ListenerAdmissionProvider = null,
     /// Additional listener-local CONNECT authorization. Callback state is
     /// borrowed and must remain alive throughout `serveListenersUntil`.
     authorization: ListenerAuthorization = .{},
@@ -3687,6 +3723,12 @@ pub const Broker = struct {
                 listener.auto_client_id_prefix orelse
                     self.options.auto_client_id_prefix,
             );
+            if (listener.admission_policy) |provider| {
+                const snapshot = provider.snapshot(provider.context);
+                try validateAutoClientIdPrefix(
+                    snapshot.autoClientIdPrefix(),
+                );
+            }
             if (!(listener.accept orelse self.options.accept)
                 .accepted_protocol_versions.any())
             {
@@ -3829,6 +3871,12 @@ pub const Broker = struct {
                 listener.auto_client_id_prefix orelse
                     self.options.auto_client_id_prefix,
             );
+            if (listener.admission_policy) |provider| {
+                const snapshot = provider.snapshot(provider.context);
+                try validateAutoClientIdPrefix(
+                    snapshot.autoClientIdPrefix(),
+                );
+            }
             if (!(listener.accept orelse self.options.accept)
                 .accepted_protocol_versions.any())
             {
@@ -9256,14 +9304,24 @@ const ListenerAcceptTask = struct {
         // every path; this frame retains ownership only of its allocation.
         pending_owned = false;
         defer task.broker.allocator.destroy(pending);
+        var accept_options = task.listener.accept orelse
+            task.broker.options.accept;
+        var auto_client_id_prefix = task.listener.auto_client_id_prefix orelse
+            task.broker.options.auto_client_id_prefix;
+        var admission_snapshot: ListenerAdmissionSnapshot = undefined;
+        if (task.listener.admission_policy) |provider| {
+            admission_snapshot = provider.snapshot(provider.context);
+            accept_options.allow_zero_length_client_id =
+                admission_snapshot.allow_zero_length_client_id;
+            auto_client_id_prefix = admission_snapshot.autoClientIdPrefix();
+        }
         var client_task = try task.broker.preparePending(
             slot_index,
             pending,
             task.listener.namespace,
-            task.listener.accept orelse task.broker.options.accept,
+            accept_options,
             task.listener.authorization,
-            task.listener.auto_client_id_prefix orelse
-                task.broker.options.auto_client_id_prefix,
+            auto_client_id_prefix,
             task.result,
         ) orelse {
             slot_claimed = false;
@@ -9392,15 +9450,25 @@ const ListenerSupervisorAcceptTask = struct {
                 task.supervisor.broker.releaseClaimedSlot(slot_index);
             };
             var connection_error: ?anyerror = null;
+            var accept_options = task.listener.accept orelse
+                task.supervisor.broker.options.accept;
+            var auto_client_id_prefix = task.listener.auto_client_id_prefix orelse
+                task.supervisor.broker.options.auto_client_id_prefix;
+            var admission_snapshot: ListenerAdmissionSnapshot = undefined;
+            if (task.listener.admission_policy) |provider| {
+                admission_snapshot = provider.snapshot(provider.context);
+                accept_options.allow_zero_length_client_id =
+                    admission_snapshot.allow_zero_length_client_id;
+                auto_client_id_prefix =
+                    admission_snapshot.autoClientIdPrefix();
+            }
             var client_task = task.supervisor.broker.preparePending(
                 slot_index,
                 &pending,
                 task.listener.namespace,
-                task.listener.accept orelse
-                    task.supervisor.broker.options.accept,
+                accept_options,
                 task.listener.authorization,
-                task.listener.auto_client_id_prefix orelse
-                    task.supervisor.broker.options.auto_client_id_prefix,
+                auto_client_id_prefix,
                 &connection_error,
             ) catch |err| {
                 task.supervisor.report(

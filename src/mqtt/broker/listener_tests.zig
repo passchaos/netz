@@ -1573,6 +1573,110 @@ test "refused listener admission releases the only broker slot" {
     try std.testing.expectEqual(@as(usize, 0), broker.stats().active_connections);
 }
 
+test "listener supervisor snapshots reloadable Client ID admission" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{
+            .max_connections = 1,
+            .max_queued_deliveries_per_connection = 1,
+            .runtime = .{ .max_packet_size = 4096 },
+        },
+    });
+    defer broker.deinit();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_packet_size = 4096 },
+    );
+    defer server.deinit();
+
+    const Policy = struct {
+        generation: std.atomic.Value(u8) = .init(0),
+
+        fn snapshot(context_ptr: *anyopaque) mqtt.broker.ListenerAdmissionSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(context_ptr));
+            return if (self.generation.load(.acquire) == 0)
+                mqtt.broker.ListenerAdmissionSnapshot.init(
+                    false,
+                    "before-",
+                ) catch unreachable
+            else
+                mqtt.broker.ListenerAdmissionSnapshot.init(
+                    true,
+                    "after-",
+                ) catch unreachable;
+        }
+    };
+    const Supervisor = struct {
+        broker: *Broker,
+        endpoint: mqtt.broker.ListenerEndpoint,
+        shutdown: std.Io.Event = .unset,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.broker.serveListenersUntil(&.{self.endpoint}, .{
+                .shutdown = &self.shutdown,
+            }) catch |err| {
+                self.err = err;
+            };
+        }
+    };
+    var policy: Policy = .{};
+    var supervisor = Supervisor{
+        .broker = &broker,
+        .endpoint = .{
+            .source = server.pendingSource(),
+            .admission_policy = .{
+                .context = &policy,
+                .snapshot = Policy.snapshot,
+            },
+            .max_connections = 1,
+            .accept_concurrency = 2,
+        },
+    };
+    const thread = try std.Thread.spawn(.{}, Supervisor.run, .{&supervisor});
+    var joined = false;
+    defer if (!joined) {
+        supervisor.shutdown.set(io);
+        thread.join();
+    };
+
+    var refused = try runtime.Client.connectAttempt(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "", .clean_start = true },
+    );
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.accepted());
+
+    policy.generation.store(1, .release);
+    var accepted = try runtime.Client.connectWithConnAck(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "", .clean_start = true },
+    );
+    defer accepted.deinit(allocator);
+    const assigned = mqtt.assignedClientIdentifier(
+        accepted.connack.connack.properties,
+    ).?;
+    try std.testing.expect(std.mem.startsWith(u8, assigned, "after-"));
+    try accepted.connection.ping();
+    try accepted.connection.disconnect(0);
+
+    supervisor.shutdown.set(io);
+    thread.join();
+    joined = true;
+    if (supervisor.err) |err| return err;
+}
+
 test "finite listeners share global admitted connection capacity" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

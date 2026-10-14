@@ -503,12 +503,18 @@ pub fn run(
     defer allocator.free(password_authentication);
     const allow_anonymous = try allocator.alloc(bool, config.listeners.len);
     defer allocator.free(allow_anonymous);
+    const admission_policies = try allocator.alloc(
+        mqtt.broker.ListenerAdmissionSnapshot,
+        config.listeners.len,
+    );
+    defer allocator.free(admission_policies);
     for (
         config.listeners,
         listener_ids,
         password_authentication,
         allow_anonymous,
-    ) |listener, *id, *uses_password, *anonymous| {
+        admission_policies,
+    ) |listener, *id, *uses_password, *anonymous, *admission| {
         id.* = listener.address.getPort();
         const password_file = if (config.per_listener_settings)
             listener.password_file
@@ -518,6 +524,13 @@ pub fn run(
             !listener.use_identity_as_username and
             !listener.use_subject_as_username;
         anonymous.* = listener.allow_anonymous;
+        admission.* = try mqtt.broker.ListenerAdmissionSnapshot.init(
+            if (config.per_listener_settings)
+                listener.allow_zero_length_client_id
+            else
+                config.allow_zero_length_client_id,
+            config.autoIdPrefixForListener(listener),
+        );
     }
     var security = try reloadable_security.Security.init(
         allocator,
@@ -530,6 +543,7 @@ pub fn run(
     defer security.deinit();
     try security.setPasswordAuthentication(password_authentication);
     try security.setAllowAnonymous(allow_anonymous);
+    try security.setAdmissionPolicies(admission_policies);
     const source_access_control = security.sourceAccessControl();
     const max_inflight_messages = config.effectiveMaxInflightMessages();
     const base_accept = mqtt.runtime.AcceptOptions{
@@ -713,6 +727,8 @@ pub fn run(
         accept.max_outgoing_topic_aliases =
             configured.max_topic_alias_broker;
         security_policies[config_index] = security.listenerPolicy(config_index);
+        const admission_policy = security_policies[config_index]
+            .admissionProvider();
         const listener_access_control = security_policies[config_index]
             .accessControl();
         const authorization = mqtt.broker.ListenerAuthorization{
@@ -795,6 +811,7 @@ pub fn run(
                 ),
                 .accept = accept,
                 .authorization = authorization,
+                .admission_policy = admission_policy,
                 .max_connections = configured.max_connections,
                 .capacity_group = capacity_group,
                 .connection_count = finite_count,
@@ -806,6 +823,7 @@ pub fn run(
                     .auto_client_id_prefix,
                 .accept = listeners[server_index].accept,
                 .authorization = listeners[server_index].authorization,
+                .admission_policy = listeners[server_index].admission_policy,
                 .max_connections = configured.max_connections,
                 .capacity_group = capacity_group,
                 .accept_concurrency = accept_concurrency,
@@ -1105,11 +1123,34 @@ fn reloadConfiguredState(
         .err = err,
     } };
     defer allocator.free(reloaded_allow_anonymous);
+    const reloaded_admission_policies = allocator.alloc(
+        mqtt.broker.ListenerAdmissionSnapshot,
+        reloaded_config.listeners.len,
+    ) catch |err| return .{ .failure = .{
+        .component = .security,
+        .err = err,
+    } };
+    defer allocator.free(reloaded_admission_policies);
     for (reloaded_config.listeners, reloaded_allow_anonymous) |
         listener,
         *enabled,
     | {
         enabled.* = listener.allow_anonymous;
+    }
+    for (reloaded_config.listeners, reloaded_admission_policies) |
+        listener,
+        *admission,
+    | {
+        admission.* = mqtt.broker.ListenerAdmissionSnapshot.init(
+            if (reloaded_config.per_listener_settings)
+                listener.allow_zero_length_client_id
+            else
+                reloaded_config.allow_zero_length_client_id,
+            reloaded_config.autoIdPrefixForListener(listener),
+        ) catch |err| return .{ .failure = .{
+            .component = .security,
+            .err = err,
+        } };
     }
     const reloaded_autosave = autosavePolicyForReload(
         allocator,
@@ -1154,6 +1195,7 @@ fn reloadConfiguredState(
         &prepared_identities,
     );
     policy.setAllowAnonymousLocked(reloaded_allow_anonymous);
+    policy.setAdmissionPoliciesLocked(reloaded_admission_policies);
     policy.lock.unlock(policy.io);
     autosave.apply(reloaded_autosave);
     bridge_commit.commit();
@@ -1195,10 +1237,7 @@ fn validateReloadableListenerTopology(
     if (initial.per_listener_settings != candidate.per_listener_settings or
         initial.listeners.len != candidate.listeners.len or
         !std.mem.eql(u8, initial.password_file, candidate.password_file) or
-        !std.mem.eql(u8, initial.acl_file, candidate.acl_file) or
-        initial.allow_zero_length_client_id !=
-            candidate.allow_zero_length_client_id or
-        !std.mem.eql(u8, initial.auto_id_prefix, candidate.auto_id_prefix))
+        !std.mem.eql(u8, initial.acl_file, candidate.acl_file))
     {
         return error.ListenerConfigurationRequiresRestart;
     }
@@ -1261,9 +1300,6 @@ fn listenerReloadCompatible(
         before.use_identity_as_username == after.use_identity_as_username and
         before.use_subject_as_username == after.use_subject_as_username and
         std.mem.eql(u8, before.mount_point, after.mount_point) and
-        before.allow_zero_length_client_id ==
-            after.allow_zero_length_client_id and
-        std.mem.eql(u8, before.auto_id_prefix, after.auto_id_prefix) and
         before.maximum_qos == after.maximum_qos and
         before.maximum_keep_alive_seconds == after.maximum_keep_alive_seconds and
         before.max_topic_alias == after.max_topic_alias and

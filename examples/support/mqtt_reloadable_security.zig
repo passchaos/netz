@@ -215,6 +215,7 @@ pub const Security = struct {
     /// legacy all-password-listeners behavior from `paths`.
     password_authentication: []const bool = &.{},
     allow_anonymous: []bool,
+    admission_policies: []mqtt.broker.ListenerAdmissionSnapshot,
     files: FileSet,
     client_auth_paths: []const ClientAuthPaths = &.{},
     client_crls: ?ClientCrlSet = null,
@@ -237,6 +238,17 @@ pub const Security = struct {
         const allow_anonymous = try allocator.alloc(bool, listener_ids.len);
         errdefer allocator.free(allow_anonymous);
         @memset(allow_anonymous, false);
+        const admission_policies = try allocator.alloc(
+            mqtt.broker.ListenerAdmissionSnapshot,
+            listener_ids.len,
+        );
+        errdefer allocator.free(admission_policies);
+        for (admission_policies) |*policy| {
+            policy.* = mqtt.broker.ListenerAdmissionSnapshot.init(
+                true,
+                "netz-",
+            ) catch unreachable;
+        }
         return .{
             .allocator = allocator,
             .io = io,
@@ -245,6 +257,7 @@ pub const Security = struct {
             .listener_ids = listener_ids,
             .per_listener_settings = per_listener_settings,
             .allow_anonymous = allow_anonymous,
+            .admission_policies = admission_policies,
             .files = try FileSet.load(allocator, io, dir, paths),
         };
     }
@@ -253,6 +266,7 @@ pub const Security = struct {
         if (self.client_crls) |*crls| crls.deinit(self.allocator);
         self.files.deinit(self.allocator);
         self.allocator.free(self.allow_anonymous);
+        self.allocator.free(self.admission_policies);
         self.* = undefined;
     }
 
@@ -284,6 +298,26 @@ pub const Security = struct {
     ) void {
         std.debug.assert(enabled.len == self.allow_anonymous.len);
         @memcpy(self.allow_anonymous, enabled);
+    }
+
+    pub fn setAdmissionPolicies(
+        self: *Security,
+        policies: []const mqtt.broker.ListenerAdmissionSnapshot,
+    ) !void {
+        if (policies.len != self.listener_ids.len) {
+            return error.InvalidSecurityLayout;
+        }
+        self.lock.lockUncancelable(self.io);
+        self.setAdmissionPoliciesLocked(policies);
+        self.lock.unlock(self.io);
+    }
+
+    pub fn setAdmissionPoliciesLocked(
+        self: *Security,
+        policies: []const mqtt.broker.ListenerAdmissionSnapshot,
+    ) void {
+        std.debug.assert(policies.len == self.admission_policies.len);
+        @memcpy(self.admission_policies, policies);
     }
 
     /// Attach the immutable client-CA topology and load every configured CRL
@@ -591,6 +625,21 @@ pub const ListenerPolicy = struct {
         return file.verify(username, password);
     }
 
+    pub fn admissionProvider(
+        self: *ListenerPolicy,
+    ) mqtt.broker.ListenerAdmissionProvider {
+        return .{ .context = self, .snapshot = admissionSnapshot };
+    }
+
+    fn admissionSnapshot(
+        context: *anyopaque,
+    ) mqtt.broker.ListenerAdmissionSnapshot {
+        const self: *ListenerPolicy = @ptrCast(@alignCast(context));
+        self.security.lock.lockSharedUncancelable(self.security.io);
+        defer self.security.lock.unlockShared(self.security.io);
+        return self.security.admission_policies[self.listener_index];
+    }
+
     pub fn accessControl(
         self: *ListenerPolicy,
     ) ?mqtt.broker.ListenerAccessControlHandler {
@@ -722,6 +771,32 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
     try security.setAllowAnonymous(&.{true});
     try std.testing.expect(ListenerPolicy.authorizeConnect(&policy, connect));
     try security.setAllowAnonymous(&.{false});
+    try std.testing.expectError(
+        error.InvalidSecurityLayout,
+        security.setAdmissionPolicies(&.{
+            try mqtt.broker.ListenerAdmissionSnapshot.init(true, "one-"),
+            try mqtt.broker.ListenerAdmissionSnapshot.init(false, "two-"),
+        }),
+    );
+    try security.setAdmissionPolicies(&.{
+        try mqtt.broker.ListenerAdmissionSnapshot.init(false, "initial-"),
+    });
+    const admission = policy.admissionProvider();
+    var snapshot = admission.snapshot(admission.context);
+    try std.testing.expect(!snapshot.allow_zero_length_client_id);
+    try std.testing.expectEqualStrings(
+        "initial-",
+        snapshot.autoClientIdPrefix(),
+    );
+    try security.setAdmissionPolicies(&.{
+        try mqtt.broker.ListenerAdmissionSnapshot.init(true, "reloaded-"),
+    });
+    snapshot = admission.snapshot(admission.context);
+    try std.testing.expect(snapshot.allow_zero_length_client_id);
+    try std.testing.expectEqualStrings(
+        "reloaded-",
+        snapshot.autoClientIdPrefix(),
+    );
     connect.username = authenticated_username;
     connect.password = authenticated_password;
     try std.testing.expect(ListenerPolicy.authorizeConnect(&policy, connect));

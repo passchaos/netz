@@ -2498,17 +2498,25 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         first_anonymous: bool,
         second_anonymous: bool,
         second_listener_port: int = second_port,
+        first_allow_zero: bool = False,
+        first_prefix: str = "initial-first-",
+        second_allow_zero: bool = True,
+        second_prefix: str = "initial-second-",
     ) -> None:
         config.write_text(
             "per_listener_settings true\n"
             f"listener {first_port} 127.0.0.1\n"
             f"password_file {password_file}\n"
             f"allow_anonymous {str(first_anonymous).lower()}\n"
-            "max_connections 4\n"
+            f"allow_zero_length_clientid {str(first_allow_zero).lower()}\n"
+            f"listener_auto_id_prefix {first_prefix}\n"
+            "max_connections 6\n"
             f"listener {second_listener_port} 127.0.0.1\n"
             f"password_file {password_file}\n"
             f"allow_anonymous {str(second_anonymous).lower()}\n"
-            "max_connections 4\n"
+            f"allow_zero_length_clientid {str(second_allow_zero).lower()}\n"
+            f"listener_auto_id_prefix {second_prefix}\n"
+            "max_connections 6\n"
         )
 
     def connect(
@@ -2536,6 +2544,41 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             )
         return client
 
+    def connect_zero(
+        port: int,
+        label: str,
+        expected_reason: int,
+        expected_prefix: str | None = None,
+        proto_ver: int = 5,
+    ) -> socket.socket:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        client.sendall(
+            connect_packet(
+                "",
+                username="stable",
+                password="password",
+                proto_ver=proto_ver,
+            )
+        )
+        connack = read_mqtt_packet(client)
+        reason = connack_reason(connack)
+        if reason != expected_reason:
+            client.close()
+            raise AssertionError(
+                f"listener policy reload {label} expected "
+                f"{expected_reason:#x}, received {reason:#x}"
+            )
+        if expected_prefix is not None:
+            assigned = assigned_client_identifier(connack)
+            if not assigned.startswith(expected_prefix):
+                client.close()
+                raise AssertionError(
+                    f"listener policy reload {label} assigned {assigned!r}, "
+                    f"expected prefix {expected_prefix!r}"
+                )
+        return client
+
     write_config(True, False)
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
@@ -2545,7 +2588,7 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 2 listeners for 8 clients" not in ready:
+    if "configured 2 listeners for 12 clients" not in ready:
         raise RuntimeError(f"listener policy reload broker failed: {ready}")
     read_listener_lines(process, 2, "listener policy reload startup")
 
@@ -2555,8 +2598,28 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         clients.append(existing)
         rejected = connect(second_port, "listener-policy-initial-rejected", 0x87)
         rejected.close()
+        rejected = connect_zero(
+            first_port,
+            "listener-policy-initial-zero-rejected",
+            0x80,
+        )
+        rejected.close()
+        initial_zero = connect_zero(
+            second_port,
+            "listener-policy-initial-zero-accepted",
+            0,
+            "initial-second-",
+        )
+        clients.append(initial_zero)
 
-        write_config(False, True)
+        write_config(
+            False,
+            True,
+            first_allow_zero=True,
+            first_prefix="reloaded-first-",
+            second_allow_zero=False,
+            second_prefix="reloaded-second-",
+        )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -2576,11 +2639,46 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             password="password",
         )
         clients.append(authenticated)
+        reloaded_zero = connect_zero(
+            first_port,
+            "listener-policy-reloaded-zero-accepted",
+            0,
+            "reloaded-first-",
+        )
+        clients.append(reloaded_zero)
+        rejected = connect_zero(
+            second_port,
+            "listener-policy-reloaded-zero-rejected",
+            0x80,
+        )
+        rejected.close()
+        reloaded_v311 = connect_zero(
+            first_port,
+            "listener-policy-reloaded-v311-zero-accepted",
+            0,
+            proto_ver=4,
+        )
+        clients.append(reloaded_v311)
+        rejected = connect_zero(
+            second_port,
+            "listener-policy-reloaded-v311-zero-rejected",
+            0x02,
+            proto_ver=4,
+        )
+        rejected.close()
 
         invalid_port = free_port()
         while invalid_port in (first_port, second_port):
             invalid_port = free_port()
-        write_config(False, False, invalid_port)
+        write_config(
+            False,
+            False,
+            invalid_port,
+            first_allow_zero=True,
+            first_prefix="reloaded-first-",
+            second_allow_zero=False,
+            second_prefix="reloaded-second-",
+        )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3599,11 +3697,26 @@ def run_autosave_reload_case(broker: Path, directory: Path) -> None:
     listener = restored.stdout.readline().strip()
     if not listener.startswith("mqtt "):
         raise RuntimeError(f"autosave reload restore listener missing: {listener}")
-    subscriber = socket.create_connection(("127.0.0.1", port), timeout=5)
-    subscriber.settimeout(5)
+    deadline = time.monotonic() + 5
+    while True:
+        subscriber: socket.socket | None = None
+        try:
+            subscriber = socket.create_connection(
+                ("127.0.0.1", port),
+                timeout=5,
+            )
+            subscriber.settimeout(5)
+            subscriber.sendall(connect_packet("autosave-reload-restored"))
+            restored_connack = read_mqtt_packet(subscriber)
+            break
+        except (ConnectionError, EOFError, socket.timeout):
+            if subscriber is not None:
+                subscriber.close()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
     try:
-        subscriber.sendall(connect_packet("autosave-reload-restored"))
-        if connack_reason(read_mqtt_packet(subscriber)) != 0:
+        if connack_reason(restored_connack) != 0:
             raise AssertionError("autosave reload restore CONNECT failed")
         subscriber.sendall(subscribe_packet(1, retained_topic))
         if read_mqtt_packet(subscriber) != bytes.fromhex("900400010000"):
@@ -5889,7 +6002,8 @@ def main() -> None:
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
         "atomic password/ACL with selective live credential revocation and "
         "TLS/WSS identity/key-password/CA/CRL "
-        "plus per-listener anonymous admission SIGHUP reload with topology rollback, "
+        "plus per-listener anonymous/zero-ID/assigned-prefix admission SIGHUP "
+        "reload with topology rollback, "
         "dynamic time/change/disabled autosave SIGHUP reload with fixed-target "
         "rollback, disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME
