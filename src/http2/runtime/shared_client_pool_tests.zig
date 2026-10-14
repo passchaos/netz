@@ -64,6 +64,25 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
             for (&requests) |*request| {
                 try std.testing.expectEqualStrings("POST", request.method);
                 try std.testing.expectEqual(@as(usize, 32 * 1024), request.body_bytes);
+                const expected_trailer: []const u8 = if (std.mem.eql(
+                    u8,
+                    request.path,
+                    "/one",
+                ))
+                    "one"
+                else if (std.mem.eql(u8, request.path, "/two"))
+                    "two"
+                else if (std.mem.eql(u8, request.path, "/three"))
+                    "three"
+                else
+                    return error.InvalidRequest;
+                try std.testing.expectEqualStrings(
+                    expected_trailer,
+                    findHeader(
+                        request.trailers,
+                        "x-shared-request-finished",
+                    ).?,
+                );
             }
             for (body_context.counts) |count| {
                 try std.testing.expectEqual(@as(usize, 32 * 1024), count);
@@ -130,17 +149,38 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
         .{
             .sender = sender.clone(),
             .uri = first_uri,
-            .request = .{ .method = "POST", .body = &first_body },
+            .request = .{
+                .method = "POST",
+                .body = &first_body,
+                .trailers = &.{.{
+                    .name = "x-shared-request-finished",
+                    .value = "one",
+                }},
+            },
         },
         .{
             .sender = sender.clone(),
             .uri = second_uri,
-            .request = .{ .method = "POST", .body = &second_body },
+            .request = .{
+                .method = "POST",
+                .body = &second_body,
+                .trailers = &.{.{
+                    .name = "x-shared-request-finished",
+                    .value = "two",
+                }},
+            },
         },
         .{
             .sender = sender.clone(),
             .uri = third_uri,
-            .request = .{ .method = "POST", .body = &third_body },
+            .request = .{
+                .method = "POST",
+                .body = &third_body,
+                .trailers = &.{.{
+                    .name = "x-shared-request-finished",
+                    .value = "three",
+                }},
+            },
         },
     };
     var threads: [producers.len]std.Thread = undefined;

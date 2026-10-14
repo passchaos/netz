@@ -4,8 +4,8 @@
 //! driver is the only task allowed to touch the underlying pool. Compatible
 //! requests without individual deadlines are coalesced into the pool's
 //! multiplexed URI batch. Bodyful batches use its full-duplex flow-control
-//! pump; independently bounded requests execute alone so one caller cannot
-//! cancel sibling streams.
+//! pump and terminal request-trailer path; independently bounded requests
+//! execute alone so one caller cannot cancel sibling streams.
 
 const std = @import("std");
 const batch = @import("batch.zig");
@@ -447,8 +447,7 @@ pub fn Dispatcher(comptime PoolType: type) type {
         }
 
         fn batchEligible(command: *const Command) bool {
-            return command.deadline == null and
-                command.request.trailers.len == 0;
+            return command.deadline == null;
         }
 
         fn sameOrigin(lhs_text: []const u8, rhs_text: []const u8) bool {

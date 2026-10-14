@@ -3,13 +3,15 @@
 //! This is the synchronous execution core for a future cloneable-sender
 //! driver: one lease submits all request HEADERS before reading. Bodyless
 //! batches use the transactional HEADERS path; body-bearing batches use the
-//! runtime's full-duplex round-robin upload/response pump.
+//! runtime's full-duplex round-robin upload/response pump, with terminal
+//! request trailers committed through a distinct HPACK transaction.
 
 const std = @import("std");
 const deadline_policy = @import("../../internal/deadline.zig");
 const http_method = @import("../../internal/http_method.zig");
 const http1_runtime = @import("../../http1/runtime.zig");
 const runtime = @import("../runtime.zig");
+const header_message = @import("../runtime/headers/message.zig");
 
 pub const UriRequest = struct {
     uri: []const u8,
@@ -67,12 +69,15 @@ fn requestUriBatchBefore(
 ) !void {
     if (requests.len != responses.len) return error.InvalidResponse;
     if (requests.len == 0) return;
-    var has_body = false;
+    var has_body_or_trailers = false;
     for (requests) |item| {
-        if (item.request.trailers.len != 0) {
-            return error.InvalidContentLength;
-        }
-        has_body = has_body or item.request.body.len != 0;
+        try header_message.validateHeaderBlock(
+            item.request.trailers,
+            .request_trailers,
+        );
+        has_body_or_trailers = has_body_or_trailers or
+            item.request.body.len != 0 or
+            item.request.trailers.len != 0;
     }
 
     const first_uri = std.Uri.parse(requests[0].uri) catch
@@ -150,7 +155,7 @@ fn requestUriBatchBefore(
         else
             try pool.acquireUri(requests[0].uri);
         defer if (lease.active) lease.discard();
-        const result = if (has_body)
+        const result = if (has_body_or_trailers)
             if (deadline) |absolute|
                 lease.connection().requestBodyBatchIntoWithDeadline(
                     native_requests,

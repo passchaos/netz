@@ -432,17 +432,38 @@ fn runPoolInterop(
         .{
             .sender = sender.clone(),
             .uri = shared_one_uri,
-            .request = .{ .method = "POST", .body = "shared-body-one" },
+            .request = .{
+                .method = "POST",
+                .body = "shared-body-one",
+                .trailers = &.{.{
+                    .name = "x-shared-request-finished",
+                    .value = "one",
+                }},
+            },
         },
         .{
             .sender = sender.clone(),
             .uri = shared_two_uri,
-            .request = .{ .method = "POST", .body = "shared-body-two" },
+            .request = .{
+                .method = "POST",
+                .body = "shared-body-two",
+                .trailers = &.{.{
+                    .name = "x-shared-request-finished",
+                    .value = "two",
+                }},
+            },
         },
         .{
             .sender = sender.clone(),
             .uri = shared_three_uri,
-            .request = .{ .method = "POST", .body = "shared-body-three" },
+            .request = .{
+                .method = "POST",
+                .body = "shared-body-three",
+                .trailers = &.{.{
+                    .name = "x-shared-request-finished",
+                    .value = "three",
+                }},
+            },
         },
     };
     var producer_threads: [producers.len]std.Thread = undefined;

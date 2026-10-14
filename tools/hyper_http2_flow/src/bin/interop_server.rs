@@ -340,7 +340,7 @@ async fn handle(
             .boxed(),
         ));
     }
-    if let Some((path, expected_body, response_body)) = request
+    if let Some((path, expected_body, expected_trailer, response_body)) = request
         .uri()
         .path_and_query()
         .map(|value| value.as_str())
@@ -348,16 +348,19 @@ async fn handle(
             "/pool-shared-one?from=netz" => Some((
                 path,
                 b"shared-body-one".as_slice(),
+                "one",
                 Bytes::from_static(b"pool-shared-one"),
             )),
             "/pool-shared-two?from=netz" => Some((
                 path,
                 b"shared-body-two".as_slice(),
+                "two",
                 Bytes::from_static(b"pool-shared-two"),
             )),
             "/pool-shared-three?from=netz" => Some((
                 path,
                 b"shared-body-three".as_slice(),
+                "three",
                 Bytes::from_static(b"pool-shared-three"),
             )),
             _ => None,
@@ -369,6 +372,17 @@ async fn handle(
             .collect()
             .await
             .map_err(io::Error::other)?;
+        if collected
+            .trailers()
+            .and_then(|trailers| trailers.get("x-shared-request-finished"))
+            .and_then(|value| value.to_str().ok())
+            != Some(expected_trailer)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 shared sender trailers",
+            ));
+        }
         if collected.to_bytes() != expected_body {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

@@ -5350,7 +5350,9 @@ pub const Connection = struct {
     /// Send a body-bearing batch with one connection-owned full-duplex pump.
     /// Request DATA advances round-robin across streams. When every unfinished
     /// body is flow-controlled, the same owner processes WINDOW_UPDATE and
-    /// early response frames before resuming the exact unsent suffix.
+    /// early response frames before resuming the exact unsent suffix. Optional
+    /// request trailers are staged under a second HPACK transaction and carry
+    /// END_STREAM only after every body byte is committed.
     /// `body_chunk_size` preserves the caller's application contribution size
     /// while HTTP/2 frame splitting still obeys the negotiated maximum.
     pub fn requestBodyBatchInto(
@@ -5673,12 +5675,17 @@ pub const Connection = struct {
         }
 
         for (requests) |request_options| {
-            if (request_options.trailers.len != 0) {
-                return error.InvalidContentLength;
-            }
             if (methodIsConnect(request_options.method)) {
                 return error.InvalidHeader;
             }
+            try validateHeaderBlock(
+                request_options.trailers,
+                .request_trailers,
+            );
+            try validateHeaderListSize(
+                request_options.trailers,
+                self.peer_max_header_list_size,
+            );
         }
 
         var states_stack: [16]BatchResponseState = undefined;
@@ -5691,6 +5698,8 @@ pub const Connection = struct {
         };
         const batch = &self.write_batch;
         batch.clearRetainingCapacity();
+        var trailer_batch: std.ArrayList(u8) = .empty;
+        defer trailer_batch.deinit(self.allocator);
         const original_next_stream_id = self.next_client_stream_id;
         const staged_encoder = try self.prepareStagedHpackEncoder();
         var started: usize = 0;
@@ -5739,7 +5748,8 @@ pub const Connection = struct {
                 .stream_id = pending.stream_id,
                 .request_method = pending.request_method,
                 .extended_connect = pending.extended_connect,
-                .request_done = request_options.body.len == 0,
+                .request_done = request_options.body.len == 0 and
+                    request_options.trailers.len == 0,
             };
             started += 1;
         }
@@ -5773,6 +5783,7 @@ pub const Connection = struct {
             view.* = .{
                 .stream_id = state.stream_id,
                 .body = request_options.body,
+                .ends_with_trailers = request_options.trailers.len != 0,
             };
         }
         try self.prepareBodyBatchData(views, body_chunk_size);
@@ -5797,6 +5808,22 @@ pub const Connection = struct {
         responses_pending = true;
         self.serve_read_connection_error = null;
         self.serve_read_stream_error = null;
+        // Stage terminal trailer blocks only after the initial HEADERS state
+        // is committed. An upload/reset failure before trailers are written
+        // can then reuse the connection without advancing local HPACK beyond
+        // the peer. The trailer stage is committed only after its wire write.
+        if (hasRequestTrailers(requests)) {
+            const trailer_encoder = try self.prepareStagedHpackEncoder();
+            for (requests, states) |request_options, state| {
+                if (request_options.trailers.len == 0) continue;
+                try self.appendRequestTrailersToBatch(
+                    state.stream_id,
+                    request_options.trailers,
+                    &trailer_batch,
+                    trailer_encoder,
+                );
+            }
+        }
         try self.writeRequestBodyBatchDataUntil(
             streaming_response,
             views,
@@ -5809,6 +5836,13 @@ pub const Connection = struct {
             &read_timed_out,
             context,
             consume,
+        );
+        try self.writeRequestBodyBatchTrailersUntil(
+            requests,
+            states,
+            trailer_batch.items,
+            deadline,
+            &read_timed_out,
         );
 
         if (streaming_response) {
@@ -5947,7 +5981,8 @@ pub const Connection = struct {
             self.allocator,
             stream_id,
             block,
-            request_options.body.len == 0,
+            request_options.body.len == 0 and
+                request_options.trailers.len == 0,
             self.outboundFramePayloadLimit(),
         );
         return .{
@@ -5955,6 +5990,67 @@ pub const Connection = struct {
             .request_method = request_options.method,
             .extended_connect = false,
         };
+    }
+
+    fn appendRequestTrailersToBatch(
+        self: *Connection,
+        stream_id: u31,
+        trailers: []const http2.Hpack.HeaderField,
+        batch: *std.ArrayList(u8),
+        encoder: *http2.Hpack.Encoder,
+    ) Error!void {
+        std.debug.assert(trailers.len != 0);
+        const block = try encoder.encodeBlockRetained(
+            self.allocator,
+            trailers,
+        );
+        try appendHeaderBlockBytes(
+            batch,
+            self.allocator,
+            stream_id,
+            block,
+            true,
+            self.outboundFramePayloadLimit(),
+        );
+    }
+
+    fn writeRequestBodyBatchTrailersUntil(
+        self: *Connection,
+        requests: []const RequestOptions,
+        states: []BatchResponseState,
+        trailer_bytes: []const u8,
+        deadline: ?std.Io.Clock.Timestamp,
+        read_timed_out: *bool,
+    ) !void {
+        if (trailer_bytes.len == 0) return;
+        if (deadline) |absolute| {
+            _ = deadline_policy.usableAwake(
+                self.io,
+                absolute,
+            ) catch |err| {
+                read_timed_out.* = err == error.Timeout;
+                return err;
+            };
+        }
+        self.transportForIo().writeAll(trailer_bytes) catch |err| {
+            // A partial wide write cannot identify which terminal HEADERS
+            // reached the peer, so the connection must not be reused.
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        self.commitStagedHpackEncoder();
+        for (requests, states) |request_options, *state| {
+            if (request_options.trailers.len != 0) {
+                state.request_done = true;
+            }
+        }
+    }
+
+    fn hasRequestTrailers(requests: []const RequestOptions) bool {
+        for (requests) |request_options| {
+            if (request_options.trailers.len != 0) return true;
+        }
+        return false;
     }
 
     fn writeRequestBodyBatchDataUntil(
@@ -6057,7 +6153,7 @@ pub const Connection = struct {
                     bytes,
                 | {
                     if (bytes != 0 and offset == view.body.len) {
-                        state.request_done = true;
+                        state.request_done = !view.ends_with_trailers;
                     }
                 }
                 continue;
@@ -6334,6 +6430,7 @@ pub const Connection = struct {
     const BatchDataView = struct {
         stream_id: u31,
         body: []const u8,
+        ends_with_trailers: bool = false,
     };
 
     fn responseBatchSelection(
@@ -10664,7 +10761,10 @@ pub const Connection = struct {
             try encodeFrameHeader(
                 &self.batch_data_headers.items[header_index],
                 .data,
-                if (end == view.body.len) flag_end_stream else 0,
+                if (end == view.body.len and !view.ends_with_trailers)
+                    flag_end_stream
+                else
+                    0,
                 view.stream_id,
                 end - offset.*,
             );

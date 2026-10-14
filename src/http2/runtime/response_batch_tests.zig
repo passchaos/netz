@@ -351,12 +351,12 @@ test "HTTP/2 streaming response batch deadline covers continuation" {
     if (shared.err) |err| return err;
 }
 
-test "HTTP/2 request body batch streams interleaved responses" {
+test "HTTP/2 request body batch streams interleaved responses and trailers" {
     const allocator = std.testing.allocator;
     const request_body = "request-batch-" ** 256;
     const response_body = "response-batch-" ** 512;
     const parallel = 3;
-    const total_request_bytes = request_body.len * parallel;
+    const total_request_bytes = request_body.len * (parallel - 1);
     const total_response_bytes = response_body.len * parallel;
     const limits: Limits = .{
         .max_body_bytes = @max(request_body.len, response_body.len),
@@ -413,9 +413,29 @@ test "HTTP/2 request body batch streams interleaved responses" {
             defer for (&requests) |*request| {
                 request.deinit(self.server.allocator);
             };
-            for (requests, self.request_bytes) |request, bytes| {
-                try std.testing.expectEqual(request_body.len, request.body_bytes);
-                try std.testing.expectEqual(request_body.len, bytes);
+            const expected_request_bytes = [_]usize{
+                request_body.len,
+                request_body.len,
+                0,
+            };
+            const expected_trailers = [_][]const u8{ "one", "two", "three" };
+            for (requests, self.request_bytes, expected_request_bytes, expected_trailers) |
+                request,
+                bytes,
+                expected_bytes,
+                expected_trailer,
+            | {
+                try std.testing.expectEqual(expected_bytes, request.body_bytes);
+                try std.testing.expectEqual(expected_bytes, bytes);
+                try std.testing.expectEqual(@as(usize, 1), request.trailers.len);
+                try std.testing.expectEqualStrings(
+                    "x-request-finished",
+                    request.trailers[0].name,
+                );
+                try std.testing.expectEqualStrings(
+                    expected_trailer,
+                    request.trailers[0].value,
+                );
             }
             var stream_ids: [parallel]u31 = undefined;
             var responses: [parallel]ResponseOptions = undefined;
@@ -448,18 +468,29 @@ test "HTTP/2 request body batch streams interleaved responses" {
             .path = "/one",
             .authority = "localhost",
             .body = request_body,
+            .trailers = &.{.{
+                .name = "x-request-finished",
+                .value = "one",
+            }},
         },
         .{
             .method = "POST",
             .path = "/two",
             .authority = "localhost",
             .body = request_body,
+            .trailers = &.{.{
+                .name = "x-request-finished",
+                .value = "two",
+            }},
         },
         .{
             .method = "POST",
             .path = "/three",
             .authority = "localhost",
-            .body = request_body,
+            .trailers = &.{.{
+                .name = "x-request-finished",
+                .value = "three",
+            }},
         },
     };
     var responses: [parallel]StreamingResponse = undefined;
@@ -487,6 +518,100 @@ test "HTTP/2 request body batch streams interleaved responses" {
         try std.testing.expectEqual(response_body.len, bytes);
     }
     try std.testing.expect(client.isReusable());
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 request body batch rolls back unsent trailer HPACK after reset" {
+    const allocator = std.testing.allocator;
+    const request_body = [_]u8{'x'} ** (16 * 1024);
+    const limits: Limits = .{
+        .max_body_bytes = request_body.len,
+        .initial_window_size = 4096,
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var reset = try connection.acceptDuplexRequest();
+            defer reset.deinit();
+            try std.testing.expectEqualStrings("/reset-before-trailers", reset.path);
+            try reset.reset(.cancel);
+
+            var after = try connection.readRequest();
+            defer after.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/after-reset", after.path);
+            try std.testing.expectEqualStrings(
+                "marker",
+                runtime.testing.findHeader(
+                    after.headers,
+                    "x-unsent-trailer",
+                ).?,
+            );
+            try connection.writeResponse(after.stream_id, .{ .body = "reused" });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    var responses: [1]runtime.OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.StreamReset,
+        client.requestBodyBatchInto(
+            &.{.{
+                .method = "POST",
+                .path = "/reset-before-trailers",
+                .authority = "localhost",
+                .body = &request_body,
+                .trailers = &.{.{
+                    .name = "x-unsent-trailer",
+                    .value = "marker",
+                }},
+            }},
+            4096,
+            &responses,
+        ),
+    );
+    try std.testing.expect(client.isReusable());
+
+    var after = try client.request(.{
+        .path = "/after-reset",
+        .authority = "localhost",
+        .headers = &.{.{
+            .name = "x-unsent-trailer",
+            .value = "marker",
+        }},
+    });
+    defer after.deinit(allocator);
+    try std.testing.expectEqualStrings("reused", after.body);
 
     thread.join();
     if (shared.err) |err| return err;

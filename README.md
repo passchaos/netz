@@ -395,13 +395,15 @@ Current protocol coverage includes:
   use bounded stack storage with exact fallbacks, all HEADERS are submitted
   through one lease before response reads, body-bearing batches round-robin
   DATA through connection/stream flow control while retaining early sibling
-  responses, out-of-order streams map back to caller order, one absolute
+  responses and then commit terminal request trailers under a separate HPACK
+  transaction, out-of-order streams map back to caller order, one absolute
   deadline spans admission and the complete batch, and a stale reused
   connection is retried only when every method is idempotent.
   `SharedDispatcher` adds Hyper-shaped execution ownership: one driver is the
   sole pool/frame reader, cloneable `SharedSender` handles feed a bounded
   queue, and compatible concurrent commands without individual deadlines are
-  coalesced into the same URI-batch core, including full-duplex body uploads.
+  coalesced into the same URI-batch core, including full-duplex body uploads
+  and request trailers.
   Per-command deadline/cancel paths unlink queued stack commands safely, queue
   overflow is explicit, and close wakes every producer; individually bounded
   requests execute alone so one caller cannot cancel sibling streams,
@@ -1528,9 +1530,10 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Both netz HTTP/1 endpoints obtain std.Io from zio; the gate asserts
 # zio-std-io versus the audited Hyper fixture's hyper-tokio runtime identity.
 # Build the locked local Hyper reference offline, then verify POST headers,
-# multi-frame bodies/trailers, body-bearing cloneable shared senders, and
-# bidirectional cancellation of a 128-KiB response at an 8-KiB stream window
-# while a concurrent sibling completes on the same connection.
+# multi-frame bodies/trailers, body-bearing cloneable shared senders with
+# terminal request trailers, and bidirectional cancellation of a 128-KiB
+# response at an 8-KiB stream window while a concurrent sibling completes on
+# the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Negotiate `http/1.1` and `h2` with independent Hyper/rustls servers through
 # the same high-level authority pool, then prove one miss plus one reuse on each
