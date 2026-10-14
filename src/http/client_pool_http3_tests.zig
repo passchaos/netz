@@ -209,7 +209,7 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
     try std.testing.expectEqual(@as(usize, 2), h3_worker.requests);
 }
 
-test "unified HTTP pool global budget reclaims idle TCP for HTTP3" {
+test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -234,6 +234,13 @@ test "unified HTTP pool global budget reclaims idle TCP for HTTP3" {
         .{ .identity = identity, .alpn_protocols = &.{"http/1.1"} },
     );
     defer tcp_server.deinit();
+    var return_server = try http1_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = identity, .alpn_protocols = &.{"http/1.1"} },
+    );
+    defer return_server.deinit();
     const h3_limits: http3_runtime.Limits = .{ .quic = .{
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
@@ -322,6 +329,33 @@ test "unified HTTP pool global budget reclaims idle TCP for HTTP3" {
             self.requests += 1;
         }
     };
+    const ReturnWorker = struct {
+        server: *http1_runtime.TlsServer,
+        requests: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/returned-tcp",
+                request.request.target,
+            );
+            try connection.writeResponse(.{
+                .body = "returned",
+                .request_method = request.request.method,
+            });
+            self.requests += 1;
+        }
+    };
     var release: std.Io.Event = .unset;
     var worker = Worker{
         .server = &tcp_server,
@@ -347,6 +381,14 @@ test "unified HTTP pool global budget reclaims idle TCP for HTTP3" {
     const h3_thread = try std.Thread.spawn(.{}, H3Worker.run, .{&h3_worker});
     var h3_joined = false;
     defer if (!h3_joined) h3_thread.join();
+    var return_worker = ReturnWorker{ .server = &return_server };
+    const return_thread = try std.Thread.spawn(
+        .{},
+        ReturnWorker.run,
+        .{&return_worker},
+    );
+    var return_joined = false;
+    defer if (!return_joined) return_thread.join();
 
     var pool = try http.Pool.init(allocator, io, .{
         .max_total_connections = 1,
@@ -415,14 +457,39 @@ test "unified HTTP pool global budget reclaims idle TCP for HTTP3" {
     try std.testing.expectEqual(@as(usize, 0), pool.totalWaitingCount());
     try std.testing.expectEqual(@as(u64, 0), pool.altSvcStats().?.failures);
 
+    const return_uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/returned-tcp",
+        .{return_server.address().ip4.port},
+    );
+    defer allocator.free(return_uri);
+    var returned = try pool.requestUriWithTimeout(
+        return_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer returned.deinit();
+    try std.testing.expectEqual(http.Protocol.http1, returned.protocol());
+    try std.testing.expectEqualStrings("returned", returned.body());
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.http3ConnectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.http3IdleCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.totalConnectionCount());
+    try std.testing.expectEqual(@as(usize, 0), pool.totalWaitingCount());
+
     release.set(io);
     thread.join();
     joined = true;
     h3_thread.join();
     h3_joined = true;
+    return_thread.join();
+    return_joined = true;
     if (worker.err) |err| return err;
     if (h3_worker.err) |err| return err;
+    if (return_worker.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), h3_worker.requests);
+    try std.testing.expectEqual(@as(usize, 1), return_worker.requests);
 }
 
 test "unified HTTP pool backs off failed HTTP3 and preserves TCP reuse" {

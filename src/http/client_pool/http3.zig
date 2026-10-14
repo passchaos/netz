@@ -67,6 +67,10 @@ pub const State = struct {
         self.cache.clear();
     }
 
+    pub fn evictOldestIdle(self: *State) bool {
+        return self.pool.evictOldestIdle();
+    }
+
     pub fn request(
         self: *State,
         uri_text: []const u8,

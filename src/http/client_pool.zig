@@ -174,23 +174,33 @@ pub const Pool = struct {
         var key = try originKeyForUri(self.allocator, uri_text);
         var key_owned = true;
         defer if (key_owned) key.deinit();
-        var blocked_on_shared = false;
-        return self.acquireMaybeBefore(
-            uri_text,
-            &key,
-            &key_owned,
-            null,
-            null,
-            &blocked_on_shared,
-            null,
-            isolate_origin_state,
-        ) catch |err| switch (err) {
-            error.Timeout,
-            error.Canceled,
-            error.ConcurrencyUnavailable,
-            => unreachable,
-            else => |other| return @errorCast(other),
-        };
+        while (true) {
+            var blocked_on_shared = false;
+            return self.acquireMaybeBefore(
+                uri_text,
+                &key,
+                &key_owned,
+                null,
+                null,
+                &blocked_on_shared,
+                null,
+                isolate_origin_state,
+            ) catch |err| switch (err) {
+                error.ConnectionLimitReached => {
+                    if (blocked_on_shared and
+                        self.reclaimHttp3IdleIfEligible(null))
+                    {
+                        continue;
+                    }
+                    return error.ConnectionLimitReached;
+                },
+                error.Timeout,
+                error.Canceled,
+                error.ConcurrencyUnavailable,
+                => unreachable,
+                else => |other| return @errorCast(other),
+            };
+        }
     }
 
     pub fn acquireUriWithTimeout(
@@ -244,6 +254,11 @@ pub const Pool = struct {
                 isolate_origin_state,
             ) catch |err| switch (err) {
                 error.ConnectionLimitReached => {
+                    if (blocked_on_shared and
+                        self.reclaimHttp3IdleIfEligible(&shared_waiter))
+                    {
+                        continue;
+                    }
                     const blocked_waiter = if (blocked_on_shared)
                         &shared_waiter
                     else
@@ -662,6 +677,15 @@ pub const Pool = struct {
         connection.close();
         self.shared_budget.release(1);
         return true;
+    }
+
+    fn reclaimHttp3IdleIfEligible(
+        self: *Pool,
+        waiter: ?*connection_budget.Waiter,
+    ) bool {
+        if (!self.shared_budget.mayReclaimFor(waiter)) return false;
+        const state = self.http3 orelse return false;
+        return state.evictOldestIdle();
     }
 };
 

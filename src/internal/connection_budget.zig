@@ -168,6 +168,16 @@ pub const Budget = struct {
         return self.waiters.count();
     }
 
+    /// Return whether this caller currently owns the FIFO right to replace an
+    /// idle connection while the total budget is full. No reservation changes.
+    pub fn mayReclaimFor(self: *Budget, waiter: ?*const Waiter) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return !self.closed and self.limit != 0 and
+            self.connections >= self.limit and
+            self.waiters.mayAttempt(waiter);
+    }
+
     fn hasCapacityLocked(self: *const Budget) bool {
         return self.closed or self.limit == 0 or self.connections < self.limit;
     }
@@ -219,6 +229,9 @@ test "shared connection budget preserves FIFO across independent pools" {
         budget.tryReserve(&second),
     );
     try std.testing.expectEqual(@as(usize, 2), budget.waitingCount());
+    try std.testing.expect(budget.mayReclaimFor(&first));
+    try std.testing.expect(!budget.mayReclaimFor(&second));
+    try std.testing.expect(!budget.mayReclaimFor(null));
 
     budget.release(1);
     try std.testing.expect(first.isNotified());

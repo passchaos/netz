@@ -1199,13 +1199,16 @@ expiry, or close. A shared allocation-free FIFO carries the original absolute
 deadline, pool close wakes both local and global waiters, and
 `totalConnectionCount` / `totalWaitingCount` expose exact aggregate state. A
 new H3 connection that finds the budget full may additionally retire the oldest
-idle TCP entry and atomically reuse its capacity; the callback runs without the
-budget mutex and the one-way H3-to-TCP lock order avoids a cross-pool cycle. A
-real TLS/QUIC regression holds the sole budget slot in the discovery TCP
-connection, migrates the next Alt-Svc request to H3 under the same cap of one,
-and verifies TCP count zero plus H3/aggregate count one without poisoning
-failure backoff. Independent H3-pool coverage verifies ordinary FIFO waiter
-cleanup when no reclaimable TCP entry exists.
+idle TCP entry and atomically reuse its capacity; a later TCP origin can
+symmetrically retire the oldest idle H3 entry. Reclaim callbacks run without the
+budget mutex, and the TCP-to-H3 direction drops the TCP mutex before checking
+that it still owns the shared FIFO head, avoiding a cross-pool lock cycle or
+late-caller barging. A real TLS/QUIC regression holds the sole budget slot in
+the discovery TCP connection, migrates the next Alt-Svc request to H3, then
+migrates back to a second TLS/TCP origin under the same cap of one. Each stage
+verifies the inactive backend count is zero, the active/aggregate counts are
+one, and failure backoff remains clean. Independent H3-pool coverage verifies
+ordinary FIFO waiter cleanup when no reclaimable peer entry exists.
 Cross-origin pooled redirects now also isolate caller-provided resumption
 inputs rather than relying only on cache keys: TCP acquisition clears explicit
 TLS 1.2/1.3 tickets, while Alt-Svc H3 requires a redirect-aware connector and

@@ -1411,6 +1411,30 @@ pub fn Pool(comptime Runtime: type) type {
             return self.pruneExpiredLocked();
         }
 
+        /// Retire the oldest idle client so another transport can reuse one
+        /// shared-budget token. Active leases and connection attempts are never
+        /// eligible.
+        pub fn evictOldestIdle(self: *Self) bool {
+            self.mutex.lockUncancelable(self.io);
+            if (self.closed) {
+                self.mutex.unlock(self.io);
+                return false;
+            }
+            const client_value = self.idle.takeOldest() orelse {
+                self.mutex.unlock(self.io);
+                return false;
+            };
+            std.debug.assert(self.connections != 0);
+            self.connections -= 1;
+            self.notifyCapacityWaiterLocked();
+            self.mutex.unlock(self.io);
+
+            var client = client_value;
+            client.deinit();
+            self.releaseShared(1);
+            return true;
+        }
+
         fn release(
             self: *Self,
             client_value: Client,
