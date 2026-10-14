@@ -10,6 +10,8 @@ const RequestOptions = runtime.RequestOptions;
 const ResponseOptions = runtime.ResponseOptions;
 const Server = runtime.Server;
 const StreamingResponse = runtime.StreamingResponse;
+const flag_end_stream: u8 = 0x1;
+const flag_end_headers: u8 = 0x4;
 
 test "HTTP/2 response body batch streams interleaved DATA" {
     const allocator = std.testing.allocator;
@@ -609,6 +611,181 @@ test "HTTP/2 request body batch rolls back unsent trailer HPACK after reset" {
             .name = "x-unsent-trailer",
             .value = "marker",
         }},
+    });
+    defer after.deinit(allocator);
+    try std.testing.expectEqualStrings("reused", after.body);
+
+    thread.join();
+    if (shared.err) |err| return err;
+}
+
+test "HTTP/2 per-stream batch deadline cancels one response and reuses sibling" {
+    const allocator = std.testing.allocator;
+    const partial_body = [_]u8{'p'} ** (20 * 1024);
+    const sibling_body = [_]u8{'s'} ** (60 * 1024);
+    const limits: Limits = .{
+        .max_body_bytes = sibling_body.len,
+    };
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var timed = try connection.readRequest();
+            defer timed.deinit(self.server.allocator);
+            var sibling = try connection.readRequest();
+            defer sibling.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/timed", timed.path);
+            try std.testing.expectEqualStrings("/sibling", sibling.path);
+
+            try runtime.testing.writeHeaders(
+                &connection,
+                timed.stream_id,
+                &.{
+                    .{ .name = ":status", .value = "200" },
+                    .{ .name = "content-length", .value = "32768" },
+                },
+                false,
+            );
+            try runtime.testing.writeData(
+                &connection,
+                timed.stream_id,
+                &partial_body,
+                false,
+            );
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(2),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(timed.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+
+            // Model response DATA already in flight when CANCEL reached the
+            // peer. The client must discard it and restore connection credit
+            // before consuming the complete sibling response.
+            try runtime.testing.writeRawFrame(
+                &connection,
+                .data,
+                0,
+                timed.stream_id,
+                "late",
+            );
+            var late_trailers: std.ArrayList(u8) = .empty;
+            defer late_trailers.deinit(self.server.allocator);
+            try connection.hpack_encoder.encodeBlock(
+                &late_trailers,
+                self.server.allocator,
+                &.{.{ .name = "x-late-dynamic", .value = "marker" }},
+            );
+            try runtime.testing.writeRawFrame(
+                &connection,
+                .headers,
+                flag_end_headers | flag_end_stream,
+                timed.stream_id,
+                late_trailers.items,
+            );
+            try connection.writeResponse(sibling.stream_id, .{
+                .headers = &.{.{
+                    .name = "x-late-dynamic",
+                    .value = "marker",
+                }},
+                .body = &sibling_body,
+            });
+
+            var after = try connection.readRequest();
+            defer after.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/after", after.path);
+            try connection.writeResponse(after.stream_id, .{ .body = "reused" });
+        }
+    };
+
+    const ResultSlot = struct {
+        response: ?runtime.OwnedResponse = null,
+        err: ?anyerror = null,
+    };
+    const ResultContext = struct {
+        slots: [2]ResultSlot = .{ .{}, .{} },
+
+        fn observe(
+            raw_context: *anyopaque,
+            index: usize,
+            result: runtime.BatchOwnedResponseResult,
+        ) void {
+            const self: *@This() = @ptrCast(@alignCast(raw_context));
+            switch (result) {
+                .response => |response| self.slots[index].response = response,
+                .err => |err| self.slots[index].err = err,
+            }
+        }
+    };
+
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var client = try Client.connect(
+        allocator,
+        io,
+        server.address(),
+        limits,
+    );
+    defer client.close();
+    const requests = [_]RequestOptions{
+        .{ .path = "/timed", .authority = "localhost" },
+        .{ .path = "/sibling", .authority = "localhost" },
+    };
+    const deadlines = [_]?std.Io.Clock.Timestamp{
+        .fromNow(io, .{ .raw = .fromMilliseconds(100), .clock = .awake }),
+        .fromNow(io, .{ .raw = .fromSeconds(2), .clock = .awake }),
+    };
+    var result_context: ResultContext = .{};
+    try client.requestBatchWithPerStreamDeadlines(
+        &requests,
+        &deadlines,
+        .{
+            .context = &result_context,
+            .on_result = ResultContext.observe,
+        },
+    );
+    try std.testing.expectEqual(error.Timeout, result_context.slots[0].err.?);
+    try std.testing.expect(result_context.slots[0].response == null);
+    try std.testing.expect(result_context.slots[1].err == null);
+    var sibling_response = result_context.slots[1].response.?;
+    defer sibling_response.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &sibling_body, sibling_response.body);
+    try std.testing.expectEqualStrings(
+        "marker",
+        runtime.testing.findHeader(
+            sibling_response.headers,
+            "x-late-dynamic",
+        ).?,
+    );
+    try std.testing.expect(client.isReusable());
+    try std.testing.expectEqual(@as(usize, 0), client.activeLocalStreamCount());
+
+    var after = try client.request(.{
+        .path = "/after",
+        .authority = "localhost",
     });
     defer after.deinit(allocator);
     try std.testing.expectEqualStrings("reused", after.body);

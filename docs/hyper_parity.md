@@ -878,6 +878,14 @@ Reusable implementation changes behind these H2 results:
   correlated by request index and stream ID; the body-bearing and streaming
   batch variants expose the same observer contract, and each stream keeps an
   independent bounded informational-response count;
+- `requestBatchWithPerStreamDeadlines` keeps the same single-reader bodyless
+  multiplexing while delivering each owned response or error through a stable
+  request-index observer. An expired member receives only its own
+  `RST_STREAM(CANCEL)`; already charged connection credit is restored, late
+  DATA is discarded, late HEADERS still update HPACK, and a later-deadline
+  sibling plus a following request reuse the connection. A stalled
+  HEADERS/CONTINUATION chain remains fail-closed because HTTP/2 forbids every
+  sibling frame until that connection-serial block terminates;
 - `requestBodyBatchInto` extends that boundary to DATA. It transactionally
   stages every HPACK block, then sends application-sized DATA contributions
   round-robin without copying payloads. When all unfinished uploads are
@@ -1294,6 +1302,11 @@ regression reuses the connection after an unsent trailer transaction is
 discarded. The Hyper h2c/TLS gate covers ten requests on one connection: three
 explicit batch requests, three independent body-bearing shared senders sharing
 one deadline whose trailers are decoded by Hyper, and the redirect chain.
+The low-level bodyless batch now also has true per-stream deadline/result
+demultiplexing. `SharedSender` still keeps distinct deadlines in separate
+batches until its borrowed stack-command lifetime can be released directly
+from that observer; this preserves the current safety contract rather than
+claiming premature shared-surface parity.
 The exclusive authenticated HTTP/3 pool now exposes the same ordinary,
 detailed, timeout and absolute-deadline redirect family as its one-shot URI
 client. Each intermediate response is complete before its lease is released,

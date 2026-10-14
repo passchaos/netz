@@ -4954,6 +4954,157 @@ pub const Connection = struct {
         );
     }
 
+    /// Send a bodyless batch whose members carry independent absolute
+    /// deadlines. Each expired stream receives RST_STREAM(CANCEL) and reports
+    /// `Timeout` without retiring or cancelling later-deadline siblings.
+    ///
+    /// The observer is invoked exactly once for every request after request
+    /// validation succeeds. Successful response ownership transfers through
+    /// the callback. A connection-level failure is reported to every
+    /// unfinished member and is also returned to the caller. The observer must
+    /// not re-enter this connection before the batch method returns.
+    pub fn requestBatchWithPerStreamDeadlines(
+        self: *Connection,
+        requests: []const RequestOptions,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
+        if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
+        if (self.callback_reader_active) return error.UnexpectedFrame;
+        if (self.role != .client) return error.UnexpectedFrame;
+        if (requests.len != deadlines.len) return error.InvalidResponse;
+        if (requests.len == 0) return;
+        if (self.active_local_streams.items.len != 0) {
+            return error.UnexpectedFrame;
+        }
+        for (requests, deadlines) |request_options, deadline| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+            if (methodIsConnect(request_options.method)) {
+                return error.InvalidHeader;
+            }
+            if (deadline) |absolute| {
+                if (absolute.clock != .awake) return error.Timeout;
+            }
+        }
+
+        var states_stack: [16]BatchResponseState = undefined;
+        const states = if (requests.len <= states_stack.len)
+            states_stack[0..requests.len]
+        else
+            try self.allocator.alloc(BatchResponseState, requests.len);
+        defer if (states.ptr != states_stack[0..].ptr) {
+            self.allocator.free(states);
+        };
+        var controls_stack: [16]IndividualBatchControl = undefined;
+        const controls = if (requests.len <= controls_stack.len)
+            controls_stack[0..requests.len]
+        else
+            try self.allocator.alloc(IndividualBatchControl, requests.len);
+        defer if (controls.ptr != controls_stack[0..].ptr) {
+            self.allocator.free(controls);
+        };
+        var admitted_stack: [16]bool = undefined;
+        const admitted = if (requests.len <= admitted_stack.len)
+            admitted_stack[0..requests.len]
+        else
+            try self.allocator.alloc(bool, requests.len);
+        defer if (admitted.ptr != admitted_stack[0..].ptr) {
+            self.allocator.free(admitted);
+        };
+        @memset(admitted, false);
+
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        const original_next_stream_id = self.next_client_stream_id;
+        const staged_encoder = try self.prepareStagedHpackEncoder();
+        var started: usize = 0;
+        var request_heads_committed = false;
+        errdefer if (!request_heads_committed) {
+            self.next_client_stream_id = original_next_stream_id;
+        };
+        defer for (states[0..started], controls[0..started]) |
+            *state,
+            control,
+        | {
+            if (!control.reported) self.releaseLocalStream(state.stream_id);
+            state.deinit(self.allocator);
+        };
+
+        for (requests, deadlines, 0..) |
+            request_options,
+            deadline,
+            request_index,
+        | {
+            if (deadline) |absolute| {
+                if (absolute.durationFromNow(self.io).raw.nanoseconds <= 0) {
+                    continue;
+                }
+            }
+            const pending = try self.appendBodylessRequestToBatch(
+                request_options,
+                batch,
+                staged_encoder,
+            );
+            states[started] = .{
+                .stream_id = pending.stream_id,
+                .request_method = pending.request_method,
+                .extended_connect = pending.extended_connect,
+            };
+            controls[started] = .{
+                .request_index = request_index,
+                .deadline = deadline,
+            };
+            admitted[request_index] = true;
+            started += 1;
+        }
+
+        for (admitted, 0..) |was_admitted, request_index| {
+            if (!was_admitted) {
+                observer.on_result(
+                    observer.context,
+                    request_index,
+                    .{ .err = error.Timeout },
+                );
+            }
+        }
+        if (started == 0) return;
+
+        self.serve_read_connection_error = null;
+        self.serve_read_stream_error = null;
+        self.transportForIo().writeAll(batch.items) catch |err| {
+            self.commitStagedHpackEncoder();
+            request_heads_committed = true;
+            self.aggregate_timeout_unusable = true;
+            self.reportIndividualBatchError(
+                states[0..started],
+                controls[0..started],
+                observer,
+                err,
+            );
+            return err;
+        };
+        self.commitStagedHpackEncoder();
+        request_heads_committed = true;
+
+        self.readResponseBatchWithPerStreamDeadlines(
+            states[0..started],
+            controls[0..started],
+            observer,
+        ) catch |err| {
+            self.abortIndividualResponseBatch(
+                states[0..started],
+                controls[0..started],
+                observer,
+                err,
+            );
+            return err;
+        };
+    }
+
     /// Aggregate a bodyless response batch while observing each ordered 1xx
     /// head. The callback identifies both the request-array index and HTTP/2
     /// stream, and its header slices remain valid only for that callback.
@@ -6687,6 +6838,324 @@ pub const Connection = struct {
             self.* = undefined;
         }
     };
+
+    const IndividualBatchControl = struct {
+        request_index: usize,
+        deadline: ?std.Io.Clock.Timestamp,
+        reported: bool = false,
+        unreleased_connection_bytes: usize = 0,
+    };
+
+    fn reportIndividualBatchError(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+        err: anyerror,
+    ) void {
+        for (states, controls) |*state, *control| {
+            if (control.reported) continue;
+            state.done = true;
+            state.request_done = true;
+            control.reported = true;
+            self.releaseLocalStream(state.stream_id);
+            self.releasePeerStream(state.stream_id);
+            self.forgetStreamWindows(state.stream_id);
+            observer.on_result(
+                observer.context,
+                control.request_index,
+                .{ .err = err },
+            );
+        }
+    }
+
+    fn abortIndividualResponseBatch(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+        err: anyerror,
+    ) void {
+        var unreleased: usize = 0;
+        for (controls) |control| {
+            if (!control.reported) {
+                unreleased = std.math.add(
+                    usize,
+                    unreleased,
+                    control.unreleased_connection_bytes,
+                ) catch std.math.maxInt(usize);
+            }
+        }
+        if (!self.aggregate_timeout_unusable and unreleased != 0) {
+            self.releaseConnectionCapacity(unreleased) catch {};
+        }
+        if (!self.aggregate_timeout_unusable) {
+            self.writeBatchResponseResets(states) catch {};
+        }
+        self.reportIndividualBatchError(states, controls, observer, err);
+    }
+
+    fn finishIndividualBatchResponse(
+        self: *Connection,
+        state: *BatchResponseState,
+        control: *IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+    ) Error!void {
+        std.debug.assert(state.done);
+        std.debug.assert(!control.reported);
+        state.body_owned = if (state.body_capacity_exact)
+            state.body.toOwnedSliceAssert()
+        else
+            try state.body.toOwnedSlice(self.allocator);
+        const response: OwnedResponse = .{
+            .headers = state.headers.?,
+            .status = state.status.?,
+            .body = state.body_owned.?,
+            .trailers = state.trailers,
+        };
+        state.headers = null;
+        state.body_owned = null;
+        state.trailers = &.{};
+        control.reported = true;
+        self.releaseLocalStream(state.stream_id);
+        observer.on_result(
+            observer.context,
+            control.request_index,
+            .{ .response = response },
+        );
+    }
+
+    fn clearIndividualBatchConnectionCredit(
+        controls: []IndividualBatchControl,
+    ) void {
+        for (controls) |*control| {
+            control.unreleased_connection_bytes = 0;
+        }
+    }
+
+    fn expireIndividualBatchDeadlines(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+    ) Error!bool {
+        const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        var expired_count: usize = 0;
+        var unreleased: usize = 0;
+        for (controls) |control| {
+            if (control.reported) continue;
+            const deadline = control.deadline orelse continue;
+            if (deadline.raw.nanoseconds > now_ns) {
+                continue;
+            }
+            expired_count += 1;
+            unreleased = std.math.add(
+                usize,
+                unreleased,
+                control.unreleased_connection_bytes,
+            ) catch return error.MessageTooLarge;
+        }
+        if (expired_count == 0) return false;
+
+        if (unreleased != 0) {
+            try self.releaseConnectionCapacity(unreleased);
+        }
+        try self.prepareLocallyResetStreams(expired_count);
+        const batch = &self.write_batch;
+        batch.clearRetainingCapacity();
+        for (states, controls) |state, control| {
+            if (control.reported) continue;
+            const deadline = control.deadline orelse continue;
+            if (deadline.raw.nanoseconds > now_ns) {
+                continue;
+            }
+            try http2.ResetStreamPayload.write(
+                batch,
+                self.allocator,
+                state.stream_id,
+                .cancel,
+            );
+        }
+        self.transportForIo().writeAll(batch.items) catch |err| {
+            self.aggregate_timeout_unusable = true;
+            return err;
+        };
+        for (states, controls) |*state, *control| {
+            if (control.reported) continue;
+            const deadline = control.deadline orelse continue;
+            if (deadline.raw.nanoseconds > now_ns) {
+                continue;
+            }
+            control.unreleased_connection_bytes = 0;
+            self.rememberLocallyResetStreamAssumeCapacity(state.stream_id);
+            self.releaseLocalStream(state.stream_id);
+            self.releasePeerStream(state.stream_id);
+            self.forgetStreamWindows(state.stream_id);
+            state.done = true;
+            state.request_done = true;
+            control.reported = true;
+            observer.on_result(
+                observer.context,
+                control.request_index,
+                .{ .err = error.Timeout },
+            );
+        }
+        return true;
+    }
+
+    fn earliestIndividualBatchDeadline(
+        controls: []const IndividualBatchControl,
+    ) ?std.Io.Clock.Timestamp {
+        var earliest: ?std.Io.Clock.Timestamp = null;
+        for (controls) |control| {
+            if (control.reported) continue;
+            earliest = deadline_policy.earlier(earliest, control.deadline);
+        }
+        return earliest;
+    }
+
+    fn readResponseBatchWithPerStreamDeadlines(
+        self: *Connection,
+        states: []BatchResponseState,
+        controls: []IndividualBatchControl,
+        observer: BatchOwnedResponseObserver,
+    ) ResponseTimeoutError!void {
+        while (true) {
+            var unfinished: usize = 0;
+            for (controls) |control| {
+                unfinished += @intFromBool(!control.reported);
+            }
+            if (unfinished == 0) return;
+
+            if (try self.expireIndividualBatchDeadlines(
+                states,
+                controls,
+                observer,
+            )) {
+                continue;
+            }
+            const deadline = earliestIndividualBatchDeadline(controls);
+            const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => |other| return other,
+            }).frame;
+            if (try self.handleConnectionFrame(frame)) continue;
+            if (frame.header.frame_type == .goaway) {
+                try self.recordPeerGoAway(
+                    try http2.GoAwayPayload.parse(frame),
+                );
+                return error.ConnectionGoAway;
+            }
+
+            const state_index = findBatchResponseStateIndex(
+                states,
+                frame.header.stream_id,
+            ) orelse return error.UnexpectedFrame;
+            const state = &states[state_index];
+            const control = &controls[state_index];
+            if (control.reported) {
+                if (frame.header.frame_type == .rst_stream) {
+                    try self.recordResetStream(
+                        try http2.ResetStreamPayload.parse(frame),
+                    );
+                    continue;
+                }
+                return error.UnexpectedFrame;
+            }
+
+            const connection_before = self.recv_connection_window.value;
+            if (frame.header.frame_type == .data) {
+                control.unreleased_connection_bytes = std.math.add(
+                    usize,
+                    control.unreleased_connection_bytes,
+                    frame.payload.len,
+                ) catch return error.MessageTooLarge;
+            }
+            var read_timed_out = false;
+            self.processBodyBatchResponseFrame(
+                false,
+                states,
+                null,
+                deadline,
+                &read_timed_out,
+                {},
+                undefined,
+                frame,
+            ) catch |err| {
+                if (self.recv_connection_window.value > connection_before) {
+                    clearIndividualBatchConnectionCredit(controls);
+                }
+                if (err == error.Timeout) {
+                    // A HEADERS/CONTINUATION sequence is connection-serial.
+                    // If it stalls across the earliest member deadline, no
+                    // sibling frame can legally make progress until the block
+                    // finishes, so retain the established fail-closed rule.
+                    self.aggregate_timeout_unusable = true;
+                    return error.Timeout;
+                }
+                if (err == error.StreamReset) {
+                    if (control.unreleased_connection_bytes != 0) {
+                        try self.releaseConnectionCapacity(
+                            control.unreleased_connection_bytes,
+                        );
+                        control.unreleased_connection_bytes = 0;
+                    }
+                    state.done = true;
+                    state.request_done = true;
+                    control.reported = true;
+                    observer.on_result(
+                        observer.context,
+                        control.request_index,
+                        .{ .err = error.StreamReset },
+                    );
+                    continue;
+                }
+                if (self.serve_read_connection_error != null or
+                    self.aggregate_timeout_unusable)
+                {
+                    return @errorCast(err);
+                }
+                if (self.serve_read_stream_error) |stream_error| {
+                    if (stream_error.stream_id == state.stream_id) {
+                        if (control.unreleased_connection_bytes != 0) {
+                            try self.releaseConnectionCapacity(
+                                control.unreleased_connection_bytes,
+                            );
+                            control.unreleased_connection_bytes = 0;
+                        }
+                        try self.writeLocalErrorResetStream(
+                            state.stream_id,
+                            stream_error.code,
+                        );
+                        self.releaseLocalStream(state.stream_id);
+                        self.releasePeerStream(state.stream_id);
+                        self.forgetStreamWindows(state.stream_id);
+                        self.serve_read_stream_error = null;
+                        state.done = true;
+                        state.request_done = true;
+                        control.reported = true;
+                        observer.on_result(
+                            observer.context,
+                            control.request_index,
+                            .{ .err = err },
+                        );
+                        continue;
+                    }
+                }
+                return @errorCast(err);
+            };
+            if (self.recv_connection_window.value > connection_before) {
+                clearIndividualBatchConnectionCredit(controls);
+            }
+            if (state.done) {
+                try self.finishIndividualBatchResponse(
+                    state,
+                    control,
+                    observer,
+                );
+            }
+        }
+    }
 
     fn readResponseBatch(
         self: *Connection,
@@ -16153,6 +16622,24 @@ pub const BatchInformationalObserver = struct {
         request_index: usize,
         stream_id: u31,
         response: StreamingResponseHead,
+    ) void,
+};
+
+/// One terminal result from a request batch whose members carry independent
+/// deadlines. Successful response ownership transfers to the observer. An
+/// error applies only to `request_index` unless the connection itself failed,
+/// in which case every unfinished member receives that connection error.
+pub const BatchOwnedResponseResult = union(enum) {
+    response: OwnedResponse,
+    err: anyerror,
+};
+
+pub const BatchOwnedResponseObserver = struct {
+    context: *anyopaque,
+    on_result: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+        result: BatchOwnedResponseResult,
     ) void,
 };
 
