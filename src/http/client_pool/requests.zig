@@ -168,6 +168,7 @@ fn requestHttp3(
     crossed_origin: bool,
     forward_client_identity: bool,
 ) !client.OwnedResponse {
+    const PoolType = @typeInfo(@TypeOf(pool)).pointer.child;
     var header_stack: [header_mapping.max_stack_headers]http3.Qpack.HeaderField =
         undefined;
     var trailer_stack: [header_mapping.max_stack_trailers]http3.Qpack.HeaderField =
@@ -196,6 +197,7 @@ fn requestHttp3(
         deadline,
         crossed_origin,
         forward_client_identity,
+        PoolType.Internal.tcpIdleReclaimer(pool),
     );
     return .{
         .allocator = pool.allocator,

@@ -218,7 +218,9 @@ Current protocol coverage includes:
   addition to the TCP pool's limits. An optional move-stable shared budget also
   caps the combined TCP/QUIC idle, leased, and connecting population, with
   allocation-free FIFO admission, caller deadlines, exact failure/eviction/
-  close accounting, and aggregate connection/waiter counters,
+  close accounting, and aggregate connection/waiter counters. When an Alt-Svc
+  H3 connection needs a full shared budget, it can retire the oldest idle TCP
+  connection and transfer that capacity without exceeding the configured cap,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the

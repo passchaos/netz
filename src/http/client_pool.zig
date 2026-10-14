@@ -316,6 +316,20 @@ pub const Pool = struct {
         return self.shared_budget.waitingCount();
     }
 
+    pub const Internal = struct {
+        /// Split-module HTTP/3 admission hook. The callback target is valid for
+        /// one Pool request, during which moving the Pool is forbidden by the
+        /// same lease ownership contract as every other operation.
+        pub fn tcpIdleReclaimer(
+            self: *Pool,
+        ) connection_budget.Reclaimer {
+            return .{
+                .context = self,
+                .reclaim = reclaimOldestTcpIdleErased,
+            };
+        }
+    };
+
     pub fn stats(self: *Pool) Stats {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -626,6 +640,28 @@ pub const Pool = struct {
         if (removed != 0) self.notifyCapacityWaiterLocked();
         self.shared_budget.release(removed);
         return removed;
+    }
+
+    fn reclaimOldestTcpIdleErased(context: *anyopaque) bool {
+        const self: *Pool = @ptrCast(@alignCast(context));
+        self.mutex.lockUncancelable(self.io);
+        if (self.closed) {
+            self.mutex.unlock(self.io);
+            return false;
+        }
+        const connection_value = self.idle.takeOldest() orelse {
+            self.mutex.unlock(self.io);
+            return false;
+        };
+        std.debug.assert(self.connections != 0);
+        self.connections -= 1;
+        self.notifyCapacityWaiterLocked();
+        self.mutex.unlock(self.io);
+
+        var connection = connection_value;
+        connection.close();
+        self.shared_budget.release(1);
+        return true;
     }
 };
 

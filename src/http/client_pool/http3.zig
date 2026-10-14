@@ -75,40 +75,20 @@ pub const State = struct {
         deadline: ?std.Io.Clock.Timestamp,
         crossed_origin: bool,
         forward_client_identity: bool,
+        reclaimer: connection_budget.Reclaimer,
     ) !runtime.OwnedHandshakeResponse {
-        if (crossed_origin) {
-            const redirect: runtime.HandshakeClientPoolRedirectConnectContext = .{
+        const redirect: ?runtime.HandshakeClientPoolRedirectConnectContext =
+            if (crossed_origin) .{
                 .cross_origin = true,
                 .forward_client_identity = forward_client_identity,
-            };
-            return if (deadline) |absolute|
-                self.pool.requestUriAltSvcForRedirectWithDeadline(
-                    uri_text,
-                    alternative.target(),
-                    options,
-                    redirect,
-                    absolute,
-                )
-            else
-                self.pool.requestUriAltSvcForRedirect(
-                    uri_text,
-                    alternative.target(),
-                    options,
-                    redirect,
-                );
-        }
-        return if (deadline) |absolute|
-            self.pool.requestUriAltSvcWithDeadline(
-                uri_text,
-                alternative.target(),
-                options,
-                absolute,
-            )
-        else
-            self.pool.requestUriAltSvc(
-                uri_text,
-                alternative.target(),
-                options,
-            );
+            } else null;
+        return self.pool.requestUriAltSvcReclaiming(
+            uri_text,
+            alternative.target(),
+            options,
+            redirect,
+            deadline,
+            reclaimer,
+        );
     }
 };

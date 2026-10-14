@@ -14,6 +14,11 @@ pub const Error = error{
 
 pub const Waiter = fifo_admission.Queue.Waiter;
 
+pub const Reclaimer = struct {
+    context: *anyopaque,
+    reclaim: *const fn (context: *anyopaque) bool,
+};
+
 pub const Budget = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -76,6 +81,48 @@ pub const Budget = struct {
         }
         self.connections += 1;
         if (self.hasCapacityLocked()) self.waiters.notifyHead(self.io);
+    }
+
+    /// Retry one reservation after allowing another pool to retire an idle
+    /// connection. The callback runs without the budget mutex, and the final
+    /// reservation still obeys FIFO if another waiter arrives meanwhile.
+    pub fn tryReserveReclaiming(
+        self: *Budget,
+        waiter: ?*Waiter,
+        reclaimer: Reclaimer,
+    ) Error!void {
+        self.mutex.lockUncancelable(self.io);
+        if (self.closed) {
+            if (waiter) |queued| self.waiters.cancel(queued, self.io);
+            self.mutex.unlock(self.io);
+            return error.PoolClosed;
+        }
+        if (!self.waiters.mayAttempt(waiter)) {
+            if (waiter) |queued| {
+                if (!queued.linked) {
+                    self.waiters.enqueue(queued);
+                } else if (queued.isNotified()) {
+                    queued.rearm();
+                }
+            }
+            self.mutex.unlock(self.io);
+            return error.ConnectionLimitReached;
+        }
+        if (self.limit == 0 or self.connections < self.limit) {
+            if (waiter) |queued| {
+                if (queued.linked) {
+                    std.debug.assert(self.waiters.remove(queued));
+                }
+            }
+            self.connections += 1;
+            if (self.hasCapacityLocked()) self.waiters.notifyHead(self.io);
+            self.mutex.unlock(self.io);
+            return;
+        }
+        self.mutex.unlock(self.io);
+
+        _ = reclaimer.reclaim(reclaimer.context);
+        return self.tryReserve(waiter);
     }
 
     pub fn cancel(self: *Budget, waiter: *Waiter) void {
@@ -186,4 +233,47 @@ test "shared connection budget preserves FIFO across independent pools" {
     try budget.tryReserve(&second);
     budget.release(1);
     try std.testing.expectEqual(@as(usize, 0), budget.waitingCount());
+}
+
+test "shared connection budget reclaims without holding its mutex" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var budget = try Budget.create(std.testing.allocator, io, 1);
+    defer budget.deinit();
+    try budget.tryReserve(null);
+    var first: Waiter = .{};
+    var second: Waiter = .{};
+    try std.testing.expectError(
+        error.ConnectionLimitReached,
+        budget.tryReserve(&first),
+    );
+    try std.testing.expectError(
+        error.ConnectionLimitReached,
+        budget.tryReserve(&second),
+    );
+
+    const Context = struct {
+        budget: *Budget,
+        calls: usize = 0,
+
+        fn reclaim(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            self.budget.release(1);
+            return true;
+        }
+    };
+    var context = Context{ .budget = budget };
+    try budget.tryReserveReclaiming(&first, .{
+        .context = &context,
+        .reclaim = Context.reclaim,
+    });
+    try std.testing.expectEqual(@as(usize, 1), context.calls);
+    try std.testing.expectEqual(@as(usize, 1), budget.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), budget.waitingCount());
+    try std.testing.expect(!second.isNotified());
+    budget.release(1);
+    try std.testing.expect(second.isNotified());
+    budget.cancel(&second);
 }

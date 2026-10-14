@@ -43,6 +43,92 @@ test "HTTP/3 pool waits on a shared connection budget under one deadline" {
     budget.release(1);
 }
 
+test "HTTP/3 unbounded request reclaims a shared connection slot" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var budget = try connection_budget.Budget.create(allocator, io, 1);
+    defer budget.deinit();
+    try budget.tryReserve(null);
+
+    const Context = struct {
+        budget: *connection_budget.Budget,
+        connect_calls: usize = 0,
+        reclaim_calls: usize = 0,
+
+        fn connect(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: runtime.Limits,
+        ) runtime.Error!runtime.HandshakeClient {
+            return error.Unexpected;
+        }
+
+        fn connectAlt(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: std.Io.net.IpAddress,
+            _: std.Uri,
+            _: http3.AltSvcTarget,
+            _: runtime.Limits,
+        ) runtime.Error!runtime.HandshakeClient {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.connect_calls += 1;
+            return error.ConnectionRefused;
+        }
+
+        fn reclaim(context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.reclaim_calls += 1;
+            self.budget.release(1);
+            return true;
+        }
+    };
+    var context = Context{ .budget = budget };
+    var pool = try runtime.HandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .loopback(0) },
+        .max_connections = 2,
+        .shared_connection_budget = budget,
+        .connector = .{
+            .context = &context,
+            .client_identity_configured = false,
+            .connect = Context.connect,
+            .connect_alt_svc = Context.connectAlt,
+        },
+    });
+    defer pool.deinit();
+
+    try std.testing.expectError(
+        error.ConnectionRefused,
+        pool.requestUriAltSvcReclaiming(
+            "https://origin.example/path",
+            .{
+                .alpn = "h3",
+                .connect_host = "127.0.0.1",
+                .origin_host = "origin.example",
+                .port = 443,
+            },
+            .{},
+            null,
+            null,
+            .{
+                .context = &context,
+                .reclaim = Context.reclaim,
+            },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 1), context.reclaim_calls);
+    try std.testing.expectEqual(@as(usize, 1), context.connect_calls);
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), budget.connectionCount());
+    try std.testing.expectEqual(@as(usize, 0), budget.waitingCount());
+}
+
 test "HTTP/3 URI connect timeout validates and preserves one deadline" {
     const quic = @import("../../quic/mod.zig");
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});

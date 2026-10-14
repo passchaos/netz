@@ -395,6 +395,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 .origin,
+                null,
             );
         }
 
@@ -408,6 +409,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 .{ .alt_svc = target },
+                null,
             );
         }
 
@@ -417,6 +419,7 @@ pub fn Pool(comptime Runtime: type) type {
             waiter: ?*fifo_admission.Queue.Waiter,
             redirect: ?RedirectConnectContext,
             route: ConnectRoute,
+            shared_reclaimer: ?connection_budget.Reclaimer,
         ) (Runtime.Error || Error)!Lease {
             var blocked_on_shared = false;
             return self.acquireUriForWaiterBefore(
@@ -427,6 +430,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 redirect,
                 route,
+                shared_reclaimer,
             ) catch |err| switch (err) {
                 error.Timeout => unreachable,
                 else => |other| return other,
@@ -442,6 +446,7 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
             route: ConnectRoute,
+            shared_reclaimer: ?connection_budget.Reclaimer,
         ) (Runtime.Error || Error || std.Io.Timeout.Error ||
             std.Io.Cancelable)!Lease {
             blocked_on_shared.* = false;
@@ -520,7 +525,7 @@ pub fn Pool(comptime Runtime: type) type {
                     route,
                 );
             } else {
-                self.reserveShared(shared_waiter) catch |err| {
+                self.reserveShared(shared_waiter, null) catch |err| {
                     if (err == error.ConnectionLimitReached) {
                         if (self.idle.takeOldest()) |displaced| {
                             self.cancelSharedWaiter(shared_waiter);
@@ -536,7 +541,27 @@ pub fn Pool(comptime Runtime: type) type {
                                 route,
                             );
                         }
-                        blocked_on_shared.* = true;
+                        self.reserveShared(
+                            shared_waiter,
+                            shared_reclaimer,
+                        ) catch |retry_err| {
+                            blocked_on_shared.* = retry_err ==
+                                error.ConnectionLimitReached;
+                            self.mutex.unlock(self.io);
+                            var key = origin_key;
+                            key.deinit();
+                            return retry_err;
+                        };
+                        self.connections += 1;
+                        self.finishAdmissionLocked(waiter);
+                        self.mutex.unlock(self.io);
+                        return self.connectReservedBefore(
+                            uri,
+                            origin_key,
+                            deadline,
+                            redirect,
+                            route,
+                        );
                     }
                     self.mutex.unlock(self.io);
                     var key = origin_key;
@@ -646,6 +671,7 @@ pub fn Pool(comptime Runtime: type) type {
                     absolute,
                     null,
                     route,
+                    null,
                 ) catch |err| switch (err) {
                     error.ConnectionLimitReached => {
                         const blocked_waiter = if (blocked_on_shared)
@@ -856,6 +882,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 .origin,
+                null,
             ) catch |err| switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
@@ -896,6 +923,7 @@ pub fn Pool(comptime Runtime: type) type {
                 absolute,
                 null,
                 .origin,
+                null,
             );
         }
 
@@ -911,6 +939,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 .{ .alt_svc = target },
+                null,
             ) catch |err| switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
@@ -930,6 +959,7 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 redirect,
                 .{ .alt_svc = target },
+                null,
             ) catch |err| switch (err) {
                 error.Timeout, error.ConcurrencyUnavailable => unreachable,
                 else => |other| return @errorCast(other),
@@ -971,6 +1001,7 @@ pub fn Pool(comptime Runtime: type) type {
                 absolute,
                 null,
                 .{ .alt_svc = target },
+                null,
             );
         }
 
@@ -993,6 +1024,33 @@ pub fn Pool(comptime Runtime: type) type {
                 absolute,
                 redirect,
                 .{ .alt_svc = target },
+                null,
+            );
+        }
+
+        /// Unified-pool hook: when the shared budget is full, reclaim one idle
+        /// connection from another transport before entering the FIFO wait.
+        pub fn requestUriAltSvcReclaiming(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            request_options: Runtime.UriRequestOptions,
+            redirect: ?RedirectConnectContext,
+            deadline: ?std.Io.Clock.Timestamp,
+            reclaimer: connection_budget.Reclaimer,
+        ) (Runtime.ReceiveTimeoutError || Error ||
+            std.Io.ConcurrentError)!Runtime.OwnedHandshakeResponse {
+            const absolute = if (deadline) |value|
+                try deadline_policy.usableAwake(self.io, value)
+            else
+                null;
+            return self.requestUriBefore(
+                uri_text,
+                request_options,
+                absolute,
+                redirect,
+                .{ .alt_svc = target },
+                reclaimer,
             );
         }
 
@@ -1003,6 +1061,7 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?RedirectConnectContext,
             route: ConnectRoute,
+            shared_reclaimer: ?connection_budget.Reclaimer,
         ) (Runtime.ReceiveTimeoutError || Error)!Runtime.OwnedHandshakeResponse {
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
@@ -1027,6 +1086,7 @@ pub fn Pool(comptime Runtime: type) type {
                             absolute,
                             redirect,
                             route,
+                            shared_reclaimer,
                         ) catch |err| switch (err) {
                             error.ConnectionLimitReached => {
                                 const blocked_waiter = if (blocked_on_shared)
@@ -1053,6 +1113,7 @@ pub fn Pool(comptime Runtime: type) type {
                     null,
                     redirect,
                     route,
+                    shared_reclaimer,
                 );
                 defer if (lease.active) lease.discard();
                 const request: http3.Request = .{
@@ -1236,6 +1297,7 @@ pub fn Pool(comptime Runtime: type) type {
                     deadline,
                     connector_redirect,
                     .origin,
+                    null,
                 );
                 errdefer response.deinit(self.allocator);
                 if (!uri_redirect.isRedirectStatus(response.response.status)) {
@@ -1447,9 +1509,14 @@ pub fn Pool(comptime Runtime: type) type {
         fn reserveShared(
             self: *Self,
             waiter: ?*connection_budget.Waiter,
+            reclaimer: ?connection_budget.Reclaimer,
         ) connection_budget.Error!void {
             const budget = self.options.shared_connection_budget orelse return;
-            try budget.tryReserve(waiter);
+            if (reclaimer) |idle| {
+                try budget.tryReserveReclaiming(waiter, idle);
+            } else {
+                try budget.tryReserve(waiter);
+            }
         }
 
         fn cancelSharedWaiter(
