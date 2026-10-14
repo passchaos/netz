@@ -1230,7 +1230,8 @@ Current protocol coverage includes:
   global or `per_listener_settings`-isolated Mosquitto password/ACL files
   with anonymous/user scopes and Linux SIGHUP atomic password/ACL plus TLS/WSS
   server-identity/key-password/client-CA/CRL, bridge-generation, and
-  periodic/change-count/disabled autosave-policy reload,
+  per-listener anonymous-admission plus periodic/change-count/disabled
+  autosave-policy reload,
   selective live credential revocation, cross-subsystem rollback, and
   ref-counted in-flight handshake generations, exact per-listener WebSocket Origin allowlists,
   a bounded configurable HTTP Upgrade head size for WS/WSS listeners, and

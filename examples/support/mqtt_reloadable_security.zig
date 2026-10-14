@@ -214,6 +214,7 @@ pub const Security = struct {
     /// actually uses the configured password file. An empty slice derives the
     /// legacy all-password-listeners behavior from `paths`.
     password_authentication: []const bool = &.{},
+    allow_anonymous: []bool,
     files: FileSet,
     client_auth_paths: []const ClientAuthPaths = &.{},
     client_crls: ?ClientCrlSet = null,
@@ -233,6 +234,9 @@ pub const Security = struct {
         {
             return error.InvalidSecurityLayout;
         }
+        const allow_anonymous = try allocator.alloc(bool, listener_ids.len);
+        errdefer allocator.free(allow_anonymous);
+        @memset(allow_anonymous, false);
         return .{
             .allocator = allocator,
             .io = io,
@@ -240,6 +244,7 @@ pub const Security = struct {
             .paths = paths,
             .listener_ids = listener_ids,
             .per_listener_settings = per_listener_settings,
+            .allow_anonymous = allow_anonymous,
             .files = try FileSet.load(allocator, io, dir, paths),
         };
     }
@@ -247,6 +252,7 @@ pub const Security = struct {
     pub fn deinit(self: *Security) void {
         if (self.client_crls) |*crls| crls.deinit(self.allocator);
         self.files.deinit(self.allocator);
+        self.allocator.free(self.allow_anonymous);
         self.* = undefined;
     }
 
@@ -258,6 +264,26 @@ pub const Security = struct {
             return error.InvalidSecurityLayout;
         }
         self.password_authentication = enabled;
+    }
+
+    pub fn setAllowAnonymous(
+        self: *Security,
+        enabled: []const bool,
+    ) !void {
+        if (enabled.len != self.listener_ids.len) {
+            return error.InvalidSecurityLayout;
+        }
+        self.lock.lockUncancelable(self.io);
+        self.setAllowAnonymousLocked(enabled);
+        self.lock.unlock(self.io);
+    }
+
+    pub fn setAllowAnonymousLocked(
+        self: *Security,
+        enabled: []const bool,
+    ) void {
+        std.debug.assert(enabled.len == self.allow_anonymous.len);
+        @memcpy(self.allow_anonymous, enabled);
     }
 
     /// Attach the immutable client-CA topology and load every configured CRL
@@ -373,12 +399,10 @@ pub const Security = struct {
     pub fn listenerPolicy(
         self: *Security,
         listener_index: usize,
-        allow_anonymous: bool,
     ) ListenerPolicy {
         return .{
             .security = self,
             .listener_index = listener_index,
-            .allow_anonymous = allow_anonymous,
         };
     }
 
@@ -549,7 +573,6 @@ pub const ClientAuthPolicy = struct {
 pub const ListenerPolicy = struct {
     security: *Security,
     listener_index: usize,
-    allow_anonymous: bool,
 
     pub fn authorizeConnect(context: *anyopaque, connect: mqtt.Connect) bool {
         const self: *ListenerPolicy = @ptrCast(@alignCast(context));
@@ -561,8 +584,9 @@ pub const ListenerPolicy = struct {
         const file = if (maybe_file.*) |*value|
             value
         else
-            return self.allow_anonymous;
-        const username = connect.username orelse return self.allow_anonymous;
+            return self.security.allow_anonymous[self.listener_index];
+        const username = connect.username orelse
+            return self.security.allow_anonymous[self.listener_index];
         const password = connect.password orelse return false;
         return file.verify(username, password);
     }
@@ -677,7 +701,7 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
         false,
     );
     defer security.deinit();
-    var policy = security.listenerPolicy(0, false);
+    var policy = security.listenerPolicy(0);
     var connect = mqtt.Connect{
         .protocol = .v5,
         .clean_start = true,
@@ -686,6 +710,20 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
         .username = "old",
         .password = "password",
     };
+    try std.testing.expectError(
+        error.InvalidSecurityLayout,
+        security.setAllowAnonymous(&.{ true, false }),
+    );
+    const authenticated_username = connect.username;
+    const authenticated_password = connect.password;
+    connect.username = null;
+    connect.password = null;
+    try std.testing.expect(!ListenerPolicy.authorizeConnect(&policy, connect));
+    try security.setAllowAnonymous(&.{true});
+    try std.testing.expect(ListenerPolicy.authorizeConnect(&policy, connect));
+    try security.setAllowAnonymous(&.{false});
+    connect.username = authenticated_username;
+    connect.password = authenticated_password;
     try std.testing.expect(ListenerPolicy.authorizeConnect(&policy, connect));
     try std.testing.expect(ListenerPolicy.authorizePublish(
         &policy,

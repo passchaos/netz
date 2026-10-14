@@ -3321,13 +3321,20 @@ that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Bridge
 definitions are one exception: `bridge_reload_type lazy|immediate` selects
 per-bridge generation replacement on the same SIGHUP without rebinding
-listeners. Autosave policy is the other: `autosave_interval` and
+listeners. Per-listener `allow_anonymous` is committed under the same security
+generation lock: existing anonymous connections remain valid, while later
+CONNECT admission immediately observes the new listener-specific value.
+Listener count/order, bind address, protocol, TLS/authentication paths, mount,
+Client ID, capability, PROXY, Origin, and connection-limit changes fail the
+complete transaction with `ListenerConfigurationRequiresRestart` instead of
+being silently ignored. Autosave policy is the other exception:
+`autosave_interval` and
 `autosave_on_changes` switch atomically among time, durable-change, and disabled
 modes. The process gate exercises every transition, rejects a changed
 persistence target without changing the active policy, and restores retained
 state from debt written immediately when change autosave is re-enabled.
-Listener topology, anonymous policy, limits, and the persistence enable/target
-still require restart.
+Listener topology, the other listener policies/limits, and the persistence
+enable/target still require restart.
 The complete configuration gate now passes with OpenSSL 3.6.5, including exact
 CertificateRequest CA-name decoding, live client-CA rotation, mTLS, CRL and
 TLS/WSS rollback. The earlier 3.6.5 failure was a process-gate synchronization

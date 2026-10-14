@@ -2480,6 +2480,129 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         )
 
 
+def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
+    first_port = free_port()
+    second_port = free_port()
+    while second_port == first_port:
+        second_port = free_port()
+    password_file = directory / "listener-policy-reload.pwfile"
+    password_hash = (
+        "$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ=="
+    )
+    password_file.write_text(f"stable:{password_hash}\n")
+    config = directory / "listener-policy-reload.conf"
+
+    def write_config(
+        first_anonymous: bool,
+        second_anonymous: bool,
+        second_listener_port: int = second_port,
+    ) -> None:
+        config.write_text(
+            "per_listener_settings true\n"
+            f"listener {first_port} 127.0.0.1\n"
+            f"password_file {password_file}\n"
+            f"allow_anonymous {str(first_anonymous).lower()}\n"
+            "max_connections 4\n"
+            f"listener {second_listener_port} 127.0.0.1\n"
+            f"password_file {password_file}\n"
+            f"allow_anonymous {str(second_anonymous).lower()}\n"
+            "max_connections 4\n"
+        )
+
+    def connect(
+        port: int,
+        client_id: str,
+        expected_reason: int,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> socket.socket:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        client.sendall(
+            connect_packet(
+                client_id,
+                username=username,
+                password=password,
+            )
+        )
+        reason = connack_reason(read_mqtt_packet(client))
+        if reason != expected_reason:
+            client.close()
+            raise AssertionError(
+                f"listener policy reload {client_id} expected "
+                f"{expected_reason:#x}, received {reason:#x}"
+            )
+        return client
+
+    write_config(True, False)
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 2 listeners for 8 clients" not in ready:
+        raise RuntimeError(f"listener policy reload broker failed: {ready}")
+    read_listener_lines(process, 2, "listener policy reload startup")
+
+    clients: list[socket.socket] = []
+    try:
+        existing = connect(first_port, "listener-policy-existing", 0)
+        clients.append(existing)
+        rejected = connect(second_port, "listener-policy-initial-rejected", 0x87)
+        rejected.close()
+
+        write_config(False, True)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload completed: source=SIGHUP",
+            "listener anonymous policy reload",
+        )
+        mqtt_ping(existing)
+        rejected = connect(first_port, "listener-policy-first-rejected", 0x87)
+        rejected.close()
+        second = connect(second_port, "listener-policy-second-accepted", 0)
+        clients.append(second)
+        authenticated = connect(
+            first_port,
+            "listener-policy-authenticated",
+            0,
+            username="stable",
+            password="password",
+        )
+        clients.append(authenticated)
+
+        invalid_port = free_port()
+        while invalid_port in (first_port, second_port):
+            invalid_port = free_port()
+        write_config(False, False, invalid_port)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "configuration reload failed: "
+            "error=ListenerConfigurationRequiresRestart",
+            "listener topology reload rollback",
+        )
+        rollback = connect(second_port, "listener-policy-rollback", 0)
+        clients.append(rollback)
+        mqtt_ping(existing)
+    finally:
+        for client in clients:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
     first_ca, first_ca_key = create_ca(
         directory, "identity-reload-first-ca", "Identity Reload First Root"
@@ -5708,6 +5831,7 @@ def main() -> None:
         run_acl_v311_case(args.broker, directory)
         run_authentication_case(args.broker, directory)
         run_security_reload_case(args.broker, directory)
+        run_listener_policy_reload_case(args.broker, directory)
         run_server_identity_reload_case(args.broker, directory)
         run_client_ca_reload_case(args.broker, directory)
         run_crl_reload_case(args.broker, directory)
@@ -5765,7 +5889,7 @@ def main() -> None:
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
         "atomic password/ACL with selective live credential revocation and "
         "TLS/WSS identity/key-password/CA/CRL "
-        "SIGHUP reload with rollback, "
+        "plus per-listener anonymous admission SIGHUP reload with topology rollback, "
         "dynamic time/change/disabled autosave SIGHUP reload with fixed-target "
         "rollback, disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
         + RUNTIME

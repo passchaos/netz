@@ -501,11 +501,14 @@ pub fn run(
         config.listeners.len,
     );
     defer allocator.free(password_authentication);
+    const allow_anonymous = try allocator.alloc(bool, config.listeners.len);
+    defer allocator.free(allow_anonymous);
     for (
         config.listeners,
         listener_ids,
         password_authentication,
-    ) |listener, *id, *uses_password| {
+        allow_anonymous,
+    ) |listener, *id, *uses_password, *anonymous| {
         id.* = listener.address.getPort();
         const password_file = if (config.per_listener_settings)
             listener.password_file
@@ -514,6 +517,7 @@ pub fn run(
         uses_password.* = password_file.len != 0 and
             !listener.use_identity_as_username and
             !listener.use_subject_as_username;
+        anonymous.* = listener.allow_anonymous;
     }
     var security = try reloadable_security.Security.init(
         allocator,
@@ -525,6 +529,7 @@ pub fn run(
     );
     defer security.deinit();
     try security.setPasswordAuthentication(password_authentication);
+    try security.setAllowAnonymous(allow_anonymous);
     const source_access_control = security.sourceAccessControl();
     const max_inflight_messages = config.effectiveMaxInflightMessages();
     const base_accept = mqtt.runtime.AcceptOptions{
@@ -651,8 +656,6 @@ pub fn run(
         config.listeners,
     );
     defer ticket_keyrings.deinit();
-    const has_reloadable_files = security.hasReloadableFiles() or
-        identities.hasReloadableFiles();
     const supports_config_reload = builtin.os.tag == .linux;
     var reload_signal: ?ReloadSignal = if (supports_config_reload)
         ReloadSignal.install()
@@ -709,10 +712,7 @@ pub fn run(
         accept.topic_alias_maximum = configured.max_topic_alias;
         accept.max_outgoing_topic_aliases =
             configured.max_topic_alias_broker;
-        security_policies[config_index] = security.listenerPolicy(
-            config_index,
-            configured.allow_anonymous,
-        );
+        security_policies[config_index] = security.listenerPolicy(config_index);
         const listener_access_control = security_policies[config_index]
             .accessControl();
         const authorization = mqtt.broker.ListenerAuthorization{
@@ -891,11 +891,12 @@ pub fn run(
             service,
             io,
             config_path,
+            &config,
             &shutdown,
             &bridges,
             &autosave,
-            if (has_reloadable_files) &security else null,
-            if (has_reloadable_files) &identities else null,
+            &security,
+            &identities,
         );
     } else {
         try serveConfigured(&broker, service);
@@ -912,11 +913,12 @@ fn serveWithManagement(
     service: Service,
     io: std.Io,
     config_path: []const u8,
+    initial_config: *const mqtt.broker_config.Config,
     shutdown: *std.Io.Event,
     bridges: *configured_bridges.Set,
     autosave: *AutosaveController,
-    security: ?*reloadable_security.Security,
-    identities: ?*reloadable_identity.Set,
+    security: *reloadable_security.Security,
+    identities: *reloadable_identity.Set,
 ) !void {
     const Result = union(enum) {
         serve: ?anyerror,
@@ -984,6 +986,7 @@ fn serveWithManagement(
                         allocator,
                         io,
                         config_path,
+                        initial_config,
                         broker,
                         bridges,
                         autosave,
@@ -1070,11 +1073,12 @@ fn reloadConfiguredState(
     allocator: std.mem.Allocator,
     io: std.Io,
     config_path: []const u8,
+    initial_config: *const mqtt.broker_config.Config,
     broker: *mqtt.broker.Broker,
     bridges: *configured_bridges.Set,
     autosave: *AutosaveController,
-    security: ?*reloadable_security.Security,
-    identities: ?*reloadable_identity.Set,
+    security: *reloadable_security.Security,
+    identities: *reloadable_identity.Set,
 ) ReloadOutcome {
     var reloaded_config = mqtt.broker_config.load(
         allocator,
@@ -1086,6 +1090,27 @@ fn reloadConfiguredState(
         .err = err,
     } };
     defer reloaded_config.deinit(allocator);
+    validateReloadableListenerTopology(
+        initial_config,
+        &reloaded_config,
+    ) catch |err| return .{ .failure = .{
+        .component = .configuration,
+        .err = err,
+    } };
+    const reloaded_allow_anonymous = allocator.alloc(
+        bool,
+        reloaded_config.listeners.len,
+    ) catch |err| return .{ .failure = .{
+        .component = .security,
+        .err = err,
+    } };
+    defer allocator.free(reloaded_allow_anonymous);
+    for (reloaded_config.listeners, reloaded_allow_anonymous) |
+        listener,
+        *enabled,
+    | {
+        enabled.* = listener.allow_anonymous;
+    }
     const reloaded_autosave = autosavePolicyForReload(
         allocator,
         reloaded_config,
@@ -1102,27 +1127,14 @@ fn reloadConfiguredState(
     } };
     defer prepared_bridges.deinit();
 
-    const policy = security orelse {
-        const bridge_commit = bridges.submitPreparedReload(
-            &prepared_bridges,
-        ) catch |err| return .{ .failure = .{
-            .component = .bridge,
-            .err = err,
-        } };
-        autosave.apply(reloaded_autosave);
-        bridge_commit.commit();
-        return .{ .success = .{
-            .security_reloaded = false,
-            .autosave_policy = reloaded_autosave,
-        } };
-    };
+    const policy = security;
     var prepared_security = policy.prepareReload() catch |err|
         return .{ .failure = .{
             .component = .security,
             .err = err,
         } };
     defer prepared_security.deinit();
-    const identity_set = identities orelse unreachable;
+    const identity_set = identities;
     var prepared_identities = identity_set.prepareReload() catch |err|
         return .{ .failure = .{
             .component = .security,
@@ -1141,6 +1153,7 @@ fn reloadConfiguredState(
     var retired_identities = identity_set.swapPreparedReload(
         &prepared_identities,
     );
+    policy.setAllowAnonymousLocked(reloaded_allow_anonymous);
     policy.lock.unlock(policy.io);
     autosave.apply(reloaded_autosave);
     bridge_commit.commit();
@@ -1173,6 +1186,109 @@ fn autosavePolicyForReload(
         }
     }
     return AutosavePolicy.fromConfig(config);
+}
+
+fn validateReloadableListenerTopology(
+    initial: *const mqtt.broker_config.Config,
+    candidate: *const mqtt.broker_config.Config,
+) !void {
+    if (initial.per_listener_settings != candidate.per_listener_settings or
+        initial.listeners.len != candidate.listeners.len or
+        !std.mem.eql(u8, initial.password_file, candidate.password_file) or
+        !std.mem.eql(u8, initial.acl_file, candidate.acl_file) or
+        initial.allow_zero_length_client_id !=
+            candidate.allow_zero_length_client_id or
+        !std.mem.eql(u8, initial.auto_id_prefix, candidate.auto_id_prefix))
+    {
+        return error.ListenerConfigurationRequiresRestart;
+    }
+    for (initial.listeners, candidate.listeners) |before, after| {
+        if (!listenerReloadCompatible(before, after)) {
+            return error.ListenerConfigurationRequiresRestart;
+        }
+    }
+}
+
+fn listenerReloadCompatible(
+    before: mqtt.broker_config.Listener,
+    after: mqtt.broker_config.Listener,
+) bool {
+    return std.meta.eql(before.address, after.address) and
+        before.bind_all_socket_domains == after.bind_all_socket_domains and
+        before.socket_domain == after.socket_domain and
+        std.mem.eql(u8, before.bind_interface, after.bind_interface) and
+        before.protocol == after.protocol and
+        std.mem.eql(u8, before.password_file, after.password_file) and
+        std.mem.eql(u8, before.acl_file, after.acl_file) and
+        std.mem.eql(u8, before.certfile, after.certfile) and
+        std.mem.eql(u8, before.keyfile, after.keyfile) and
+        std.mem.eql(
+            u8,
+            before.keyfile_password_file,
+            after.keyfile_password_file,
+        ) and
+        std.mem.eql(u8, before.cafile, after.cafile) and
+        std.mem.eql(u8, before.capath, after.capath) and
+        std.mem.eql(u8, before.crlfile, after.crlfile) and
+        std.mem.eql(
+            std.meta.Elem(@TypeOf(before.tls13_cipher_suites)),
+            before.tls13_cipher_suites,
+            after.tls13_cipher_suites,
+        ) and
+        std.mem.eql(
+            std.meta.Elem(@TypeOf(before.tls12_cipher_suites)),
+            before.tls12_cipher_suites,
+            after.tls12_cipher_suites,
+        ) and
+        std.meta.eql(before.tls_protocol_policy, after.tls_protocol_policy) and
+        before.tls12_session_tickets == after.tls12_session_tickets and
+        std.mem.eql(
+            u8,
+            before.tls12_session_ticket_server_id,
+            after.tls12_session_ticket_server_id,
+        ) and
+        before.tls12_session_ticket_lifetime_seconds ==
+            after.tls12_session_ticket_lifetime_seconds and
+        before.tls13_session_tickets == after.tls13_session_tickets and
+        std.mem.eql(
+            u8,
+            before.tls13_session_ticket_server_id,
+            after.tls13_session_ticket_server_id,
+        ) and
+        before.tls13_session_ticket_lifetime_seconds ==
+            after.tls13_session_ticket_lifetime_seconds and
+        before.require_certificate == after.require_certificate and
+        before.use_identity_as_username == after.use_identity_as_username and
+        before.use_subject_as_username == after.use_subject_as_username and
+        std.mem.eql(u8, before.mount_point, after.mount_point) and
+        before.allow_zero_length_client_id ==
+            after.allow_zero_length_client_id and
+        std.mem.eql(u8, before.auto_id_prefix, after.auto_id_prefix) and
+        before.maximum_qos == after.maximum_qos and
+        before.maximum_keep_alive_seconds == after.maximum_keep_alive_seconds and
+        before.max_topic_alias == after.max_topic_alias and
+        before.max_topic_alias_broker == after.max_topic_alias_broker and
+        std.meta.eql(
+            before.accepted_protocol_versions,
+            after.accepted_protocol_versions,
+        ) and
+        equalStringLists(
+            before.websocket_origins.items,
+            after.websocket_origins.items,
+        ) and
+        before.proxy_protocol == after.proxy_protocol and
+        before.proxy_protocol_v2_require_tls ==
+            after.proxy_protocol_v2_require_tls and
+        before.use_username_as_client_id == after.use_username_as_client_id and
+        before.max_connections == after.max_connections;
+}
+
+fn equalStringLists(before: []const []u8, after: []const []u8) bool {
+    if (before.len != after.len) return false;
+    for (before, after) |left, right| {
+        if (!std.mem.eql(u8, left, right)) return false;
+    }
+    return true;
 }
 
 const Service = union(enum) {

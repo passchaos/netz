@@ -852,8 +852,10 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
             "topic write nowhere/#\n"
         )
         local_config.write_text(
+            f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
             "allow_anonymous true\n"
+            "max_connections 4\n"
             "connection reloadable\n"
             f"address localhost:{upstream_port}\n"
             "topic # in 1 local/not-staged/ remote/not-staged/\n"
@@ -883,8 +885,10 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         )
 
         local_config.write_text(
+            f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
             "allow_anonymous true\n"
+            "max_connections 4\n"
             "connection reloadable\n"
             f"address 127.0.0.1:{upstream_port}\n"
             "topic # in 1 local/broken/ remote/broken/\n"
@@ -913,6 +917,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
 
         acl_file.write_text("topic readwrite #\n")
         local_config.write_text(
+            f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
             "allow_anonymous true\n"
             "max_connections 4\n"

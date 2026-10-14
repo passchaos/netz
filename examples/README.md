@@ -569,8 +569,12 @@ authenticate again. Server-certificate, client-CA, and CRL changes apply to
 later TLS/WSS handshakes without rebinding the listener. In-flight handshakes
 retain their complete TLS policy generation until completion, while established
 TLS connections retain traffic keys and authenticated peer metadata without
-depending on the old files. Listener topology, anonymous policy, limits, and
-the persistence enable/location/file remain fixed until restart.
+depending on the old files. SIGHUP also updates each existing listener's
+`allow_anonymous` admission policy under the same security generation lock;
+existing clients stay online, while later CONNECT attempts use the new value.
+Changing listener topology or any other listener transport/admission field
+fails the complete reload instead of being ignored. The persistence
+enable/location/file remain fixed until restart.
 When persistence is enabled, `autosave_on_changes true` treats
 `autosave_interval` as a durable-change threshold; otherwise it is a periodic
 seconds interval. Matching Mosquitto, zero disables either form of runtime
