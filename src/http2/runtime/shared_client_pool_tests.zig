@@ -216,6 +216,285 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     if (server_worker.err) |err| return err;
 }
 
+test "HTTP/2 shared senders coalesce only an identical deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const ServerWorker = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/same-one", first.path);
+            try std.testing.expectEqualStrings("/same-two", second.path);
+            const stream_ids = [_]u31{ second.stream_id, first.stream_id };
+            const headers = [_]http2.Hpack.HeaderField{
+                .{ .name = "x-path", .value = second.path },
+                .{ .name = "x-path", .value = first.path },
+            };
+            const responses = [_]runtime.ResponseOptions{
+                .{ .headers = headers[0..1] },
+                .{ .headers = headers[1..2] },
+            };
+            try connection.writeResponseBatch(&stream_ids, &responses);
+
+            var third = try connection.readRequest();
+            defer third.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/different", third.path);
+            try connection.writeResponse(third.stream_id, .{
+                .headers = &.{.{ .name = "x-path", .value = third.path }},
+            });
+        }
+    };
+
+    const Producer = struct {
+        sender: pool_mod.SharedSender,
+        uri: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        response: ?runtime.OwnedResponse = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.response = self.sender.requestWithDeadline(
+                self.uri,
+                .{},
+                self.deadline,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var server_worker = ServerWorker{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerWorker.run,
+        .{&server_worker},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    var dispatcher = try pool_mod.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 8, .max_batch_requests = 8 },
+    );
+    defer dispatcher.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    const first_uri = try std.fmt.allocPrint(allocator, "{s}/same-one", .{base});
+    defer allocator.free(first_uri);
+    const second_uri = try std.fmt.allocPrint(allocator, "{s}/same-two", .{base});
+    defer allocator.free(second_uri);
+    const third_uri = try std.fmt.allocPrint(allocator, "{s}/different", .{base});
+    defer allocator.free(third_uri);
+    const common_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
+    const different_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(6),
+        .clock = .awake,
+    });
+    const sender = dispatcher.sender();
+    var producers = [_]Producer{
+        .{ .sender = sender.clone(), .uri = first_uri, .deadline = common_deadline },
+        .{ .sender = sender.clone(), .uri = second_uri, .deadline = common_deadline },
+        .{ .sender = sender.clone(), .uri = third_uri, .deadline = different_deadline },
+    };
+    var threads: [producers.len]std.Thread = undefined;
+    for (&threads, &producers, 1..) |*thread, *producer, queued| {
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+        try waitQueued(io, &dispatcher, queued);
+    }
+    var driver = try std.Io.concurrent(
+        io,
+        pool_mod.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    for (&threads) |*thread| thread.join();
+    dispatcher.close();
+    try driver.await(io);
+
+    const expected = [_][]const u8{ "/same-one", "/same-two", "/different" };
+    for (&producers, expected) |*producer, path| {
+        if (producer.err) |err| return err;
+        var response = producer.response.?;
+        defer response.deinit(allocator);
+        try std.testing.expectEqualStrings(
+            path,
+            findHeader(response.headers, "x-path").?,
+        );
+    }
+    const stats = dispatcher.stats();
+    try std.testing.expectEqual(@as(u64, 2), stats.batches);
+    try std.testing.expectEqual(@as(u64, 2), stats.coalesced_requests);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    server_thread.join();
+    server_joined = true;
+    if (server_worker.err) |err| return err;
+}
+
+test "HTTP/2 shared senders expire one identical-deadline batch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const ServerWorker = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var first = try connection.readRequest();
+            defer first.deinit(self.server.allocator);
+            var second = try connection.readRequest();
+            defer second.deinit(self.server.allocator);
+            const first_is_one = std.mem.eql(u8, first.path, "/timeout-one");
+            const first_is_two = std.mem.eql(u8, first.path, "/timeout-two");
+            const second_is_one = std.mem.eql(u8, second.path, "/timeout-one");
+            const second_is_two = std.mem.eql(u8, second.path, "/timeout-two");
+            try std.testing.expect(
+                (first_is_one and second_is_two) or
+                    (first_is_two and second_is_one),
+            );
+            try std.Io.sleep(self.server.io, .fromMilliseconds(500), .awake);
+        }
+    };
+
+    const Producer = struct {
+        sender: pool_mod.SharedSender,
+        uri: []const u8,
+        io: std.Io,
+        start: *std.Io.Event,
+        deadline: *const std.Io.Clock.Timestamp,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.start.wait(self.io) catch |err| {
+                self.err = err;
+                return;
+            };
+            var response = self.sender.requestWithDeadline(
+                self.uri,
+                .{},
+                self.deadline.*,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+            response.deinit(std.testing.allocator);
+        }
+    };
+
+    var server_worker = ServerWorker{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerWorker.run,
+        .{&server_worker},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    var dispatcher = try pool_mod.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 4, .max_batch_requests = 4 },
+    );
+    defer dispatcher.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    const first_uri = try std.fmt.allocPrint(allocator, "{s}/timeout-one", .{base});
+    defer allocator.free(first_uri);
+    const second_uri = try std.fmt.allocPrint(allocator, "{s}/timeout-two", .{base});
+    defer allocator.free(second_uri);
+    const sender = dispatcher.sender();
+    var start: std.Io.Event = .unset;
+    var deadline: std.Io.Clock.Timestamp = undefined;
+    var producers = [_]Producer{
+        .{ .sender = sender.clone(), .uri = first_uri, .io = io, .start = &start, .deadline = &deadline },
+        .{ .sender = sender.clone(), .uri = second_uri, .io = io, .start = &start, .deadline = &deadline },
+    };
+    var threads: [producers.len]std.Thread = undefined;
+    for (&threads, &producers) |*thread, *producer| {
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+    }
+    deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromMilliseconds(250),
+        .clock = .awake,
+    });
+    start.set(io);
+    try waitQueued(io, &dispatcher, producers.len);
+    var driver = try std.Io.concurrent(
+        io,
+        pool_mod.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    for (&threads) |*thread| thread.join();
+    dispatcher.close();
+    try driver.await(io);
+
+    for (producers) |producer| {
+        try std.testing.expectEqual(error.Timeout, producer.err.?);
+    }
+    const stats = dispatcher.stats();
+    try std.testing.expectEqual(@as(u64, 1), stats.batches);
+    try std.testing.expectEqual(@as(u64, 2), stats.coalesced_requests);
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
+    server_thread.join();
+    server_joined = true;
+    if (server_worker.err) |err| return err;
+}
+
 test "HTTP/2 shared sender removes timed out queued command" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -2,10 +2,11 @@
 //!
 //! Producers enqueue stack-owned commands and wait on per-command events. The
 //! driver is the only task allowed to touch the underlying pool. Compatible
-//! requests without individual deadlines are coalesced into the pool's
-//! multiplexed URI batch. Bodyful batches use its full-duplex flow-control
-//! pump and terminal request-trailer path; independently bounded requests
-//! execute alone so one caller cannot cancel sibling streams.
+//! requests without individual deadlines, or requests sharing one exact
+//! absolute deadline, are coalesced into the pool's multiplexed URI batch.
+//! Bodyful batches use its full-duplex flow-control pump and terminal
+//! request-trailer path. Distinct deadlines remain isolated so one caller
+//! cannot cancel a sibling whose budget has not expired.
 
 const std = @import("std");
 const batch = @import("batch.zig");
@@ -344,10 +345,9 @@ pub fn Dispatcher(comptime PoolType: type) type {
             first.state = .in_flight;
             out[0] = first;
             var count: usize = 1;
-            if (!batchEligible(first)) return count;
             while (count < state.options.max_batch_requests) {
                 const next = state.head orelse break;
-                if (!batchEligible(next) or
+                if (!sameDeadline(first.deadline, next.deadline) or
                     !sameOrigin(first.uri, next.uri)) break;
                 detach(state, next);
                 next.state = .in_flight;
@@ -389,10 +389,18 @@ pub fn Dispatcher(comptime PoolType: type) type {
                     .request = command.request,
                 };
             }
-            state.pool.requestUriBatch(
-                requests[0..commands.len],
-                responses[0..commands.len],
-            ) catch |err| {
+            const result = if (commands[0].deadline) |deadline|
+                state.pool.requestUriBatchWithDeadline(
+                    requests[0..commands.len],
+                    responses[0..commands.len],
+                    deadline,
+                )
+            else
+                state.pool.requestUriBatch(
+                    requests[0..commands.len],
+                    responses[0..commands.len],
+                );
+            result catch |err| {
                 for (commands) |command| complete(state, command, null, err);
                 return;
             };
@@ -446,8 +454,16 @@ pub fn Dispatcher(comptime PoolType: type) type {
             command.response = null;
         }
 
-        fn batchEligible(command: *const Command) bool {
-            return command.deadline == null;
+        fn sameDeadline(
+            lhs: ?std.Io.Clock.Timestamp,
+            rhs: ?std.Io.Clock.Timestamp,
+        ) bool {
+            if (lhs) |left| {
+                const right = rhs orelse return false;
+                return left.clock == right.clock and
+                    left.raw.nanoseconds == right.raw.nanoseconds;
+            }
+            return rhs == null;
         }
 
         fn sameOrigin(lhs_text: []const u8, rhs_text: []const u8) bool {

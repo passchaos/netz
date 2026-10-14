@@ -400,10 +400,15 @@ fn runPoolInterop(
         sender: netz.http2.client_pool.SharedSender,
         uri: []const u8,
         request: netz.http2.runtime.RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
         response: ?netz.http2.runtime.OwnedResponse = null,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            self.response = self.sender.request(self.uri, self.request) catch |err| {
+            self.response = self.sender.requestWithDeadline(
+                self.uri,
+                self.request,
+                self.deadline,
+            ) catch |err| {
                 self.err = err;
                 return;
             };
@@ -428,10 +433,15 @@ fn runPoolInterop(
     );
     defer allocator.free(shared_three_uri);
     const sender = dispatcher.sender();
+    const shared_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
+        .raw = .fromSeconds(5),
+        .clock = .awake,
+    });
     var producers = [_]SharedProducer{
         .{
             .sender = sender.clone(),
             .uri = shared_one_uri,
+            .deadline = shared_deadline,
             .request = .{
                 .method = "POST",
                 .body = "shared-body-one",
@@ -444,6 +454,7 @@ fn runPoolInterop(
         .{
             .sender = sender.clone(),
             .uri = shared_two_uri,
+            .deadline = shared_deadline,
             .request = .{
                 .method = "POST",
                 .body = "shared-body-two",
@@ -456,6 +467,7 @@ fn runPoolInterop(
         .{
             .sender = sender.clone(),
             .uri = shared_three_uri,
+            .deadline = shared_deadline,
             .request = .{
                 .method = "POST",
                 .body = "shared-body-three",
@@ -477,25 +489,35 @@ fn runPoolInterop(
         try std.Io.sleep(io, .fromMilliseconds(1), .awake);
     }
     if (dispatcher.queuedCount() != producers.len) return error.Timeout;
-    const DriverWorker = struct {
+    var driver = try std.Io.concurrent(
+        io,
+        netz.http2.client_pool.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    const ProducerJoiner = struct {
         dispatcher: *netz.http2.client_pool.SharedDispatcher,
-        err: ?anyerror = null,
+        threads: []std.Thread,
+
         fn run(self: *@This()) void {
-            self.dispatcher.run() catch |err| {
-                self.err = err;
-            };
+            for (self.threads) |*thread| thread.join();
+            self.dispatcher.close();
         }
     };
-    var driver_worker = DriverWorker{ .dispatcher = &dispatcher };
-    const driver_thread = try std.Thread.spawn(
+    var producer_joiner = ProducerJoiner{
+        .dispatcher = &dispatcher,
+        .threads = &producer_threads,
+    };
+    const producer_join_thread = try std.Thread.spawn(
         .{},
-        DriverWorker.run,
-        .{&driver_worker},
+        ProducerJoiner.run,
+        .{&producer_joiner},
     );
-    for (&producer_threads) |*thread| thread.join();
-    dispatcher.close();
-    driver_thread.join();
-    if (driver_worker.err) |err| return err;
+    var driver_err: ?anyerror = null;
+    driver.await(io) catch |err| {
+        driver_err = err;
+    };
+    producer_join_thread.join();
+    if (driver_err) |err| return err;
     const shared_expected = [_][]const u8{
         "pool-shared-one",
         "pool-shared-two",

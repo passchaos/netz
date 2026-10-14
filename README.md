@@ -401,12 +401,12 @@ Current protocol coverage includes:
   connection is retried only when every method is idempotent.
   `SharedDispatcher` adds Hyper-shaped execution ownership: one driver is the
   sole pool/frame reader, cloneable `SharedSender` handles feed a bounded
-  queue, and compatible concurrent commands without individual deadlines are
-  coalesced into the same URI-batch core, including full-duplex body uploads
-  and request trailers.
+  queue, and compatible concurrent commands either without deadlines or with
+  one identical absolute deadline are coalesced into the same URI-batch core,
+  including full-duplex body uploads and request trailers.
   Per-command deadline/cancel paths unlink queued stack commands safely, queue
-  overflow is explicit, and close wakes every producer; individually bounded
-  requests execute alone so one caller cannot cancel sibling streams,
+  overflow is explicit, and close wakes every producer; distinct deadlines
+  remain separate so an earlier budget cannot cancel a later sibling,
   allocation-free HTTP/2 runtime
   SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, transactional single-reservation SETTINGS frames with payload length reuse and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,
@@ -1530,10 +1530,10 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # Both netz HTTP/1 endpoints obtain std.Io from zio; the gate asserts
 # zio-std-io versus the audited Hyper fixture's hyper-tokio runtime identity.
 # Build the locked local Hyper reference offline, then verify POST headers,
-# multi-frame bodies/trailers, body-bearing cloneable shared senders with
-# terminal request trailers, and bidirectional cancellation of a 128-KiB
-# response at an 8-KiB stream window while a concurrent sibling completes on
-# the same connection.
+# multi-frame bodies/trailers, body-bearing cloneable shared senders with one
+# shared absolute deadline plus terminal request trailers, and bidirectional
+# cancellation of a 128-KiB response at an 8-KiB stream window while a
+# concurrent sibling completes on the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Negotiate `http/1.1` and `h2` with independent Hyper/rustls servers through
 # the same high-level authority pool, then prove one miss plus one reuse on each
