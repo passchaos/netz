@@ -386,7 +386,13 @@ Current protocol coverage includes:
   and resumption tickets cleared on cross-origin hops by default; the
   authority-keyed pool exposes the same redirect API, releasing each completed
   lease before reacquiring so same-origin hops reuse HPACK/TLS state and
-  cross-origin hops retain capacity, LRU, ticket, and identity policy,
+  cross-origin hops retain capacity, LRU, ticket, and identity policy. The
+  pool also exposes same-origin bodyless URI batches: request descriptors and
+  targets use bounded stack storage with exact fallbacks, all HEADERS are
+  submitted through one lease before response reads, out-of-order streams map
+  back to caller order, one absolute deadline spans admission and the complete
+  batch, and a stale reused connection is retried only when every method is
+  idempotent,
   allocation-free HTTP/2 runtime
   SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, transactional single-reservation SETTINGS frames with payload length reuse and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,

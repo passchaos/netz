@@ -358,6 +358,37 @@ fn runPoolInterop(
     defer first.deinit(allocator);
     var second = try pool.requestUri(second_uri, .{});
     defer second.deinit(allocator);
+    const batch_one_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-batch-one?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(batch_one_uri);
+    const batch_two_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://LOCALHOST:{d}/pool-batch-two?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(batch_two_uri);
+    const batch_three_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-batch-three?from=netz",
+        .{ scheme, port },
+    );
+    defer allocator.free(batch_three_uri);
+    const batch_requests = [_]netz.http2.client_pool.UriBatchRequest{
+        .{ .uri = batch_one_uri },
+        .{ .uri = batch_two_uri },
+        .{ .uri = batch_three_uri },
+    };
+    var batch_responses: [batch_requests.len]netz.http2.runtime.OwnedResponse =
+        undefined;
+    try pool.requestUriBatchWithTimeout(
+        &batch_requests,
+        &batch_responses,
+        .fromSeconds(5),
+    );
+    defer for (&batch_responses) |*response| response.deinit(allocator);
     const redirect_uri = try std.fmt.allocPrint(
         allocator,
         "{s}://localhost:{d}/pool-redirect-start?from=netz",
@@ -381,6 +412,9 @@ fn runPoolInterop(
     if (first.status != 200 or second.status != 200 or
         !std.mem.eql(u8, first.body, "pool-one") or
         !std.mem.eql(u8, second.body, "pool-two") or
+        !std.mem.eql(u8, batch_responses[0].body, "pool-batch-one") or
+        !std.mem.eql(u8, batch_responses[1].body, "pool-batch-two") or
+        !std.mem.eql(u8, batch_responses[2].body, "pool-batch-three") or
         !std.mem.eql(u8, redirected.response.body, "pool-redirected") or
         redirected.redirect_count != 1 or
         pool.idleCount() != 1 or pool.connectionCount() != 1)
@@ -388,7 +422,7 @@ fn runPoolInterop(
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/2 pool reused Hyper connection through redirect: transport={s} requests=4 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz HTTP/2 pool multiplexed Hyper batch and redirect: transport={s} requests=7 batch=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

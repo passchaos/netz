@@ -14,11 +14,13 @@ const uri_redirect = @import("../http1/runtime/redirect.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const tls_ticket_cache = @import("../tls/stream/client_ticket_cache.zig");
 const runtime = @import("runtime.zig");
+const batch = @import("client_pool/batch.zig");
 
 pub const Error = runtime.Error || error{
     PoolClosed,
     ConnectionLimitReached,
     InvalidPoolOptions,
+    MixedBatchOrigins,
 };
 pub const AcquireTimeoutError = Error || std.Io.Timeout.Error;
 
@@ -39,6 +41,8 @@ pub const Options = struct {
     /// Zero disables automatic ticket retention and resumption.
     max_tls13_session_tickets: usize = 32,
 };
+
+pub const UriBatchRequest = batch.UriRequest;
 
 const Transport = enum { cleartext, tls };
 
@@ -69,6 +73,10 @@ pub const Pool = struct {
     tls12_tickets: tls_ticket_cache.Cache,
     tls13_tickets: tls_ticket_cache.Tls13Cache,
     closed: bool = false,
+
+    pub const requestUriBatch = batch.requestUriBatch;
+    pub const requestUriBatchWithTimeout = batch.requestUriBatchWithTimeout;
+    pub const requestUriBatchWithDeadline = batch.requestUriBatchWithDeadline;
 
     pub fn init(
         allocator: std.mem.Allocator,

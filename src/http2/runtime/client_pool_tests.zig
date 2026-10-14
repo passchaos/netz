@@ -1,8 +1,16 @@
 const std = @import("std");
 const pool_mod = @import("../client_pool.zig");
 const runtime = @import("../runtime.zig");
+const http2 = @import("../mod.zig");
 const tls_testing = @import("../../tls/testing.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
+
+fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
+    }
+    return null;
+}
 
 fn uriFor(
     allocator: std.mem.Allocator,
@@ -90,6 +98,151 @@ test "HTTP/2 client pool reuses one persistent connection" {
     joined = true;
     if (shared.err) |err| return err;
     try std.testing.expectEqual(@as(usize, 1), shared.accepts);
+}
+
+test "HTTP/2 client pool multiplexes same-origin URI batch" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        accepts: usize = 0,
+        requests: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            self.accepts += 1;
+            defer connection.close();
+            var requests: [3]runtime.OwnedRequest = undefined;
+            var initialized: usize = 0;
+            defer for (requests[0..initialized]) |*request| {
+                request.deinit(self.server.allocator);
+            };
+            for (&requests) |*request| {
+                request.* = try connection.readRequest();
+                initialized += 1;
+                self.requests += 1;
+            }
+            var stream_ids: [requests.len]u31 = undefined;
+            var headers: [requests.len]http2.Hpack.HeaderField =
+                undefined;
+            var responses: [requests.len]runtime.ResponseOptions = undefined;
+            var index = requests.len;
+            while (index != 0) {
+                index -= 1;
+                const output = requests.len - 1 - index;
+                stream_ids[output] = requests[index].stream_id;
+                headers[output] = .{
+                    .name = "x-path",
+                    .value = requests[index].path,
+                };
+                responses[output] = .{
+                    .headers = headers[output..][0..1],
+                    .request_method = requests[index].method,
+                };
+            }
+            try connection.writeResponseBatch(&stream_ids, &responses);
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    const port = server.address().ip4.port;
+    const first = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}/one",
+        .{port},
+    );
+    defer allocator.free(first);
+    const second = try std.fmt.allocPrint(
+        allocator,
+        "http://LOCALHOST:{d}/two?x=1",
+        .{port},
+    );
+    defer allocator.free(second);
+    const third = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}/three",
+        .{port},
+    );
+    defer allocator.free(third);
+    const requests = [_]pool_mod.UriBatchRequest{
+        .{ .uri = first },
+        .{ .uri = second },
+        .{ .uri = third },
+    };
+    var responses: [requests.len]runtime.OwnedResponse = undefined;
+    try pool.requestUriBatchWithTimeout(
+        &requests,
+        &responses,
+        .fromSeconds(3),
+    );
+    defer for (&responses) |*response| response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "/one",
+        findHeader(responses[0].headers, "x-path").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/two?x=1",
+        findHeader(responses[1].headers, "x-path").?,
+    );
+    try std.testing.expectEqualStrings(
+        "/three",
+        findHeader(responses[2].headers, "x-path").?,
+    );
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 1), shared.accepts);
+    try std.testing.expectEqual(@as(usize, 3), shared.requests);
+}
+
+test "HTTP/2 client pool rejects mixed-origin and bodyful URI batches" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var pool = try pool_mod.Pool.init(allocator, threaded.io(), .{});
+    defer pool.deinit();
+    var responses: [2]runtime.OwnedResponse = undefined;
+    try std.testing.expectError(
+        error.MixedBatchOrigins,
+        pool.requestUriBatch(&.{
+            .{ .uri = "http://localhost:1/one" },
+            .{ .uri = "http://localhost:2/two" },
+        }, &responses),
+    );
+    try std.testing.expectError(
+        error.InvalidContentLength,
+        pool.requestUriBatch(&.{
+            .{ .uri = "http://localhost:1/one", .request = .{ .body = "x" } },
+            .{ .uri = "http://localhost:1/two" },
+        }, &responses),
+    );
+    try std.testing.expectEqual(@as(usize, 0), pool.connectionCount());
 }
 
 test "HTTP/2 client connect timeout is available through direct and pool APIs" {
@@ -198,6 +351,106 @@ test "HTTP/2 client pool retries stale reused idempotent connection once" {
     var retried = try pool.requestUri(retry_uri, .{ .method = "QUERY" });
     defer retried.deinit(allocator);
     try std.testing.expectEqualStrings("retried", retried.body);
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), shared.accepts);
+}
+
+test "HTTP/2 client pool retries stale idempotent URI batch once" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+    const Shared = struct {
+        server: *runtime.Server,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.accept();
+            self.accepts += 1;
+            var seed = try first.readRequest();
+            const seed_stream_id = seed.stream_id;
+            seed.deinit(self.server.allocator);
+            try first.writeResponse(seed_stream_id, .{ .body = "seed" });
+            first.close();
+
+            var second = try self.server.accept();
+            self.accepts += 1;
+            defer second.close();
+            var requests: [2]runtime.OwnedRequest = undefined;
+            for (&requests) |*request| request.* = try second.readRequest();
+            defer for (&requests) |*request| {
+                request.deinit(self.server.allocator);
+            };
+            try std.testing.expectEqualStrings("/batch-one", requests[0].path);
+            try std.testing.expectEqualStrings("/batch-two", requests[1].path);
+            try std.testing.expectEqualStrings("GET", requests[0].method);
+            try std.testing.expectEqualStrings("QUERY", requests[1].method);
+            try second.writeResponseBatch(
+                &.{ requests[1].stream_id, requests[0].stream_id },
+                &.{
+                    .{ .headers = &.{.{ .name = "x-result", .value = "two" }} },
+                    .{ .headers = &.{.{ .name = "x-result", .value = "one" }} },
+                },
+            );
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    defer pool.deinit();
+    const seed_uri = try uriFor(allocator, "http", server.address(), "/seed");
+    defer allocator.free(seed_uri);
+    const first_uri = try uriFor(
+        allocator,
+        "http",
+        server.address(),
+        "/batch-one",
+    );
+    defer allocator.free(first_uri);
+    const second_uri = try uriFor(
+        allocator,
+        "http",
+        server.address(),
+        "/batch-two",
+    );
+    defer allocator.free(second_uri);
+    var seed = try pool.requestUri(seed_uri, .{});
+    seed.deinit(allocator);
+    const batch_requests = [_]pool_mod.UriBatchRequest{
+        .{ .uri = first_uri },
+        .{ .uri = second_uri, .request = .{ .method = "QUERY" } },
+    };
+    var responses: [batch_requests.len]runtime.OwnedResponse = undefined;
+    try pool.requestUriBatch(&batch_requests, &responses);
+    defer for (&responses) |*response| response.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "one",
+        findHeader(responses[0].headers, "x-result").?,
+    );
+    try std.testing.expectEqualStrings(
+        "two",
+        findHeader(responses[1].headers, "x-result").?,
+    );
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
 
     thread.join();
