@@ -33,6 +33,9 @@ pub const Options = struct {
     max_idle_connections: usize = 16,
     max_idle_per_authority: usize = 4,
     idle_timeout: ?std.Io.Duration = .fromSeconds(90),
+    /// Application contribution size used by pooled body-bearing URI batches.
+    /// HTTP/2 frame splitting and flow-control limits remain authoritative.
+    batch_body_chunk_size: usize = 16 * 1024,
     limits: runtime.Limits = .{},
     tls: runtime.TlsConnectOptions = .{},
     /// Maximum cached RFC 5077 TLS 1.2 tickets across HTTPS authorities.
@@ -88,6 +91,9 @@ pub const Pool = struct {
         options: Options,
     ) Error!Pool {
         if (options.max_idle_per_authority > options.max_idle_connections) {
+            return error.InvalidPoolOptions;
+        }
+        if (options.batch_body_chunk_size == 0) {
             return error.InvalidPoolOptions;
         }
         if (options.idle_timeout) |timeout| {

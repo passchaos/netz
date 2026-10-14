@@ -399,10 +399,11 @@ fn runPoolInterop(
     const SharedProducer = struct {
         sender: netz.http2.client_pool.SharedSender,
         uri: []const u8,
+        request: netz.http2.runtime.RequestOptions,
         response: ?netz.http2.runtime.OwnedResponse = null,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            self.response = self.sender.request(self.uri, .{}) catch |err| {
+            self.response = self.sender.request(self.uri, self.request) catch |err| {
                 self.err = err;
                 return;
             };
@@ -428,9 +429,21 @@ fn runPoolInterop(
     defer allocator.free(shared_three_uri);
     const sender = dispatcher.sender();
     var producers = [_]SharedProducer{
-        .{ .sender = sender.clone(), .uri = shared_one_uri },
-        .{ .sender = sender.clone(), .uri = shared_two_uri },
-        .{ .sender = sender.clone(), .uri = shared_three_uri },
+        .{
+            .sender = sender.clone(),
+            .uri = shared_one_uri,
+            .request = .{ .method = "POST", .body = "shared-body-one" },
+        },
+        .{
+            .sender = sender.clone(),
+            .uri = shared_two_uri,
+            .request = .{ .method = "POST", .body = "shared-body-two" },
+        },
+        .{
+            .sender = sender.clone(),
+            .uri = shared_three_uri,
+            .request = .{ .method = "POST", .body = "shared-body-three" },
+        },
     };
     var producer_threads: [producers.len]std.Thread = undefined;
     for (&producer_threads, &producers) |*thread, *producer| {

@@ -340,6 +340,49 @@ async fn handle(
             .boxed(),
         ));
     }
+    if let Some((path, expected_body, response_body)) = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .and_then(|path| match path {
+            "/pool-shared-one?from=netz" => Some((
+                path,
+                b"shared-body-one".as_slice(),
+                Bytes::from_static(b"pool-shared-one"),
+            )),
+            "/pool-shared-two?from=netz" => Some((
+                path,
+                b"shared-body-two".as_slice(),
+                Bytes::from_static(b"pool-shared-two"),
+            )),
+            "/pool-shared-three?from=netz" => Some((
+                path,
+                b"shared-body-three".as_slice(),
+                Bytes::from_static(b"pool-shared-three"),
+            )),
+            _ => None,
+        })
+    {
+        ensure_request(&request, Method::POST, path)?;
+        let collected = request
+            .into_body()
+            .collect()
+            .await
+            .map_err(io::Error::other)?;
+        if collected.to_bytes() != expected_body {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 shared sender body",
+            ));
+        }
+        signals.pool_requests.fetch_add(1, Ordering::AcqRel);
+        return Ok(Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                response_body,
+            ))]))
+            .boxed(),
+        ));
+    }
     if let Some(path) = request.uri().path_and_query().map(|value| value.as_str()) {
         let body = match path {
             "/pool-one?from=netz" => Some(Bytes::from_static(b"pool-one")),
@@ -347,9 +390,6 @@ async fn handle(
             "/pool-batch-one?from=netz" => Some(Bytes::from_static(b"pool-batch-one")),
             "/pool-batch-two?from=netz" => Some(Bytes::from_static(b"pool-batch-two")),
             "/pool-batch-three?from=netz" => Some(Bytes::from_static(b"pool-batch-three")),
-            "/pool-shared-one?from=netz" => Some(Bytes::from_static(b"pool-shared-one")),
-            "/pool-shared-two?from=netz" => Some(Bytes::from_static(b"pool-shared-two")),
-            "/pool-shared-three?from=netz" => Some(Bytes::from_static(b"pool-shared-three")),
             _ => None,
         };
         if let Some(body) = body {

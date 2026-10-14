@@ -2,9 +2,10 @@
 //!
 //! Producers enqueue stack-owned commands and wait on per-command events. The
 //! driver is the only task allowed to touch the underlying pool. Compatible
-//! bodyless requests without individual deadlines are coalesced into the pool's
-//! multiplexed URI batch; bodyful or independently bounded requests execute
-//! alone so one caller cannot cancel sibling streams.
+//! requests without individual deadlines are coalesced into the pool's
+//! multiplexed URI batch. Bodyful batches use its full-duplex flow-control
+//! pump; independently bounded requests execute alone so one caller cannot
+//! cancel sibling streams.
 
 const std = @import("std");
 const batch = @import("batch.zig");
@@ -447,7 +448,6 @@ pub fn Dispatcher(comptime PoolType: type) type {
 
         fn batchEligible(command: *const Command) bool {
             return command.deadline == null and
-                command.request.body.len == 0 and
                 command.request.trailers.len == 0;
         }
 

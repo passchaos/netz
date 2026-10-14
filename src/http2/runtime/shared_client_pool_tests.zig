@@ -23,7 +23,12 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     var threaded = std.Io.Threaded.init(allocator, .{ .async_limit = .unlimited });
     defer threaded.deinit();
     const io = threaded.io();
-    var server = try runtime.Server.listen(allocator, io, .{ .ip4 = .loopback(0) }, .{});
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .initial_window_size = 4096 },
+    );
     defer server.deinit();
 
     const ServerWorker = struct {
@@ -37,9 +42,32 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
         fn runFallible(self: *@This()) !void {
             var connection = try self.server.accept();
             defer connection.close();
-            var requests: [3]runtime.OwnedRequest = undefined;
-            for (&requests) |*request| request.* = try connection.readRequest();
+            var requests: [3]runtime.StreamingRequest = undefined;
+            const BodyContext = struct {
+                counts: [3]usize = .{ 0, 0, 0 },
+                fn consume(context: *@This(), _: u31, data: []const u8) !void {
+                    for (data) |byte| switch (byte) {
+                        'a' => context.counts[0] += 1,
+                        'b' => context.counts[1] += 1,
+                        'c' => context.counts[2] += 1,
+                        else => return error.InvalidRequest,
+                    };
+                }
+            };
+            var body_context: BodyContext = .{};
+            try connection.readRequestBatchStreamingInto(
+                &requests,
+                &body_context,
+                BodyContext.consume,
+            );
             defer for (&requests) |*request| request.deinit(self.server.allocator);
+            for (&requests) |*request| {
+                try std.testing.expectEqualStrings("POST", request.method);
+                try std.testing.expectEqual(@as(usize, 32 * 1024), request.body_bytes);
+            }
+            for (body_context.counts) |count| {
+                try std.testing.expectEqual(@as(usize, 32 * 1024), count);
+            }
             var stream_ids: [requests.len]u31 = undefined;
             var fields: [requests.len]http2.Hpack.HeaderField = undefined;
             var responses: [requests.len]runtime.ResponseOptions = undefined;
@@ -60,10 +88,11 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     const Producer = struct {
         sender: pool_mod.SharedSender,
         uri: []const u8,
+        request: runtime.RequestOptions,
         response: ?runtime.OwnedResponse = null,
         err: ?anyerror = null,
         fn run(self: *@This()) void {
-            self.response = self.sender.request(self.uri, .{}) catch |err| {
+            self.response = self.sender.request(self.uri, self.request) catch |err| {
                 self.err = err;
                 return;
             };
@@ -74,7 +103,9 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     const server_thread = try std.Thread.spawn(.{}, ServerWorker.run, .{&server_worker});
     var server_joined = false;
     defer if (!server_joined) server_thread.join();
-    var pool = try pool_mod.Pool.init(allocator, io, .{});
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .batch_body_chunk_size = 1024,
+    });
     defer pool.deinit();
     var dispatcher = try pool_mod.SharedDispatcher.init(
         allocator,
@@ -92,10 +123,25 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
     const third_uri = try std.fmt.allocPrint(allocator, "{s}/three", .{base});
     defer allocator.free(third_uri);
     const sender = dispatcher.sender();
+    const first_body = [_]u8{'a'} ** (32 * 1024);
+    const second_body = [_]u8{'b'} ** (32 * 1024);
+    const third_body = [_]u8{'c'} ** (32 * 1024);
     var producers = [_]Producer{
-        .{ .sender = sender.clone(), .uri = first_uri },
-        .{ .sender = sender.clone(), .uri = second_uri },
-        .{ .sender = sender.clone(), .uri = third_uri },
+        .{
+            .sender = sender.clone(),
+            .uri = first_uri,
+            .request = .{ .method = "POST", .body = &first_body },
+        },
+        .{
+            .sender = sender.clone(),
+            .uri = second_uri,
+            .request = .{ .method = "POST", .body = &second_body },
+        },
+        .{
+            .sender = sender.clone(),
+            .uri = third_uri,
+            .request = .{ .method = "POST", .body = &third_body },
+        },
     };
     var threads: [producers.len]std.Thread = undefined;
     for (&threads, &producers) |*thread, *producer| {
@@ -109,7 +155,13 @@ test "HTTP/2 shared senders coalesce concurrent requests through one driver" {
 
     const expected = [_][]const u8{ "/one", "/two", "/three" };
     for (&producers, expected) |*producer, path| {
-        if (producer.err) |err| return err;
+        if (producer.err) |err| {
+            std.debug.print("shared body batch producer failed: {s}\n", .{@errorName(err)});
+            if (server_worker.err) |server_err| {
+                std.debug.print("shared body batch server failed: {s}\n", .{@errorName(server_err)});
+            }
+            return err;
+        }
         var response = producer.response.?;
         try std.testing.expectEqualStrings(path, findHeader(response.headers, "x-path").?);
         response.deinit(allocator);

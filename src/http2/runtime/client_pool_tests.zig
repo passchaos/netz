@@ -221,7 +221,7 @@ test "HTTP/2 client pool multiplexes same-origin URI batch" {
     try std.testing.expectEqual(@as(usize, 3), shared.requests);
 }
 
-test "HTTP/2 client pool rejects mixed-origin and bodyful URI batches" {
+test "HTTP/2 client pool rejects mixed-origin and trailer URI batches" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -238,7 +238,13 @@ test "HTTP/2 client pool rejects mixed-origin and bodyful URI batches" {
     try std.testing.expectError(
         error.InvalidContentLength,
         pool.requestUriBatch(&.{
-            .{ .uri = "http://localhost:1/one", .request = .{ .body = "x" } },
+            .{
+                .uri = "http://localhost:1/one",
+                .request = .{ .trailers = &.{.{
+                    .name = "x-checksum",
+                    .value = "done",
+                }} },
+            },
             .{ .uri = "http://localhost:1/two" },
         }, &responses),
     );

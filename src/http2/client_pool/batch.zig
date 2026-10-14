@@ -1,8 +1,9 @@
 //! Same-origin URI batches for the exclusive HTTP/2 connection pool.
 //!
 //! This is the synchronous execution core for a future cloneable-sender
-//! driver: one lease submits all bodyless request HEADERS before reading, and
-//! the runtime correlates out-of-order peer responses back to request order.
+//! driver: one lease submits all request HEADERS before reading. Bodyless
+//! batches use the transactional HEADERS path; body-bearing batches use the
+//! runtime's full-duplex round-robin upload/response pump.
 
 const std = @import("std");
 const deadline_policy = @import("../../internal/deadline.zig");
@@ -66,10 +67,12 @@ fn requestUriBatchBefore(
 ) !void {
     if (requests.len != responses.len) return error.InvalidResponse;
     if (requests.len == 0) return;
+    var has_body = false;
     for (requests) |item| {
-        if (item.request.body.len != 0 or item.request.trailers.len != 0) {
+        if (item.request.trailers.len != 0) {
             return error.InvalidContentLength;
         }
+        has_body = has_body or item.request.body.len != 0;
     }
 
     const first_uri = std.Uri.parse(requests[0].uri) catch
@@ -147,7 +150,21 @@ fn requestUriBatchBefore(
         else
             try pool.acquireUri(requests[0].uri);
         defer if (lease.active) lease.discard();
-        const result = if (deadline) |absolute|
+        const result = if (has_body)
+            if (deadline) |absolute|
+                lease.connection().requestBodyBatchIntoWithDeadline(
+                    native_requests,
+                    pool.options.batch_body_chunk_size,
+                    responses,
+                    absolute,
+                )
+            else
+                lease.connection().requestBodyBatchInto(
+                    native_requests,
+                    pool.options.batch_body_chunk_size,
+                    responses,
+                )
+        else if (deadline) |absolute|
             lease.connection().requestBatchIntoWithDeadline(
                 native_requests,
                 responses,
