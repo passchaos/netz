@@ -3315,6 +3315,17 @@ definitions are the exception: `bridge_reload_type lazy|immediate` selects
 per-bridge generation replacement on the same SIGHUP without rebinding
 listeners. Listener topology, anonymous policy, limits, and persistence
 settings still require restart.
+The complete configuration gate now passes with OpenSSL 3.6.5, including exact
+CertificateRequest CA-name decoding, live client-CA rotation, mTLS, CRL and
+TLS/WSS rollback. The earlier 3.6.5 failure was a process-gate synchronization
+bug rather than a TLS wire mismatch: `select()` cannot see lines already
+decoded into Python's `TextIOWrapper`. The line waiter now drains that buffer
+non-blockingly before waiting on the descriptor, with a deterministic two-line
+regression. A separate restart helper retries only transport loss while a
+test broker is killed and rebound under an automatically reconnecting bridge;
+completed MQTT refusals remain immediate failures. Twenty consecutive bridge
+reload runs and the complete broker-configuration matrix passed after the
+change.
 Broker plugins are intentionally outside the target scope and are not counted
 as a standards gap. CA files may contain non-CA certificates whose KeyUsage
 authorizes `cRLSign`; these are retained separately from client trust anchors

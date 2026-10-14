@@ -170,6 +170,18 @@ def _connect_client(port: int, client_id: str) -> socket.socket:
         raise
 
 
+def _connect_client_after_restart(port: int, client_id: str) -> socket.socket:
+    """Retry only transport loss in the loopback process-restart window."""
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            return _connect_client(port, client_id)
+        except (ConnectionError, EOFError, socket.timeout):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+
+
 def _connect_tls_client(
     port: int,
     client_id: str,
@@ -814,7 +826,10 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
             finite=False,
         )
         _wait_for_log(upstream, upstream_log, "configured 1 listeners")
-        observer = _connect_client(upstream_port, "bridge-reload-observer-2")
+        observer = _connect_client_after_restart(
+            upstream_port,
+            "bridge-reload-observer-2",
+        )
         _subscribe_client(observer, 1, state_topic, 1)
         _expect_bridge_state(observer, state_topic, b"1")
         publisher = _connect_client(upstream_port, "bridge-reload-publisher-2")
@@ -1095,7 +1110,10 @@ def run_outbound_bridge_reload_case(broker: Path, directory: Path) -> None:
             finite=False,
         )
         _wait_for_log(upstream, upstream_log, "configured 1 listeners")
-        observer = _connect_client(upstream_port, "outbound-reload-observer-2")
+        observer = _connect_client_after_restart(
+            upstream_port,
+            "outbound-reload-observer-2",
+        )
         _subscribe_client(observer, 1, state_topic, 1)
         _expect_bridge_state(observer, state_topic, b"1")
         _subscribe_client(observer, 2, "remote/#", 1)
