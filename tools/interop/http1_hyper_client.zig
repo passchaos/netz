@@ -472,14 +472,39 @@ pub fn main(init: std.process.Init) !void {
     defer pool_one.deinit(allocator);
     var pool_two = try pool.requestUri(pool_two_uri, .{});
     defer pool_two.deinit(allocator);
+    const pool_redirect_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}://localhost:{d}/pool-redirect-start?from=netz",
+        .{ pool_scheme, port },
+    );
+    defer allocator.free(pool_redirect_uri);
+    var pool_redirected = try pool.requestUriFollowingRedirectsDetailedWithTimeout(
+        pool_redirect_uri,
+        .{
+            .method = .POST,
+            .headers = &.{.{
+                .name = "Authorization",
+                .value = "Bearer pool-redirect",
+            }},
+            .body = "pool-body",
+        },
+        .{},
+        .fromSeconds(5),
+    );
+    defer pool_redirected.deinit();
     if (!std.mem.eql(u8, pool_one.response.body, "pool-one") or
         !std.mem.eql(u8, pool_two.response.body, "pool-two") or
+        !std.mem.eql(
+            u8,
+            pool_redirected.response.response.body,
+            "pool-redirected",
+        ) or pool_redirected.redirect_count != 1 or
         pool.idleCount() != 1)
     {
         return error.InvalidPooledResponse;
     }
     std.debug.print(
-        "netz HTTP/1 pool reused Hyper connection: transport={s} requests=2 idle=1 client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz HTTP/1 pool reused Hyper connection through redirect: transport={s} requests=4 redirects=1 idle=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "cleartext"},
     );
 

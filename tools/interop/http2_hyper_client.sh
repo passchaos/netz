@@ -120,10 +120,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'netz HTTP/2 pool reused Hyper connection: transport=h2c requests=2 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'netz HTTP/2 pool reused Hyper connection through redirect: transport=h2c requests=4 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/pool-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'Hyper HTTP/2 server completed netz pool redirect reuse: requests=4 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/pool-server.log"
 cat "$work/pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper h2c reuse interop passed'
@@ -265,10 +265,10 @@ fi
 wait "$server_pid"
 server_pid=
 grep -Fq \
-  'netz HTTP/2 pool reused Hyper connection: transport=tls requests=2 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'netz HTTP/2 pool reused Hyper connection through redirect: transport=tls requests=4 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-pool-client.log"
 grep -Fq \
-  'Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
+  'Hyper HTTP/2 server completed netz pool redirect reuse: requests=4 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio' \
   "$work/tls-pool-server.log"
 cat "$work/tls-pool-client.log"
 echo 'netz HTTP/2 pool -> Hyper TLS reuse interop passed'

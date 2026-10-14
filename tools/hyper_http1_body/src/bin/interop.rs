@@ -150,7 +150,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
                         )
                         .await
                         .expect("serve netz pooled HTTP/1 requests");
-                    assert_eq!(requests.load(Ordering::SeqCst), 2);
+                    assert_eq!(requests.load(Ordering::SeqCst), 4);
                 }
                 8 | 9 => {
                     server_http1::Builder::new()
@@ -170,7 +170,7 @@ async fn run_server(port: u16, cert_path: Option<String>, key_path: Option<Strin
     for connection in connections {
         connection.await.expect("join Hyper HTTP/1 connection");
     }
-    println!("Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, redirect, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 redirect=303/POST-to-GET pooled_requests=2 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio");
+    println!("Hyper/Tokio HTTP/1 fixture verified netz extension method, informational, Expect, CONNECT, Upgrade, redirect, and pooled reuse boundaries: extension=PURGE observed=103,102 expect=103,100 early_final=417 body_sent=0 tunnel_bytes=17/18 upgrade_bytes=18/19 redirect=303/POST-to-GET pooled_requests=4 pooled_redirect=303 pooled_connections=1 client_io=zio-std-io server_io=hyper-tokio");
 }
 
 async fn handle_redirect_request(
@@ -243,25 +243,76 @@ async fn handle_pool_request(
     requests: Arc<AtomicUsize>,
 ) -> Result<Response<Body>, std::io::Error> {
     let index = requests.fetch_add(1, Ordering::SeqCst);
-    let expected = if index == 0 {
-        "/pool-one?from=netz"
-    } else {
-        "/pool-two?from=netz"
-    };
-    if index >= 2
-        || request.method() != Method::GET
-        || request.uri().path_and_query().map(|value| value.as_str()) != Some(expected)
-    {
-        return Err(std::io::Error::new(
+    match index {
+        0 | 1 => {
+            let expected = if index == 0 {
+                "/pool-one?from=netz"
+            } else {
+                "/pool-two?from=netz"
+            };
+            if request.method() != Method::GET
+                || request.uri().path_and_query().map(|value| value.as_str()) != Some(expected)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected netz pooled request",
+                ));
+            }
+            Ok(Response::new(body_with_trailers(
+                if index == 0 { b"pool-one" } else { b"pool-two" },
+                b"",
+                HeaderMap::new(),
+            )))
+        }
+        2 => {
+            if request.method() != Method::POST
+                || request.uri().path_and_query().map(|value| value.as_str())
+                    != Some("/pool-redirect-start?from=netz")
+                || request.headers().get("authorization")
+                    != Some(&HeaderValue::from_static("Bearer pool-redirect"))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected pooled redirect source",
+                ));
+            }
+            let (body, trailers) = collect_body(request.into_body()).await?;
+            if body != b"pool-body" || trailers.is_some() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected pooled redirect body",
+                ));
+            }
+            Ok(Response::builder()
+                .status(StatusCode::SEE_OTHER)
+                .header("location", "/pool-redirect-final?from=hyper")
+                .body(empty_body())
+                .expect("pooled redirect response"))
+        }
+        3 => {
+            if request.method() != Method::GET
+                || request.uri().path_and_query().map(|value| value.as_str())
+                    != Some("/pool-redirect-final?from=hyper")
+                || request.headers().get("authorization")
+                    != Some(&HeaderValue::from_static("Bearer pool-redirect"))
+                || request.headers().contains_key("content-length")
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "unexpected pooled redirected request",
+                ));
+            }
+            Ok(Response::new(body_with_trailers(
+                b"pool-redirected",
+                b"",
+                HeaderMap::new(),
+            )))
+        }
+        _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "unexpected netz pooled request",
-        ));
+            "too many netz pooled requests",
+        )),
     }
-    Ok(Response::new(body_with_trailers(
-        if index == 0 { b"pool-one" } else { b"pool-two" },
-        b"",
-        HeaderMap::new(),
-    )))
 }
 
 async fn serve_informational(mut stream: MaybeTls) -> Result<(), std::io::Error> {

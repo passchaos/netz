@@ -8,7 +8,9 @@ const std = @import("std");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const http_method = @import("../internal/http_method.zig");
+const http2 = @import("mod.zig");
 const http1_runtime = @import("../http1/runtime.zig");
+const uri_redirect = @import("../http1/runtime/redirect.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const tls_ticket_cache = @import("../tls/stream/client_ticket_cache.zig");
 const runtime = @import("runtime.zig");
@@ -303,6 +305,188 @@ pub const Pool = struct {
             errdefer response.deinit(self.allocator);
             lease.release();
             return response;
+        }
+    }
+
+    pub fn requestUriFollowingRedirects(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+    ) Error!runtime.OwnedResponse {
+        var result = try self.requestUriFollowingRedirectsDetailedBefore(
+            uri_text,
+            request_options,
+            policy,
+            null,
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailed(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+    ) Error!runtime.RedirectedResponse {
+        return self.requestUriFollowingRedirectsDetailedBefore(
+            uri_text,
+            request_options,
+            policy,
+            null,
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithDeadline(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!runtime.OwnedResponse {
+        var result = try self.requestUriFollowingRedirectsDetailedBefore(
+            uri_text,
+            request_options,
+            policy,
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
+        return result.takeResponse();
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithDeadline(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!runtime.RedirectedResponse {
+        return self.requestUriFollowingRedirectsDetailedBefore(
+            uri_text,
+            request_options,
+            policy,
+            try deadline_policy.usableAwake(self.io, deadline),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsWithTimeout(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+        timeout: std.Io.Duration,
+    ) AcquireTimeoutError!runtime.OwnedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestUriFollowingRedirectsWithDeadline(
+            uri_text,
+            request_options,
+            policy,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    pub fn requestUriFollowingRedirectsDetailedWithTimeout(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+        timeout: std.Io.Duration,
+    ) AcquireTimeoutError!runtime.RedirectedResponse {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.requestUriFollowingRedirectsDetailedWithDeadline(
+            uri_text,
+            request_options,
+            policy,
+            .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestUriFollowingRedirectsDetailedBefore(
+        self: *Pool,
+        uri_text: []const u8,
+        request_options: runtime.RequestOptions,
+        policy: runtime.RedirectPolicy,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!runtime.RedirectedResponse {
+        var chain = uri_redirect.Chain.init(self.allocator, policy);
+        defer chain.deinit();
+        try chain.recordInitial(uri_text);
+        var current_uri = try self.allocator.dupe(u8, uri_text);
+        defer self.allocator.free(current_uri);
+        var hop_options = request_options;
+        var owned_headers: ?[]http2.Hpack.HeaderField = null;
+        defer if (owned_headers) |headers| self.allocator.free(headers);
+
+        while (true) {
+            var response = if (deadline) |absolute|
+                try self.requestUriWithDeadline(
+                    current_uri,
+                    hop_options,
+                    absolute,
+                )
+            else
+                try self.requestUri(current_uri, hop_options);
+            errdefer response.deinit(self.allocator);
+            if (!uri_redirect.isRedirectStatus(response.status)) {
+                return .{
+                    .allocator = self.allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        self.allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            const location = try redirectLocation(response.headers);
+            if (location == null) {
+                return .{
+                    .allocator = self.allocator,
+                    .response = response,
+                    .final_uri = try uri_redirect.canonicalize(
+                        self.allocator,
+                        current_uri,
+                    ),
+                    .redirect_count = chain.redirects,
+                };
+            }
+            var next = try chain.follow(current_uri, location.?, response.status);
+            var next_owned = true;
+            defer if (next_owned) next.deinit();
+            if (next.cross_origin) {
+                try uri_redirect.enforceClientIdentityPolicy(
+                    policy,
+                    true,
+                    self.options.tls.client_identity != null,
+                );
+            }
+            const action = uri_redirect.methodActionBytes(
+                policy,
+                response.status,
+                hop_options.method,
+            );
+            const remove_credentials = next.cross_origin and
+                !policy.forward_cross_origin_credentials;
+            hop_options.headers = try redirectHeaders(
+                self.allocator,
+                hop_options.headers,
+                remove_credentials,
+                action == .rewrite_get,
+                &owned_headers,
+            );
+            hop_options.authority = null;
+            hop_options.scheme = null;
+            if (action == .rewrite_get) {
+                hop_options.method = "GET";
+                hop_options.protocol = null;
+                hop_options.body = &.{};
+                hop_options.trailers = &.{};
+            } else if (remove_credentials) {
+                hop_options.trailers = &.{};
+            }
+            response.deinit(self.allocator);
+            self.allocator.free(current_uri);
+            current_uri = next.uri;
+            next_owned = false;
         }
     }
 
@@ -798,6 +982,75 @@ fn transportForScheme(scheme: []const u8) Error!Transport {
     return error.UnsupportedScheme;
 }
 
+fn redirectLocation(
+    headers: []const http2.Hpack.HeaderField,
+) Error!?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (headers) |header| {
+        if (!std.ascii.eqlIgnoreCase(header.name, "location")) continue;
+        if (found != null or header.value.len == 0) {
+            return error.InvalidRedirect;
+        }
+        found = header.value;
+    }
+    return found;
+}
+
+fn redirectHeaders(
+    allocator: std.mem.Allocator,
+    source: []const http2.Hpack.HeaderField,
+    remove_credentials: bool,
+    remove_body: bool,
+    owned: *?[]http2.Hpack.HeaderField,
+) std.mem.Allocator.Error![]const http2.Hpack.HeaderField {
+    var retained_count: usize = 0;
+    for (source) |header| {
+        if (!dropRedirectHeader(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) retained_count += 1;
+    }
+    if (retained_count == source.len) return source;
+    if (retained_count == 0) {
+        if (owned.*) |old| allocator.free(old);
+        owned.* = null;
+        return &.{};
+    }
+    const headers = try allocator.alloc(
+        http2.Hpack.HeaderField,
+        retained_count,
+    );
+    var index: usize = 0;
+    for (source) |header| {
+        if (dropRedirectHeader(
+            header.name,
+            remove_credentials,
+            remove_body,
+        )) continue;
+        headers[index] = header;
+        index += 1;
+    }
+    if (owned.*) |old| allocator.free(old);
+    owned.* = headers;
+    return headers;
+}
+
+fn dropRedirectHeader(
+    name: []const u8,
+    remove_credentials: bool,
+    remove_body: bool,
+) bool {
+    if (std.ascii.eqlIgnoreCase(name, "host")) return true;
+    if (remove_credentials and uri_redirect.isCrossOriginCredential(name)) {
+        return true;
+    }
+    if (remove_credentials and std.ascii.eqlIgnoreCase(name, "trailer")) {
+        return true;
+    }
+    return remove_body and uri_redirect.isBodyHeader(name);
+}
+
 fn retryableStaleConnectionError(err: anyerror) bool {
     return switch (err) {
         error.ConnectionAborted,
@@ -860,4 +1113,8 @@ test "HTTP/2 stale retry policy accepts only idempotent methods" {
     try std.testing.expect(!http_method.isIdempotent("POST"));
     try std.testing.expect(!http_method.isIdempotent("CONNECT"));
     try std.testing.expect(!http_method.isIdempotent("PATCH"));
+}
+
+test {
+    _ = @import("client_pool/redirect_tests.zig");
 }

@@ -599,6 +599,13 @@ mode over h2c and rustls TLS that independently verifies 303 POST-to-GET,
 same-origin Authorization, empty redirected DATA and removed content fields;
 the existing pool, KeyUpdate, cancellation and two-phase GOAWAY matrix remains
 in the same process gate.
+Both authority-keyed pools expose the same ordinary, detailed, timeout and
+absolute-deadline redirect forms. Each completed response is drained and its
+lease released before the next URI is acquired: a same-origin hop can therefore
+reuse that exact HTTP/1 or HTTP/2 connection, while a cross-origin hop follows
+the pool's capacity/LRU and TLS-ticket policy. Credential headers and trailers
+are stripped at the origin boundary, and pools configured with a client
+identity reject cross-origin redirects by default.
 Focused tests also reject any
 subsequent HTTP read/write attempt while the tunnel retains the transport.
 HTTP/1 CONNECT and generic Upgrade tunnels also expose `closeWrite`. Cleartext
@@ -1175,11 +1182,13 @@ eligible for the same single stale-connection retry as GET or PUT on every
 HTTP version, while lowercase or unknown extension names remain ineligible.
 
 The Hyper process gate now also establishes a dedicated persistent connection
-for two URI-based requests through `http1.client_pool.Pool`, in both cleartext
-and certificate-verified TLS modes. Hyper counts exactly two requests on that
-single accepted socket, while netz verifies case-insensitive authority reuse
-and one idle pooled connection afterward. This is direct cross-process evidence
-for the pool rather than inference from the standalone persistent Client tests.
+for four URI-based requests through `http1.client_pool.Pool`, in both cleartext
+and certificate-verified TLS modes. The final two requests are a 303 POST-to-GET
+redirect chain. Hyper counts all four requests on that single accepted socket,
+while netz verifies case-insensitive authority reuse, one followed redirect and
+one idle pooled connection afterward. This is direct cross-process evidence for
+pool redirect reuse rather than inference from standalone persistent Client
+tests.
 | HTTP/2 consecutive empty | 9.55-9.96 us/op pinned | 12.51-12.54 us/op pinned |
 | HTTP/2 consecutive 10-byte POST | 10.09-10.38 us/op pinned, coalesced frame submission | 41.15-41.37 ms/op pinned, delayed-ACK cliff on this host |
 | HTTP/2 consecutive 100-KiB POST | 23.52-23.57 us/op pinned, streaming receive | 37.24-38.68 us/op pinned |
@@ -1637,10 +1646,12 @@ direction Hyper enables its actual 25 ms background keep-alive with idle probes
 using the harness's Tokio-backed implementation of Hyper's timer interface,
 waits 100 ms, and then completes another request through the netz server. This
 proves netz services external PINGs rather than relying only on local peers.
-The same process gate now runs two URI requests through `http2.client_pool.Pool`
-over both h2c and certificate-verified TLS, requires distinct response bodies,
-and verifies one idle/total connection afterward while the Hyper process
-confirms that both requests arrived on its single accepted connection.
+The same process gate now runs four URI requests through
+`http2.client_pool.Pool` over both h2c and certificate-verified TLS. The final
+two requests are a 303 POST-to-GET redirect chain; netz verifies the final body,
+one followed redirect and one idle/total connection afterward, while the Hyper
+process confirms that all four requests arrived on its single accepted
+connection.
 Single-stream cancellation and ordinary GOAWAY now use caller-buffer frame
 encoders: the fixed 13-byte RST_STREAM always stays on the stack, and common
 GOAWAY debug strings use a bounded 256-byte stack path with an exact heap

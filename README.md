@@ -235,7 +235,11 @@ Current protocol coverage includes:
   input boundary, and cleartext leases additionally perform a native
   nonblocking socket peek before returning idle; buffered or kernel-queued
   unsolicited responses and EOF are therefore discarded instead of being
-  attributed to the next lease
+  attributed to the next lease; pooled URI requests expose the same bounded
+  redirect policy and whole-chain deadline, releasing every response before
+  reacquiring its next authority so same-origin hops can immediately reuse the
+  connection while cross-origin hops retain pool capacity, LRU, TLS-ticket,
+  credential-isolation, and mTLS-identity rules
 - Shared vail-backed TLS 1.2/1.3 stream client/server wrappers with explicit
   TLS-1.3-only, TLS-1.2-only, or highest-version negotiation policy; TLS 1.2
   permits only ECDHE+AEAD suites, requires Extended Master Secret and secure
@@ -351,7 +355,10 @@ Current protocol coverage includes:
   literal connect support plus the same bounded RFC 3986 redirect, method/body
   replay, cross-origin credential/trailer isolation, HTTPS downgrade policy and
   whole-chain deadline contract as HTTP/1, with client certificates blocked
-  and resumption tickets cleared on cross-origin hops by default,
+  and resumption tickets cleared on cross-origin hops by default; the
+  authority-keyed pool exposes the same redirect API, releasing each completed
+  lease before reacquiring so same-origin hops reuse HPACK/TLS state and
+  cross-origin hops retain capacity, LRU, ticket, and identity policy,
   allocation-free HTTP/2 runtime
   SETTINGS/frame sends, and a `std.Io.async` concurrent server helper
 - HTTP/3 frame headers with preallocated generic writes and direct QUIC-varint emission, transactional single-reservation SETTINGS frames with payload length reuse and exact-allocation parsing, preallocated single-varint control frames, preallocated PUSH_PROMISE/push-stream prefixes/PRIORITY_UPDATE, preallocated DATAGRAM/Capsule, and unidirectional stream prefixes with preallocated small-varint write fast paths, request/response HEADERS+DATA helpers,

@@ -164,7 +164,7 @@ fn main() {
             // requests shared it. That can surface as a reset after all
             // asserted work, which is a valid shutdown for this scenario.
             let _ = connection.await;
-            println!("Hyper HTTP/2 server completed netz pool reuse: requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio");
+            println!("Hyper HTTP/2 server completed netz pool redirect reuse: requests=4 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
         } else {
             // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY,
             // synchronizes one RTT with PING, then narrows the boundary to the
@@ -280,6 +280,66 @@ async fn handle(
     request: Request<Incoming>,
     signals: Arc<LifecycleSignals>,
 ) -> Result<Response<http_body_util::combinators::BoxBody<Bytes, Infallible>>, io::Error> {
+    if request.uri().path_and_query().map(|value| value.as_str())
+        == Some("/pool-redirect-start?from=netz")
+    {
+        if request.method() != Method::POST
+            || request.headers().get("authorization")
+                != Some(&HeaderValue::from_static("Bearer h2-pool-redirect"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 pooled redirect source",
+            ));
+        }
+        let collected = request
+            .into_body()
+            .collect()
+            .await
+            .map_err(io::Error::other)?;
+        if collected.to_bytes() != b"pool-body".as_slice() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 pooled redirect body",
+            ));
+        }
+        signals.pool_requests.fetch_add(1, Ordering::AcqRel);
+        let mut response = Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"redirecting"),
+            ))]))
+            .boxed(),
+        );
+        *response.status_mut() = StatusCode::SEE_OTHER;
+        response.headers_mut().insert(
+            "location",
+            HeaderValue::from_static("/pool-redirect-final?from=hyper"),
+        );
+        return Ok(response);
+    }
+    if request.uri().path_and_query().map(|value| value.as_str())
+        == Some("/pool-redirect-final?from=hyper")
+    {
+        ensure_request(&request, Method::GET, "/pool-redirect-final?from=hyper")?;
+        if request.headers().get("authorization")
+            != Some(&HeaderValue::from_static("Bearer h2-pool-redirect"))
+            || request.headers().contains_key("content-length")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 pooled redirected request",
+            ));
+        }
+        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 4 {
+            signals.pool_finished.notify_one();
+        }
+        return Ok(Response::new(
+            StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(
+                Bytes::from_static(b"pool-redirected"),
+            ))]))
+            .boxed(),
+        ));
+    }
     if let Some(path) = request.uri().path_and_query().map(|value| value.as_str()) {
         let body = match path {
             "/pool-one?from=netz" => Some(Bytes::from_static(b"pool-one")),
@@ -288,9 +348,7 @@ async fn handle(
         };
         if let Some(body) = body {
             ensure_request(&request, Method::GET, path)?;
-            if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 2 {
-                signals.pool_finished.notify_one();
-            }
+            signals.pool_requests.fetch_add(1, Ordering::AcqRel);
             return Ok(Response::new(
                 StreamBody::new(stream::iter([Ok::<_, Infallible>(Frame::data(body))])).boxed(),
             ));
