@@ -153,3 +153,44 @@ test "Alt-Svc cache allocation failures leave no partial entry" {
         .{},
     );
 }
+
+test "Alt-Svc cache replacement and hit each allocate one block" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var tracking = std.testing.FailingAllocator.init(allocator, .{});
+    const tracked = tracking.allocator();
+    var cache = try cache_mod.Cache.init(tracked, threaded.io(), .{});
+    defer cache.deinit();
+    const origin: http3.Origin = .{
+        .scheme = "https",
+        .host = "allocation-count.example",
+        .port = 443,
+    };
+    const initial = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "alt-svc", .value = "h3=\":443\"; ma=60" },
+    };
+    _ = try cache.updateFromHeadersAt(origin, &initial, 0);
+
+    const replacement = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "alt-svc", .value = "h3=\"other.example:8443\"; ma=60" },
+    };
+    const before_replace = tracking.allocations;
+    _ = try cache.updateFromHeadersAt(origin, &replacement, 1);
+    try std.testing.expectEqual(
+        before_replace + 1,
+        tracking.allocations,
+    );
+
+    const before_lookup = tracking.allocations;
+    var alternative = (try cache.lookupAt(origin, 2)).?;
+    defer alternative.deinit();
+    try std.testing.expectEqual(
+        before_lookup + 1,
+        tracking.allocations,
+    );
+    try std.testing.expectEqualStrings(
+        "other.example",
+        alternative.connect_host,
+    );
+}

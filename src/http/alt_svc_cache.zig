@@ -13,6 +13,7 @@ pub const Error = std.mem.Allocator.Error || error{
     InvalidCacheOptions,
     InvalidHeader,
     InvalidOrigin,
+    IntegerOverflow,
 };
 
 pub const Config = struct {
@@ -33,6 +34,7 @@ pub const UpdateResult = enum {
 
 pub const Alternative = struct {
     allocator: std.mem.Allocator,
+    storage: []u8,
     alpn: []u8,
     connect_host: []u8,
     origin_host: []u8,
@@ -41,9 +43,7 @@ pub const Alternative = struct {
     failure_count: u8,
 
     pub fn deinit(self: *Alternative) void {
-        self.allocator.free(self.alpn);
-        self.allocator.free(self.connect_host);
-        self.allocator.free(self.origin_host);
+        self.allocator.free(self.storage);
         self.* = undefined;
     }
 
@@ -121,7 +121,8 @@ const Index = std.HashMapUnmanaged(
 );
 
 const Entry = struct {
-    origin: http3.OriginKey,
+    storage: []u8,
+    origin: http3.Origin,
     alpn: []u8,
     connect_host: []u8,
     origin_host: []u8,
@@ -132,10 +133,7 @@ const Entry = struct {
     last_used: u64,
 
     fn deinit(self: *Entry, allocator: std.mem.Allocator) void {
-        self.origin.deinit();
-        allocator.free(self.alpn);
-        allocator.free(self.connect_host);
-        allocator.free(self.origin_host);
+        allocator.free(self.storage);
         self.* = undefined;
     }
 
@@ -266,7 +264,7 @@ pub const Cache = struct {
                     entry_owned = false;
                     const stored_key = self.index.getKeyPtr(indexKey(origin)).?;
                     stored_key.* = indexKey(
-                        self.entries.items[index].origin.origin(),
+                        self.entries.items[index].origin,
                     );
                     removed.deinit(self.allocator);
                     self.total_stored +|= 1;
@@ -285,7 +283,7 @@ pub const Cache = struct {
                 self.entries.appendAssumeCapacity(entry);
                 entry_owned = false;
                 self.index.putAssumeCapacityNoClobber(
-                    indexKey(self.entries.items[new_index].origin.origin()),
+                    indexKey(self.entries.items[new_index].origin),
                     new_index,
                 );
                 self.total_stored +|= 1;
@@ -318,15 +316,32 @@ pub const Cache = struct {
             self.backoff_suppressed +|= 1;
             return null;
         }
-        const alpn = try self.allocator.dupe(u8, entry.alpn);
-        errdefer self.allocator.free(alpn);
-        const connect_host = try self.allocator.dupe(u8, entry.connect_host);
-        errdefer self.allocator.free(connect_host);
-        const origin_host = try self.allocator.dupe(u8, entry.origin_host);
+        const total_len = try totalLength(&.{
+            entry.alpn,
+            entry.connect_host,
+            entry.origin_host,
+        });
+        const storage = try self.allocator.alloc(u8, total_len);
+        errdefer self.allocator.free(storage);
+        var offset: usize = 0;
+        const alpn = copyPart(storage, &offset, entry.alpn, false);
+        const connect_host = copyPart(
+            storage,
+            &offset,
+            entry.connect_host,
+            false,
+        );
+        const origin_host = copyPart(
+            storage,
+            &offset,
+            entry.origin_host,
+            false,
+        );
         entry.last_used = self.nextAccess();
         self.hits +|= 1;
         return .{
             .allocator = self.allocator,
+            .storage = storage,
             .alpn = alpn,
             .connect_host = connect_host,
             .origin_host = origin_host,
@@ -444,11 +459,11 @@ pub const Cache = struct {
 
     fn removeAtLocked(self: *Cache, index: usize) Entry {
         const old_len = self.entries.items.len;
-        const removed_key = indexKey(self.entries.items[index].origin.origin());
+        const removed_key = indexKey(self.entries.items[index].origin);
         std.debug.assert(self.index.remove(removed_key));
         const removed = self.entries.swapRemove(index);
         if (index != old_len - 1) {
-            const moved_key = indexKey(self.entries.items[index].origin.origin());
+            const moved_key = indexKey(self.entries.items[index].origin);
             self.index.getPtr(moved_key).?.* = index;
         }
         return removed;
@@ -550,18 +565,34 @@ fn makeEntry(
     target: http3.AltSvcTarget,
     expires_at_ms: u64,
 ) Error!Entry {
-    const scheme = try lowerAlloc(allocator, origin.scheme);
-    errdefer allocator.free(scheme);
-    const host = try lowerAlloc(allocator, origin.host);
-    errdefer allocator.free(host);
-    const alpn = try allocator.dupe(u8, target.alpn);
-    errdefer allocator.free(alpn);
-    const connect_host = try lowerAlloc(allocator, target.connect_host);
-    errdefer allocator.free(connect_host);
-    const origin_host = try lowerAlloc(allocator, target.origin_host);
+    const total_len = try totalLength(&.{
+        origin.scheme,
+        origin.host,
+        target.alpn,
+        target.connect_host,
+        target.origin_host,
+    });
+    const storage = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(storage);
+    var offset: usize = 0;
+    const scheme = copyPart(storage, &offset, origin.scheme, true);
+    const host = copyPart(storage, &offset, origin.host, true);
+    const alpn = copyPart(storage, &offset, target.alpn, false);
+    const connect_host = copyPart(
+        storage,
+        &offset,
+        target.connect_host,
+        true,
+    );
+    const origin_host = copyPart(
+        storage,
+        &offset,
+        target.origin_host,
+        true,
+    );
     return .{
+        .storage = storage,
         .origin = .{
-            .allocator = allocator,
             .scheme = scheme,
             .host = host,
             .port = origin.port,
@@ -591,13 +622,31 @@ fn validateOrigin(origin: http3.Origin) Error!void {
     }
 }
 
-fn lowerAlloc(
-    allocator: std.mem.Allocator,
+fn totalLength(parts: []const []const u8) Error!usize {
+    var total: usize = 0;
+    for (parts) |part| {
+        total = std.math.add(usize, total, part.len) catch
+            return error.IntegerOverflow;
+    }
+    return total;
+}
+
+fn copyPart(
+    storage: []u8,
+    offset: *usize,
     value: []const u8,
-) std.mem.Allocator.Error![]u8 {
-    const owned = try allocator.dupe(u8, value);
-    for (owned) |*byte| byte.* = std.ascii.toLower(byte.*);
-    return owned;
+    lowercase: bool,
+) []u8 {
+    const out = storage[offset.*..][0..value.len];
+    if (lowercase) {
+        for (value, out) |byte, *target| {
+            target.* = std.ascii.toLower(byte);
+        }
+    } else {
+        @memcpy(out, value);
+    }
+    offset.* += value.len;
+    return out;
 }
 
 fn indexKey(origin: http3.Origin) IndexKey {

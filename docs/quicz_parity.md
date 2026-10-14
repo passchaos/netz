@@ -803,7 +803,10 @@ an optional deployment cap, `ma=0`, `clear`, and removal when a replacement
 field omits HTTP/3. True LRU eviction bounds origin churn, while exponential
 failure backoff survives refreshes of the same alternative so a broken QUIC
 path is not retried after every successful TCP response. Allocation-failure
-coverage verifies that replacement never publishes a partial entry. The
+coverage verifies that replacement never publishes a partial entry. Entry
+replacement and each thread-safe hit now use exactly one contiguous owned
+string block; an allocation-count regression rejects a return to per-field
+ALPN/host allocations. The
 exclusive authenticated H3 pool now consumes these routes without confusing
 transport and authority identity: its cache key, TLS SNI/certificate policy,
 and QPACK `:authority` remain the original origin while DNS/UDP uses the
