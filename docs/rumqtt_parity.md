@@ -4254,6 +4254,26 @@ proxy evidence for the entire suite.
    evidence; the Connection reduction also applies to steady-state non-PROXY
    clients that use the event-driven keep-alive path and have not installed
    aliases or QoS state.
+   The broker's Will publisher association index now follows the same
+   demand-driven rule. Broker initialization no longer reserves the configured
+   65,536-Will maximum when no CONNECT has supplied a Will. A Will-bearing
+   registration reserves its one prospective entry before Session or Will
+   state changes, so allocation failure retains the existing atomic rollback
+   boundary and the later commit remains allocation-free. Four-sample ABBA
+   process captures for both one and 64 idle MQTT connections reduced anonymous
+   RSS by 132 KiB at the median in both shapes, with non-overlapping ranges.
+   A separate eight-arm fixed-binary ABBA used CPUs 0/1/2 for client, server,
+   and 2-ms RSS sampling; 32 publishers, 32 subscribers, a four-message window,
+   256 warmups, 3,200 measured durable QoS 2 publishes, 102,400 verified
+   deliveries, 64-byte payloads, and 3,600-second Sessions. The baseline
+   `784f299fde94049ac2ba4701fa2dbbaad8adbac7bf41c6f31e613281cd446885`
+   and candidate
+   `8c3a87ea92bb343776c04549d170b5f9ed1a4f8e46f81dcf56465ab8e0287b8f`
+   moved median peak RSS from 7,914 to 7,608 KiB (3.87%); the candidate's
+   7,676-KiB maximum remained below the baseline's 7,720-KiB minimum.
+   Throughput medians were identical at 3,056 publishes/s, while p50 and p99
+   median ratios were 1.0021x and 0.9979x. This is a fixed broker-state memory
+   result, not a general durable QoS 2 throughput claim.
    Delivery policy dispatch keeps the owned global/listener callback tables
    behind borrowed pointers and resolves a destination Session's Client ID only
    when one of those tables actually supplies a delivery callback. Retained

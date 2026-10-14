@@ -1249,6 +1249,76 @@ test "MQTT broker stores optional Session and Will handles without tags" {
     try std.testing.expect(slot.willHandle() == null);
 }
 
+test "MQTT broker lazily reserves Will publisher index" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    var broker = try Broker.init(
+        std.testing.allocator,
+        threaded.io(),
+        .{ .limits = .{ .max_connections = 2 } },
+    );
+    defer broker.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        broker.will_publishers.capacity(),
+    );
+}
+
+test "MQTT broker Will index allocation failure precedes Session mutation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var broker = try Broker.init(failing.allocator(), io, .{
+        .limits = .{ .max_connections = 1 },
+        .session = .{ .max_sessions = 1 },
+    });
+    defer broker.deinit();
+
+    const slot_index = try broker.claimSlot();
+    defer broker.releaseClaimedSlot(slot_index);
+    var progress: RegistrationProgress = .{};
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        broker.register(
+            slot_index,
+            .{
+                .protocol = .v5,
+                .clean_start = true,
+                .keep_alive_seconds = 30,
+                .client_id = "will-allocation-failure",
+                .will = .{
+                    .topic = "will/allocation-failure",
+                    .payload = "offline",
+                    .qos = .at_least_once,
+                    .retain = false,
+                    .properties = &.{},
+                },
+            },
+            null,
+            null,
+            broker.options.auto_client_id_prefix,
+            &progress,
+        ),
+    );
+    failing.fail_index = std.math.maxInt(usize);
+
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        broker.will_publishers.capacity(),
+    );
+    try std.testing.expectEqual(@as(usize, 0), broker.wills.count());
+    try std.testing.expect(broker.sessions.find(
+        "will-allocation-failure",
+        std.Io.Clock.awake.now(io),
+    ) == null);
+    try std.testing.expect(broker.slots[slot_index].sessionHandle() == null);
+    try std.testing.expect(broker.slots[slot_index].willHandle() == null);
+}
+
 test "MQTT broker stores optional retained source identity without tag" {
     var slot: ClientSlot = .{};
     try std.testing.expect(slot.retainedSourceId() == null);
@@ -2229,10 +2299,6 @@ pub const Broker = struct {
         );
         var will_publishers: will_mod.PublisherMap = .empty;
         errdefer will_publishers.deinit(allocator);
-        try will_publishers.ensureTotalCapacity(
-            allocator,
-            @intCast(options.will.max_wills),
-        );
         const started_at_ns = std.Io.Clock.awake.now(io).nanoseconds;
         const broker: Broker = .{
             .allocator = allocator,
@@ -4479,6 +4545,16 @@ pub const Broker = struct {
                 null
         else
             null;
+        // Most brokers have no pending Will for most connections. Reserve the
+        // publisher association before Session/Will mutation, but grow it only
+        // when this CONNECT can actually install a Will instead of allocating
+        // for `max_wills` at Broker initialization.
+        if (effective_connect.will != null) {
+            try self.will_publishers.ensureUnusedCapacity(
+                self.allocator,
+                1,
+            );
+        }
         const opened_session = try self.sessions.open(
             effective_connect.client_id,
             effective_connect.clean_start,

@@ -75,6 +75,7 @@ test "broker routes immediate Will on ungraceful close" {
             .will = will(0, false),
         },
     );
+    try std.testing.expect(broker.will_publishers.capacity() != 0);
     try source.shutdown();
     defer source.close();
 
