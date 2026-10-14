@@ -59,12 +59,16 @@ fn prepareUriBatch(
     const first_uri = std.Uri.parse(requests[0].uri) catch
         return error.InvalidUri;
     const first_secure = try secureForScheme(first_uri.scheme);
-    var first_endpoint = try http1_runtime.uriEndpoint(
-        pool.allocator,
-        first_uri,
-        if (first_secure) 443 else 80,
-    );
-    defer first_endpoint.deinit();
+    var first_endpoint: ?http1_runtime.UriEndpoint =
+        if (requests.len > 1)
+            try http1_runtime.uriEndpoint(
+                pool.allocator,
+                first_uri,
+                if (first_secure) 443 else 80,
+            )
+        else
+            null;
+    defer if (first_endpoint) |*endpoint| endpoint.deinit();
 
     var total_target_bytes: usize = 0;
     for (requests, 0..) |item, index| {
@@ -78,10 +82,10 @@ fn prepareUriBatch(
             );
             defer endpoint.deinit();
             if (secure != first_secure or
-                endpoint.port != first_endpoint.port or
+                endpoint.port != first_endpoint.?.port or
                 !std.ascii.eqlIgnoreCase(
                     endpoint.tls_host,
-                    first_endpoint.tls_host,
+                    first_endpoint.?.tls_host,
                 ))
             {
                 return error.MixedBatchOrigins;
@@ -344,117 +348,18 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
         }
         if (active_count == 0) return;
 
-        var lease: Lease = if (cancellation) |cancel| acquire: {
-            const AcquireResult = union(enum) {
-                lease: anyerror!Lease,
-                wake: std.Io.Cancelable!void,
-            };
-            const AcquireTask = struct {
-                fn run(
-                    task_pool: @TypeOf(pool),
-                    uri: []const u8,
-                    deadline: ?std.Io.Clock.Timestamp,
-                ) anyerror!Lease {
-                    return if (deadline) |absolute|
-                        task_pool.acquireUriWithDeadline(uri, absolute)
-                    else
-                        task_pool.acquireUri(uri);
-                }
-
-                fn wait(
-                    event: *std.Io.Event,
-                    io: std.Io,
-                ) std.Io.Cancelable!void {
-                    return event.wait(io);
-                }
-            };
-            var result_buffer: [2]AcquireResult = undefined;
-            var select: std.Io.Select(AcquireResult) = .init(
-                pool.io,
-                &result_buffer,
-            );
-            var select_drained = false;
-            defer if (!select_drained) {
-                while (select.cancel()) |late| switch (late) {
-                    .lease => |result| if (result) |acquired| {
-                        var abandoned = acquired;
-                        abandoned.discard();
-                    } else |_| {},
-                    .wake => {},
-                };
-            };
-            try select.concurrent(
-                .lease,
-                AcquireTask.run,
-                .{
-                    pool,
-                    requests[first_active.?].uri,
-                    earliest,
-                },
-            );
-            try select.concurrent(
-                .wake,
-                AcquireTask.wait,
-                .{ cancel.event, pool.io },
-            );
-
-            var acquired_lease: ?Lease = null;
-            var acquire_err: ?anyerror = null;
-            var woke = false;
-            const first_result = select.await() catch |err| {
-                while (select.cancel()) |late| switch (late) {
-                    .lease => |result| if (result) |acquired| {
-                        var abandoned = acquired;
-                        abandoned.discard();
-                    } else |_| {},
-                    .wake => {},
-                };
-                select_drained = true;
-                return err;
-            };
-            switch (first_result) {
-                .lease => |result| {
-                    if (result) |acquired| {
-                        acquired_lease = acquired;
-                    } else |err| {
-                        acquire_err = err;
-                    }
-                },
-                .wake => |result| {
-                    try result;
-                    woke = true;
-                },
-            }
-            while (select.cancel()) |late| switch (late) {
-                .lease => |result| {
-                    if (result) |acquired| {
-                        if (acquired_lease == null) {
-                            acquired_lease = acquired;
-                        } else {
-                            var duplicate = acquired;
-                            duplicate.discard();
-                        }
-                    } else |err| {
-                        if (err != error.Canceled and
-                            err != error.Timeout)
-                        {
-                            acquire_err = err;
-                        }
-                    }
-                },
-                .wake => |result| result catch |err| {
-                    if (err != error.Canceled) return err;
-                },
-            };
-            select_drained = true;
-            if (acquired_lease) |acquired| break :acquire acquired;
-            if (acquire_err) |err| switch (err) {
+        var lease: Lease = if (cancellation) |cancel|
+            (acquireUriWithCancellation(
+                Lease,
+                pool,
+                requests[first_active.?].uri,
+                earliest,
+                cancel.event,
+            ) catch |err| switch (err) {
                 error.Timeout => continue,
                 else => |other| return other,
-            };
-            std.debug.assert(woke);
-            continue;
-        } else if (earliest) |absolute|
+            }) orelse continue
+        else if (earliest) |absolute|
             pool.acquireUriWithDeadline(
                 requests[first_active.?].uri,
                 absolute,
@@ -683,6 +588,113 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
         lease.release();
         return;
     }
+}
+
+fn acquireUriWithCancellation(
+    comptime Lease: type,
+    pool: anytype,
+    uri: []const u8,
+    deadline: ?std.Io.Clock.Timestamp,
+    wake: *std.Io.Event,
+) !?Lease {
+    if (try pool.tryAcquireIdleUri(uri)) |idle| return idle;
+
+    const AcquireResult = union(enum) {
+        lease: anyerror!Lease,
+        wake: std.Io.Cancelable!void,
+    };
+    const Task = struct {
+        fn acquire(
+            task_pool: @TypeOf(pool),
+            task_uri: []const u8,
+            task_deadline: ?std.Io.Clock.Timestamp,
+        ) anyerror!Lease {
+            return if (task_deadline) |absolute|
+                task_pool.acquireUriWithDeadline(task_uri, absolute)
+            else
+                task_pool.acquireUri(task_uri);
+        }
+
+        fn wait(
+            event: *std.Io.Event,
+            io: std.Io,
+        ) std.Io.Cancelable!void {
+            return event.wait(io);
+        }
+
+        fn drainDiscard(select: *std.Io.Select(AcquireResult)) void {
+            while (select.cancel()) |late| switch (late) {
+                .lease => |result| if (result) |acquired| {
+                    var abandoned = acquired;
+                    abandoned.discard();
+                } else |_| {},
+                .wake => {},
+            };
+        }
+    };
+    var result_buffer: [2]AcquireResult = undefined;
+    var select: std.Io.Select(AcquireResult) = .init(
+        pool.io,
+        &result_buffer,
+    );
+    var select_drained = false;
+    defer if (!select_drained) Task.drainDiscard(&select);
+    try select.concurrent(
+        .lease,
+        Task.acquire,
+        .{ pool, uri, deadline },
+    );
+    try select.concurrent(
+        .wake,
+        Task.wait,
+        .{ wake, pool.io },
+    );
+
+    var acquired_lease: ?Lease = null;
+    var acquire_err: ?anyerror = null;
+    var woke = false;
+    const first_result = select.await() catch |err| {
+        Task.drainDiscard(&select);
+        select_drained = true;
+        return err;
+    };
+    switch (first_result) {
+        .lease => |result| {
+            if (result) |acquired| {
+                acquired_lease = acquired;
+            } else |err| {
+                acquire_err = err;
+            }
+        },
+        .wake => |result| {
+            try result;
+            woke = true;
+        },
+    }
+    while (select.cancel()) |late| switch (late) {
+        .lease => |result| {
+            if (result) |acquired| {
+                if (acquired_lease == null) {
+                    acquired_lease = acquired;
+                } else {
+                    var duplicate = acquired;
+                    duplicate.discard();
+                }
+            } else |err| {
+                if (err != error.Canceled and err != error.Timeout) {
+                    acquire_err = err;
+                }
+            }
+        },
+        .wake => |result| result catch |err| {
+            if (err != error.Canceled) return err;
+        },
+    };
+    select_drained = true;
+    if (acquired_lease) |acquired| return acquired;
+    if (acquire_err) |err| return err;
+    std.debug.assert(woke);
+    return null;
 }
 
 fn requestUriBatchBefore(

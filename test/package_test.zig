@@ -499,6 +499,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.client_pool.Pool,
+        "tryAcquireIdleUri",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
         "requestUriBatchStreamingWithPerStreamDeadlines",
     ));
     try std.testing.expect(@hasDecl(

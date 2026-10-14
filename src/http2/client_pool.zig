@@ -162,6 +162,44 @@ pub const Pool = struct {
         return self.acquire(transport, endpoint, null);
     }
 
+    /// Take a matching idle connection without dialing or waiting for global
+    /// capacity. Returns null when the normal admission path is required.
+    pub fn tryAcquireIdleUri(
+        self: *Pool,
+        uri_text: []const u8,
+    ) Error!?Lease {
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        const transport = try transportForScheme(uri.scheme);
+        var endpoint = try http1_runtime.uriEndpoint(
+            self.allocator,
+            uri,
+            if (transport == .tls) 443 else 80,
+        );
+        defer endpoint.deinit();
+
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        if (self.closed) return error.PoolClosed;
+        if (!self.capacity_waiters.mayAttempt(null)) return null;
+        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        var index = self.idle.items.len;
+        while (index != 0) {
+            index -= 1;
+            const slot = self.idle.items[index];
+            if (slot.transport == transport and slot.port == endpoint.port and
+                std.ascii.eqlIgnoreCase(slot.tls_host, endpoint.tls_host))
+            {
+                const owned = self.idle.swapRemove(index);
+                return .{
+                    .pool = self,
+                    .slot = owned,
+                    .was_reused = true,
+                };
+            }
+        }
+        return null;
+    }
+
     /// Wait for an idle connection or total-pool capacity within one relative
     /// timeout. The budget covers queueing only; dialing and HTTP/2 handshake
     /// deadlines remain controlled by `Options.limits` and `Options.tls`.

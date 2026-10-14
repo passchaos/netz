@@ -10380,8 +10380,8 @@ pub const Connection = struct {
         var result_buffer: [2]Result = undefined;
         var select: std.Io.Select(Result) = .init(self.io, &result_buffer);
         defer select.cancelDiscard();
-        try select.concurrent(.frame, Task.read, .{ self, deadline });
-        try select.concurrent(.wake, Task.wait, .{ wake, self.io });
+        select.async(.frame, Task.read, .{ self, deadline });
+        select.async(.wake, Task.wait, .{ wake, self.io });
         switch (try select.await()) {
             .frame => |result| return .{ .frame = try result },
             .wake => |result| try result,

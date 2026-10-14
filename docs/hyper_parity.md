@@ -1326,6 +1326,28 @@ body-bearing aggregate shared senders, three 64-KiB streaming shared senders,
 an actively canceled Shared request plus its gated sibling, and the redirect
 chain. Both transports require the active cancellation to complete well before
 its five-second request deadline, then validate sibling and connection reuse.
+The dedicated `http2_shared_consecutive_x1_empty` benchmark isolates the
+default active-cancellation cost with one persistent h2c connection, 1,000
+warmups, and 2,000 sequential empty responses. An initial fifteen-pair CPU-0
+AB/BA comparison of `96710d24` against the first cancellation implementation
+measured a 1.2709x paired-median latency ratio. Letting the pool take a matching
+idle lease before arming its admission Select, using the lighter Select async
+tasks for frame/event readiness, and skipping cross-origin endpoint
+materialization for a one-request URI batch reduced the final fixed-binary
+result to 11,513 versus 12,338 ns/request by medians; the paired median was
+1.0697x, with the candidate slower in all fifteen pairs. The
+baseline/candidate binary SHA-256
+values were
+`3edb561b1fb2895a5351581c0e937942ef71157f9cd4c35c25368b95484c6f4d`
+and
+`7ea508c911a7ac37edd1e50b1994eee1e5601b233122958e4b4bca897eef33d4`.
+Counting-allocator controls reduced measured calls from four to three per
+request and requested bytes from 1,298,000 to 1,286,000 across 2,000 requests;
+peak live bytes stayed within 176 bytes. The remaining roughly 0.83-us
+worst-shape cost buys default task cancellation while blocked in admission or
+frame read; direct pool/connection APIs retain their non-dispatcher fast paths.
+This is an explicit lifecycle/latency tradeoff, not a general HTTP/2 throughput
+regression claim.
 The pool adapter preserves stack-first URI target preparation, maps compacted
 active requests back to their original command indices, and retries capacity
 admission after expiring only the earliest deadline. This carries the low-level
