@@ -126,12 +126,27 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
-    try bridge.run(.{
+    var run_err: ?anyerror = null;
+    bridge.run(.{
         .timeout = .fromMilliseconds(250),
         .cancellation_check_interval = .fromMilliseconds(10),
-    });
+    }) catch |err| {
+        run_err = err;
+    };
     try stop.await(io);
-    try bridge.disconnect(0);
+    if (run_err) |err| switch (err) {
+        error.Canceled,
+        error.ConnectionClosed,
+        error.ConnectionUnavailable,
+        => {},
+        else => return err,
+    };
+    bridge.disconnect(0) catch |err| switch (err) {
+        error.ConnectionClosed,
+        error.ConnectionUnavailable,
+        => {},
+        else => return err,
+    };
 }
 
 fn waitForStop(

@@ -772,6 +772,7 @@ pub fn Engine(comptime Source: type) type {
                 bounded.reconnect_after_transport_error = false;
             }
             while (true) {
+                if (self.source.shutdown.isSet()) return;
                 if (connected) |state| {
                     state.store(self.target.connection() != null, .release);
                 }
@@ -779,9 +780,10 @@ pub fn Engine(comptime Source: type) type {
                     if (pending.load(.acquire) and
                         self.target.connection() == null) return;
                 }
-                _ = self.step(bounded) catch |err| switch (err) {
-                    error.Canceled => return,
-                    else => return err,
+                _ = self.step(bounded) catch |err| {
+                    if (self.source.shutdown.isSet()) return;
+                    if (err == error.Canceled) return;
+                    return err;
                 };
             }
         }

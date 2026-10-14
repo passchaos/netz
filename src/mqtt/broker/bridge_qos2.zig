@@ -259,20 +259,10 @@ pub const Store = struct {
         if (options.max_entries == 0 or options.max_owned_bytes == 0) {
             return error.InvalidStoreOptions;
         }
-        var self = Store{
+        return Store{
             .allocator = allocator,
             .options = options,
         };
-        errdefer self.deinit();
-        try self.entries.ensureTotalCapacity(
-            allocator,
-            options.max_entries,
-        );
-        try self.epochs.ensureTotalCapacity(
-            allocator,
-            options.max_entries,
-        );
-        return self;
     }
 
     pub fn deinit(self: *Store) void {
@@ -359,6 +349,9 @@ pub const Store = struct {
         if (self.entries.items.len >= self.options.max_entries) {
             return error.EntryLimitExceeded;
         }
+        // Reserve the commit before owning mapped PUBLISH bytes. A failed
+        // first growth therefore leaves no entry or owned-byte accounting.
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const created = try Publish.create(
             self.allocator,
             withoutDup(publish),
@@ -369,14 +362,11 @@ pub const Store = struct {
             doomed.deinit();
         }
         try self.reserveOwnedDelta(created.allocation_bytes);
-        self.entries.append(self.allocator, .{
+        self.entries.appendAssumeCapacity(.{
             .key = key,
             .phase = .pending,
             .publish = created,
-        }) catch |err| {
-            self.releaseOwnedBytes(created.allocation_bytes);
-            return err;
-        };
+        });
         return .inserted;
     }
 
@@ -449,8 +439,8 @@ pub const Store = struct {
     }
 
     /// Restore a released tombstone after its durable deletion fails. Store
-    /// initialization reserves the full entry capacity, so this rollback is
-    /// allocation-free after `complete` removed one element.
+    /// capacity is retained after `complete`, so this rollback is
+    /// allocation-free after that removal.
     pub fn restoreReleased(self: *Store, key: Key) void {
         std.debug.assert(self.findIndex(key) == null);
         std.debug.assert(self.entries.items.len < self.options.max_entries);
@@ -538,7 +528,8 @@ pub const Store = struct {
             if (self.epochs.items.len >= self.options.max_entries) {
                 return error.EntryLimitExceeded;
             }
-            try self.epochs.append(self.allocator, .{
+            try self.epochs.ensureUnusedCapacity(self.allocator, 1);
+            self.epochs.appendAssumeCapacity(.{
                 .bridge_id = bridge_id,
                 .value = next,
             });
@@ -771,6 +762,10 @@ pub const Store = struct {
         if (epoch_count > self.options.max_entries) {
             return error.EntryLimitExceeded;
         }
+        try self.epochs.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(epoch_count),
+        );
         for (0..epoch_count) |_| {
             const bridge_id_blob = try cursor.readBlob();
             if (bridge_id_blob.len != 16) return error.CorruptSnapshot;
@@ -780,7 +775,7 @@ pub const Store = struct {
             if (epoch == 0 or self.findEpochIndex(bridge_id) != null) {
                 return error.CorruptSnapshot;
             }
-            try self.epochs.append(self.allocator, .{
+            self.epochs.appendAssumeCapacity(.{
                 .bridge_id = bridge_id,
                 .value = epoch,
             });
@@ -789,6 +784,10 @@ pub const Store = struct {
         if (count > self.options.max_entries) {
             return error.EntryLimitExceeded;
         }
+        try self.entries.ensureUnusedCapacity(
+            self.allocator,
+            @intCast(count),
+        );
         for (0..count) |_| {
             const bridge_id_blob = try cursor.readBlob();
             if (bridge_id_blob.len != 16) return error.CorruptSnapshot;
@@ -882,11 +881,9 @@ pub const Store = struct {
         if (self.entries.items.len >= self.options.max_entries) {
             return error.EntryLimitExceeded;
         }
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
         try self.reserveOwnedDelta(entry.ownedBytes());
-        self.entries.append(self.allocator, entry) catch |err| {
-            self.releaseOwnedBytes(entry.ownedBytes());
-            return err;
-        };
+        self.entries.appendAssumeCapacity(entry);
     }
 
     fn reserveOwnedDelta(self: *Store, delta: usize) Error!void {
@@ -1097,6 +1094,62 @@ test "bridge QoS2 store deep owns pending publish" {
     try std.testing.expect(pending.retain);
     try std.testing.expectEqual(@as(usize, 1), store.stats().entries);
     try std.testing.expect(store.stats().owned_bytes > 0);
+}
+
+test "bridge QoS2 store lazily reserves transaction and epoch tables" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    var store = try Store.init(failing.allocator(), .{});
+    defer store.deinit();
+    try std.testing.expectEqual(@as(usize, 0), store.entries.capacity);
+    try std.testing.expectEqual(@as(usize, 0), store.epochs.capacity);
+
+    const key = testKey(9);
+    const publish = mqtt.Publish{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "bridge/lazy",
+        .packet_id = null,
+        .payload = "payload",
+    };
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.stage(key, publish, .zero),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), store.stats().entries);
+    try std.testing.expectEqual(@as(usize, 0), store.stats().owned_bytes);
+    try std.testing.expectEqual(@as(usize, 0), store.entries.capacity);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(
+        StageResult.inserted,
+        try store.stage(key, publish, .zero),
+    );
+    try std.testing.expect(store.entries.capacity != 0);
+
+    const bridge_id = [_]u8{0xa7} ** 16;
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.advanceSession(bridge_id),
+    );
+    try std.testing.expectEqual(
+        @as(?u64, null),
+        store.latestSessionEpoch(bridge_id),
+    );
+    try std.testing.expectEqual(@as(usize, 0), store.epochs.capacity);
+
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(
+        @as(u64, 1),
+        try store.advanceSession(bridge_id),
+    );
+    try std.testing.expect(store.epochs.capacity != 0);
 }
 
 test "bridge QoS2 store rejects mismatched duplicate but accepts identical retry" {

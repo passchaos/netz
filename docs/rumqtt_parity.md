@@ -4297,6 +4297,35 @@ proxy evidence for the entire suite.
    median ratios were 1.00005x and 0.9940x. The map therefore grows to the live
    transaction set without weakening duplicate detection, Receive Maximum, or
    PUBREL exactly-once routing.
+   The independent bridge QoS 2 store now applies the same rule to both its
+   transaction and Session-epoch arrays. A new transaction reserves an entry
+   before owning its mapped PUBLISH; a new bridge epoch reserves its marker
+   before mutation; snapshot restore reserves only the encoded epoch/entry
+   counts. Replacement remains capacity-neutral, and `complete` retains the
+   removed slot so durable-deletion failure can still restore a released
+   tombstone with `appendAssumeCapacity`. Serial allocator telemetry removed
+   the final 245,920-byte startup block: total requested bytes fell from
+   538,559 to 255,655 and peak live bytes from 294,334 to 11,430, with no
+   allocation above 64 KiB and zero live bytes after teardown. Baseline
+   `128bcae103655462bc3c922f2de1a8a29e99b63d8c5d5a5a2c5bc656428da207`
+   and candidate
+   `fa4a480eb94ed82c41afe3647319cd7bbe881d85fbfed7d4b4ac4303891446ea`
+   four-sample idle ABBA captures reduced anonymous RSS by 8 KiB at one
+   connection and 6 KiB at 64 connections. A separate eight-arm ordinary
+   durable 32x32 control produced median throughput, p50, and p99 ratios of
+   0.9988x, 0.9919x, and 1.0004x; its RSS ranges overlapped, so the result is
+   retained as allocator/startup-memory evidence rather than an active-RSS or
+   throughput claim. Durable inbound/outbound bridge QoS 2 fuzz targets over
+   TCP and authenticated TLS preserve stage/duplicate/release/rollback,
+   Session-loss, epoch, snapshot, and configured-bridge behavior.
+   The complete two-Mosquitto outbound matrix additionally exposed a finite-
+   runner shutdown race: a valid control byte could close reconnect clients
+   before the control task set its Event, surfacing `ConnectionUnavailable`
+   after PUBCOMP. The production run loop now gives an observed shutdown
+   precedence over transport errors, while the finite tool awaits the control
+   task and treats already-closed endpoints as an idempotent disconnect. The
+   complete v3.1.1/v5 QoS 0/1/2, restart, Session-loss, negative-PUBREC, delayed-
+   ACK, and topic-remap Mosquitto matrix now exits cleanly.
    Delivery policy dispatch keeps the owned global/listener callback tables
    behind borrowed pointers and resolves a destination Session's Client ID only
    when one of those tables actually supplies a delivery callback. Retained
