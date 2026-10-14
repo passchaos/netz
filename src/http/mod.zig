@@ -1,6 +1,11 @@
 //! Shared HTTP semantics independent of wire version.
 
 pub const content_coding = @import("content_coding.zig");
+pub const alt_svc_cache = @import("alt_svc_cache.zig");
+pub const AltSvcCache = alt_svc_cache.Cache;
+pub const AltSvcCacheConfig = alt_svc_cache.Config;
+pub const AltSvcAlternative = alt_svc_cache.Alternative;
+pub const AltSvcCacheStats = alt_svc_cache.Stats;
 pub const ContentCoding = content_coding.Coding;
 pub const ContentCodingChain = content_coding.Chain;
 pub const DecodedContent = content_coding.DecodedBody;
@@ -31,9 +36,11 @@ pub const PoolOperationError = client_pool.OperationError;
 
 test {
     _ = content_coding;
+    _ = alt_svc_cache;
     _ = client;
     _ = client_pool;
     _ = @import("content_coding/tests.zig");
+    _ = @import("alt_svc_cache_tests.zig");
     _ = @import("client_tests.zig");
     _ = @import("client_pool_tests.zig");
 }

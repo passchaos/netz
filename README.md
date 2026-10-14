@@ -482,7 +482,13 @@ Current protocol coverage includes:
   handshake-backed protected client/server
   runtime with `https://` URI endpoint parsing/DNS/literal target resolution
   plus `HandshakeClient.connectUri` / `requestUri` for public H3 client
-  tooling and bounded authenticated URI redirects with RFC 3986 resolution,
+  tooling. The shared HTTP layer also exposes a thread-safe, origin-keyed
+  `http.AltSvcCache`: it applies RFC 7838's 24-hour default max-age, peer `ma`
+  expiry, `ma=0`, `clear`, replacement without HTTP/3, configurable entry and
+  max-age bounds, true LRU eviction, and exponential QUIC failure backoff.
+  Refreshing the same target preserves its backoff so a TCP response cannot
+  make every request retry a broken UDP path. The handshake client provides
+  bounded authenticated URI redirects with RFC 3986 resolution,
   QPACK credential/representation cleanup, method/DATA/trailer replay policy,
   fresh QUIC CIDs and ephemeral handshake inputs per hop, cross-origin
   client-identity/resumption isolation, final-URI metadata and one deadline
