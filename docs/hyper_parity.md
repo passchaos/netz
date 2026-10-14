@@ -1293,18 +1293,27 @@ owns the pool and frame reader while cloneable send handles enqueue bounded
 commands. Commands with distinct deadlines now coalesce through the per-stream
 result observer; capacity admission expires only elapsed members, and an
 admitted timeout completes its stack command after stream-local CANCEL while a
-later sibling continues. The full-duplex scheduler stops an expired body cursor
-before releasing borrowed caller storage, keeps round-robin WINDOW_UPDATE
-progress for siblings, and encodes terminal trailers one surviving stream at a
-time so an expired trailer cannot mutate live HPACK state. Real regressions
-cover independently bounded bodyless requests, a partial-response timeout, a
-32-KiB flow-blocked upload timeout whose 32-KiB sibling and trailers complete,
-and three differently bounded shared body/trailer uploads in one batch. The
-full-duplex regression uses 4-KiB stream windows; a companion reset
-regression reuses the connection after an unsent trailer transaction is
-discarded. The Hyper h2c/TLS gate covers ten requests on one connection: three
-explicit batch requests, three independent body-bearing shared senders with
-distinct deadlines whose trailers are decoded by Hyper, and the redirect chain.
+later sibling continues. Each command can select owned aggregation or a
+callback-streaming final head and DATA path that transfers only owned terminal
+headers, trailers, and the exact byte count. Streaming callbacks execute on the
+sole driver under the existing borrowed-reader guard; callback rejection
+restores charged connection credit, cancels only that stream, and leaves later
+siblings and the pooled connection usable. The full-duplex scheduler stops an
+expired body cursor before releasing borrowed caller storage, keeps round-robin
+WINDOW_UPDATE progress for siblings, and encodes terminal trailers one
+surviving stream at a time so an expired trailer cannot mutate live HPACK state.
+Real regressions cover independently bounded bodyless requests, a partial-
+response timeout, a 32-KiB flow-blocked upload timeout whose 32-KiB sibling and
+trailers complete, three differently bounded shared body/trailer uploads in one
+batch, and a four-command streaming batch where callback rejection and a
+partial-body deadline each receive target-only CANCEL while two 64-KiB siblings
+plus a later ordinary request finish on the same connection. The full-duplex
+regression uses 4-KiB stream windows; a companion reset regression reuses the
+connection after an unsent trailer transaction is discarded. The Hyper h2c/TLS
+gate covers thirteen requests on one connection: three explicit batch requests,
+three independent body-bearing aggregate shared senders, three 64-KiB streaming
+shared senders whose heads, DATA bytes, and trailers are validated, and the
+redirect chain.
 The pool adapter preserves stack-first URI target preparation, maps compacted
 active requests back to their original command indices, and retries capacity
 admission after expiring only the earliest deadline. This carries the low-level

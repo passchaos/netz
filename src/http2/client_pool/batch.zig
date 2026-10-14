@@ -1,7 +1,7 @@
 //! Same-origin URI batches for the exclusive HTTP/2 connection pool.
 //!
-//! This is the synchronous execution core for a future cloneable-sender
-//! driver: one lease submits all request HEADERS before reading. Bodyless
+//! This is the synchronous execution core for the cloneable-sender driver:
+//! one lease submits all request HEADERS before reading. Bodyless
 //! batches use the transactional HEADERS path; body-bearing batches use the
 //! runtime's full-duplex round-robin upload/response pump, with terminal
 //! request trailers committed through a distinct HPACK transaction.
@@ -178,6 +178,40 @@ pub fn requestUriBatchWithPerStreamDeadlines(
     deadlines: []const ?std.Io.Clock.Timestamp,
     observer: runtime.BatchOwnedResponseObserver,
 ) !void {
+    return requestUriBatchWithPerStreamDeadlinesMode(
+        false,
+        pool,
+        requests,
+        deadlines,
+        observer,
+    );
+}
+
+/// Callback-streaming counterpart to
+/// `requestUriBatchWithPerStreamDeadlines`. URI admission and original-index
+/// mapping are identical, but response DATA is never aggregated.
+pub fn requestUriBatchStreamingWithPerStreamDeadlines(
+    pool: anytype,
+    requests: []const UriRequest,
+    deadlines: []const ?std.Io.Clock.Timestamp,
+    observer: runtime.BatchStreamingResponseObserver,
+) !void {
+    return requestUriBatchWithPerStreamDeadlinesMode(
+        true,
+        pool,
+        requests,
+        deadlines,
+        observer,
+    );
+}
+
+fn requestUriBatchWithPerStreamDeadlinesMode(
+    comptime streaming: bool,
+    pool: anytype,
+    requests: []const UriRequest,
+    deadlines: []const ?std.Io.Clock.Timestamp,
+    observer: anytype,
+) !void {
     if (requests.len != deadlines.len) return error.InvalidResponse;
     if (requests.len == 0) return;
     for (deadlines) |deadline| {
@@ -293,7 +327,51 @@ pub fn requestUriBatchWithPerStreamDeadlines(
             return;
         }
 
-        const Mapping = struct {
+        const Mapping = if (streaming) struct {
+            observer: runtime.BatchStreamingResponseObserver,
+            original_indices: []const usize,
+
+            fn head(
+                raw_context: *anyopaque,
+                compact_index: usize,
+                response: runtime.StreamingResponseHead,
+            ) anyerror!void {
+                const self: *@This() = @ptrCast(@alignCast(raw_context));
+                if (self.observer.on_head) |on_head| {
+                    try on_head(
+                        self.observer.context,
+                        self.original_indices[compact_index],
+                        response,
+                    );
+                }
+            }
+
+            fn data(
+                raw_context: *anyopaque,
+                compact_index: usize,
+                bytes: []const u8,
+            ) anyerror!void {
+                const self: *@This() = @ptrCast(@alignCast(raw_context));
+                try self.observer.on_data(
+                    self.observer.context,
+                    self.original_indices[compact_index],
+                    bytes,
+                );
+            }
+
+            fn observe(
+                raw_context: *anyopaque,
+                compact_index: usize,
+                result: runtime.BatchStreamingResponseResult,
+            ) void {
+                const self: *@This() = @ptrCast(@alignCast(raw_context));
+                self.observer.on_result(
+                    self.observer.context,
+                    self.original_indices[compact_index],
+                    result,
+                );
+            }
+        } else struct {
             observer: runtime.BatchOwnedResponseObserver,
             original_indices: []const usize,
 
@@ -314,7 +392,32 @@ pub fn requestUriBatchWithPerStreamDeadlines(
             .observer = observer,
             .original_indices = original_indices[0..compact_count],
         };
-        const result = if (prepared.has_body_or_trailers)
+        const result = if (streaming)
+            if (prepared.has_body_or_trailers)
+                lease.connection()
+                    .requestBodyBatchStreamingWithPerStreamDeadlines(
+                    compact_requests[0..compact_count],
+                    pool.options.batch_body_chunk_size,
+                    compact_deadlines[0..compact_count],
+                    .{
+                        .context = &mapping,
+                        .on_head = Mapping.head,
+                        .on_data = Mapping.data,
+                        .on_result = Mapping.observe,
+                    },
+                )
+            else
+                lease.connection().requestBatchStreamingWithPerStreamDeadlines(
+                    compact_requests[0..compact_count],
+                    compact_deadlines[0..compact_count],
+                    .{
+                        .context = &mapping,
+                        .on_head = Mapping.head,
+                        .on_data = Mapping.data,
+                        .on_result = Mapping.observe,
+                    },
+                )
+        else if (prepared.has_body_or_trailers)
             lease.connection().requestBodyBatchWithPerStreamDeadlines(
                 compact_requests[0..compact_count],
                 pool.options.batch_body_chunk_size,

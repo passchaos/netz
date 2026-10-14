@@ -35,6 +35,7 @@ const CONSTRAINED_STREAM_WINDOW: u32 = 8 * 1024;
 const CONSTRAINED_CONNECTION_WINDOW: u32 = 65_535;
 const CANCEL_RESPONSE_BYTES: usize = 128 * 1024;
 const SIBLING_RESPONSE_BYTES: usize = 16 * 1024;
+const SHARED_STREAM_RESPONSE_BYTES: usize = 64 * 1024;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -164,7 +165,7 @@ fn main() {
             // requests shared it. That can surface as a reset after all
             // asserted work, which is a valid shutdown for this scenario.
             let _ = connection.await;
-            println!("Hyper HTTP/2 server completed netz pool batch, shared senders, and redirect reuse: requests=10 batch=3 shared=3 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
+            println!("Hyper HTTP/2 server completed netz pool batch, aggregate/streaming shared senders, and redirect reuse: requests=13 batch=3 shared=6 streamed_bytes=196608 redirects=1 connections=1 client_io=zio-std-io server_io=hyper-tokio");
         } else {
             // Hyper/h2 emits the recommended MAX_STREAM_ID GOAWAY,
             // synchronizes one RTT with PING, then narrows the boundary to the
@@ -330,7 +331,7 @@ async fn handle(
                 "unexpected HTTP/2 pooled redirected request",
             ));
         }
-        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 10 {
+        if signals.pool_requests.fetch_add(1, Ordering::AcqRel) + 1 == 13 {
             signals.pool_finished.notify_one();
         }
         return Ok(Response::new(
@@ -339,6 +340,61 @@ async fn handle(
             ))]))
             .boxed(),
         ));
+    }
+    if let Some((path, expected_body, expected_trailer, response_byte)) = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .and_then(|path| match path {
+            "/pool-shared-stream-one?from=netz" => {
+                Some((path, b"stream-request-one".as_slice(), "one", b'a'))
+            }
+            "/pool-shared-stream-two?from=netz" => {
+                Some((path, b"stream-request-two".as_slice(), "two", b'b'))
+            }
+            "/pool-shared-stream-three?from=netz" => {
+                Some((path, b"stream-request-three".as_slice(), "three", b'c'))
+            }
+            _ => None,
+        })
+    {
+        ensure_request(&request, Method::POST, path)?;
+        let response_path = HeaderValue::from_str(path).map_err(io::Error::other)?;
+        let collected = request
+            .into_body()
+            .collect()
+            .await
+            .map_err(io::Error::other)?;
+        if collected
+            .trailers()
+            .and_then(|trailers| trailers.get("x-shared-request-finished"))
+            .and_then(|value| value.to_str().ok())
+            != Some(expected_trailer)
+            || collected.to_bytes() != expected_body
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unexpected HTTP/2 shared streaming request",
+            ));
+        }
+        signals.pool_requests.fetch_add(1, Ordering::AcqRel);
+        let mut response_trailers = HeaderMap::new();
+        response_trailers.insert(
+            "x-shared-response-finished",
+            HeaderValue::from_static(expected_trailer),
+        );
+        let half = SHARED_STREAM_RESPONSE_BYTES / 2;
+        let frames = stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from(vec![response_byte; half]))),
+            Ok(Frame::data(Bytes::from(vec![response_byte; half]))),
+            Ok(Frame::trailers(response_trailers)),
+        ]);
+        let mut response = Response::new(StreamBody::new(frames).boxed());
+        response
+            .headers_mut()
+            .insert("content-length", HeaderValue::from_static("65536"));
+        response.headers_mut().insert("x-path", response_path);
+        return Ok(response);
     }
     if let Some((path, expected_body, expected_trailer, response_body)) = request
         .uri()

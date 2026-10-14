@@ -86,6 +86,8 @@ pub const Pool = struct {
     pub const requestUriBatchWithDeadline = batch.requestUriBatchWithDeadline;
     pub const requestUriBatchWithPerStreamDeadlines =
         batch.requestUriBatchWithPerStreamDeadlines;
+    pub const requestUriBatchStreamingWithPerStreamDeadlines =
+        batch.requestUriBatchStreamingWithPerStreamDeadlines;
 
     pub fn init(
         allocator: std.mem.Allocator,

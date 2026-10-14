@@ -402,9 +402,12 @@ Current protocol coverage includes:
   `SharedDispatcher` adds Hyper-shaped execution ownership: one driver is the
   sole pool/frame reader, cloneable `SharedSender` handles feed a bounded
   queue, and commands with independent deadlines coalesce through the
-  per-stream result observer. An expired member is reset/completed, its upload
-  cursor stops borrowing caller data, and only surviving streams emit request
-  trailers while later siblings continue.
+  per-stream result observer. Senders can choose owned aggregation or
+  callback-streaming final heads/DATA with owned terminal headers and trailers;
+  compatible response modes coalesce without adding another frame reader. An
+  expired or callback-rejected member is reset/completed, its upload cursor
+  stops borrowing caller data, and only surviving streams emit request trailers
+  while later siblings continue.
   Per-command deadline/cancel paths unlink queued stack commands safely, queue
   overflow is explicit, and close wakes every producer,
   allocation-free HTTP/2 runtime
@@ -1531,9 +1534,10 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # zio-std-io versus the audited Hyper fixture's hyper-tokio runtime identity.
 # Build the locked local Hyper reference offline, then verify POST headers,
 # multi-frame bodies/trailers, body-bearing cloneable shared senders with
-# distinct absolute deadlines plus terminal request trailers, and bidirectional
-# cancellation of a 128-KiB response at an 8-KiB stream window while a
-# concurrent sibling completes on the same connection.
+# distinct absolute deadlines plus terminal request trailers, three 64-KiB
+# callback-streamed SharedSender responses with final-head/trailer validation,
+# and bidirectional cancellation of a 128-KiB response at an 8-KiB stream
+# window while a concurrent sibling completes on the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Negotiate `http/1.1` and `h2` with independent Hyper/rustls servers through
 # the same high-level authority pool, then prove one miss plus one reuse on each

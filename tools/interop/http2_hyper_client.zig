@@ -414,6 +414,52 @@ fn runPoolInterop(
             };
         }
     };
+    const SharedStreamingProducer = struct {
+        sender: netz.http2.client_pool.SharedSender,
+        uri: []const u8,
+        request: netz.http2.runtime.RequestOptions,
+        deadline: std.Io.Clock.Timestamp,
+        expected_path: []const u8,
+        expected_byte: u8,
+        saw_head: bool = false,
+        body_bytes: usize = 0,
+        response: ?netz.http2.runtime.StreamingResponse = null,
+        err: ?anyerror = null,
+
+        fn begin(
+            self: *@This(),
+            head: netz.http2.runtime.StreamingResponseHead,
+        ) !void {
+            if (head.status != 200 or
+                !headerEquals(head.headers, "x-path", self.expected_path) or
+                !headerEquals(head.headers, "content-length", "65536"))
+            {
+                return error.InvalidResponse;
+            }
+            self.saw_head = true;
+        }
+
+        fn consume(self: *@This(), data: []const u8) !void {
+            if (!self.saw_head or !allBytesEqual(data, self.expected_byte)) {
+                return error.InvalidResponse;
+            }
+            self.body_bytes += data.len;
+        }
+
+        fn run(self: *@This()) void {
+            self.response = self.sender.requestStreamingWithHeadAndDeadline(
+                self.uri,
+                self.request,
+                self.deadline,
+                self,
+                begin,
+                consume,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
     const shared_one_uri = try std.fmt.allocPrint(
         allocator,
         "{s}://localhost:{d}/pool-shared-one?from=netz",
@@ -539,6 +585,149 @@ fn runPoolInterop(
     {
         return error.InvalidResponse;
     }
+
+    var streaming_dispatcher =
+        try netz.http2.client_pool.SharedDispatcher.init(
+            allocator,
+            io,
+            &pool,
+            .{ .max_queued_requests = 8, .max_batch_requests = 8 },
+        );
+    defer streaming_dispatcher.deinit();
+    const streaming_uris = [_][]u8{
+        try std.fmt.allocPrint(
+            allocator,
+            "{s}://localhost:{d}/pool-shared-stream-one?from=netz",
+            .{ scheme, port },
+        ),
+        try std.fmt.allocPrint(
+            allocator,
+            "{s}://LOCALHOST:{d}/pool-shared-stream-two?from=netz",
+            .{ scheme, port },
+        ),
+        try std.fmt.allocPrint(
+            allocator,
+            "{s}://localhost:{d}/pool-shared-stream-three?from=netz",
+            .{ scheme, port },
+        ),
+    };
+    defer for (streaming_uris) |uri| allocator.free(uri);
+    const streaming_paths = [_][]const u8{
+        "/pool-shared-stream-one?from=netz",
+        "/pool-shared-stream-two?from=netz",
+        "/pool-shared-stream-three?from=netz",
+    };
+    const streaming_bodies = [_][]const u8{
+        "stream-request-one",
+        "stream-request-two",
+        "stream-request-three",
+    };
+    const streaming_trailers = [_][]const u8{ "one", "two", "three" };
+    const streaming_bytes = [_]u8{ 'a', 'b', 'c' };
+    const streaming_sender = streaming_dispatcher.sender();
+    var streaming_request_trailer_fields: [streaming_uris.len][1]netz.http2.Hpack.HeaderField = undefined;
+    var streaming_producers: [streaming_uris.len]SharedStreamingProducer =
+        undefined;
+    for (
+        &streaming_producers,
+        streaming_uris,
+        streaming_paths,
+        streaming_bodies,
+        streaming_trailers,
+        streaming_bytes,
+        0..,
+    ) |
+        *producer,
+        uri,
+        path,
+        body,
+        trailer,
+        expected_byte,
+        index,
+    | {
+        streaming_request_trailer_fields[index][0] = .{
+            .name = "x-shared-request-finished",
+            .value = trailer,
+        };
+        producer.* = .{
+            .sender = streaming_sender.clone(),
+            .uri = uri,
+            .request = .{
+                .method = "POST",
+                .body = body,
+                .trailers = &streaming_request_trailer_fields[index],
+            },
+            .deadline = .fromNow(io, .{
+                .raw = .fromSeconds(@intCast(5 + index)),
+                .clock = .awake,
+            }),
+            .expected_path = path,
+            .expected_byte = expected_byte,
+        };
+    }
+    var streaming_threads: [streaming_producers.len]std.Thread = undefined;
+    for (&streaming_threads, &streaming_producers) |*thread, *producer| {
+        thread.* = try std.Thread.spawn(
+            .{},
+            SharedStreamingProducer.run,
+            .{producer},
+        );
+    }
+    queued_attempts = 0;
+    while (streaming_dispatcher.queuedCount() != streaming_producers.len and
+        queued_attempts < 500) : (queued_attempts += 1)
+    {
+        try std.Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    if (streaming_dispatcher.queuedCount() != streaming_producers.len) {
+        return error.Timeout;
+    }
+    var streaming_driver = try std.Io.concurrent(
+        io,
+        netz.http2.client_pool.SharedDispatcher.run,
+        .{&streaming_dispatcher},
+    );
+    var streaming_joiner = ProducerJoiner{
+        .dispatcher = &streaming_dispatcher,
+        .threads = &streaming_threads,
+    };
+    const streaming_join_thread = try std.Thread.spawn(
+        .{},
+        ProducerJoiner.run,
+        .{&streaming_joiner},
+    );
+    driver_err = null;
+    streaming_driver.await(io) catch |err| {
+        driver_err = err;
+    };
+    streaming_join_thread.join();
+    if (driver_err) |err| return err;
+    for (
+        &streaming_producers,
+        streaming_trailers,
+    ) |*producer, expected_trailer| {
+        if (producer.err) |err| return err;
+        const response = &producer.response.?;
+        if (!producer.saw_head or producer.body_bytes != 64 * 1024 or
+            response.body_bytes != 64 * 1024 or
+            !headerEquals(
+                response.trailers,
+                "x-shared-response-finished",
+                expected_trailer,
+            ))
+        {
+            return error.InvalidResponse;
+        }
+    }
+    defer for (&streaming_producers) |*producer| {
+        if (producer.response) |*response| response.deinit(allocator);
+    };
+    const streaming_stats = streaming_dispatcher.stats();
+    if (streaming_stats.batches != 1 or
+        streaming_stats.coalesced_requests != streaming_producers.len)
+    {
+        return error.InvalidResponse;
+    }
     const redirect_uri = try std.fmt.allocPrint(
         allocator,
         "{s}://localhost:{d}/pool-redirect-start?from=netz",
@@ -572,7 +761,7 @@ fn runPoolInterop(
         return error.InvalidResponse;
     }
     std.debug.print(
-        "netz HTTP/2 pool multiplexed Hyper batch, shared senders, and redirect: transport={s} requests=10 batch=3 shared=3 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz HTTP/2 pool multiplexed Hyper batch, aggregate/streaming shared senders, and redirect: transport={s} requests=13 batch=3 shared=6 streamed_bytes=196608 redirects=1 idle=1 total=1 client_io=zio-std-io server_io=hyper-tokio\n",
         .{if (tls_enabled) "tls" else "h2c"},
     );
 }

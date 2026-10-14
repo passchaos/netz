@@ -498,8 +498,52 @@ test "public modules are reachable" {
         "requestUriWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.Pool,
+        "requestUriBatchStreamingWithPerStreamDeadlines",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.SharedSender,
+        "requestStreaming",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.SharedSender,
+        "requestStreamingWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.SharedSender,
+        "requestStreamingWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.SharedSender,
+        "requestStreamingWithHead",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.SharedSender,
+        "requestStreamingWithHeadAndTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.client_pool.SharedSender,
+        "requestStreamingWithHeadAndDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "BatchStreamingResponseObserver",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime,
+        "BatchStreamingResponseResult",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,
         "isReusable",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBatchStreamingWithPerStreamDeadlines",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "requestBodyBatchStreamingWithPerStreamDeadlines",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime.Connection,

@@ -4980,7 +4980,32 @@ pub const Connection = struct {
             requests,
             16 * 1024,
             deadlines,
-            observer,
+            .{ .owned = observer },
+        ) catch |err| return @errorCast(err);
+    }
+
+    /// Callback-streaming form of `requestBatchWithPerStreamDeadlines`.
+    /// Final heads and DATA are delivered in wire order while terminal owned
+    /// headers/trailers and the exact streamed byte count transfer through the
+    /// observer. Callback failure cancels only that request stream.
+    pub fn requestBatchStreamingWithPerStreamDeadlines(
+        self: *Connection,
+        requests: []const RequestOptions,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchStreamingResponseObserver,
+    ) anyerror!void {
+        for (requests) |request_options| {
+            if (request_options.body.len != 0 or
+                request_options.trailers.len != 0)
+            {
+                return error.InvalidContentLength;
+            }
+        }
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            16 * 1024,
+            deadlines,
+            .{ .streaming = observer },
         );
     }
 
@@ -5000,7 +5025,26 @@ pub const Connection = struct {
             requests,
             body_chunk_size,
             deadlines,
-            observer,
+            .{ .owned = observer },
+        ) catch |err| return @errorCast(err);
+    }
+
+    /// Full-duplex callback-streaming form of
+    /// `requestBodyBatchWithPerStreamDeadlines`. Uploads stop borrowing an
+    /// expired or callback-rejected member while surviving streams continue.
+    pub fn requestBodyBatchStreamingWithPerStreamDeadlines(
+        self: *Connection,
+        requests: []const RequestOptions,
+        body_chunk_size: usize,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchStreamingResponseObserver,
+    ) anyerror!void {
+        if (body_chunk_size == 0) return error.InvalidFrameSize;
+        return self.requestBatchWithPerStreamDeadlinesChunked(
+            requests,
+            body_chunk_size,
+            deadlines,
+            .{ .streaming = observer },
         );
     }
 
@@ -5009,8 +5053,8 @@ pub const Connection = struct {
         requests: []const RequestOptions,
         body_chunk_size: usize,
         deadlines: []const ?std.Io.Clock.Timestamp,
-        observer: BatchOwnedResponseObserver,
-    ) ResponseTimeoutError!void {
+        observer: IndividualBatchObserver,
+    ) anyerror!void {
         if (self.aggregate_timeout_unusable) return error.ConnectionClosed;
         if (self.callback_reader_active) return error.UnexpectedFrame;
         if (self.role != .client) return error.UnexpectedFrame;
@@ -5111,11 +5155,7 @@ pub const Connection = struct {
 
         for (admitted, 0..) |was_admitted, request_index| {
             if (!was_admitted) {
-                observer.on_result(
-                    observer.context,
-                    request_index,
-                    .{ .err = error.Timeout },
-                );
+                observer.reportError(request_index, error.Timeout);
             }
         }
         if (started == 0) return;
@@ -6309,7 +6349,7 @@ pub const Connection = struct {
         requests: []const RequestOptions,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
+        observer: IndividualBatchObserver,
     ) ResponseTimeoutError!void {
         for (states, controls) |*state, *control| {
             if (control.reported) continue;
@@ -6519,8 +6559,8 @@ pub const Connection = struct {
         application_chunk_size: usize,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
-    ) ResponseTimeoutError!void {
+        observer: IndividualBatchObserver,
+    ) anyerror!void {
         std.debug.assert(views.len == offsets.len);
         std.debug.assert(views.len == round_reserved.len);
         std.debug.assert(views.len == states.len);
@@ -7145,11 +7185,121 @@ pub const Connection = struct {
         unreleased_connection_bytes: usize = 0,
     };
 
+    const IndividualBatchObserver = union(enum) {
+        owned: BatchOwnedResponseObserver,
+        streaming: BatchStreamingResponseObserver,
+
+        fn isStreaming(self: IndividualBatchObserver) bool {
+            return switch (self) {
+                .owned => false,
+                .streaming => true,
+            };
+        }
+
+        fn reportError(
+            self: IndividualBatchObserver,
+            request_index: usize,
+            err: anyerror,
+        ) void {
+            switch (self) {
+                .owned => |observer| observer.on_result(
+                    observer.context,
+                    request_index,
+                    .{ .err = err },
+                ),
+                .streaming => |observer| observer.on_result(
+                    observer.context,
+                    request_index,
+                    .{ .err = err },
+                ),
+            }
+        }
+
+        fn notifyHead(
+            self: IndividualBatchObserver,
+            request_index: usize,
+            head: StreamingResponseHead,
+        ) anyerror!void {
+            switch (self) {
+                .owned => {},
+                .streaming => |observer| if (observer.on_head) |on_head| {
+                    try on_head(observer.context, request_index, head);
+                },
+            }
+        }
+
+        fn notifyData(
+            self: IndividualBatchObserver,
+            request_index: usize,
+            data: []const u8,
+        ) anyerror!void {
+            switch (self) {
+                .owned => unreachable,
+                .streaming => |observer| try observer.on_data(
+                    observer.context,
+                    request_index,
+                    data,
+                ),
+            }
+        }
+
+        fn finish(
+            self: IndividualBatchObserver,
+            connection: *Connection,
+            state: *BatchResponseState,
+            control: *IndividualBatchControl,
+        ) Error!void {
+            std.debug.assert(state.done);
+            std.debug.assert(!control.reported);
+            switch (self) {
+                .owned => |observer| {
+                    state.body_owned = if (state.body_capacity_exact)
+                        state.body.toOwnedSliceAssert()
+                    else
+                        try state.body.toOwnedSlice(connection.allocator);
+                    const response: OwnedResponse = .{
+                        .headers = state.headers.?,
+                        .status = state.status.?,
+                        .body = state.body_owned.?,
+                        .trailers = state.trailers,
+                    };
+                    state.headers = null;
+                    state.body_owned = null;
+                    state.trailers = &.{};
+                    control.reported = true;
+                    connection.releaseLocalStream(state.stream_id);
+                    observer.on_result(
+                        observer.context,
+                        control.request_index,
+                        .{ .response = response },
+                    );
+                },
+                .streaming => |observer| {
+                    const response: StreamingResponse = .{
+                        .headers = state.headers.?,
+                        .status = state.status.?,
+                        .body_bytes = state.body_bytes,
+                        .trailers = state.trailers,
+                    };
+                    state.headers = null;
+                    state.trailers = &.{};
+                    control.reported = true;
+                    connection.releaseLocalStream(state.stream_id);
+                    observer.on_result(
+                        observer.context,
+                        control.request_index,
+                        .{ .response = response },
+                    );
+                },
+            }
+        }
+    };
+
     fn reportIndividualBatchError(
         self: *Connection,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
+        observer: IndividualBatchObserver,
         err: anyerror,
     ) void {
         for (states, controls) |*state, *control| {
@@ -7160,11 +7310,7 @@ pub const Connection = struct {
             self.releaseLocalStream(state.stream_id);
             self.releasePeerStream(state.stream_id);
             self.forgetStreamWindows(state.stream_id);
-            observer.on_result(
-                observer.context,
-                control.request_index,
-                .{ .err = err },
-            );
+            observer.reportError(control.request_index, err);
         }
     }
 
@@ -7172,7 +7318,7 @@ pub const Connection = struct {
         self: *Connection,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
+        observer: IndividualBatchObserver,
         err: anyerror,
     ) void {
         var unreleased: usize = 0;
@@ -7198,30 +7344,9 @@ pub const Connection = struct {
         self: *Connection,
         state: *BatchResponseState,
         control: *IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
+        observer: IndividualBatchObserver,
     ) Error!void {
-        std.debug.assert(state.done);
-        std.debug.assert(!control.reported);
-        state.body_owned = if (state.body_capacity_exact)
-            state.body.toOwnedSliceAssert()
-        else
-            try state.body.toOwnedSlice(self.allocator);
-        const response: OwnedResponse = .{
-            .headers = state.headers.?,
-            .status = state.status.?,
-            .body = state.body_owned.?,
-            .trailers = state.trailers,
-        };
-        state.headers = null;
-        state.body_owned = null;
-        state.trailers = &.{};
-        control.reported = true;
-        self.releaseLocalStream(state.stream_id);
-        observer.on_result(
-            observer.context,
-            control.request_index,
-            .{ .response = response },
-        );
+        return observer.finish(self, state, control);
     }
 
     fn clearIndividualBatchConnectionCredit(
@@ -7232,11 +7357,39 @@ pub const Connection = struct {
         }
     }
 
+    fn failIndividualStreamingCallback(
+        self: *Connection,
+        states: []BatchResponseState,
+        state_index: usize,
+        controls: []IndividualBatchControl,
+        observer: IndividualBatchObserver,
+        err: anyerror,
+    ) Error!void {
+        const state = &states[state_index];
+        const control = &controls[state_index];
+        if (control.unreleased_connection_bytes != 0) {
+            try self.releaseConnectionCapacity(
+                control.unreleased_connection_bytes,
+            );
+            control.unreleased_connection_bytes = 0;
+        }
+        try self.writeBatchResponseResets(
+            states[state_index..][0..1],
+        );
+        self.releaseLocalStream(state.stream_id);
+        self.releasePeerStream(state.stream_id);
+        self.forgetStreamWindows(state.stream_id);
+        state.done = true;
+        state.request_done = true;
+        control.reported = true;
+        observer.reportError(control.request_index, err);
+    }
+
     fn expireIndividualBatchDeadlines(
         self: *Connection,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
+        observer: IndividualBatchObserver,
     ) Error!bool {
         const now_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         var expired_count: usize = 0;
@@ -7293,11 +7446,7 @@ pub const Connection = struct {
             state.done = true;
             state.request_done = true;
             control.reported = true;
-            observer.on_result(
-                observer.context,
-                control.request_index,
-                .{ .err = error.Timeout },
-            );
+            observer.reportError(control.request_index, error.Timeout);
         }
         return true;
     }
@@ -7317,8 +7466,8 @@ pub const Connection = struct {
         self: *Connection,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
-    ) ResponseTimeoutError!void {
+        observer: IndividualBatchObserver,
+    ) anyerror!void {
         const deadline = earliestIndividualBatchDeadline(controls);
         const frame = (self.readBufferedFrameWithDeadline(deadline) catch |err| switch (err) {
             error.Timeout => return,
@@ -7357,18 +7506,67 @@ pub const Connection = struct {
             ) catch return error.MessageTooLarge;
         }
         var read_timed_out = false;
-        self.processBodyBatchResponseFrame(
-            false,
-            states,
-            null,
-            deadline,
-            &read_timed_out,
-            {},
-            undefined,
-            frame,
-        ) catch |err| {
+        const had_final_head = state.headers != null;
+        var callback_error: ?anyerror = null;
+        const DataContext = struct {
+            observer: IndividualBatchObserver,
+            request_index: usize,
+            callback_error: *?anyerror,
+
+            fn consume(
+                context: *@This(),
+                _: usize,
+                data: []const u8,
+            ) anyerror!void {
+                context.observer.notifyData(
+                    context.request_index,
+                    data,
+                ) catch |err| {
+                    context.callback_error.* = err;
+                    return err;
+                };
+            }
+        };
+        var data_context: DataContext = .{
+            .observer = observer,
+            .request_index = control.request_index,
+            .callback_error = &callback_error,
+        };
+        const process_result = switch (observer) {
+            .owned => self.processBodyBatchResponseFrame(
+                false,
+                states,
+                null,
+                deadline,
+                &read_timed_out,
+                {},
+                undefined,
+                frame,
+            ),
+            .streaming => self.processBodyBatchResponseFrame(
+                true,
+                states,
+                null,
+                deadline,
+                &read_timed_out,
+                &data_context,
+                DataContext.consume,
+                frame,
+            ),
+        };
+        process_result catch |err| {
             if (self.recv_connection_window.value > connection_before) {
                 clearIndividualBatchConnectionCredit(controls);
+            }
+            if (callback_error) |application_error| {
+                try self.failIndividualStreamingCallback(
+                    states,
+                    state_index,
+                    controls,
+                    observer,
+                    application_error,
+                );
+                return;
             }
             if (err == error.Timeout) {
                 // A HEADERS/CONTINUATION sequence is connection-serial. If it
@@ -7387,11 +7585,7 @@ pub const Connection = struct {
                 state.done = true;
                 state.request_done = true;
                 control.reported = true;
-                observer.on_result(
-                    observer.context,
-                    control.request_index,
-                    .{ .err = error.StreamReset },
-                );
+                observer.reportError(control.request_index, error.StreamReset);
                 return;
             }
             if (self.serve_read_connection_error != null or
@@ -7418,11 +7612,7 @@ pub const Connection = struct {
                     state.done = true;
                     state.request_done = true;
                     control.reported = true;
-                    observer.on_result(
-                        observer.context,
-                        control.request_index,
-                        .{ .err = err },
-                    );
+                    observer.reportError(control.request_index, err);
                     return;
                 }
             }
@@ -7430,6 +7620,31 @@ pub const Connection = struct {
         };
         if (self.recv_connection_window.value > connection_before) {
             clearIndividualBatchConnectionCredit(controls);
+        }
+        if (observer.isStreaming() and !had_final_head and
+            state.headers != null)
+        {
+            self.beginBorrowedReadCallback() catch |err| {
+                return @errorCast(err);
+            };
+            const head_result = observer.notifyHead(
+                control.request_index,
+                .{
+                    .headers = state.headers.?,
+                    .status = state.status.?,
+                },
+            );
+            self.endBorrowedReadCallback();
+            head_result catch |err| {
+                try self.failIndividualStreamingCallback(
+                    states,
+                    state_index,
+                    controls,
+                    observer,
+                    err,
+                );
+                return;
+            };
         }
         if (state.done and state.request_done) {
             try self.finishIndividualBatchResponse(
@@ -7444,8 +7659,8 @@ pub const Connection = struct {
         self: *Connection,
         states: []BatchResponseState,
         controls: []IndividualBatchControl,
-        observer: BatchOwnedResponseObserver,
-    ) ResponseTimeoutError!void {
+        observer: IndividualBatchObserver,
+    ) anyerror!void {
         while (true) {
             var unfinished: usize = 0;
             for (controls) |control| {
@@ -16951,6 +17166,37 @@ pub const BatchOwnedResponseObserver = struct {
         context: *anyopaque,
         request_index: usize,
         result: BatchOwnedResponseResult,
+    ) void,
+};
+
+/// One terminal result from a callback-streaming request batch whose members
+/// carry independent deadlines. Headers and trailers are owned by a successful
+/// response; response DATA has already been delivered to `on_data`.
+pub const BatchStreamingResponseResult = union(enum) {
+    response: StreamingResponse,
+    err: anyerror,
+};
+
+/// Streams independently-deadlined response bodies without aggregating DATA.
+/// `on_head` and `on_data` run under the connection's borrowed-reader guard and
+/// must not re-enter the same connection. Either callback may reject only its
+/// own stream; the exact callback error is then delivered through `on_result`.
+pub const BatchStreamingResponseObserver = struct {
+    context: *anyopaque,
+    on_head: ?*const fn (
+        context: *anyopaque,
+        request_index: usize,
+        response: StreamingResponseHead,
+    ) anyerror!void = null,
+    on_data: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+        data: []const u8,
+    ) anyerror!void,
+    on_result: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+        result: BatchStreamingResponseResult,
     ) void,
 };
 

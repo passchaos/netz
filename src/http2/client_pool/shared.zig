@@ -44,6 +44,18 @@ pub fn Dispatcher(comptime PoolType: type) type {
             completed,
         };
 
+        const StreamingCallbacks = struct {
+            context: *anyopaque,
+            on_head: ?*const fn (
+                context: *anyopaque,
+                head: runtime.StreamingResponseHead,
+            ) anyerror!void = null,
+            on_data: *const fn (
+                context: *anyopaque,
+                data: []const u8,
+            ) anyerror!void,
+        };
+
         const Command = struct {
             uri: []const u8,
             request: runtime.RequestOptions,
@@ -52,7 +64,9 @@ pub fn Dispatcher(comptime PoolType: type) type {
             next: ?*Command = null,
             state: CommandState = .idle,
             abandoned: bool = false,
+            streaming: ?StreamingCallbacks = null,
             response: ?runtime.OwnedResponse = null,
+            streaming_response: ?runtime.StreamingResponse = null,
             err: ?anyerror = null,
             done: std.Io.Event = .unset,
         };
@@ -127,6 +141,217 @@ pub fn Dispatcher(comptime PoolType: type) type {
                     return error.Timeout;
                 }
                 return self.requestBefore(uri, request_options, deadline);
+            }
+
+            /// Stream response DATA on the sole dispatcher driver without
+            /// retaining an aggregate body. The callback runs on that driver
+            /// and must not re-enter the same dispatcher or pool connection.
+            pub fn requestStreaming(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                context: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                return self.requestStreamingAdapted(
+                    uri,
+                    request_options,
+                    null,
+                    context,
+                    null,
+                    consume,
+                );
+            }
+
+            pub fn requestStreamingWithTimeout(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                timeout: std.Io.Duration,
+                context: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.requestStreamingAdapted(
+                    uri,
+                    request_options,
+                    .fromNow(self.state.io, .{
+                        .raw = timeout,
+                        .clock = .awake,
+                    }),
+                    context,
+                    null,
+                    consume,
+                );
+            }
+
+            pub fn requestStreamingWithDeadline(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                deadline: std.Io.Clock.Timestamp,
+                context: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                if (deadline.clock != .awake or
+                    deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0)
+                {
+                    return error.Timeout;
+                }
+                return self.requestStreamingAdapted(
+                    uri,
+                    request_options,
+                    deadline,
+                    context,
+                    null,
+                    consume,
+                );
+            }
+
+            /// Final-head variant. `begin` runs after the final non-1xx head
+            /// and before the first DATA callback for that stream.
+            pub fn requestStreamingWithHead(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                context: anytype,
+                comptime begin: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                return self.requestStreamingAdapted(
+                    uri,
+                    request_options,
+                    null,
+                    context,
+                    begin,
+                    consume,
+                );
+            }
+
+            pub fn requestStreamingWithHeadAndTimeout(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                timeout: std.Io.Duration,
+                context: anytype,
+                comptime begin: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                if (timeout.nanoseconds <= 0) return error.Timeout;
+                return self.requestStreamingAdapted(
+                    uri,
+                    request_options,
+                    .fromNow(self.state.io, .{
+                        .raw = timeout,
+                        .clock = .awake,
+                    }),
+                    context,
+                    begin,
+                    consume,
+                );
+            }
+
+            pub fn requestStreamingWithHeadAndDeadline(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                deadline: std.Io.Clock.Timestamp,
+                context: anytype,
+                comptime begin: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                if (deadline.clock != .awake or
+                    deadline.durationFromNow(self.state.io).raw.nanoseconds <= 0)
+                {
+                    return error.Timeout;
+                }
+                return self.requestStreamingAdapted(
+                    uri,
+                    request_options,
+                    deadline,
+                    context,
+                    begin,
+                    consume,
+                );
+            }
+
+            fn requestStreamingAdapted(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                deadline: ?std.Io.Clock.Timestamp,
+                context: anytype,
+                comptime begin: anytype,
+                comptime consume: anytype,
+            ) anyerror!runtime.StreamingResponse {
+                const Context = @TypeOf(context);
+                const Adapter = struct {
+                    fn typed(raw_context: *anyopaque) Context {
+                        return @ptrCast(@alignCast(raw_context));
+                    }
+
+                    fn head(
+                        raw_context: *anyopaque,
+                        response_head: runtime.StreamingResponseHead,
+                    ) anyerror!void {
+                        if (comptime @TypeOf(begin) == @TypeOf(null)) {
+                            unreachable;
+                        } else {
+                            try begin(typed(raw_context), response_head);
+                        }
+                    }
+
+                    fn data(
+                        raw_context: *anyopaque,
+                        bytes: []const u8,
+                    ) anyerror!void {
+                        try consume(typed(raw_context), bytes);
+                    }
+                };
+                return self.requestStreamingBefore(
+                    uri,
+                    request_options,
+                    deadline,
+                    .{
+                        .context = @ptrCast(context),
+                        .on_head = if (comptime @TypeOf(begin) == @TypeOf(null))
+                            null
+                        else
+                            Adapter.head,
+                        .on_data = Adapter.data,
+                    },
+                );
+            }
+
+            fn requestStreamingBefore(
+                self: Sender,
+                uri: []const u8,
+                request_options: runtime.RequestOptions,
+                deadline: ?std.Io.Clock.Timestamp,
+                callbacks: StreamingCallbacks,
+            ) anyerror!runtime.StreamingResponse {
+                var command: Command = .{
+                    .uri = uri,
+                    .request = request_options,
+                    .deadline = deadline,
+                    .streaming = callbacks,
+                };
+                try enqueue(self.state, &command);
+                const wait_err = waitForCompletion(
+                    self.state,
+                    &command,
+                    deadline,
+                );
+                if (wait_err) |err| {
+                    if (cancelQueued(self.state, &command)) return err;
+                    self.state.mutex.lockUncancelable(self.state.io);
+                    command.abandoned = true;
+                    self.state.mutex.unlock(self.state.io);
+                    command.done.waitUncancelable(self.state.io);
+                    discardResult(self.state, &command);
+                    return err;
+                }
+                return takeStreamingResult(self.state, &command);
             }
 
             fn requestBefore(
@@ -347,6 +572,9 @@ pub fn Dispatcher(comptime PoolType: type) type {
             while (count < state.options.max_batch_requests) {
                 const next = state.head orelse break;
                 if (!sameOrigin(first.uri, next.uri)) break;
+                if ((first.streaming == null) != (next.streaming == null)) {
+                    break;
+                }
                 detach(state, next);
                 next.state = .in_flight;
                 out[count] = next;
@@ -362,6 +590,10 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 state.coalesced_requests +|= commands.len;
             }
             state.mutex.unlock(state.io);
+            if (commands[0].streaming != null) {
+                executeStreamingBatch(state, commands);
+                return;
+            }
             if (commands.len == 1) {
                 const command = commands[0];
                 const result = if (command.deadline) |deadline|
@@ -466,6 +698,104 @@ pub fn Dispatcher(comptime PoolType: type) type {
             }
         }
 
+        fn executeStreamingBatch(state: *State, commands: []*Command) void {
+            var requests: [max_batch_limit]batch.UriRequest = undefined;
+            var deadlines: [max_batch_limit]?std.Io.Clock.Timestamp = undefined;
+            var completed: [max_batch_limit]bool = @splat(false);
+            for (
+                commands,
+                requests[0..commands.len],
+                deadlines[0..commands.len],
+            ) |command, *request, *deadline| {
+                std.debug.assert(command.streaming != null);
+                request.* = .{
+                    .uri = command.uri,
+                    .request = command.request,
+                };
+                deadline.* = command.deadline;
+            }
+
+            const ObserverContext = struct {
+                state: *State,
+                commands: []*Command,
+                completed: []bool,
+
+                fn head(
+                    raw_context: *anyopaque,
+                    request_index: usize,
+                    response_head: runtime.StreamingResponseHead,
+                ) anyerror!void {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    const callbacks = self.commands[request_index].streaming.?;
+                    if (callbacks.on_head) |on_head| {
+                        try on_head(callbacks.context, response_head);
+                    }
+                }
+
+                fn data(
+                    raw_context: *anyopaque,
+                    request_index: usize,
+                    bytes: []const u8,
+                ) anyerror!void {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    const callbacks = self.commands[request_index].streaming.?;
+                    try callbacks.on_data(callbacks.context, bytes);
+                }
+
+                fn observe(
+                    raw_context: *anyopaque,
+                    request_index: usize,
+                    result: runtime.BatchStreamingResponseResult,
+                ) void {
+                    const self: *@This() = @ptrCast(@alignCast(raw_context));
+                    self.completed[request_index] = true;
+                    switch (result) {
+                        .response => |response| completeStreaming(
+                            self.state,
+                            self.commands[request_index],
+                            response,
+                            null,
+                        ),
+                        .err => |err| completeStreaming(
+                            self.state,
+                            self.commands[request_index],
+                            null,
+                            err,
+                        ),
+                    }
+                }
+            };
+            var observer_context: ObserverContext = .{
+                .state = state,
+                .commands = commands,
+                .completed = completed[0..commands.len],
+            };
+            state.pool.requestUriBatchStreamingWithPerStreamDeadlines(
+                requests[0..commands.len],
+                deadlines[0..commands.len],
+                .{
+                    .context = &observer_context,
+                    .on_head = ObserverContext.head,
+                    .on_data = ObserverContext.data,
+                    .on_result = ObserverContext.observe,
+                },
+            ) catch |err| {
+                for (completed[0..commands.len], 0..) |
+                    was_completed,
+                    index,
+                | {
+                    if (!was_completed) {
+                        completeStreaming(
+                            state,
+                            commands[index],
+                            null,
+                            err,
+                        );
+                    }
+                }
+            };
+        }
+
         fn complete(
             state: *State,
             command: *Command,
@@ -489,6 +819,29 @@ pub fn Dispatcher(comptime PoolType: type) type {
             command.done.set(state.io);
         }
 
+        fn completeStreaming(
+            state: *State,
+            command: *Command,
+            response_value: ?runtime.StreamingResponse,
+            err: ?anyerror,
+        ) void {
+            var response = response_value;
+            state.mutex.lockUncancelable(state.io);
+            if (command.abandoned) {
+                command.state = .completed;
+                state.mutex.unlock(state.io);
+                if (response) |*owned| owned.deinit(state.pool.allocator);
+                command.done.set(state.io);
+                return;
+            }
+            command.streaming_response = response;
+            response = null;
+            command.err = err;
+            command.state = .completed;
+            state.mutex.unlock(state.io);
+            command.done.set(state.io);
+        }
+
         fn takeResult(
             state: *State,
             command: *Command,
@@ -502,6 +855,19 @@ pub fn Dispatcher(comptime PoolType: type) type {
             return response;
         }
 
+        fn takeStreamingResult(
+            state: *State,
+            command: *Command,
+        ) anyerror!runtime.StreamingResponse {
+            state.mutex.lockUncancelable(state.io);
+            defer state.mutex.unlock(state.io);
+            std.debug.assert(command.state == .completed);
+            if (command.err) |err| return err;
+            const response = command.streaming_response.?;
+            command.streaming_response = null;
+            return response;
+        }
+
         fn discardResult(state: *State, command: *Command) void {
             state.mutex.lockUncancelable(state.io);
             defer state.mutex.unlock(state.io);
@@ -509,6 +875,10 @@ pub fn Dispatcher(comptime PoolType: type) type {
                 state.pool.allocator,
             );
             command.response = null;
+            if (command.streaming_response) |*response| response.deinit(
+                state.pool.allocator,
+            );
+            command.streaming_response = null;
         }
 
         fn sameDeadline(

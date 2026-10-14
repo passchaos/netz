@@ -534,6 +534,416 @@ test "HTTP/2 shared sender timeout preserves later-deadline sibling" {
     if (server_worker.err) |err| return err;
 }
 
+test "HTTP/2 shared streaming isolates callback failure and reuses connection" {
+    const allocator = std.testing.allocator;
+    const response_bytes = 64 * 1024;
+    const response_chunk = 4096;
+    const response_a = [_]u8{'a'} ** response_bytes;
+    const response_b = [_]u8{'b'} ** response_bytes;
+    const rejected_prefix = [_]u8{'r'} ** response_chunk;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_body_bytes = response_bytes,
+            .max_frame_payload = response_chunk,
+        },
+    );
+    defer server.deinit();
+
+    const ServerWorker = struct {
+        server: *runtime.Server,
+        saw_callback_cancel: bool = false,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var requests: [4]runtime.StreamingRequest = undefined;
+            const BodyContext = struct {
+                bytes: [4]usize = @splat(0),
+
+                fn consume(
+                    context: *@This(),
+                    stream_id: u31,
+                    data: []const u8,
+                ) !void {
+                    const index: usize = @intCast((stream_id - 1) / 2);
+                    if (index >= context.bytes.len) {
+                        return error.InvalidRequest;
+                    }
+                    context.bytes[index] += data.len;
+                }
+            };
+            var body_context: BodyContext = .{};
+            try connection.readRequestBatchStreamingInto(
+                &requests,
+                &body_context,
+                BodyContext.consume,
+            );
+            defer for (&requests) |*request| {
+                request.deinit(self.server.allocator);
+            };
+            for (&requests) |*request| {
+                try std.testing.expectEqualStrings("POST", request.method);
+                try std.testing.expectEqual(@as(usize, 16 * 1024), request.body_bytes);
+                try std.testing.expectEqualStrings(
+                    "done",
+                    findHeader(request.trailers, "x-request-finished").?,
+                );
+            }
+            for (body_context.bytes) |bytes| {
+                try std.testing.expectEqual(@as(usize, 16 * 1024), bytes);
+            }
+
+            const rejected = for (&requests) |*request| {
+                if (std.mem.eql(u8, request.path, "/stream-reject")) {
+                    break request;
+                }
+            } else return error.InvalidRequest;
+            const timed = for (&requests) |*request| {
+                if (std.mem.eql(u8, request.path, "/stream-timeout")) {
+                    break request;
+                }
+            } else return error.InvalidRequest;
+            var rejected_writer = try connection.startResponse(
+                rejected.stream_id,
+                .{
+                    .headers = &.{
+                        .{ .name = "content-length", .value = "65536" },
+                        .{ .name = "x-path", .value = rejected.path },
+                    },
+                },
+            );
+            defer rejected_writer.deinit();
+            try rejected_writer.write(&rejected_prefix);
+            var reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(2),
+            );
+            defer reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(rejected.stream_id, reset.reset.stream_id);
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                reset.reset.error_code,
+            );
+            self.saw_callback_cancel = true;
+
+            var timed_writer = try connection.startResponse(
+                timed.stream_id,
+                .{
+                    .headers = &.{
+                        .{ .name = "content-length", .value = "65536" },
+                        .{ .name = "x-path", .value = timed.path },
+                    },
+                },
+            );
+            defer timed_writer.deinit();
+            try timed_writer.write(&rejected_prefix);
+            var timed_reset = try connection.readResetStreamWithTimeout(
+                .fromSeconds(4),
+            );
+            defer timed_reset.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                timed.stream_id,
+                timed_reset.reset.stream_id,
+            );
+            try std.testing.expectEqual(
+                http2.ErrorCode.cancel,
+                timed_reset.reset.error_code,
+            );
+
+            for (&requests) |*request| {
+                if (request == rejected or request == timed) continue;
+                const body: []const u8 = if (std.mem.eql(
+                    u8,
+                    request.path,
+                    "/stream-one",
+                ))
+                    &response_a
+                else if (std.mem.eql(u8, request.path, "/stream-two"))
+                    &response_b
+                else
+                    return error.InvalidRequest;
+                var writer = try connection.startResponse(
+                    request.stream_id,
+                    .{
+                        .headers = &.{
+                            .{ .name = "content-length", .value = "65536" },
+                            .{ .name = "x-path", .value = request.path },
+                        },
+                    },
+                );
+                defer writer.deinit();
+                var offset: usize = 0;
+                while (offset < body.len) : (offset += response_chunk) {
+                    try writer.write(body[offset..][0..response_chunk]);
+                }
+                try writer.finishTrailers(&.{.{
+                    .name = "x-response-finished",
+                    .value = request.path,
+                }});
+            }
+
+            var reused_streaming = try connection.readRequest();
+            defer reused_streaming.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/reuse-streaming",
+                reused_streaming.path,
+            );
+            try connection.writeResponse(reused_streaming.stream_id, .{
+                .body = "stream-reused",
+            });
+
+            var reused = try connection.readRequest();
+            defer reused.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/reuse", reused.path);
+            try connection.writeResponse(reused.stream_id, .{
+                .body = "reused",
+            });
+        }
+    };
+
+    const StreamContext = struct {
+        expected_byte: u8,
+        expected_path: []const u8,
+        reject: bool = false,
+        saw_head: bool = false,
+        body_bytes: usize = 0,
+
+        fn begin(
+            self: *@This(),
+            head: runtime.StreamingResponseHead,
+        ) !void {
+            try std.testing.expect(!self.saw_head);
+            try std.testing.expectEqual(@as(u16, 200), head.status);
+            try std.testing.expectEqualStrings(
+                self.expected_path,
+                findHeader(head.headers, "x-path").?,
+            );
+            self.saw_head = true;
+        }
+
+        fn consume(self: *@This(), data: []const u8) !void {
+            try std.testing.expect(self.saw_head);
+            for (data) |byte| {
+                try std.testing.expectEqual(self.expected_byte, byte);
+            }
+            self.body_bytes += data.len;
+            if (self.reject) return error.RejectSharedStream;
+        }
+    };
+    const Producer = struct {
+        sender: pool_mod.SharedSender,
+        uri: []const u8,
+        deadline: std.Io.Clock.Timestamp,
+        context: StreamContext,
+        response: ?runtime.StreamingResponse = null,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            const body = [_]u8{'q'} ** (16 * 1024);
+            self.response = self.sender.requestStreamingWithHeadAndDeadline(
+                self.uri,
+                .{
+                    .method = "POST",
+                    .body = &body,
+                    .trailers = &.{.{
+                        .name = "x-request-finished",
+                        .value = "done",
+                    }},
+                },
+                self.deadline,
+                &self.context,
+                StreamContext.begin,
+                StreamContext.consume,
+            ) catch |err| {
+                self.err = err;
+                return;
+            };
+        }
+    };
+
+    var server_worker = ServerWorker{ .server = &server };
+    const server_thread = try std.Thread.spawn(
+        .{},
+        ServerWorker.run,
+        .{&server_worker},
+    );
+    var server_joined = false;
+    defer if (!server_joined) server_thread.join();
+    var pool = try pool_mod.Pool.init(allocator, io, .{
+        .batch_body_chunk_size = 1024,
+        .limits = .{
+            .max_body_bytes = response_bytes,
+            .max_frame_payload = response_chunk,
+        },
+    });
+    defer pool.deinit();
+    var dispatcher = try pool_mod.SharedDispatcher.init(
+        allocator,
+        io,
+        &pool,
+        .{ .max_queued_requests = 8, .max_batch_requests = 8 },
+    );
+    defer dispatcher.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "http://localhost:{d}",
+        .{server.address().ip4.port},
+    );
+    defer allocator.free(base);
+    const uris = [_][]u8{
+        try std.fmt.allocPrint(allocator, "{s}/stream-one", .{base}),
+        try std.fmt.allocPrint(allocator, "{s}/stream-reject", .{base}),
+        try std.fmt.allocPrint(allocator, "{s}/stream-timeout", .{base}),
+        try std.fmt.allocPrint(allocator, "{s}/stream-two", .{base}),
+    };
+    defer for (uris) |uri| allocator.free(uri);
+    const paths = [_][]const u8{
+        "/stream-one",
+        "/stream-reject",
+        "/stream-timeout",
+        "/stream-two",
+    };
+    const expected_bytes = [_]u8{ 'a', 'r', 'r', 'b' };
+    const sender = dispatcher.sender();
+    var producers: [4]Producer = undefined;
+    for (&producers, uris, paths, expected_bytes, 0..) |
+        *producer,
+        uri,
+        path,
+        expected_byte,
+        index,
+    | {
+        producer.* = .{
+            .sender = sender.clone(),
+            .uri = uri,
+            .deadline = .fromNow(io, .{
+                .raw = if (index == 2)
+                    .fromSeconds(2)
+                else
+                    .fromSeconds(@intCast(8 + index)),
+                .clock = .awake,
+            }),
+            .context = .{
+                .expected_byte = expected_byte,
+                .expected_path = path,
+                .reject = index == 1,
+            },
+        };
+    }
+    var producer_threads: [producers.len]std.Thread = undefined;
+    for (&producer_threads, &producers) |*thread, *producer| {
+        thread.* = try std.Thread.spawn(.{}, Producer.run, .{producer});
+    }
+    try waitQueued(io, &dispatcher, producers.len);
+    var driver = try std.Io.concurrent(
+        io,
+        pool_mod.SharedDispatcher.run,
+        .{&dispatcher},
+    );
+    for (&producer_threads) |*thread| thread.join();
+
+    for (&producers, paths, 0..) |*producer, path, index| {
+        if (index == 1) {
+            try std.testing.expectEqual(
+                error.RejectSharedStream,
+                producer.err.?,
+            );
+            try std.testing.expect(producer.response == null);
+            try std.testing.expect(producer.context.saw_head);
+            try std.testing.expectEqual(
+                @as(usize, response_chunk),
+                producer.context.body_bytes,
+            );
+            continue;
+        }
+        if (index == 2) {
+            try std.testing.expectEqual(error.Timeout, producer.err.?);
+            try std.testing.expect(producer.response == null);
+            try std.testing.expect(producer.context.saw_head);
+            try std.testing.expectEqual(
+                @as(usize, response_chunk),
+                producer.context.body_bytes,
+            );
+            continue;
+        }
+        if (producer.err) |err| return err;
+        var response = producer.response.?;
+        defer response.deinit(allocator);
+        try std.testing.expectEqual(@as(u16, 200), response.status);
+        try std.testing.expectEqual(response_bytes, response.body_bytes);
+        try std.testing.expectEqual(response_bytes, producer.context.body_bytes);
+        try std.testing.expectEqualStrings(
+            path,
+            findHeader(response.trailers, "x-response-finished").?,
+        );
+    }
+
+    const ReuseStreamContext = struct {
+        body_bytes: usize = 0,
+
+        fn consume(self: *@This(), data: []const u8) !void {
+            self.body_bytes += data.len;
+        }
+    };
+    const reuse_streaming_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/reuse-streaming",
+        .{base},
+    );
+    defer allocator.free(reuse_streaming_uri);
+    var reuse_stream_context: ReuseStreamContext = .{};
+    var reuse_stream_response = try sender.requestStreamingWithTimeout(
+        reuse_streaming_uri,
+        .{},
+        .fromSeconds(2),
+        &reuse_stream_context,
+        ReuseStreamContext.consume,
+    );
+    defer reuse_stream_response.deinit(allocator);
+    try std.testing.expectEqual(
+        @as(usize, "stream-reused".len),
+        reuse_stream_context.body_bytes,
+    );
+    try std.testing.expectEqual(
+        @as(usize, "stream-reused".len),
+        reuse_stream_response.body_bytes,
+    );
+
+    const reuse_uri = try std.fmt.allocPrint(allocator, "{s}/reuse", .{base});
+    defer allocator.free(reuse_uri);
+    var reuse_response = try sender.requestWithTimeout(
+        reuse_uri,
+        .{},
+        .fromSeconds(2),
+    );
+    defer reuse_response.deinit(allocator);
+    try std.testing.expectEqualStrings("reused", reuse_response.body);
+    dispatcher.close();
+    try driver.await(io);
+    const stats = dispatcher.stats();
+    try std.testing.expectEqual(@as(u64, 3), stats.batches);
+    try std.testing.expectEqual(@as(u64, 4), stats.coalesced_requests);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    server_thread.join();
+    server_joined = true;
+    if (server_worker.err) |err| return err;
+    try std.testing.expect(server_worker.saw_callback_cancel);
+}
+
 test "HTTP/2 shared sender removes timed out queued command" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
