@@ -19,6 +19,10 @@ const Tls12Ops = struct {
         return now_seconds < session.created_at_seconds or
             now_seconds - session.created_at_seconds >= session.lifetime_seconds;
     }
+
+    fn ticketAlpn(ticket: *const Ticket) []const u8 {
+        return ticket.alpn();
+    }
 };
 
 const Tls13Ops = struct {
@@ -63,6 +67,10 @@ const Tls13Ops = struct {
     fn expired(ticket: *const Ticket, now_ms: u64) bool {
         _ = ticket.obfuscatedTicketAge(now_ms) catch return true;
         return false;
+    }
+
+    fn ticketAlpn(ticket: *const Ticket) []const u8 {
+        return ticket.alpn;
     }
 };
 
@@ -153,6 +161,33 @@ fn TicketCache(comptime Ops: type) type {
             return ticket;
         }
 
+        /// Clone only a ticket issued for the exact application protocol.
+        /// A unified HTTP pool may negotiate HTTP/1.1 or HTTP/2 for the same
+        /// origin, so origin-only lookup is insufficient for safe resumption.
+        pub fn cloneForAlpn(
+            self: *Self,
+            server_identity: []const u8,
+            port: u16,
+            alpn: []const u8,
+            now: u64,
+        ) !?Ticket {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.pruneExpiredLocked(now);
+            const index = self.findAlpn(
+                server_identity,
+                port,
+                alpn,
+            ) orelse return null;
+            var ticket = try Ops.clone(
+                &self.entries.items[index].ticket,
+                self.allocator,
+            );
+            errdefer ticket.deinit();
+            self.entries.items[index].last_used = self.nextAccess();
+            return ticket;
+        }
+
         /// Consume `ticket`. Allocation failure disables caching for this
         /// ticket without failing the authenticated connection that issued it.
         pub fn store(
@@ -170,7 +205,11 @@ fn TicketCache(comptime Ops: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.pruneExpiredLocked(now);
-            if (self.find(server_identity, port)) |index| {
+            if (self.findAlpn(
+                server_identity,
+                port,
+                Ops.ticketAlpn(&ticket),
+            )) |index| {
                 self.entries.items[index].ticket.deinit();
                 self.entries.items[index].ticket = ticket;
                 self.entries.items[index].last_used = self.nextAccess();
@@ -214,6 +253,24 @@ fn TicketCache(comptime Ops: type) type {
             return true;
         }
 
+        pub fn removeForAlpn(
+            self: *Self,
+            server_identity: []const u8,
+            port: u16,
+            alpn: []const u8,
+        ) bool {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            const index = self.findAlpn(
+                server_identity,
+                port,
+                alpn,
+            ) orelse return false;
+            var removed = self.entries.swapRemove(index);
+            removed.deinit(self.allocator);
+            return true;
+        }
+
         fn pruneExpiredLocked(self: *Self, now: u64) void {
             var index: usize = 0;
             while (index < self.entries.items.len) {
@@ -233,6 +290,22 @@ fn TicketCache(comptime Ops: type) type {
         ) ?usize {
             for (self.entries.items, 0..) |entry, index| {
                 if (entry.matches(server_identity, port)) return index;
+            }
+            return null;
+        }
+
+        fn findAlpn(
+            self: *const Self,
+            server_identity: []const u8,
+            port: u16,
+            alpn: []const u8,
+        ) ?usize {
+            for (self.entries.items, 0..) |entry, index| {
+                if (entry.matches(server_identity, port) and
+                    std.mem.eql(u8, Ops.ticketAlpn(&entry.ticket), alpn))
+                {
+                    return index;
+                }
             }
             return null;
         }
@@ -412,6 +485,52 @@ test "TLS 1.3 client ticket cache deep-clones owned session context" {
     var expected_psk = vail.tls.secret.Secret.fromSha256([_]u8{0x43} ** 32);
     defer expected_psk.deinit();
     try std.testing.expect(cloned.psk.eql(&expected_psk));
+}
+
+test "client ticket cache isolates application protocols for one origin" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var cache = Tls13Cache.init(allocator, threaded.io(), 2);
+    defer cache.deinit();
+
+    const h2 = try testTls13Ticket(allocator, "same.example", 100_000);
+    cache.store("same.example", 443, h2, 100_000);
+    var h1 = try testTls13Ticket(allocator, "same.example", 100_001);
+    const h1_alpn = try allocator.dupe(u8, "http/1.1");
+    allocator.free(h1.alpn);
+    h1.alpn = h1_alpn;
+    cache.store("same.example", 443, h1, 100_001);
+
+    try std.testing.expectEqual(@as(usize, 2), cache.count());
+    var cloned_h2 = (try cache.cloneForAlpn(
+        "same.example",
+        443,
+        "h2",
+        100_002,
+    )).?;
+    defer cloned_h2.deinit();
+    var cloned_h1 = (try cache.cloneForAlpn(
+        "same.example",
+        443,
+        "http/1.1",
+        100_002,
+    )).?;
+    defer cloned_h1.deinit();
+    try std.testing.expectEqualStrings("h2", cloned_h2.alpn);
+    try std.testing.expectEqualStrings("http/1.1", cloned_h1.alpn);
+    try std.testing.expect(cache.removeForAlpn(
+        "same.example",
+        443,
+        "h2",
+    ));
+    try std.testing.expectEqual(@as(usize, 1), cache.count());
+    try std.testing.expect((try cache.cloneForAlpn(
+        "same.example",
+        443,
+        "h2",
+        100_003,
+    )) == null);
 }
 
 test "client ticket caches discard entries when disabled" {

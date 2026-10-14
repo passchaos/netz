@@ -74,7 +74,7 @@ for protocol in h1 h2; do
   expected_alpn=http/1.1
   if [[ $protocol == h2 ]]; then expected_alpn=h2; fi
   grep -Fq \
-    "netz unified HTTP client selected Hyper protocol=$protocol alpn=$expected_alpn requests=2 connections=1 reusable=true client_io=zio-std-io server_io=hyper-tokio" \
+    "netz unified HTTP pool selected Hyper protocol=$protocol alpn=$expected_alpn requests=2 connections=1 reusable=true client_io=zio-std-io server_io=hyper-tokio" \
     "$work/client-$protocol.log"
   grep -Fq \
     "Hyper unified server completed protocol=$protocol alpn=$expected_alpn requests=2 connections=1 client_io=zio-std-io server_io=hyper-tokio" \

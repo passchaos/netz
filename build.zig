@@ -1685,7 +1685,7 @@ pub fn build(b: *std.Build) void {
     http_unified_hyper.addArtifactArg(http_unified_hyper_client);
     const http_unified_hyper_step = b.step(
         "interop-http-unified-hyper",
-        "Run unified netz HTTP client ALPN/reuse interop with Hyper",
+        "Run unified netz HTTP pool ALPN/reuse interop with Hyper",
     );
     http_unified_hyper_step.dependOn(&http_unified_hyper.step);
 

@@ -64,6 +64,47 @@ pub const Connection = struct {
         };
     }
 
+    pub fn negotiatedAlpn(self: *const Connection) ?[]const u8 {
+        return switch (self.value) {
+            .http1 => |*client| client.negotiatedAlpn(),
+            .http2 => |*connection| connection.negotiatedAlpn(),
+        };
+    }
+
+    pub fn negotiatedTlsProtocol(
+        self: *const Connection,
+    ) ?tls_stream.Protocol {
+        return switch (self.value) {
+            .http1 => |*client| client.negotiatedTlsProtocol(),
+            .http2 => |*connection| connection.negotiatedTlsProtocol(),
+        };
+    }
+
+    pub fn wasTlsSessionResumed(self: *const Connection) ?bool {
+        return switch (self.value) {
+            .http1 => |*client| client.wasTlsSessionResumed(),
+            .http2 => |*connection| connection.wasTlsSessionResumed(),
+        };
+    }
+
+    pub fn takeTls12SessionTicket(
+        self: *Connection,
+    ) ?tls_stream.Tls12SessionTicket {
+        return switch (self.value) {
+            .http1 => |*client| client.takeTls12SessionTicket(),
+            .http2 => |*connection| connection.takeTls12SessionTicket(),
+        };
+    }
+
+    pub fn takeTls13SessionTicket(
+        self: *Connection,
+    ) tls_stream.Error!?tls_stream.Tls13SessionTicket {
+        return switch (self.value) {
+            .http1 => |*client| client.takeTls13SessionTicket(),
+            .http2 => |*connection| connection.takeTls13SessionTicket(),
+        };
+    }
+
     pub fn request(
         self: *Connection,
         target: []const u8,

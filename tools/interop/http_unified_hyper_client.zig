@@ -21,24 +21,27 @@ pub fn main(init: std.process.Init) !void {
     const io = backend.io();
     const key_pair = try netz.tls.testing.serverKeyPair();
     const public_key = key_pair.public_key.toUncompressedSec1();
-    var client = try netz.http.Client.init(allocator, io, .{
-        .tls = .{ .server_verifier = .{
+    var pool = try netz.http.Pool.init(allocator, io, .{
+        .client = .{ .tls = .{ .server_verifier = .{
             .pinned_ecdsa_p256_public_key = public_key,
-        } },
+        } } },
     });
-    defer client.deinit();
-    const uri = try std.fmt.allocPrint(
+    defer pool.deinit();
+    const first_uri = try std.fmt.allocPrint(
         allocator,
-        "https://localhost:{d}/",
+        "https://localhost:{d}/one",
         .{port},
     );
-    defer allocator.free(uri);
-    var connection = try client.connectUriWithTimeout(uri, .fromSeconds(5));
-    defer connection.close();
-    if (connection.protocol() != expected) return error.InvalidProtocol;
+    defer allocator.free(first_uri);
+    const second_uri = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}/two",
+        .{port},
+    );
+    defer allocator.free(second_uri);
     const label = if (expected == .http2) "h2" else "h1";
-    var first = try connection.requestWithTimeout(
-        "/one",
+    var first = try pool.requestUriWithTimeout(
+        first_uri,
         .{ .headers = &.{.{
             .name = "x-netz-unified",
             .value = label,
@@ -46,8 +49,8 @@ pub fn main(init: std.process.Init) !void {
         .fromSeconds(5),
     );
     defer first.deinit();
-    var second = try connection.requestWithTimeout(
-        "/two",
+    var second = try pool.requestUriWithTimeout(
+        second_uri,
         .{ .headers = &.{.{
             .name = "x-netz-unified",
             .value = label,
@@ -64,8 +67,17 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidResponse;
     }
+    if (first.protocol() != expected or second.protocol() != expected) {
+        return error.InvalidProtocol;
+    }
+    const stats = pool.stats();
+    if (pool.connectionCount() != 1 or pool.idleCount() != 1 or
+        stats.total_reused != 1 or stats.total_misses != 1)
+    {
+        return error.InvalidPoolState;
+    }
     std.debug.print(
-        "netz unified HTTP client selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true client_io=zio-std-io server_io=hyper-tokio\n",
+        "netz unified HTTP pool selected Hyper protocol={s} alpn={s} requests=2 connections=1 reusable=true client_io=zio-std-io server_io=hyper-tokio\n",
         .{ label, if (expected == .http2) "h2" else "http/1.1" },
     );
 }

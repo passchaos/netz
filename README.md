@@ -184,7 +184,8 @@ Current protocol coverage includes:
   backpressure, bound every intermediate layer through reusable fixed-capacity
   queues, require an explicit EOF finish, and expose constructors on each
   protocol's streaming response-head type,
-- A unified `http.Client`/`http.Connection` surface for HTTP/1.1 and HTTP/2:
+- A unified `http.Client`/`http.Connection`/`http.Pool` surface for HTTP/1.1
+  and HTTP/2:
   HTTPS performs one certificate-verified vail TLS 1.2/1.3 handshake offering
   `h2,http/1.1`, then transfers that exact authenticated transport into the
   selected runtime without reconnecting; explicit `http1_only`/`http2_only`
@@ -195,7 +196,14 @@ Current protocol coverage includes:
   absolute deadlines cover DNS/TCP, TLS, H2 SETTINGS, and the complete
   response. Bounded redirects may change negotiated protocol between origins
   while retaining method replay, credential/mTLS isolation, downgrade policy,
-  final URI metadata, and one whole-chain deadline,
+  final URI metadata, and one whole-chain deadline. The authority-keyed pool
+  retains the negotiated protocol without another TLS handshake, caps the
+  combined idle/leased/connecting population, uses allocation-free FIFO
+  capacity admission, per-origin and global idle bounds, true global LRU and
+  monotonic idle retirement, and retries one stale reused connection only for
+  idempotent methods. TLS 1.2/1.3 tickets are retained by exact origin and ALPN,
+  and pool redirects release each completed hop before acquiring the next
+  origin,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the
@@ -1486,7 +1494,8 @@ zig build interop-http1-hyper -Doptimize=ReleaseFast
 # the same connection.
 zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # Negotiate `http/1.1` and `h2` with independent Hyper/rustls servers through
-# the same high-level client, then make two requests on each selected transport.
+# the same high-level authority pool, then prove one miss plus one reuse on each
+# selected transport.
 zig build interop-http-unified-hyper -Doptimize=ReleaseFast
 # Exercise netz HTTP/1.1 and HTTP/2 servers with installed curl and nghttp2:
 # cleartext plus certificate-verified TLS, exact request/response assertions,

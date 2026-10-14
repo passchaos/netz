@@ -1139,9 +1139,12 @@ under another cipher suite using the same transcript hash, but 0-RTT is rejected
 unless the ticket's original cipher suite and ALPN context both match;
 servers issue a fresh stateless ticket after full and resumed handshakes and
 fall back to certificate authentication when an opaque ticket is invalid.
-Both HTTP pools collect those post-handshake tickets after response traffic
-and automatically resume after idle eviction or non-reusable connection
-retirement; forced-retirement tests cover TLS 1.2 and TLS 1.3 independently.
+The version-specific and unified HTTP pools collect those post-handshake
+tickets after response traffic and automatically resume after idle eviction or
+non-reusable connection retirement. The unified cache additionally keys
+entries by negotiated ALPN so tickets for `h2`, `http/1.1`, and legacy no-ALPN
+HTTP/1 cannot replace one another; forced-retirement tests cover TLS 1.2 and
+TLS 1.3 independently.
 `zig build interop-tls13-ticket-openssl -Doptimize=ReleaseSafe` verifies both
 endpoint-role directions against OpenSSL, including an HTTP/1 request after
 the resumed handshake. The existing TLS 1.2 gate remains separate.
@@ -1157,12 +1160,21 @@ fields through fixed stack storage with exact overflow allocation. Redirects
 can move from H1 to H2 across origins under one deadline and the existing
 credential, body replay, downgrade and client-identity rules. A dedicated
 Hyper/rustls process gate independently selects only `http/1.1` and only `h2`;
-netz completes two requests on one connection in each arm and reports the
-zio/Hyper-Tokio runtime identities.
+netz sends two URI requests through the authority-keyed negotiated pool in
+each arm, verifies one initial miss plus one idle reuse and one live connection,
+and reports the zio/Hyper-Tokio runtime identities. The same pool applies one
+absolute deadline across FIFO admission, DNS/TCP, TLS, H2 SETTINGS, stale
+idempotent retry and the complete response; its total bound includes idle,
+leased and connecting sockets. Per-origin/global idle limits, true global LRU,
+monotonic expiration, allocation-free FIFO anti-barging and close wakeups share
+the already-audited pool primitives rather than creating a third approximate
+implementation. Local TLS coverage also follows a pooled redirect from an
+already-negotiated H1 origin to an already-negotiated H2 origin without opening
+either connection again.
 
 | Area | netz | hyper |
 | --- | --- | --- |
-| Unified H1/H2 client selection | One TLS connection offers `h2,http/1.1`, adopts the authenticated transport into the selected runtime, exposes explicit cleartext prior knowledge, common requests/responses, whole-operation deadlines and cross-protocol redirects; independent Hyper/rustls ALPN arms verify two requests on one connection | Core `client::conn` intentionally exposes separate low-level H1/H2 handshakes and delegates connecting/pooling to hyper-util or higher-level clients |
+| Unified H1/H2 client and pool selection | One TLS connection offers `h2,http/1.1`, adopts the authenticated transport into the selected runtime, exposes explicit cleartext prior knowledge, common requests/responses, whole-operation deadlines and cross-protocol redirects; the bounded authority pool retains that negotiated connection, provides FIFO capacity waits, LRU/idle lifecycle, stale-idempotent retry, and origin/ALPN-isolated TLS tickets; independent Hyper/rustls ALPN arms verify one pool miss plus one reuse on one connection | Core `client::conn` intentionally exposes separate low-level H1/H2 handshakes and delegates connecting/pooling to hyper-util or higher-level clients |
 | HTTP/1 client/server | Backend-neutral `std.Io`, native TLS 1.3 client/server, persistent/pipelined serving, bounded concurrent TCP/Unix/TLS listeners, long-running supervisors with cancellation plus accept/connection error policy, configurable DNS/TCP connect, TLS handshake, and caller-owned absolute per-request-head deadlines over TCP/TLS, stateful fixed/chunked writers, client/server Expect/100-continue, observable bounded informational responses, and callback-streaming fixed/chunked/close-delimited readers. A caller-owned request deadline preserves a partial head for an explicit later retry, while configured Slowloris protection retains its fail-closed connection policy. Aggregate request/response transport errors retire the connection after validation but before any possible reuse, including automatic 100, CONNECT/Upgrade, and coalesced or borrowed response batches; deterministic preflight failures remain retryable. Successful CONNECT and generic Upgrade handoffs permanently exit HTTP framing on both endpoint roles, so a pool closes the handed-off socket instead of returning it to idle reuse. Forward-proxy APIs add persistent absolute-form HTTP requests and deadline-bounded HTTPS CONNECT plus origin TLS without leaking proxy headers into the tunnel. One-shot URI clients add bounded RFC 3986 redirects, method/body replay policy, cross-origin credential isolation, downgrade protection and one whole-chain deadline for direct or proxy routes. A thread-safe bounded HTTP/HTTPS client pool reuses eligible idle connections per scheme/authority, exposes exclusive leases for streaming APIs, caps the combined idle/leased/connecting population, reports that live count, and offers relative/absolute FIFO capacity waits with wakeups on release, failure, eviction and close. It also enforces a monotonic idle timeout, evicts least-recently-used idle entries, discards non-reusable responses, and retries a stale reused connection once only for idempotent methods. Certificate-verified HTTPS interop with Hyper is exercised in both endpoint roles; installed curl 8.5.0 also verifies the production server over cleartext and certificate-verified TLS with exact request/response and persistent reuse checks | Async runtime integration, mature ecosystem and generic Body polling; its server header-read timeout has equivalent absolute per-head semantics |
 | HTTP/1 strictness | Case-sensitive RFC token methods, including allocation-free borrowed extension methods and registered QUERY safety/idempotency; Host/authority, TE/CL, CONNECT/HEAD/status body semantics, trailers, 100-continue only after complete request-head/framing validation, ordered 1xx observation and bounded interim chains | Mature RFC behavior and broad production use |
 | HTTP/2 | Prior-knowledge TCP/Unix client/server, h2c Upgrade, and native TLS 1.3 client/server with mandatory `h2` ALPN, optional/required client authentication, and separate resolved-address plus TLS-host/authority connection; configurable DNS/TCP connect budgets; symmetric single-connection `serveConnection` helpers plus bounded concurrent and long-running supervised TCP/Unix/TLS serving; one-shot h2c/TLS URI clients with bounded RFC 3986 redirects, method/DATA/trailer replay policy, cross-origin credential isolation, downgrade protection, final-URI metadata and one whole-chain deadline; an authority-keyed, total/idle-bounded exclusive connection pool for cleartext and verified TLS that reuses HPACK state, offers FIFO timeout/deadline capacity waits, retries a stale reused socket once only for idempotent methods, and discards GOAWAY, active-stream and push-capable connections; HPACK, bounded ordered informational callbacks, push, priorities, fixed or opt-in BDP-adaptive receive flow control, graceful GOAWAY draining, public Last-Stream-ID retry classification, tunnels/RFC 8441, explicit absolute-deadline PING round trips, and single-reader inactivity-aware keep-alive cycles with active/idle policy; certificate-verified TLS interop with Hyper/h2 is exercised in both endpoint roles, including redirects, 1xx, push, and push opt-out. Separate curl 8.5.0/nghttp2 1.59.0 and nghttp2 1.68.1 clients verify h2c/TLS requests, response headers/bodies, distinct streams on one connection, certificate trust, and TLS ALPN | Tokio h2 integration and production client/server, including automatic BDP-adaptive receive flow control and background keep-alive interval/timeout/idle policy |
