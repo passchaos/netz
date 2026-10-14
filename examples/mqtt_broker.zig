@@ -437,6 +437,19 @@ pub fn main(init: std.process.Init) !void {
                 snapshot.alloc_buckets[6],
             },
         );
+        for (snapshot.exact_sizes[0..snapshot.exact_size_len]) |entry| {
+            if (entry.size <= 64 * 1024) continue;
+            std.debug.print(
+                "record=allocator-large implementation=netz " ++
+                    "endpoint_role=server size_bytes={d} count={d} " ++
+                    "total_bytes={d} complete=true\n",
+                .{
+                    entry.size,
+                    entry.count,
+                    entry.size *| entry.count,
+                },
+            );
+        }
     }
 }
 

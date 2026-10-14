@@ -319,7 +319,7 @@ pub const Store = struct {
         allocator: std.mem.Allocator,
         maximum: usize,
     ) std.mem.Allocator.Error!Store {
-        var self = Store{
+        return Store{
             .allocator = allocator,
             .maximum = maximum,
             .storage_cache = .initAligned(
@@ -328,12 +328,6 @@ pub const Store = struct {
                 .fromByteUnits(publication_mod.allocation_alignment),
             ),
         };
-        errdefer self.deinit();
-        try self.entries.ensureTotalCapacity(
-            allocator,
-            @intCast(maximum),
-        );
-        return self;
     }
 
     pub fn deinit(self: *Store) void {
@@ -459,6 +453,11 @@ pub const Store = struct {
         if (self.entries.count() >= self.maximum) {
             return error.ReceiveMaximumExceeded;
         }
+        // Reserve the map commit before taking ownership of any PUBLISH bytes.
+        // Most brokers use only a small fraction of their aggregate bound; a
+        // failed growth therefore leaves no Pending state while avoiding a
+        // maximum-sized table at Broker initialization.
+        try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const pending = try Pending.createWithSourceAndCache(
             self.allocator,
             &self.storage_cache,
@@ -965,6 +964,39 @@ test "QoS 2 store reuses bounded pending storage" {
         @intFromPtr(second.bytes.ptr),
     );
     store.recycle(&second);
+}
+
+test "QoS 2 store reserves its transaction map on first publish" {
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{},
+    );
+    var store = try Store.init(failing.allocator(), 4096);
+    defer store.deinit();
+    try std.testing.expectEqual(@as(usize, 0), store.entries.capacity());
+
+    const publish = mqtt.Publish{
+        .dup = false,
+        .qos = .exactly_once,
+        .retain = false,
+        .topic = "lazy/qos2",
+        .packet_id = 7,
+        .payload = "payload",
+    };
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        store.record(10, publish, .zero),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), store.count());
+    try std.testing.expectEqual(@as(usize, 0), store.entries.capacity());
+
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(try store.record(10, publish, .zero));
+    try std.testing.expect(store.entries.capacity() != 0);
+    var pending = store.take(10, 7).?;
+    store.recycle(&pending);
 }
 
 test "QoS 2 store transfers pending backing into a shared publication" {

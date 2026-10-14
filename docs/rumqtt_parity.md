@@ -4274,6 +4274,29 @@ proxy evidence for the entire suite.
    Throughput medians were identical at 3,056 publishes/s, while p50 and p99
    median ratios were 1.0021x and 0.9979x. This is a fixed broker-state memory
    result, not a general durable QoS 2 throughput claim.
+   The broker-wide inbound QoS 2 transaction map is now demand-driven as well.
+   Initialization no longer reserves all 4,096 entries; a first non-duplicate
+   PUBLISH reserves one map slot before allocating or owning Pending message
+   state, so map OOM leaves no transaction while the later exactly-once commit
+   remains allocation-free. Broker allocator telemetry now emits every exact
+   allocation above 64 KiB. A serial durable QoS 2 capture removed the
+   1,318,944-byte startup block: total requested bytes fell from 1,856,191 to
+   538,047 and peak live bytes from 1,611,966 to 293,822, with every byte freed.
+   The remaining 245,920-byte fixed block belongs to the independent bridge
+   QoS 2 store. Four-sample ABBA `/proc` captures reduced anonymous RSS by 16
+   KiB at one idle connection and 14 KiB at 64 idle connections. An eight-arm
+   CPU-0/1/2 fixed-binary durable 32x32 comparison used the same 256 warmups,
+   3,200 measured publishes, four-message publisher window, 64-byte payloads,
+   102,400 verified deliveries, and 3,600-second Sessions. Baseline
+   `edf1b553ca25b260b90e6c467255178116054c5ad72ec0aab3e8f4f40b9d7811`
+   and candidate
+   `7084703e42f344fb80c61755b28582992de014dc7806632b6a03f32441eaaf08`
+   moved median peak RSS from 7,576 to 6,362 KiB (16.0%); the candidate's
+   6,572-KiB maximum remained below the baseline's 7,552-KiB minimum.
+   Throughput medians were 3,072 and 3,072.5 publishes/s, while p50 and p99
+   median ratios were 1.00005x and 0.9940x. The map therefore grows to the live
+   transaction set without weakening duplicate detection, Receive Maximum, or
+   PUBREL exactly-once routing.
    Delivery policy dispatch keeps the owned global/listener callback tables
    behind borrowed pointers and resolves a destination Session's Client ID only
    when one of those tables actually supplies a delivery callback. Retained
