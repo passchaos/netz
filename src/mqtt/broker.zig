@@ -132,6 +132,32 @@ pub const ChangeAutosaveOptions = struct {
     enabled: bool = true,
 };
 
+/// Owned, fallible preparation for changing the broker-managed snapshot
+/// target without allocating in the reload commit phase.
+pub const PreparedChangeAutosaveTarget = struct {
+    allocator: std.mem.Allocator,
+    options: ?ChangeAutosaveOptions,
+    consumed: bool = false,
+
+    pub fn deinit(self: *PreparedChangeAutosaveTarget) void {
+        if (!self.consumed) {
+            if (self.options) |options| {
+                self.allocator.free(@constCast(options.sub_path));
+            }
+        }
+        self.options = null;
+        self.consumed = true;
+    }
+
+    fn take(self: *PreparedChangeAutosaveTarget) ?ChangeAutosaveOptions {
+        std.debug.assert(!self.consumed);
+        const options = self.options;
+        self.options = null;
+        self.consumed = true;
+        return options;
+    }
+};
+
 pub const RuntimeSchedulingPolicy = deadline_driver_mod.Policy;
 pub const RuntimeDeliveryPolicy = runtime_policy_mod.Delivery;
 
@@ -2727,6 +2753,50 @@ pub const Broker = struct {
             self.autosavePersistentChangesIfNeededLocked();
         } else {
             self.persistent_change_autosave_enabled.store(false, .release);
+        }
+    }
+
+    pub fn preparePersistentChangeAutosaveTarget(
+        self: *Broker,
+        options: ?ChangeAutosaveOptions,
+    ) Error!PreparedChangeAutosaveTarget {
+        if (options) |target| {
+            if (target.sub_path.len == 0 or target.max_changes == 0) {
+                return error.InvalidProperty;
+            }
+        }
+        const owned_options: ?ChangeAutosaveOptions = if (options) |target| .{
+            .dir = target.dir,
+            .sub_path = try self.allocator.dupe(u8, target.sub_path),
+            .max_changes = target.max_changes,
+            .enabled = target.enabled,
+        } else null;
+        return .{
+            .allocator = self.allocator,
+            .options = owned_options,
+        };
+    }
+
+    /// Swap the broker-managed snapshot destination while no autosave writer
+    /// can observe a mixed target/threshold generation.
+    pub fn commitPersistentChangeAutosaveTarget(
+        self: *Broker,
+        prepared: *PreparedChangeAutosaveTarget,
+    ) void {
+        std.debug.assert(prepared.allocator.ptr == self.allocator.ptr);
+        std.debug.assert(prepared.allocator.vtable == self.allocator.vtable);
+        const replacement = prepared.take();
+        self.persistence_mutex.lockUncancelable(self.io);
+        self.persistent_change_autosave_enabled.store(false, .release);
+        const retired = self.options.persistent_change_autosave;
+        self.options.persistent_change_autosave = replacement;
+        self.persistent_change_autosave_enabled.store(
+            if (replacement) |target| target.enabled else false,
+            .release,
+        );
+        self.persistence_mutex.unlock(self.io);
+        if (retired) |target| {
+            self.allocator.free(@constCast(target.sub_path));
         }
     }
 

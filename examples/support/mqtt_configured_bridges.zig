@@ -725,7 +725,7 @@ const Slot = struct {
 pub const PreparedReload = struct {
     allocator: std.mem.Allocator,
     slots: []?*Slot,
-    commit: *std.Io.Event,
+    decision: *ReloadDecision,
     owned: bool = true,
 
     fn init(
@@ -736,9 +736,9 @@ pub const PreparedReload = struct {
         persistence_path: ?[]const u8,
         activate_local_sources: bool,
     ) !PreparedReload {
-        const commit = try allocator.create(std.Io.Event);
-        errdefer allocator.destroy(commit);
-        commit.* = .unset;
+        const decision = try allocator.create(ReloadDecision);
+        errdefer allocator.destroy(decision);
+        decision.* = .{};
         const slots = try allocator.alloc(?*Slot, configured.len);
         @memset(slots, null);
         errdefer allocator.free(slots);
@@ -763,7 +763,7 @@ pub const PreparedReload = struct {
         return .{
             .allocator = allocator,
             .slots = slots,
-            .commit = commit,
+            .decision = decision,
         };
     }
 
@@ -773,7 +773,7 @@ pub const PreparedReload = struct {
             if (maybe_slot) |slot| slot.deinit();
         }
         self.allocator.free(self.slots);
-        self.allocator.destroy(self.commit);
+        self.allocator.destroy(self.decision);
         self.owned = false;
     }
 
@@ -792,14 +792,42 @@ pub const PreparedReload = struct {
     }
 };
 
+const ReloadDecision = struct {
+    event: std.Io.Event = .unset,
+    apply: std.atomic.Value(bool) = .init(false),
+};
+
 pub const ReloadCommit = struct {
     io: std.Io,
-    event: *std.Io.Event,
+    decision: *ReloadDecision,
 
     pub fn commit(self: ReloadCommit) void {
-        self.event.set(self.io);
+        self.decision.apply.store(true, .release);
+        self.decision.event.set(self.io);
+    }
+
+    pub fn abort(self: ReloadCommit) void {
+        self.decision.event.set(self.io);
     }
 };
+
+test "configured bridge reload decision can abort a prepared generation" {
+    var decision = ReloadDecision{};
+    const token = ReloadCommit{
+        .io = std.testing.io,
+        .decision = &decision,
+    };
+    token.abort();
+    try std.testing.expect(!decision.apply.load(.acquire));
+
+    var committed = ReloadDecision{};
+    const committed_token = ReloadCommit{
+        .io = std.testing.io,
+        .decision = &committed,
+    };
+    committed_token.commit();
+    try std.testing.expect(committed.apply.load(.acquire));
+}
 
 pub const Set = struct {
     allocator: std.mem.Allocator,
@@ -963,12 +991,19 @@ pub const Set = struct {
                         else => return err,
                     };
                     defer prepared.deinit();
-                    try prepared.commit.wait(self.io);
-                    self.applyReload(&prepared, &workers);
-                    std.debug.print(
-                        "netz MQTT bridge reload committed\n",
-                        .{},
-                    );
+                    try prepared.decision.event.wait(self.io);
+                    if (prepared.decision.apply.load(.acquire)) {
+                        self.applyReload(&prepared, &workers);
+                        std.debug.print(
+                            "netz MQTT bridge reload committed\n",
+                            .{},
+                        );
+                    } else {
+                        std.debug.print(
+                            "netz MQTT bridge reload aborted\n",
+                            .{},
+                        );
+                    }
                     try select.concurrent(.reload, receiveReload, .{self});
                 },
                 .failback_tick => |result| {
@@ -1043,7 +1078,7 @@ pub const Set = struct {
         self.slots_mutex.unlock(self.io);
         try self.reload_queue.putOne(self.io, prepared.*);
         prepared.owned = false;
-        return .{ .io = self.io, .event = prepared.commit };
+        return .{ .io = self.io, .decision = prepared.decision };
     }
 
     fn applyReload(

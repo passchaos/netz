@@ -187,23 +187,48 @@ const AutosavePolicy = union(enum) {
     }
 };
 
+const PreparedAutosaveReload = struct {
+    allocator: std.mem.Allocator,
+    persistence_path: ?[]u8,
+    broker_target: mqtt.broker.PreparedChangeAutosaveTarget,
+    policy: AutosavePolicy,
+    snapshot_required: bool,
+    staged: bool = false,
+    consumed: bool = false,
+
+    fn deinit(self: *PreparedAutosaveReload) void {
+        if (!self.consumed) {
+            if (self.persistence_path) |path| self.allocator.free(path);
+            self.broker_target.deinit();
+        }
+        self.persistence_path = null;
+        self.consumed = true;
+    }
+};
+
 const AutosaveController = struct {
+    allocator: std.mem.Allocator,
     broker: *mqtt.broker.Broker,
     io: std.Io,
-    persistence_path: ?[]const u8,
+    persistence_path: ?[]u8,
     policy: AutosavePolicy,
     next_periodic_ns: ?i96,
 
     fn init(
+        allocator: std.mem.Allocator,
         broker: *mqtt.broker.Broker,
         io: std.Io,
         persistence_path: ?[]const u8,
         policy: AutosavePolicy,
-    ) AutosaveController {
+    ) std.mem.Allocator.Error!AutosaveController {
         var self = AutosaveController{
+            .allocator = allocator,
             .broker = broker,
             .io = io,
-            .persistence_path = persistence_path,
+            .persistence_path = if (persistence_path) |path|
+                try allocator.dupe(u8, path)
+            else
+                null,
             .policy = policy,
             .next_periodic_ns = null,
         };
@@ -211,12 +236,70 @@ const AutosaveController = struct {
         return self;
     }
 
-    fn apply(self: *AutosaveController, policy: AutosavePolicy) void {
-        self.broker.setPersistentChangeAutosaveThreshold(
-            policy.changeThreshold(),
-        ) catch unreachable;
-        self.policy = policy;
+    fn deinit(self: *AutosaveController) void {
+        if (self.persistence_path) |path| self.allocator.free(path);
+        self.* = undefined;
+    }
+
+    fn prepareReload(
+        self: *AutosaveController,
+        persistence_path: ?[]const u8,
+        policy: AutosavePolicy,
+    ) mqtt.broker.Error!PreparedAutosaveReload {
+        const broker_target = try self.broker
+            .preparePersistentChangeAutosaveTarget(
+            if (persistence_path) |path| .{
+                .dir = std.Io.Dir.cwd(),
+                .sub_path = path,
+                .max_changes = @max(policy.intervalSeconds(), 1),
+                .enabled = policy.changeThreshold() != null,
+            } else null,
+        );
+        errdefer {
+            var target = broker_target;
+            target.deinit();
+        }
+        const owned_path = if (persistence_path) |path|
+            try self.allocator.dupe(u8, path)
+        else
+            null;
+        return .{
+            .allocator = self.allocator,
+            .persistence_path = owned_path,
+            .broker_target = broker_target,
+            .policy = policy,
+            .snapshot_required = !optionalStringEqual(
+                self.persistence_path,
+                persistence_path,
+            ) or (policy.changeThreshold() != null and
+                self.policy.changeThreshold() == null),
+        };
+    }
+
+    fn stageReload(
+        self: *AutosaveController,
+        prepared: *PreparedAutosaveReload,
+    ) mqtt.broker.Error!void {
+        if (prepared.snapshot_required) if (prepared.persistence_path) |path| {
+            try self.broker.saveLiveSnapshot(std.Io.Dir.cwd(), path);
+        };
+        prepared.staged = true;
+    }
+
+    fn commitReload(
+        self: *AutosaveController,
+        prepared: *PreparedAutosaveReload,
+    ) void {
+        std.debug.assert(prepared.staged and !prepared.consumed);
+        self.broker.commitPersistentChangeAutosaveTarget(
+            &prepared.broker_target,
+        );
+        if (self.persistence_path) |path| self.allocator.free(path);
+        self.persistence_path = prepared.persistence_path;
+        prepared.persistence_path = null;
+        self.policy = prepared.policy;
         self.resetPeriodicDeadline();
+        prepared.consumed = true;
     }
 
     fn tick(self: *AutosaveController) !void {
@@ -235,6 +318,11 @@ const AutosaveController = struct {
 
     fn noteCheckpoint(self: *AutosaveController) void {
         self.resetPeriodicDeadline();
+    }
+
+    fn saveFinalSnapshot(self: *AutosaveController) !void {
+        const path = self.persistence_path orelse return;
+        try self.broker.saveSnapshot(std.Io.Dir.cwd(), path);
     }
 
     fn resetPeriodicDeadline(self: *AutosaveController) void {
@@ -665,11 +753,8 @@ pub fn run(
         persistence_path,
     );
     defer bridges.deinit();
-    var checkpoint_signal = if (config.persistence)
-        CheckpointSignal.install()
-    else
-        null;
-    defer if (checkpoint_signal) |*signal| signal.deinit();
+    var checkpoint_signal = CheckpointSignal.install();
+    defer checkpoint_signal.deinit();
     const identity_paths = try identityPathsForConfig(allocator, &config);
     defer allocator.free(identity_paths);
     var identities = try reloadable_identity.Set.init(
@@ -907,12 +992,14 @@ pub fn run(
             .listeners = active_endpoints,
             .shutdown = &shutdown,
         } };
-    var autosave = AutosaveController.init(
+    var autosave = try AutosaveController.init(
+        allocator,
         &broker,
         io,
         persistence_path,
         AutosavePolicy.fromConfig(config),
     );
+    defer autosave.deinit();
     if (config.persistence or reload_signal != null or bridges.len() != 0) {
         try serveWithManagement(
             allocator,
@@ -931,9 +1018,7 @@ pub fn run(
         try serveConfigured(&broker, service);
     }
     bridges.disconnectLocalSources();
-    if (persistence_path) |path| {
-        try broker.saveSnapshot(std.Io.Dir.cwd(), path);
-    }
+    try autosave.saveFinalSnapshot();
 }
 
 fn serveWithManagement(
@@ -990,24 +1075,33 @@ fn serveWithManagement(
             .management_tick => |result| {
                 try result;
                 if (CheckpointSignal.take()) {
-                    broker.saveLiveSnapshot(
-                        std.Io.Dir.cwd(),
-                        autosave.persistence_path orelse unreachable,
-                    ) catch |err| switch (err) {
-                        error.SnapshotBusy => CheckpointSignal.request(),
-                        else => return err,
-                    };
-                    if (!CheckpointSignal.take()) {
-                        autosave.noteCheckpoint();
+                    if (autosave.persistence_path) |path| {
+                        broker.saveLiveSnapshot(
+                            std.Io.Dir.cwd(),
+                            path,
+                        ) catch |err| switch (err) {
+                            error.SnapshotBusy => CheckpointSignal.request(),
+                            else => return err,
+                        };
+                        if (!CheckpointSignal.take()) {
+                            autosave.noteCheckpoint();
+                            std.debug.print(
+                                "netz MQTT persistence checkpoint completed: " ++
+                                    "source=SIGUSR1 server_io=zio-std-io\n",
+                                .{},
+                            );
+                        } else {
+                            // A request delivered during the completed snapshot
+                            // still needs its own subsequent checkpoint.
+                            CheckpointSignal.request();
+                        }
+                    } else {
                         std.debug.print(
-                            "netz MQTT persistence checkpoint completed: " ++
-                                "source=SIGUSR1 server_io=zio-std-io\n",
+                            "netz MQTT persistence checkpoint ignored: " ++
+                                "persistence=disabled source=SIGUSR1 " ++
+                                "server_io=zio-std-io\n",
                             .{},
                         );
-                    } else {
-                        // A request delivered during the completed snapshot
-                        // still needs its own subsequent checkpoint.
-                        CheckpointSignal.request();
                     }
                 }
                 if (ReloadSignal.take()) {
@@ -1042,6 +1136,12 @@ fn serveWithManagement(
                                 "netz MQTT bridge reload staged: " ++
                                     "source=SIGHUP server_io=zio-std-io\n",
                                 .{},
+                            );
+                            std.debug.print(
+                                "netz MQTT persistence target reload " ++
+                                    "completed: enabled={} source=SIGHUP " ++
+                                    "server_io=zio-std-io\n",
+                                .{success.persistence_enabled},
                             );
                             if (autosave.persistence_path != null) {
                                 std.debug.print(
@@ -1133,6 +1233,7 @@ const ReloadOutcome = union(enum) {
     success: struct {
         security_reloaded: bool,
         autosave_policy: AutosavePolicy,
+        persistence_enabled: bool,
         scheduling_policy: mqtt.broker.RuntimeSchedulingPolicy,
         delivery_policy: mqtt.broker.RuntimeDeliveryPolicy,
         required_client_id_prefix_length: usize,
@@ -1246,14 +1347,37 @@ fn reloadConfiguredState(
         } };
         admission.retain_available = reloaded_config.retain_available;
     }
-    const reloaded_autosave = autosavePolicyForReload(
-        allocator,
-        reloaded_config,
+    const reloaded_persistence_path = if (reloaded_config.persistence)
+        reloaded_config.persistencePath(allocator) catch |err|
+            return .{ .failure = .{
+                .component = .persistence,
+                .err = err,
+            } }
+    else
+        null;
+    defer if (reloaded_persistence_path) |path| allocator.free(path);
+    const persistence_target_changed = !optionalStringEqual(
         autosave.persistence_path,
+        reloaded_persistence_path,
+    );
+    const commit_log_enabled = broker.commitLogEnabled();
+    reload_compatibility.validatePersistenceTargetReload(
+        persistence_target_changed,
+        commit_log_enabled,
+        bridgesUseQoS2(reloaded_config.bridges),
     ) catch |err| return .{ .failure = .{
         .component = .persistence,
         .err = err,
     } };
+    const reloaded_autosave = AutosavePolicy.fromConfig(reloaded_config);
+    var prepared_autosave = autosave.prepareReload(
+        reloaded_persistence_path,
+        reloaded_autosave,
+    ) catch |err| return .{ .failure = .{
+        .component = .persistence,
+        .err = err,
+    } };
+    defer prepared_autosave.deinit();
     const reloaded_scheduling_policy = runtimeSchedulingPolicyFromConfig(
         &reloaded_config,
     );
@@ -1302,6 +1426,13 @@ fn reloadConfiguredState(
         .component = .bridge,
         .err = err,
     } };
+    autosave.stageReload(&prepared_autosave) catch |err| {
+        bridge_commit.abort();
+        return .{ .failure = .{
+            .component = .persistence,
+            .err = err,
+        } };
+    };
 
     policy.lock.lockUncancelable(policy.io);
     var retired_security = policy.swapPreparedReload(&prepared_security);
@@ -1322,7 +1453,7 @@ fn reloadConfiguredState(
     broker.setRuntimeDeliveryPolicy(
         reloaded_delivery_policy,
     ) catch unreachable;
-    autosave.apply(reloaded_autosave);
+    autosave.commitReload(&prepared_autosave);
     bridge_commit.commit();
     _ = broker.disconnectUnauthorizedConnections(.{
         .context = &retired_security,
@@ -1334,6 +1465,7 @@ fn reloadConfiguredState(
     return .{ .success = .{
         .security_reloaded = true,
         .autosave_policy = reloaded_autosave,
+        .persistence_enabled = reloaded_persistence_path != null,
         .scheduling_policy = reloaded_scheduling_policy,
         .delivery_policy = reloaded_delivery_policy,
         .required_client_id_prefix_length = required_client_id_prefix_length,
@@ -1372,22 +1504,10 @@ fn intervalSeconds(interval: ?std.Io.Duration) u64 {
     return @intCast(@divExact(value.nanoseconds, std.time.ns_per_s));
 }
 
-fn autosavePolicyForReload(
-    allocator: std.mem.Allocator,
-    config: mqtt.broker_config.Config,
-    persistence_path: ?[]const u8,
-) !AutosavePolicy {
-    if (config.persistence != (persistence_path != null)) {
-        return error.PersistenceConfigurationRequiresRestart;
-    }
-    if (persistence_path) |expected| {
-        const actual = try config.persistencePath(allocator);
-        defer allocator.free(actual);
-        if (!std.mem.eql(u8, actual, expected)) {
-            return error.PersistenceConfigurationRequiresRestart;
-        }
-    }
-    return AutosavePolicy.fromConfig(config);
+fn optionalStringEqual(a: ?[]const u8, b: ?[]const u8) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return std.mem.eql(u8, left, right);
 }
 
 fn validateReloadableListenerTopology(

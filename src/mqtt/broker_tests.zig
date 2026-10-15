@@ -1959,6 +1959,52 @@ test "broker runtime delivery policy commits atomically" {
     try std.testing.expectEqualDeep(updated, broker.runtimeDeliveryPolicy());
 }
 
+test "broker persistent autosave target prepares and commits ownership" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var broker = try Broker.init(allocator, io, .{});
+    defer broker.deinit();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.preparePersistentChangeAutosaveTarget(.{
+            .dir = tmp.dir,
+            .sub_path = "",
+            .max_changes = 1,
+        }),
+    );
+
+    var enabled = try broker.preparePersistentChangeAutosaveTarget(.{
+        .dir = tmp.dir,
+        .sub_path = "dynamic.db",
+        .max_changes = 2,
+        .enabled = true,
+    });
+    defer enabled.deinit();
+    broker.commitPersistentChangeAutosaveTarget(&enabled);
+    try std.testing.expectEqual(
+        @as(?usize, 2),
+        broker.persistentChangeAutosaveThreshold(),
+    );
+    try std.testing.expectEqualStrings(
+        "dynamic.db",
+        broker.options.persistent_change_autosave.?.sub_path,
+    );
+
+    var disabled = try broker.preparePersistentChangeAutosaveTarget(null);
+    defer disabled.deinit();
+    broker.commitPersistentChangeAutosaveTarget(&disabled);
+    try std.testing.expectEqual(
+        @as(?usize, null),
+        broker.persistentChangeAutosaveThreshold(),
+    );
+    try std.testing.expect(broker.options.persistent_change_autosave == null);
+}
+
 test "broker required Client ID prefix prepares and commits ownership" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

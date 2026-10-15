@@ -105,6 +105,18 @@ pub fn validateRestartRequiredGlobals(
     }
 }
 
+pub fn validatePersistenceTargetReload(
+    target_changed: bool,
+    commit_log_enabled: bool,
+    candidate_uses_qos2_bridge: bool,
+) error{PersistenceWithQoS2BridgeRequiresRestart}!void {
+    if ((target_changed and commit_log_enabled) or
+        (candidate_uses_qos2_bridge and !commit_log_enabled))
+    {
+        return error.PersistenceWithQoS2BridgeRequiresRestart;
+    }
+}
+
 fn fieldEqual(comptime T: type, initial: T, candidate: T) bool {
     return switch (@typeInfo(T)) {
         .pointer => |pointer| if (pointer.size == .slice and
@@ -169,6 +181,19 @@ test "runtime-owned MQTT globals remain reload-compatible" {
     candidate.client_id_prefixes = @constCast("dynamic-");
 
     try validateRestartRequiredGlobals(&initial, &candidate);
+}
+
+test "persistence target reload preserves QoS 2 bridge journals" {
+    try validatePersistenceTargetReload(true, false, false);
+    try validatePersistenceTargetReload(false, true, true);
+    try std.testing.expectError(
+        error.PersistenceWithQoS2BridgeRequiresRestart,
+        validatePersistenceTargetReload(true, true, true),
+    );
+    try std.testing.expectError(
+        error.PersistenceWithQoS2BridgeRequiresRestart,
+        validatePersistenceTargetReload(false, false, true),
+    );
 }
 
 fn expectRestart(initial: Config, candidate: Config) !void {

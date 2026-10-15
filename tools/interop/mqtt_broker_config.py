@@ -3822,7 +3822,7 @@ def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
 def run_autosave_reload_case(broker: Path, directory: Path) -> None:
     port = free_port()
     snapshot = directory / "autosave-reload.db"
-    rejected_snapshot = directory / "autosave-reload-rejected.db"
+    switched_snapshot = directory / "autosave-reload-switched.db"
     config = directory / "autosave-reload.conf"
     retained_topic = "persistence/autosave-reload/disabled"
     retained_payload = b"reload-debt"
@@ -3832,14 +3832,20 @@ def run_autosave_reload_case(broker: Path, directory: Path) -> None:
         on_changes: bool,
         persistence_file: str = snapshot.name,
         max_connections: int = 4,
+        persistence_enabled: bool = True,
+        persistence_location: Path = directory,
     ) -> None:
         config.write_text(
-            "persistence true\n"
-            f"persistence_location {directory}\n"
-            f"persistence_file {persistence_file}\n"
-            f"autosave_interval {interval}\n"
-            f"autosave_on_changes {str(on_changes).lower()}\n"
-            f"listener {port} 127.0.0.1\n"
+            (
+                "persistence true\n"
+                f"persistence_location {persistence_location}\n"
+                f"persistence_file {persistence_file}\n"
+                f"autosave_interval {interval}\n"
+                f"autosave_on_changes {str(on_changes).lower()}\n"
+                if persistence_enabled
+                else "persistence false\n"
+            )
+            + f"listener {port} 127.0.0.1\n"
             "allow_anonymous true\n"
             f"max_connections {max_connections}\n"
         )
@@ -3924,26 +3930,60 @@ def run_autosave_reload_case(broker: Path, directory: Path) -> None:
         publish_retained(publisher, retained_topic, retained_payload)
         expect_no_snapshot(snapshot, "reloaded disabled policy")
 
-        write_config(1, True, rejected_snapshot.name)
+        write_config(0, False, switched_snapshot.name)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
-            "persistence reload failed: "
-            "error=PersistenceConfigurationRequiresRestart",
-            "non-reloadable persistence target",
+            "persistence target reload completed: enabled=true",
+            "persistence target switch",
         )
-        expect_no_snapshot(snapshot, "failed reload rollback")
-        if rejected_snapshot.exists():
-            raise AssertionError("failed reload wrote the rejected target")
+        wait_snapshot(switched_snapshot, "switched persistence target")
+        missing_directory = directory / "missing-persistence-directory"
+        write_config(
+            0,
+            False,
+            "rejected.db",
+            persistence_location=missing_directory,
+        )
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence reload failed: error=FileNotFound",
+            "failed persistence target switch",
+        )
+        switched_snapshot.unlink()
+        os.kill(process.pid, signal.SIGUSR1)
+        wait_process_line(
+            process,
+            "persistence checkpoint completed: source=SIGUSR1",
+            "switched target checkpoint",
+        )
+        wait_snapshot(switched_snapshot, "switched SIGUSR1 target")
+        expect_no_snapshot(snapshot, "retired persistence target")
+
+        write_config(0, False, persistence_enabled=False)
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "persistence target reload completed: enabled=false",
+            "disabled persistence target",
+        )
+        switched_snapshot.unlink()
+        publish_retained(
+            publisher,
+            "persistence/autosave-reload/disabled-target",
+            b"disabled-target",
+        )
+        expect_no_snapshot(switched_snapshot, "disabled persistence target")
 
         write_config(1, True)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
-            "persistence autosave reload completed: mode=changes interval=1",
-            "restored change-count policy",
+            "persistence target reload completed: enabled=true",
+            "re-enabled persistence target",
         )
-        wait_snapshot(snapshot, "change debt after policy restore")
+        wait_snapshot(snapshot, "re-enabled target snapshot")
         mqtt_ping(publisher)
     finally:
         publisher.close()
@@ -6303,8 +6343,9 @@ def main() -> None:
         "plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/"
         "Keep-Alive/Topic-Alias admission SIGHUP "
         "reload with topology rollback, "
-        "dynamic time/change/disabled autosave SIGHUP reload with fixed-target "
-        "rollback, disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "
+        "dynamic persistence target enable/disable/path and time/change/disabled "
+        "autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint "
+        "routing, QoS2 journal guard, and snapshot restore "
         + RUNTIME
     )
 
