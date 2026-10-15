@@ -5123,6 +5123,54 @@ measure the public comb/add/double and inversion paths alongside X25519 rather
 than further tuning handshake allocation or key-schedule sites already down
 near 1--2%.
 
+Published Vail `040193a` then moves the public prepared verifier's complete
+Montgomery-Jacobian doubling and mixed-add formulas onto the matching ARM64
+`s2n-bignum` schedules from the same pinned upstream revision. The mixed-add
+wrapper preserves identity inputs and distinguishes its exceptional equal-point
+identity result from the correct inverse-point identity before dispatching to
+the dedicated doubling kernel. ReleaseFast/ReleaseSafe focused tests cover
+identity, equal, inverse, and 64 deterministic double-scalar comparisons against
+Zig std; Debug/ReleaseSmall retain the portable formulas. The complete Debug
+and ReleaseFast Vail suites and the x86_64 Linux ReleaseFast compile gate pass.
+
+Eight CPU-0 fixed-binary prepared-verifier pairs used published field-only
+baseline SHA-256
+`9530cf582fdf8884709a0addb6451bd0db88116faee4d6d2d8ade25c0e348b07`
+and point-kernel candidate
+`259cccb3e8e5f9986b6caccadc7e284eaa04654bdcc338942d2ccd56cba2cb94`.
+Every pair favored the candidate: the midpoint median fell from 29,531 to
+17,808.5 ns/verify (39.70%), with a 0.603439 median paired ratio. Preparation,
+which remains outside the online timer and reusable by the caller, fell from
+728,880.5 to 675,097 ns (7.38%, 8/8 wins). The candidate is 63.75% below the
+same-host 49,135 ns AWS-LC parsed-verifier reference, or about 2.76x its
+throughput. Replacing repeatedly inlined formulas also reduced the prepared
+benchmark's GNU `size` text total from 645,864 to 554,200 bytes (-91,664).
+
+The corresponding same-certificate fixed-Quinn-server client comparison used
+netz baseline SHA-256
+`0e4a9fcb160ccf0c8500a63652381458b95eed7f5350a09b847a611b3fb7fb94`
+and candidate
+`e555bd546538f2c5fca8e09d764b6f306cf6c6c42004327da67df97e32d74986`.
+Across eight mirrored 100-connection pairs, client instructions fell in every
+pair with a 0.899752 median paired ratio (10.02%). Complete P50 won six pairs
+with a 0.917684 ratio (8.23%), while timed sums won only five pairs despite a
+0.896965 median ratio. Host-load excursions reached both sides of the matrix,
+so only the instruction reduction is treated as causal and the complete timing
+as bounded support. All arms verified 110 connections including warmup, exact
+echo checksum 5,995, certificate validation, and peer close. The candidate also
+passed the complete four-role Quinn smoke. Its GNU `size` text total fell from
+3,778,711 to 3,652,163 bytes (-126,548), rather than paying a whole-binary code
+size increase for the dedicated schedules.
+
+A zero-loss 1,000-connection candidate profile recorded 296 samples and a
+407.051 us P50; its 3.101 ms P99 remains load-sensitive. The former 14.72%
+`doubleScalarMulComb` hotspot is gone. The new ordering is the X25519 variable
+and fixed loops at 18.67%/3.68%, the complete P-256 prepared-verifier body at
+8.76%, ARM64 P-256 mixed-add at 4.08%, and point doubling at 0.42%. The next
+crypto pass should therefore re-audit public scalar inversion and the residual
+prepared-verifier body, but X25519 and non-crypto handshake work now outrank
+P-256 doubling; further point-kernel work needs a newly isolated hotspot.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
