@@ -2367,9 +2367,12 @@ cost and tail scheduling.
    Its `--connection-counts=1,4,16,64 --server-topology=shared` companion runs
    both sender roles at each size and reports aggregate retention without
    assuming linear throughput on two fixed CPUs. A three-sample 1-MiB-per-
-   connection run retained 66.2%/89.0% of one-connection aggregate throughput
+   connection run retained 82.0%/87.0% of one-connection aggregate throughput
    at 64 client/server-sender connections while verifying exact 64-MiB delivery
-   and all 64 completions in every arm.
+   and all 64 completions in every arm. Its periodic exact payload verifier no
+   longer makes scalar generation/verification the top benchmark hotspot;
+   fixed-binary 64-connection medians improved 32.7%/12.1% without changing
+   application bytes, checksum, FIN, or completion exchange.
    Complete-connection userspace UDP counters and the new loopback packet
    captures expose materially different wire shapes. Equalize GRO, ACK/pacing,
    packetization, and application stream

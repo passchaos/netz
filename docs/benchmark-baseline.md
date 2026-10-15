@@ -3784,19 +3784,43 @@ work-normalized elapsed ratio, and per-connection throughput relative to the
 first count. It deliberately does not call linear aggregate throughput an
 ideal on a fixed two-CPU layout.
 
-A CPU-10/11 three-sample shared-server run used 1, 4, 16, and 64 connections,
-one 1-MiB stream per connection, one server UDP socket, receive batch 32, and
-ACK-every 4 with a 25-ms maximum delay. All 24 arms passed certificate, FIN,
-byte, checksum, socket/datagram/event-counter, and DONE/DONE_ACK validation.
-At 64 connections each direction transferred exactly 67,108,864 bytes with
-checksum 8,556,380,160. Client-sender median aggregate throughput was
-159.702, 163.320, 142.315, and 105.753 MiB/s, retaining 1.000x, 1.023x,
-0.891x, and 0.662x of the one-connection result. Server-sender medians were
-147.155, 143.308, 139.297, and 130.898 MiB/s, retaining 1.000x, 0.974x,
-0.947x, and 0.890x. The matrix closes the missing shared-socket
+A final CPU-10/11 three-sample shared-server run used 1, 4, 16, and 64
+connections, one 1-MiB stream per connection, one server UDP socket, receive
+batch 32, and ACK-every 4 with a 25-ms maximum delay. All 24 arms passed
+certificate, FIN, byte, checksum, socket/datagram/event-counter, and
+DONE/DONE_ACK validation. At 64 connections each direction transferred exactly
+67,108,864 bytes with checksum 8,556,380,160. Client-sender median aggregate
+throughput was 172.367, 180.558, 161.761, and 141.339 MiB/s, retaining 1.000x,
+1.048x, 0.938x, and 0.820x of the one-connection result. Server-sender medians
+were 167.458, 158.532, 154.646, and 145.678 MiB/s, retaining 1.000x, 0.947x,
+0.923x, and 0.870x. The matrix closes the missing shared-socket
 connection-count evidence through 64 concurrent connections; it remains a
 same-application-shape two-process result rather than an equal-wire or
 multi-core scaling claim.
+
+Those final results use an exact periodic payload verifier rather than charging
+the transport for scalar benchmark bookkeeping. The affine payload repeats
+every 256 bytes; a compile-time table supplies exact block comparison, sender
+fill, and checksum prefix sums. Tests compare its output against bytewise
+generation at cycle edges, arbitrary offsets and all configured stream/round
+biases, verify a 1-MiB payload in Debug/ReleaseFast, and flip an interior byte
+to prove corruption still fails. An initial exponential fill exposed Zig
+0.16's range-narrowing of `@min(len, 256)` to `u9`; explicit `usize` progress
+and read-only 256-byte copies replaced it before the candidate benchmark.
+
+Ten CPU-10/11 fixed-binary, order-alternated 64 x 1-MiB pairs compared baseline
+`ead8e956819208cb7eaa8069b9199e775fa010fa1771ff60fbe97bdb76cc2bed`
+with candidate
+`0e4ed798c8896590d664bcdbbd4dccb4a4d52f87d99ff6ea5614d0bb973e19d9`.
+Client-sender throughput rose from a 107.810 to 142.045 MiB/s median (1.327x,
+10/10 wins); server-sender rose from 133.941 to 149.130 MiB/s (1.121x, 10/10).
+One-GiB server profiles removed the former 19.80% scalar `verifyPayload`
+hotspot to 0.70% and removed the former 17.60% `PayloadSet.init` hotspot.
+Approximate upload/server-sender cycle event counts fell from 8,357,470,339 to
+7,026,378,417 (-15.93%) and 11,453,765,401 to 9,527,935,031 (-16.82%). The
+application bytes, wire protocol, checksum and completion contract are
+unchanged; this is a benchmark-fidelity improvement that exposes the actual
+crypto, clock, recovery and routing costs more clearly.
 
 The same runner can launch a selected netz endpoint under `perf record` with
 `--profile-role=client|server --profile-dir=PATH`; filenames include topology,

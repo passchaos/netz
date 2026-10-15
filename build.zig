@@ -856,6 +856,13 @@ pub fn build(b: *std.Build) void {
     const run_quic_persistent_bench_tests = b.addRunArtifact(
         quic_persistent_bench_tests,
     );
+    const quic_persistent_bench_test_step = b.step(
+        "test-quic-persistent-bench",
+        "Test persistent QUIC benchmark payload and config helpers",
+    );
+    quic_persistent_bench_test_step.dependOn(
+        &run_quic_persistent_bench_tests.step,
+    );
     const quic_datagram_bench_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(

@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const benchmark_payload = @import("quic_benchmark_payload.zig");
 
 pub const alpn = "netz-raw-stream-bench";
 pub const mtu: usize = 1280;
@@ -229,29 +230,9 @@ pub fn decodePrelude(bytes: *const [prelude_len]u8, round: u32, streams: u16) !u
     return index;
 }
 
-pub fn payloadByte(round: u32, stream_index: usize, offset: usize) u8 {
-    return @truncate(offset *% 131 +% stream_index *% 17 +% @as(usize, round) *% 29);
-}
-
-pub fn fillPayload(payload: []u8, round: u32, stream_index: usize) u64 {
-    var checksum: u64 = 0;
-    for (payload, 0..) |*byte, offset| {
-        byte.* = payloadByte(round, stream_index, offset);
-        checksum +%= byte.*;
-    }
-    return checksum;
-}
-
-pub fn verifyPayload(bytes: []const u8, round: u32, stream_index: usize, offset: usize) !u64 {
-    var checksum: u64 = 0;
-    for (bytes, 0..) |byte, index| {
-        if (byte != payloadByte(round, stream_index, offset + index)) {
-            return error.InvalidBenchmarkPayload;
-        }
-        checksum +%= byte;
-    }
-    return checksum;
-}
+pub const payloadByte = benchmark_payload.byte;
+pub const fillPayload = benchmark_payload.fill;
+pub const verifyPayload = benchmark_payload.verify;
 
 pub fn nowNs(io: std.Io) u64 {
     const value = std.Io.Clock.awake.now(io).nanoseconds;

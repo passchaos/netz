@@ -1907,6 +1907,7 @@ zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle
 zig build bench-quic-handshake-stream -Doptimize=ReleaseFast -- --mode=lifecycle-churn --iterations=4096 --streams=16 --reorder-every=5
 zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --warmup=2 --iterations=5 --bytes-per-stream=4194304 --chunk-bytes=16384 --stream-window=1048576
 zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --netz-only --streams=1 --warmup=0 --iterations=1 --bytes-per-stream=262144
+zig build test-quic-persistent-bench -Doptimize=ReleaseFast
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --mode=both --samples=5 --connections=4 --warmup=200 --iterations=5000 --payload-bytes=1024 --bytes-per-stream=1048576
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=3 --connections=4 --streams=1 --bytes-per-stream=1048576 --server-topology=independent
 # Strict shared-socket scaling matrix: each connection count runs both sender
@@ -2173,6 +2174,12 @@ sender/count/run writes a uniquely named `perf.data` file while preserving the
 same strict result verification. Aggregate checksum verification uses the exact
 256-byte period of its affine payload generator, so multi-GiB gates remain
 constant-time instead of replaying every logical byte in Python.
+The Zig sender/receiver verifier uses the same compile-time period table for
+exact block comparison, periodic fill, and checksum prefix sums. It still
+rejects any corrupted byte, while keeping application verification from
+dominating the timed QUIC path; `test-quic-persistent-bench` locks cycle edges,
+arbitrary offsets, wrap boundaries, 1-MiB payloads, and corruption detection in
+Debug and ReleaseFast.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request
