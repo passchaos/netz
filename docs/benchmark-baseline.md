@@ -4948,6 +4948,39 @@ and 4.9% even though Quinn's controls were slower in both candidate blocks.
 This is bounded supporting evidence for the tested workload, not a universal
 cross-stack latency claim.
 
+The next handshake pass removed a value-movement artifact rather than changing
+cryptography or the timed boundary. `EstablishedConnection` is 9,328 bytes on
+this 64-bit build, of which the embedded one-RTT `Connection` is 9,016 bytes.
+The client and server previously constructed that value, performed their
+coalesced 1-RTT and accepted/rejected 0-RTT transitions, and returned it again.
+Those transitions now share the typed
+`src/quic/handshake/established_promotion.zig` ownership boundary and execute
+before the first return. ReleaseFast disassembly of fixed binary
+`b13d01c01518c277395b38ebbed3d8addd4d667faa2a8b8455352529dd8281da`
+versus candidate
+`9055a6b20d5aec722ef4935b94d0c8233c6a82c3221214e6ce73847de2373648`
+removed all three explicit 9,328-byte `memcpy` calls from both
+`connectAttempt` and `acceptInternal`. Their fixed stack reservations fell
+82,288 to 63,824 bytes and 94,512 to 75,984 bytes respectively (excluding the
+unchanged prologue and server scalable-vector slot), while benchmark ELF
+`.text` fell 3,776,943 to 3,774,239 bytes.
+
+Debug and ReleaseFast focused library gates cover ordinary authenticated
+handshakes, preconfigured state, coalesced packets, and the complete accepted,
+rejected, retransmitted, socket-rejected, Retry, Version Negotiation, and replay
+0-RTT matrix. The strict four-role Quinn smoke verified the expected checksums
+and median UDP packet/byte shapes. Eight same-certificate fixed-Quinn-server
+short blocks used old/new/new/old/new/old/old/new order on CPU 0/1, with ten
+warmups and 100 measured connections. The candidate won all four adjacent
+mirrored P50 pairs
+by 22.4%, 16.4%, 5.9%, and 3.6%; aggregate client instructions had a 112.183M
+baseline versus 112.044M candidate midpoint median (0.12% lower, three of four
+paired wins). Longer blocks and earlier cross-process blocks moved with host
+frequency/load, including one same-certificate long run in the opposite
+direction. The retained causal claim is therefore the eliminated copies,
+smaller stack/code, and modest instruction reduction; the full-handshake P50
+movement remains supporting rather than universal evidence.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256

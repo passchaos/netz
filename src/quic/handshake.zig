@@ -6,6 +6,7 @@ const retry = @import("handshake/retry.zig");
 const transport_limits = @import("handshake/transport_limits.zig");
 const datagram_reader = @import("handshake/datagram_reader.zig");
 const handshake_transcript = @import("handshake/transcript.zig");
+const established_promotion = @import("handshake/established_promotion.zig");
 const fixed_bit = @import("one_rtt/fixed_bit.zig");
 
 const net = std.Io.net;
@@ -616,6 +617,7 @@ pub fn establishPreconfigured(
         options.exporter_master_secret,
         options.peer_certificates,
         null,
+        .none,
     );
 }
 
@@ -2229,7 +2231,7 @@ fn connectAttempt(
             application.server_application_traffic_secret.bytes(),
         );
     }
-    var established = try establishedConnection(
+    return establishedConnection(
         endpoint,
         options.version,
         server_initial.from,
@@ -2259,38 +2261,26 @@ fn connectAttempt(
         ),
         if (peer_certificate) |certificate| certificate.entries else &.{},
         reader,
+        .{ .client = .{
+            .coalesced_one_rtt = if (server_handshake.coalesced_one_rtt) |bytes|
+                .{
+                    .from = server_handshake.from,
+                    .bytes = bytes,
+                    .ecn = server_handshake.coalesced_one_rtt_ecn,
+                }
+            else
+                null,
+            .sent_early_data = if (options.early_data) |early_data|
+                .{
+                    .protected_packet_count = protected_early_data_packet_count,
+                    .sent_packet_numbers = sent_early_data_packet_numbers[0..sent_early_data_packet_count],
+                    .sent_datagram_size = sent_early_data_packet_len,
+                    .frames = early_data.frames,
+                }
+            else
+                null,
+        } },
     );
-    errdefer established.deinit();
-    if (server_handshake.coalesced_one_rtt) |one_rtt| {
-        try established.connection.preloadReceivedDatagram(
-            server_handshake.from,
-            one_rtt,
-            server_handshake.coalesced_one_rtt_ecn,
-        );
-    }
-    if (options.early_data) |early_data| {
-        if (early_data_status == .accepted and
-            sent_early_data_packet_count != 0)
-        {
-            try established.connection.importSentEarlyDataPacketNumbers(
-                0,
-                protected_early_data_packet_count,
-                sent_early_data_packet_numbers[0..sent_early_data_packet_count],
-                sent_early_data_packet_len,
-                early_data.frames,
-            );
-        } else if (protected_early_data_packet_count != 0) {
-            try established.connection.discardSentEarlyDataCopies(
-                0,
-                protected_early_data_packet_count,
-            );
-        }
-        established.early_data_protected_packet_count =
-            protected_early_data_packet_count;
-        established.early_data_sent_packet_count =
-            sent_early_data_packet_count;
-    }
-    return established;
 }
 
 pub fn accept(endpoint: *quic.runtime.Endpoint, options: ServerOptions) Error!EstablishedConnection {
@@ -3174,7 +3164,7 @@ fn acceptInternal(
             application.server_application_traffic_secret.bytes(),
         );
     }
-    var established = try establishedConnection(
+    return establishedConnection(
         endpoint,
         options.version,
         client_initial.from,
@@ -3204,22 +3194,24 @@ fn acceptInternal(
         ),
         if (peer_certificate) |certificate| certificate.entries else &.{},
         &reader,
+        .{ .server = .{
+            .coalesced_one_rtt = if (client_handshake.coalesced_one_rtt) |bytes|
+                .{
+                    .from = client_handshake.from,
+                    .bytes = bytes,
+                    .ecn = client_handshake.coalesced_one_rtt_ecn,
+                }
+            else
+                null,
+            .received_early_data = if (pending_early_data) |*early_data|
+                .{
+                    .packet_number = early_data.packet.packet_number,
+                    .frames = early_data.frames,
+                }
+            else
+                null,
+        } },
     );
-    errdefer established.deinit();
-    if (client_handshake.coalesced_one_rtt) |bytes| {
-        try established.connection.preloadReceivedDatagram(
-            client_handshake.from,
-            bytes,
-            client_handshake.coalesced_one_rtt_ecn,
-        );
-    }
-    if (pending_early_data) |*early_data| {
-        try established.connection.applyEarlyDataFrames(
-            early_data.packet.packet_number,
-            early_data.frames,
-        );
-    }
-    return established;
 }
 
 fn containsHandshakePacket(datagram: []const u8) bool {
@@ -4570,6 +4562,7 @@ fn establishedConnection(
     exporter_master_secret: ?quic.tls.secret.Secret,
     peer_certificates: []const []const u8,
     handshake_reader: ?*datagram_reader.Reader,
+    post_init: established_promotion.PostInit,
 ) Error!EstablishedConnection {
     var owned_receive_packet = if (handshake_reader) |reader|
         reader.takeStorage()
@@ -4614,6 +4607,12 @@ fn establishedConnection(
             try connection.registerLocalPreferredAddress(preferred);
         }
     }
+    const promotion = try established_promotion.apply(
+        &connection,
+        local_endpoint,
+        early_data_status,
+        post_init,
+    );
     return .{
         .connection = connection,
         .local_connection_id = local_owned,
@@ -4623,6 +4622,8 @@ fn establishedConnection(
         .retry_processed = retry_processed,
         .resumed = resumed,
         .early_data_status = early_data_status,
+        .early_data_protected_packet_count = promotion.protected_packet_count,
+        .early_data_sent_packet_count = promotion.sent_packet_count,
         .resumption_master_secret = resumption_master_secret,
         .exporter_master_secret = exporter_master_secret,
         .peer_certificate_chain = peer_certificate_chain,

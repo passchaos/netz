@@ -2233,7 +2233,19 @@ client handshake another 14.3%, with every candidate arm faster and 4,096
 deterministic public-key differential cases. Two mirrored fixed-Quinn-server
 blocks improved netz-client P50 by 0.4% and 4.9% despite slower Quinn controls;
 this remains bounded workload evidence. Packet/key-schedule work and tail
-scheduling are now the next handshake targets.
+scheduling remained the next handshake targets. The following Netz pass moved
+coalesced 1-RTT preload and accepted/rejected 0-RTT import into one typed
+client/server promotion boundary before the first established return.
+ReleaseFast disassembly removed three explicit 9,328-byte copies from each of
+`connectAttempt` and `acceptInternal`, reduced their fixed stack reservations
+by 18,464 and 18,528 bytes, and reduced the benchmark ELF `.text` by 2,704
+bytes. Focused Debug/ReleaseFast lifecycle gates and the strict four-role Quinn
+smoke pass. Short same-certificate fixed-binary blocks gave four of four P50
+wins and a 0.12% aggregate instruction reduction, but longer blocks moved with
+host load in both directions; copy, stack, code-size, and instruction evidence
+is causal, while complete-handshake latency remains a bounded observation.
+The remaining handshake targets are packet/key-schedule work and tail
+scheduling outside these removed returns.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
