@@ -179,6 +179,10 @@ MOSQUITTO_SOURCE_SHA256 = {
         "871e0a39d1d270e30eb0c762ff0613d04e31a54d44882474bc7b7c37db19a587",
     "broker/12-prop-maximum-packet-size-publish-qos2.py":
         "5eadd09d3415f0150df793b96d4201995452defa263a5c662a133f2e0a8d0787",
+    "broker/15-persist-client-msg-in-v3-1-1.py":
+        "87221b66d976bb842569f258ecb7d50e5edc3eab7eeb448b9eec3d4296df03a5",
+    "broker/15-persist-client-msg-in-v5-0.py":
+        "54c3878816bfa0b5a8e25138c72ed2a95384052db640bd5226f4f8a1f9e1617b",
     "broker/15-persist-client-msg-out-v5-0.py":
         "2612901cb197a0c602ae6dc34b46d80a742f6b35cdc3757a81ddf10d77093b97",
     "broker/15-persist-client-expired-session.py":

@@ -21,6 +21,7 @@ from mqtt_vectors import (
     disconnect_forms,
     maximum_topic_hierarchy,
     pattern_matching,
+    persistent_incoming_qos2,
     persistent_subscriptions,
     qos0_live_queue_scope,
     qos2_receive_maximum,
@@ -37,6 +38,7 @@ SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
     + disconnect_forms.SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
+    + persistent_incoming_qos2.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
     + qos0_live_queue_scope.SCENARIO_COUNT
     + qos2_receive_maximum.SCENARIO_COUNT
@@ -6372,6 +6374,10 @@ def main() -> None:
     persistent_subscriptions.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         connect_client, expected_connack, expect_packet,
+    )
+    persistent_incoming_qos2.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
     )
     subscription_flip_flop.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
