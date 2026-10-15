@@ -1946,6 +1946,7 @@ pub const SystemMetric = enum {
 
 pub const ListenerAdmissionSnapshot = struct {
     allow_zero_length_client_id: bool,
+    retain_available: bool = true,
     maximum_qos: ?mqtt.QoS = null,
     maximum_keep_alive_seconds: ?u16 = null,
     topic_alias_maximum: u16 = 16,
@@ -2297,6 +2298,7 @@ pub const Broker = struct {
             .max_payload_size = options.limits.max_payload_size,
             .queue_qos0_messages = options.queue_qos0_messages,
             .upgrade_outgoing_qos = options.upgrade_outgoing_qos,
+            .check_retain_source = options.check_retain_source,
             .persistent_session_expiry_seconds = options.persistent_session_expiry_seconds,
         };
         try initial_delivery_policy.validate();
@@ -2565,6 +2567,7 @@ pub const Broker = struct {
         self.options.limits.max_payload_size = policy.max_payload_size;
         self.options.queue_qos0_messages = policy.queue_qos0_messages;
         self.options.upgrade_outgoing_qos = policy.upgrade_outgoing_qos;
+        self.options.check_retain_source = policy.check_retain_source;
         self.options.persistent_session_expiry_seconds =
             policy.persistent_session_expiry_seconds;
         self.runtime_delivery_snapshot.store(policy);
@@ -4541,6 +4544,17 @@ pub const Broker = struct {
                 &pending_owned,
             );
             return null;
+        }
+        if (pending.connect.connect.will) |will| {
+            if (will.retain and !accept_options.retain_available) {
+                try self.refuseResolvedConnect(pending, .{
+                    .reason_code = switch (pending.connect.connect.protocol) {
+                        .v5 => 0x9a,
+                        .v3_1, .v3_1_1 => 0x05,
+                    },
+                }, &pending_owned);
+                return null;
+            }
         }
         if (pending.connect.connect.client_id.len != 0 and
             !self.clientIdMatchesRequiredPrefix(
@@ -9569,6 +9583,8 @@ const ListenerAcceptTask = struct {
                 admission_snapshot.topic_alias_maximum;
             accept_options.max_outgoing_topic_aliases =
                 admission_snapshot.max_outgoing_topic_aliases;
+            accept_options.retain_available =
+                admission_snapshot.retain_available;
             accept_options.accepted_protocol_versions =
                 admission_snapshot.accepted_protocol_versions;
             auto_client_id_prefix = admission_snapshot.autoClientIdPrefix();
@@ -9724,6 +9740,8 @@ const ListenerSupervisorAcceptTask = struct {
                     admission_snapshot.topic_alias_maximum;
                 accept_options.max_outgoing_topic_aliases =
                     admission_snapshot.max_outgoing_topic_aliases;
+                accept_options.retain_available =
+                    admission_snapshot.retain_available;
                 accept_options.accepted_protocol_versions =
                     admission_snapshot.accepted_protocol_versions;
                 auto_client_id_prefix =

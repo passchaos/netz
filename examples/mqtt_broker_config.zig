@@ -562,6 +562,7 @@ pub fn run(
             listener.max_topic_alias_broker,
             listener.accepted_protocol_versions,
         );
+        admission.retain_available = config.retain_available;
     }
     var security = try reloadable_security.Security.init(
         allocator,
@@ -599,7 +600,7 @@ pub fn run(
         .client_id_prefix = config.client_id_prefixes,
         .upgrade_outgoing_qos = initial_delivery_policy.upgrade_outgoing_qos,
         .queue_qos0_messages = initial_delivery_policy.queue_qos0_messages,
-        .check_retain_source = config.check_retain_source,
+        .check_retain_source = initial_delivery_policy.check_retain_source,
         .persistent_session_expiry_seconds = initial_delivery_policy.persistent_session_expiry_seconds,
         .retained_expiry_interval = initial_scheduling_policy.retained_expiry_interval,
         .system_stats_interval = initial_scheduling_policy.system_stats_interval,
@@ -1074,6 +1075,7 @@ fn serveWithManagement(
                                     "completed: message_size_limit={d} " ++
                                     "queue_qos0_messages={} " ++
                                     "upgrade_outgoing_qos={} " ++
+                                    "check_retain_source={} " ++
                                     "persistent_client_expiration={d} " ++
                                     "source=SIGHUP server_io=zio-std-io\n",
                                 .{
@@ -1082,6 +1084,8 @@ fn serveWithManagement(
                                         .queue_qos0_messages,
                                     success.delivery_policy
                                         .upgrade_outgoing_qos,
+                                    success.delivery_policy
+                                        .check_retain_source,
                                     success.delivery_policy
                                         .persistent_session_expiry_seconds orelse 0,
                                 },
@@ -1240,6 +1244,7 @@ fn reloadConfiguredState(
             .component = .security,
             .err = err,
         } };
+        admission.retain_available = reloaded_config.retain_available;
     }
     const reloaded_autosave = autosavePolicyForReload(
         allocator,
@@ -1342,6 +1347,7 @@ fn runtimeDeliveryPolicyFromConfig(
         .max_payload_size = config.message_size_limit,
         .queue_qos0_messages = config.queue_qos0_messages,
         .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
+        .check_retain_source = config.check_retain_source,
         .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
     };
 }

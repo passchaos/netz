@@ -13,6 +13,8 @@ pub const Delivery = struct {
     queue_qos0_messages: bool = false,
     /// Permit subscription QoS to raise the outgoing source QoS.
     upgrade_outgoing_qos: bool = false,
+    /// Re-check the retained publisher's current write authorization on replay.
+    check_retain_source: bool = true,
     /// Administrative upper bound for a persistent Session lifetime.
     persistent_session_expiry_seconds: ?u32 = null,
 
@@ -31,6 +33,7 @@ pub const Snapshot = struct {
 
     const queue_qos0_bit: u8 = 1 << 0;
     const upgrade_outgoing_qos_bit: u8 = 1 << 1;
+    const check_retain_source_bit: u8 = 1 << 2;
 
     pub fn init(policy: Delivery) Snapshot {
         return .{
@@ -71,6 +74,7 @@ pub const Snapshot = struct {
                 .max_payload_size = max_payload_size,
                 .queue_qos0_messages = flags & queue_qos0_bit != 0,
                 .upgrade_outgoing_qos = flags & upgrade_outgoing_qos_bit != 0,
+                .check_retain_source = flags & check_retain_source_bit != 0,
                 .persistent_session_expiry_seconds = if (expiry == 0) null else expiry,
             };
         }
@@ -80,7 +84,9 @@ pub const Snapshot = struct {
         return @as(u8, @intFromBool(policy.queue_qos0_messages)) *
             queue_qos0_bit |
             @as(u8, @intFromBool(policy.upgrade_outgoing_qos)) *
-                upgrade_outgoing_qos_bit;
+                upgrade_outgoing_qos_bit |
+            @as(u8, @intFromBool(policy.check_retain_source)) *
+                check_retain_source_bit;
     }
 };
 
@@ -93,6 +99,7 @@ test "delivery policy snapshot never exposes a mixed generation" {
         .max_payload_size = 2,
         .queue_qos0_messages = true,
         .upgrade_outgoing_qos = true,
+        .check_retain_source = false,
         .persistent_session_expiry_seconds = 2,
     };
     var snapshot = Snapshot.init(first);

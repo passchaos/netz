@@ -1927,6 +1927,7 @@ test "broker runtime delivery policy commits atomically" {
     try std.testing.expectEqual(@as(usize, 1), initial.max_payload_size);
     try std.testing.expect(!initial.queue_qos0_messages);
     try std.testing.expect(!initial.upgrade_outgoing_qos);
+    try std.testing.expect(initial.check_retain_source);
     try std.testing.expectEqual(
         @as(?u32, 10),
         initial.persistent_session_expiry_seconds,
@@ -1938,6 +1939,7 @@ test "broker runtime delivery policy commits atomically" {
             .max_payload_size = 2,
             .queue_qos0_messages = true,
             .upgrade_outgoing_qos = true,
+            .check_retain_source = false,
             .persistent_session_expiry_seconds = 0,
         }),
     );
@@ -1950,6 +1952,7 @@ test "broker runtime delivery policy commits atomically" {
         .max_payload_size = 2,
         .queue_qos0_messages = true,
         .upgrade_outgoing_qos = true,
+        .check_retain_source = false,
         .persistent_session_expiry_seconds = 1,
     };
     try broker.setRuntimeDeliveryPolicy(updated);

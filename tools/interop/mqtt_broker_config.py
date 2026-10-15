@@ -1361,16 +1361,20 @@ def run_retain_unavailable_case(broker: Path, directory: Path) -> None:
     while websocket_port == tcp_port:
         websocket_port = free_port()
     config = directory / "retain-unavailable.conf"
-    config.write_text(
-        "retain_available false\n"
-        f"listener {tcp_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
-        "max_connections 4\n"
-        f"listener {websocket_port} 127.0.0.1\n"
-        "protocol websockets\n"
-        "allow_anonymous true\n"
-        "max_connections 1\n"
-    )
+
+    def write_config(retain_available: bool) -> None:
+        config.write_text(
+            f"retain_available {str(retain_available).lower()}\n"
+            f"listener {tcp_port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 5\n"
+            f"listener {websocket_port} 127.0.0.1\n"
+            "protocol websockets\n"
+            "allow_anonymous true\n"
+            "max_connections 1\n"
+        )
+
+    write_config(True)
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,
@@ -1379,8 +1383,33 @@ def run_retain_unavailable_case(broker: Path, directory: Path) -> None:
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 2 listeners for 5 clients" not in ready:
+    if "configured 2 listeners for 6 clients" not in ready:
         raise RuntimeError(f"retain-unavailable broker failed to start: {ready}")
+
+    existing = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
+    existing.settimeout(5)
+    existing.sendall(connect_packet("retain-existing"))
+    existing_connack = read_mqtt_packet(existing)
+    if bytes((0x25, 0)) in connack_properties(existing_connack):
+        raise AssertionError("initial connection unexpectedly disabled RETAIN")
+    write_config(False)
+    os.kill(process.pid, signal.SIGHUP)
+    wait_process_line(
+        process,
+        "security reload completed: source=SIGHUP",
+        "retain availability reload",
+    )
+    existing.sendall(
+        publish_packet(
+            "retain/existing",
+            b"allowed",
+            qos=1,
+            packet_id=9,
+            retain=True,
+        )
+    )
+    if puback_reason(read_mqtt_packet(existing), 9) not in (0, 0x10):
+        raise AssertionError("existing connection lost negotiated RETAIN support")
 
     v5 = socket.create_connection(("127.0.0.1", tcp_port), timeout=5)
     v5.settimeout(5)
@@ -1466,20 +1495,21 @@ def run_retain_unavailable_case(broker: Path, directory: Path) -> None:
                 if connack_reason(read_mqtt_packet(client)) != expected_reason:
                     raise AssertionError("retained Will CONNACK reason mismatch")
             else:
-                try:
-                    closed = client.recv(1) == b""
-                except ConnectionError:
-                    closed = True
-                if not closed:
-                    raise AssertionError("retained MQTT 3.1.1 Will was not closed")
+                if read_mqtt_packet(client) != bytes.fromhex("20020005"):
+                    raise AssertionError(
+                        "retained MQTT 3.1.1 Will CONNACK reason mismatch"
+                    )
         finally:
             client.close()
 
+    existing.sendall(bytes.fromhex("e000"))
+    existing.close()
+
     return_code = process.wait(timeout=5)
     output = process.stdout.read()
-    if return_code == 0 or "InvalidProperty" not in output:
+    if return_code != 0:
         raise RuntimeError(
-            "retain-unavailable Will rejection was not reported: " + output
+            "retain-unavailable dynamic admission failed: " + output
         )
 
 
@@ -4155,6 +4185,30 @@ def run_retain_source_scope_case(
         if read_websocket_binary(checked) != expected_suback:
             raise AssertionError("retained-source checked SUBACK mismatch")
         websocket_mqtt_ping(checked)
+        write_config(False)
+        os.kill(checked_process.pid, signal.SIGHUP)
+        wait_process_line(
+            checked_process,
+            "runtime delivery reload completed:",
+            "retained-source policy reload",
+        )
+        send_websocket_binary(
+            checked,
+            subscribe_packet(3, topic, proto_ver=proto_ver),
+        )
+        expected_suback = bytes.fromhex(
+            "900400030000" if proto_ver == 5 else "9003000300"
+        )
+        if read_websocket_binary(checked) != expected_suback:
+            raise AssertionError("retained-source reloaded SUBACK mismatch")
+        expected_publish = publish_packet(
+            topic,
+            payload,
+            proto_ver=proto_ver,
+            retain=True,
+        )
+        if read_websocket_binary(checked) != expected_publish:
+            raise AssertionError("reloaded source check suppressed replay")
         send_websocket_binary(checked, bytes.fromhex("e000"))
     finally:
         source_probe.close()
@@ -6211,7 +6265,8 @@ def main() -> None:
         "persistent-client and "
         "retained-message "
         "expiration, periodic $SYS policy, atomic $SYS/retained scheduling, "
-        "and message-size/offline-QoS0/QoS-upgrade/session-cap SIGHUP reload "
+        "and message-size/offline-QoS0/QoS-upgrade/session-cap/retained-source "
+        "SIGHUP reload plus Retain Available admission reload "
         "with restart-required global rollback and live-client continuity, "
         "zero-length and MQTT 3.1 Client ID bounds, global/listener auto-ID "
         "prefixes, atomic required Client ID prefix SIGHUP reload with rollback, "

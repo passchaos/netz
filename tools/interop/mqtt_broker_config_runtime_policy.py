@@ -190,6 +190,7 @@ def run_runtime_delivery_policy_reload_case(
             process,
             "runtime delivery reload completed: message_size_limit=0 "
             "queue_qos0_messages=true upgrade_outgoing_qos=true "
+            "check_retain_source=true "
             "persistent_client_expiration=1",
             "runtime delivery policy reload",
         )

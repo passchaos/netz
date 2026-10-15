@@ -31,7 +31,8 @@ fn fieldClass(comptime name: []const u8) FieldClass {
     }
     if (std.mem.eql(u8, name, "bridges")) return .bridge;
     if (std.mem.eql(u8, name, "allow_zero_length_client_id") or
-        std.mem.eql(u8, name, "auto_id_prefix"))
+        std.mem.eql(u8, name, "auto_id_prefix") or
+        std.mem.eql(u8, name, "retain_available"))
     {
         return .admission;
     }
@@ -54,6 +55,7 @@ fn fieldClass(comptime name: []const u8) FieldClass {
     if (std.mem.eql(u8, name, "message_size_limit") or
         std.mem.eql(u8, name, "queue_qos0_messages") or
         std.mem.eql(u8, name, "upgrade_outgoing_qos") or
+        std.mem.eql(u8, name, "check_retain_source") or
         std.mem.eql(u8, name, "persistent_client_expiration_seconds"))
     {
         return .delivery_policy;
@@ -68,8 +70,6 @@ fn fieldClass(comptime name: []const u8) FieldClass {
         std.mem.eql(u8, name, "max_inflight_bytes") or
         std.mem.eql(u8, name, "max_queued_messages") or
         std.mem.eql(u8, name, "max_queued_bytes") or
-        std.mem.eql(u8, name, "retain_available") or
-        std.mem.eql(u8, name, "check_retain_source") or
         std.mem.eql(u8, name, "websocket_headers_size") or
         std.mem.eql(u8, name, "set_tcp_nodelay"))
     {
@@ -143,12 +143,6 @@ test "restart-required MQTT globals reject every changed field" {
     candidate.max_queued_bytes = 1;
     try expectRestart(initial, candidate);
     candidate = initial;
-    candidate.retain_available = !candidate.retain_available;
-    try expectRestart(initial, candidate);
-    candidate = initial;
-    candidate.check_retain_source = !candidate.check_retain_source;
-    try expectRestart(initial, candidate);
-    candidate = initial;
     candidate.websocket_headers_size -= 1;
     try expectRestart(initial, candidate);
     candidate = initial;
@@ -161,6 +155,7 @@ test "runtime-owned MQTT globals remain reload-compatible" {
     const initial = Config{ .listeners = &empty_listeners };
     var candidate = initial;
     candidate.allow_zero_length_client_id = false;
+    candidate.retain_available = false;
     candidate.auto_id_prefix = @constCast("dynamic-");
     candidate.autosave_interval = 7;
     candidate.autosave_on_changes = true;
@@ -169,6 +164,7 @@ test "runtime-owned MQTT globals remain reload-compatible" {
     candidate.message_size_limit = 1;
     candidate.queue_qos0_messages = true;
     candidate.upgrade_outgoing_qos = true;
+    candidate.check_retain_source = false;
     candidate.persistent_client_expiration_seconds = 1;
     candidate.client_id_prefixes = @constCast("dynamic-");
 
