@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import disconnect_forms
 import maximum_topic_hierarchy
 import pattern_matching
 import persistent_subscriptions
@@ -54,6 +55,8 @@ class SourceLockTests(unittest.TestCase):
                     "6fa62519cbb04bcad3e79244773d0354dfbab206b4b18f4234a96faf2ef3db11",
                 "broker/01-connect-auto-id.py":
                     "a3d7ae2aa2508e5e3f5086a5105536d992b4ae330988e3411797e8135625b28f",
+                "broker/01-connect-disconnect-v5.py":
+                    "79d9bd1015b35a8d8f54b9e3c2d76c1a9bc5a19aa22d1839c2d0d0bc8de0bb96",
                 "broker/01-connect-zero-length-id.py":
                     "3e69a4a94622dbe6e3814d5a2457605a5f8b6b9a6affe8505be81bf64c8338cd",
                 "broker/01-connect-global-max-clients.py":
@@ -250,6 +253,7 @@ class SourceLockTests(unittest.TestCase):
                     "ca7a38158e005603f4c5ec4583ddd6e45fe643cfbf3761f8a13981a743417f7d",
             },
         )
+        self.assertEqual(disconnect_forms.SCENARIO_COUNT, 4)
         self.assertEqual(persistent_subscriptions.SCENARIO_COUNT, 2)
         self.assertEqual(maximum_topic_hierarchy.MAXIMUM_TOPIC_BYTES, 65_535)
         self.assertEqual(maximum_topic_hierarchy.PROTOCOL_VERSIONS, (4, 5))

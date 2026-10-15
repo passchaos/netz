@@ -18,6 +18,7 @@ import tempfile
 import time
 
 from mqtt_vectors import (
+    disconnect_forms,
     maximum_topic_hierarchy,
     pattern_matching,
     persistent_subscriptions,
@@ -34,6 +35,7 @@ from mqtt_vectors import (
 BASE_SCENARIO_COUNT = 171
 SCENARIO_COUNT = (
     BASE_SCENARIO_COUNT
+    + disconnect_forms.SCENARIO_COUNT
     + pattern_matching.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
     + qos0_live_queue_scope.SCENARIO_COUNT
@@ -6337,6 +6339,10 @@ def main() -> None:
     )
     hostile_initial_packets(args.broker, mqtt_packets)
     malformed_will_connects(args.broker, mqtt_packets)
+    disconnect_forms.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
     will_delay_invalid_topic.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         expected_connack, expect_packet,
