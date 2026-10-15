@@ -1375,19 +1375,22 @@ fallback and still reuse the first parse during validation. Parsed URI
 acquisition methods carry that already validated first origin through idle,
 deadline, and cancellation-aware pool admission without retaining it beyond
 the call; string APIs remain wrappers, and endpoint/userinfo/port/IPv6 checks
-are unchanged. The cancellation Select itself is unchanged. Twenty CPU-0
+are unchanged. The cancellation Select itself is unchanged. Pool idle/LRU
+timestamps now also share zio's awake-clock snapshot for one
+event-loop scan; foreign `std.Io` backends retain ordinary clock reads, and
+request deadlines remain fresh, independent absolute timestamps. Twenty CPU-0
 fixed-binary pairs of the same 1,000-warmup/2,000-request SharedSender shape
-reduced the paired latency
-median to 0.986470 (-1.353%, 19/20 wins) and process instructions to 0.943199
-(-5.680%, 20/20). Baseline/candidate SHA-256 values were
+reduced the paired latency median to 0.970066 (-2.993%, 20/20 wins) and process
+instructions to 0.939518
+(-6.048%, 20/20). Baseline/candidate SHA-256 values were
 `3d2636d58637653d5f33465886a18ba418a1c8b3f2403c89faf26bd77943e310`
 and
-`465681808274702861fb2df0df1c82bffc4859fefef0f12b9fe62d04244efb80`;
+`2f71569cb25a849b5bc2c6cbe72356e884cb9cfbd1e65a2284b7b70d7214a7fb`;
 the candidate's total static size was 104 bytes smaller. In matched zero-loss
-profiles, baseline `Uri.parse` accounted for 3.54% but did not remain a
-standalone symbol above 0.5% in the candidate; approximate sampled event count
-moved from 5,174,996,464 to 4,894,765,710 (-5.415%). Both binaries retained
-exactly 6,000 measured
+profiles, `Uri.parse` moved from 3.54% to 0.99%, `clock_gettime` from 16.81% to
+15.46%, and the baseline pool release/admission clock branches disappeared;
+approximate sampled event count moved from 5,174,996,464 to 4,917,766,464
+(-4.971%). Both binaries retained exactly 6,000 measured
 allocator calls, 1,286,000 requested bytes, 71,946 live bytes, and 140,592 peak
 bytes. Debug client-pool/shared-sender gates passed 60/60 and 48/48,
 the parsed-admission regression passed 43/43, ReleaseFast shared-sender passed

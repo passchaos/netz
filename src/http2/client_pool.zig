@@ -8,6 +8,7 @@ const std = @import("std");
 const fifo_admission = @import("../internal/fifo_admission.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const http_method = @import("../internal/http_method.zig");
+const netz_runtime = @import("../runtime.zig");
 const http2 = @import("mod.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const uri_redirect = @import("../http1/runtime/redirect.zig");
@@ -194,7 +195,7 @@ pub const Pool = struct {
         defer self.mutex.unlock(self.io);
         if (self.closed) return error.PoolClosed;
         if (!self.capacity_waiters.mayAttempt(null)) return null;
-        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        self.pruneExpiredLocked(self.awakeNowNs());
         var index = self.idle.items.len;
         while (index != 0) {
             index -= 1;
@@ -580,7 +581,7 @@ pub const Pool = struct {
     pub fn idleCount(self: *Pool) usize {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        self.pruneExpiredLocked(self.awakeNowNs());
         return self.idle.items.len;
     }
 
@@ -598,7 +599,7 @@ pub const Pool = struct {
         defer endpoint.deinit();
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        self.pruneExpiredLocked(self.awakeNowNs());
         var count: usize = 0;
         for (self.idle.items) |slot| {
             count += @intFromBool(
@@ -625,7 +626,7 @@ pub const Pool = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const before = self.idle.items.len;
-        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        self.pruneExpiredLocked(self.awakeNowNs());
         return before - self.idle.items.len;
     }
 
@@ -678,7 +679,7 @@ pub const Pool = struct {
             self.mutex.unlock(self.io);
             return error.ConnectionLimitReached;
         }
-        self.pruneExpiredLocked(std.Io.Clock.awake.now(self.io).nanoseconds);
+        self.pruneExpiredLocked(self.awakeNowNs());
         var index = self.idle.items.len;
         while (index != 0) {
             index -= 1;
@@ -953,7 +954,7 @@ pub const Pool = struct {
         }
         self.sequence +%= 1;
         slot.last_used = self.sequence;
-        slot.idle_since_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        slot.idle_since_ns = self.awakeNowNs();
         if (self.idle.items.len >= self.options.max_idle_connections) {
             var oldest = self.idle.swapRemove(
                 self.oldestIdleIndexLocked(),
@@ -1033,6 +1034,12 @@ pub const Pool = struct {
             self.connections -= 1;
             self.notifyCapacityWaiterLocked();
         }
+    }
+
+    /// Idle bookkeeping may share the event loop's timestamp for one scheduler
+    /// scan. Foreign std.Io implementations retain ordinary awake-clock reads.
+    fn awakeNowNs(self: *Pool) i96 {
+        return netz_runtime.cachedAwakeNow(self.io).nanoseconds;
     }
 };
 

@@ -8021,21 +8021,25 @@ writing each request's final `:path`; the first URI also reuses its scheme
 parse during origin validation. Larger batches add no allocation and retain a
 two-pass fallback. Borrowed parsed-URI pool admission also avoids reparsing the
 already validated first origin while preserving endpoint, scheme, userinfo,
-port and IPv6 validation. Twenty CPU-0 fixed-binary pairs used the
+port and IPv6 validation. Idle/LRU bookkeeping additionally shares zio's
+awake-clock snapshot within one event-loop scan, while foreign backends and
+request deadlines retain ordinary fresh-clock behavior. Twenty CPU-0
+fixed-binary pairs used the
 `http2_shared_consecutive_x1_empty` shape with one persistent h2c connection,
 1,000 warmups and 2,000 measured requests. Baseline SHA-256 was
 `3d2636d58637653d5f33465886a18ba418a1c8b3f2403c89faf26bd77943e310`
 and candidate SHA-256 was
-`465681808274702861fb2df0df1c82bffc4859fefef0f12b9fe62d04244efb80`.
-Paired latency fell to 0.986470 (-1.353%, 19/20 wins) and process instructions
-to 0.943199 (-5.680%, 20/20). Candidate total static size was 104 bytes smaller.
+`2f71569cb25a849b5bc2c6cbe72356e884cb9cfbd1e65a2284b7b70d7214a7fb`.
+Paired latency fell to 0.970066 (-2.993%, 20/20 wins) and process instructions
+to 0.939518 (-6.048%, 20/20). Candidate total static size was 104 bytes smaller.
 Measured allocator telemetry was unchanged: 6,000 calls, 1,286,000 requested
-bytes, 71,946 live
-bytes and 140,592 peak bytes per 2,000-request arm. Zero-loss explanatory
-profiles removed baseline `Uri.parse` (3.54%) from the standalone symbols above
-0.5% and reduced approximate event count 5.415%;
-the complete bidirectional
-Hyper h2c/TLS interoperability matrix and focused Debug/ReleaseFast pool and
+bytes, 71,946 live bytes and 140,592 peak bytes per 2,000-request arm. Zero-loss
+explanatory
+profiles moved `Uri.parse` from 3.54% to 0.99%, `clock_gettime` from 16.81% to
+15.46%, removed pool release/admission clock branches, and reduced approximate
+event count 4.971%;
+the complete bidirectional Hyper h2c/TLS interoperability matrix and focused
+Debug/ReleaseFast pool and
 SharedSender gates passed.
 
 ## Gaps before a completion audit can pass
