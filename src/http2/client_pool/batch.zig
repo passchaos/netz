@@ -22,6 +22,7 @@ const stack_request_count: usize = 16;
 const stack_target_bytes: usize = 1024;
 
 const PreparedUriBatch = struct {
+    first_uri: std.Uri,
     native_requests: []runtime.RequestOptions,
     target_storage: []u8,
     has_body_or_trailers: bool,
@@ -134,6 +135,7 @@ fn prepareUriBatch(
         native.authority = null;
     }
     return .{
+        .first_uri = first_uri,
         .native_requests = native_requests,
         .target_storage = target_storage,
         .has_body_or_trailers = has_body_or_trailers,
@@ -337,7 +339,6 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
             cancel.acknowledge(cancel.context);
         };
         var active_count: usize = 0;
-        var first_active: ?usize = null;
         var earliest: ?std.Io.Clock.Timestamp = null;
         for (active, deadlines, 0..) |*is_active, deadline, index| {
             if (!is_active.*) continue;
@@ -352,7 +353,6 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
                     continue;
                 }
             }
-            first_active = first_active orelse index;
             earliest = deadline_policy.earlier(earliest, deadline);
             active_count += 1;
         }
@@ -362,7 +362,7 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
             (acquireUriWithCancellation(
                 Lease,
                 pool,
-                requests[first_active.?].uri,
+                prepared.first_uri,
                 earliest,
                 cancel.event,
             ) catch |err| switch (err) {
@@ -370,15 +370,15 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
                 else => |other| return other,
             }) orelse continue
         else if (earliest) |absolute|
-            pool.acquireUriWithDeadline(
-                requests[first_active.?].uri,
+            pool.acquireParsedUriWithDeadline(
+                prepared.first_uri,
                 absolute,
             ) catch |err| switch (err) {
                 error.Timeout => continue,
                 else => |other| return other,
             }
         else
-            try pool.acquireUri(requests[first_active.?].uri);
+            try pool.acquireParsedUri(prepared.first_uri);
         defer if (lease.active) lease.discard();
 
         var compact_count: usize = 0;
@@ -603,11 +603,11 @@ fn requestUriBatchWithPerStreamDeadlinesMode(
 fn acquireUriWithCancellation(
     comptime Lease: type,
     pool: anytype,
-    uri: []const u8,
+    uri: std.Uri,
     deadline: ?std.Io.Clock.Timestamp,
     wake: *std.Io.Event,
 ) !?Lease {
-    if (try pool.tryAcquireIdleUri(uri)) |idle| return idle;
+    if (try pool.tryAcquireIdleParsedUri(uri)) |idle| return idle;
 
     const AcquireResult = union(enum) {
         lease: anyerror!Lease,
@@ -616,13 +616,13 @@ fn acquireUriWithCancellation(
     const Task = struct {
         fn acquire(
             task_pool: @TypeOf(pool),
-            task_uri: []const u8,
+            task_uri: std.Uri,
             task_deadline: ?std.Io.Clock.Timestamp,
         ) anyerror!Lease {
             return if (task_deadline) |absolute|
-                task_pool.acquireUriWithDeadline(task_uri, absolute)
+                task_pool.acquireParsedUriWithDeadline(task_uri, absolute)
             else
-                task_pool.acquireUri(task_uri);
+                task_pool.acquireParsedUri(task_uri);
         }
 
         fn wait(
@@ -730,9 +730,12 @@ fn requestUriBatchBefore(
     var may_retry = retry_stale;
     while (true) {
         var lease = if (deadline) |absolute|
-            try pool.acquireUriWithDeadline(requests[0].uri, absolute)
+            try pool.acquireParsedUriWithDeadline(
+                prepared.first_uri,
+                absolute,
+            )
         else
-            try pool.acquireUri(requests[0].uri);
+            try pool.acquireParsedUri(prepared.first_uri);
         defer if (lease.active) lease.discard();
         const result = if (prepared.has_body_or_trailers)
             if (deadline) |absolute|

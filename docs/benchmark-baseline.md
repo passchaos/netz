@@ -8019,17 +8019,22 @@ HTTP/2 same-origin URI-batch preparation now retains up to sixteen parsed
 `std.Uri` views in stack storage, avoiding the former second parse while
 writing each request's final `:path`; the first URI also reuses its scheme
 parse during origin validation. Larger batches add no allocation and retain a
-two-pass fallback. Twenty CPU-0 fixed-binary pairs used the
+two-pass fallback. Borrowed parsed-URI pool admission also avoids reparsing the
+already validated first origin while preserving endpoint, scheme, userinfo,
+port and IPv6 validation. Twenty CPU-0 fixed-binary pairs used the
 `http2_shared_consecutive_x1_empty` shape with one persistent h2c connection,
 1,000 warmups and 2,000 measured requests. Baseline SHA-256 was
 `3d2636d58637653d5f33465886a18ba418a1c8b3f2403c89faf26bd77943e310`
 and candidate SHA-256 was
-`51f467b4f07adecd78417f7abab38294cc13f0c9cbdd23f88ff67f1d0689df9b`.
-Paired latency fell to 0.989356 (-1.064%, 18/20 wins) and process instructions
-to 0.962067 (-3.793%, 20/20). Total static size and measured allocator
-telemetry were unchanged: 6,000 calls, 1,286,000 requested bytes, 71,946 live
+`465681808274702861fb2df0df1c82bffc4859fefef0f12b9fe62d04244efb80`.
+Paired latency fell to 0.986470 (-1.353%, 19/20 wins) and process instructions
+to 0.943199 (-5.680%, 20/20). Candidate total static size was 104 bytes smaller.
+Measured allocator telemetry was unchanged: 6,000 calls, 1,286,000 requested
+bytes, 71,946 live
 bytes and 140,592 peak bytes per 2,000-request arm. Zero-loss explanatory
-profiles moved `Uri.parse` from 3.54% to 0.94%; the complete bidirectional
+profiles removed baseline `Uri.parse` (3.54%) from the standalone symbols above
+0.5% and reduced approximate event count 5.415%;
+the complete bidirectional
 Hyper h2c/TLS interoperability matrix and focused Debug/ReleaseFast pool and
 SharedSender gates passed.
 

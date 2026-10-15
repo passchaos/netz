@@ -1371,20 +1371,27 @@ once for origin/target sizing and then again to write the final `:path`, after
 already parsing the first URI for scheme selection. Batches of at most sixteen
 now retain borrowed `std.Uri` views in caller-stack storage, so every member is
 parsed once during preparation; larger batches retain the allocation-neutral
-fallback and still reuse the first parse during validation. Pool admission and
-its cancellation Select are unchanged. Twenty CPU-0 fixed-binary pairs of the
-same 1,000-warmup/2,000-request SharedSender shape reduced the paired latency
-median to 0.989356 (-1.064%, 18/20 wins) and process instructions to 0.962067
-(-3.793%, 20/20). Baseline/candidate SHA-256 values were
+fallback and still reuse the first parse during validation. Parsed URI
+acquisition methods carry that already validated first origin through idle,
+deadline, and cancellation-aware pool admission without retaining it beyond
+the call; string APIs remain wrappers, and endpoint/userinfo/port/IPv6 checks
+are unchanged. The cancellation Select itself is unchanged. Twenty CPU-0
+fixed-binary pairs of the same 1,000-warmup/2,000-request SharedSender shape
+reduced the paired latency
+median to 0.986470 (-1.353%, 19/20 wins) and process instructions to 0.943199
+(-5.680%, 20/20). Baseline/candidate SHA-256 values were
 `3d2636d58637653d5f33465886a18ba418a1c8b3f2403c89faf26bd77943e310`
 and
-`51f467b4f07adecd78417f7abab38294cc13f0c9cbdd23f88ff67f1d0689df9b`;
-their total static sizes were identical. Matched zero-loss profiles moved
-`Uri.parse` from 3.54% to 0.94% and approximate sampled event count from
-5,174,996,464 to 5,030,381,374. Both binaries retained exactly 6,000 measured
+`465681808274702861fb2df0df1c82bffc4859fefef0f12b9fe62d04244efb80`;
+the candidate's total static size was 104 bytes smaller. In matched zero-loss
+profiles, baseline `Uri.parse` accounted for 3.54% but did not remain a
+standalone symbol above 0.5% in the candidate; approximate sampled event count
+moved from 5,174,996,464 to 4,894,765,710 (-5.415%). Both binaries retained
+exactly 6,000 measured
 allocator calls, 1,286,000 requested bytes, 71,946 live bytes, and 140,592 peak
 bytes. Debug client-pool/shared-sender gates passed 60/60 and 48/48,
-ReleaseFast shared-sender passed 48/48, and the complete bidirectional Hyper
+the parsed-admission regression passed 43/43, ReleaseFast shared-sender passed
+48/48, and the complete bidirectional Hyper
 h2c/TLS pool, cancellation, redirect, trailers, reuse, KeyUpdate and GOAWAY
 matrix passed.
 The pool adapter preserves stack-first URI target preparation, maps compacted

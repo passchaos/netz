@@ -152,6 +152,12 @@ pub const Pool = struct {
     /// Acquire an exclusive persistent HTTP/2 connection for one URI origin.
     pub fn acquireUri(self: *Pool, uri_text: []const u8) Error!Lease {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        return self.acquireParsedUri(uri);
+    }
+
+    /// Parsed counterpart for URI pipelines that already validated and retain
+    /// the borrowed source text for this complete call.
+    pub fn acquireParsedUri(self: *Pool, uri: std.Uri) Error!Lease {
         const transport = try transportForScheme(uri.scheme);
         var endpoint = try http1_runtime.uriEndpoint(
             self.allocator,
@@ -169,6 +175,13 @@ pub const Pool = struct {
         uri_text: []const u8,
     ) Error!?Lease {
         const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        return self.tryAcquireIdleParsedUri(uri);
+    }
+
+    pub fn tryAcquireIdleParsedUri(
+        self: *Pool,
+        uri: std.Uri,
+    ) Error!?Lease {
         const transport = try transportForScheme(uri.scheme);
         var endpoint = try http1_runtime.uriEndpoint(
             self.allocator,
@@ -209,8 +222,9 @@ pub const Pool = struct {
         timeout: std.Io.Duration,
     ) AcquireTimeoutError!Lease {
         if (timeout.nanoseconds <= 0) return error.Timeout;
-        return self.acquireUriUntil(
-            uri_text,
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        return self.acquireParsedUriUntil(
+            uri,
             .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
         );
     }
@@ -221,15 +235,24 @@ pub const Pool = struct {
         deadline: std.Io.Clock.Timestamp,
     ) AcquireTimeoutError!Lease {
         _ = try deadline_policy.usableAwake(self.io, deadline);
-        return self.acquireUriUntil(uri_text, deadline);
+        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        return self.acquireParsedUriUntil(uri, deadline);
     }
 
-    fn acquireUriUntil(
+    pub fn acquireParsedUriWithDeadline(
         self: *Pool,
-        uri_text: []const u8,
+        uri: std.Uri,
         deadline: std.Io.Clock.Timestamp,
     ) AcquireTimeoutError!Lease {
-        const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
+        _ = try deadline_policy.usableAwake(self.io, deadline);
+        return self.acquireParsedUriUntil(uri, deadline);
+    }
+
+    fn acquireParsedUriUntil(
+        self: *Pool,
+        uri: std.Uri,
+        deadline: std.Io.Clock.Timestamp,
+    ) AcquireTimeoutError!Lease {
         const transport = try transportForScheme(uri.scheme);
         var endpoint = try http1_runtime.uriEndpoint(
             self.allocator,
@@ -1170,6 +1193,37 @@ test "HTTP/2 client pool validates idle limits" {
         threaded.io(),
         .{ .max_idle_connections = 1, .max_idle_per_authority = 2 },
     ));
+}
+
+test "HTTP/2 parsed URI pool admission preserves validation" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try Pool.init(std.testing.allocator, io, .{});
+    defer pool.deinit();
+
+    const ipv6 = try std.Uri.parse("http://[::1]:8080/path?x=1");
+    try std.testing.expect(
+        try pool.tryAcquireIdleParsedUri(ipv6) == null,
+    );
+
+    const unsupported = try std.Uri.parse("ftp://localhost/path");
+    try std.testing.expectError(
+        error.UnsupportedScheme,
+        pool.tryAcquireIdleParsedUri(unsupported),
+    );
+    const userinfo = try std.Uri.parse("http://user@localhost/path");
+    try std.testing.expectError(
+        error.InvalidUri,
+        pool.tryAcquireIdleParsedUri(userinfo),
+    );
+    try std.testing.expectError(
+        error.Timeout,
+        pool.acquireParsedUriWithDeadline(
+            unsupported,
+            .{ .raw = .zero, .clock = .awake },
+        ),
+    );
 }
 
 test "HTTP/2 stale retry policy accepts only idempotent methods" {
