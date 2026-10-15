@@ -103,6 +103,11 @@ def validate(
     for key, value in expected_environment.items():
         if environment.get(key) != value:
             raise ValueError(f"invalid environment {key}: {environment}")
+    netz_certificate_verify = environment.get("netz_certificate_verify")
+    if netz_certificate_verify not in {"fresh-p256", "prepared-p256"}:
+        raise ValueError(
+            f"invalid environment netz_certificate_verify: {environment}"
+        )
     for key in (
         "netz_binary_sha256", "quinn_binary_sha256", "quinn_lock_sha256",
         "server_certificate_sha256",
@@ -156,12 +161,15 @@ def validate(
             "timeout_ms": str(timeout_ms),
         }
         for sample_number, row in enumerate(samples_for_run, 1):
-            expect_fields(row, {
+            expected_sample = {
                 **common, "record": "handshake-sample",
                 "implementation": client, "endpoint_role": "client",
                 "sample": str(sample_number), "verified": "true",
                 "trust_cache": "enabled" if client == "netz" else "implementation-specific",
-            }, "handshake sample")
+            }
+            if client == "netz":
+                expected_sample["certificate_verify"] = netz_certificate_verify
+            expect_fields(row, expected_sample, "handshake sample")
             integer(row, "elapsed_ns", 1)
             for traffic_field in (
                 "connect_tx_datagrams", "connect_tx_bytes",
@@ -177,7 +185,7 @@ def validate(
             "checksum": checksum, "echo_verified": "true",
             "complete": "true",
         }
-        expect_fields(result, {
+        expected_result = {
             **result_common, "record": "result",
             "implementation": client, "endpoint_role": "client",
             "timing_scope": "client-connect-only",
@@ -185,7 +193,10 @@ def validate(
             "trust_cache": "enabled" if client == "netz" else "implementation-specific",
             "key_exchange": "x25519",
             "cipher": "aes-128-gcm-sha256",
-        }, "result")
+        }
+        if client == "netz":
+            expected_result["certificate_verify"] = netz_certificate_verify
+        expect_fields(result, expected_result, "result")
         expect_fields(completion, {
             **result_common, "record": "server-complete",
             "implementation": server, "endpoint_role": "server",
@@ -211,6 +222,8 @@ def validate(
             "server_io": io_name(server), "checksum": str((warmup + iterations) * (warmup + iterations - 1) // 2),
             "complete": "true",
         }
+        if client == "netz":
+            expected["certificate_verify"] = netz_certificate_verify
         for key, value in expected.items():
             if row.get(key) != value:
                 raise ValueError(f"invalid summary {key}: {row}")

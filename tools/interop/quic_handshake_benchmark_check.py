@@ -112,6 +112,7 @@ def verify(
     phase_values: dict[str, list[int]] = {key: [] for key in (
         "pre_trust_ns", "trust_ns", "post_trust_ns",
     )}
+    certificate_verify_mode: str | None = None
     for outer_run in range(1, samples + 1):
         matching_results = [row for row in results if row.get("run") == str(outer_run)]
         matching_servers = [row for row in completions if row.get("run") == str(outer_run)]
@@ -156,6 +157,15 @@ def verify(
         }
         if client_impl == "netz":
             expected_result_fields["trust_cache"] = "enabled"
+            certificate_verify = result.get("certificate_verify")
+            if certificate_verify not in {"fresh-p256", "prepared-p256"}:
+                raise ValueError(
+                    f"run {outer_run}: invalid certificate_verify"
+                )
+            if certificate_verify_mode is None:
+                certificate_verify_mode = certificate_verify
+            elif certificate_verify_mode != certificate_verify:
+                raise ValueError("certificate_verify changed across runs")
         elif client_impl == "quinn":
             expected_result_fields["trust_cache"] = "implementation-specific"
         for key, value in expected_result_fields.items():
@@ -176,6 +186,7 @@ def verify(
             }
             if client_impl == "netz":
                 expected_sample_fields["trust_cache"] = "enabled"
+                expected_sample_fields["certificate_verify"] = certificate_verify
             elif client_impl == "quinn":
                 expected_sample_fields["trust_cache"] = "implementation-specific"
             for key, value in expected_sample_fields.items():
@@ -238,6 +249,7 @@ def verify(
             for key, values in phase_values.items()
         }
         phase_fields = (
+            f"certificate_verify={certificate_verify_mode} "
             f"median_pre_trust_ns={phase_medians['pre_trust_ns']} "
             f"median_trust_ns={phase_medians['trust_ns']} "
             f"median_post_trust_ns={phase_medians['post_trust_ns']} "

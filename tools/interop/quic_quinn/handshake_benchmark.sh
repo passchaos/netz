@@ -11,6 +11,7 @@ iterations=100
 timeout_ms=10000
 client_cpu=
 server_cpu=
+netz_prepared_p256=disabled
 for argument in "$@"; do
   case $argument in
     --samples=*) samples=${argument#*=} ;;
@@ -19,9 +20,14 @@ for argument in "$@"; do
     --timeout-ms=*) timeout_ms=${argument#*=} ;;
     --client-cpu=*) client_cpu=${argument#*=} ;;
     --server-cpu=*) server_cpu=${argument#*=} ;;
+    --netz-prepared-p256=*) netz_prepared_p256=${argument#*=} ;;
     *) echo "unsupported Quinn handshake benchmark argument: $argument" >&2; exit 2 ;;
   esac
 done
+if [[ $netz_prepared_p256 != enabled && $netz_prepared_p256 != disabled ]]; then
+  echo 'netz prepared P-256 mode must be enabled or disabled' >&2
+  exit 2
+fi
 if [[ $build_mode != ReleaseFast ]]; then
   echo 'bench-quic-handshake-quinn requires -Doptimize=ReleaseFast' >&2
   exit 2
@@ -152,7 +158,7 @@ fi
 
 results="$work/results.log"
 printf '%s\n' \
-  "record=environment protocol=quic-v1 mode=handshake peer=quinn samples=$samples schedule=abba client_cpu=$client_cpu server_cpu=$server_cpu host=$(hostname) arch=$(uname -m) kernel=$(uname -r) zig=$(zig version) rustc=$(rustc --version | awk '{print $2}') netz_build_mode=$build_mode quinn_revision=$quinn_revision netz_binary_sha256=$(sha256 "$netz_bench") quinn_binary_sha256=$(sha256 "$quinn_peer") quinn_lock_sha256=$(sha256 "$repo_root/tools/interop/quic_quinn/Cargo.lock") server_identity=shared-ca-signed-p256-leaf server_certificate_chain_entries=1 server_certificate_der_bytes=$(wc -c <"$work/quinn-cert.der") server_certificate_sha256=$(sha256 "$work/quinn-cert.der") complete=true" \
+  "record=environment protocol=quic-v1 mode=handshake peer=quinn samples=$samples schedule=abba client_cpu=$client_cpu server_cpu=$server_cpu host=$(hostname) arch=$(uname -m) kernel=$(uname -r) zig=$(zig version) rustc=$(rustc --version | awk '{print $2}') netz_build_mode=$build_mode quinn_revision=$quinn_revision netz_binary_sha256=$(sha256 "$netz_bench") quinn_binary_sha256=$(sha256 "$quinn_peer") quinn_lock_sha256=$(sha256 "$repo_root/tools/interop/quic_quinn/Cargo.lock") server_identity=shared-ca-signed-p256-leaf server_certificate_chain_entries=1 server_certificate_der_bytes=$(wc -c <"$work/quinn-cert.der") server_certificate_sha256=$(sha256 "$work/quinn-cert.der") netz_certificate_verify=$(if [[ $netz_prepared_p256 == enabled ]]; then printf prepared-p256; else printf fresh-p256; fi) complete=true" \
   >"$results"
 
 run_pair() {
@@ -189,8 +195,13 @@ run_pair() {
       handshake-bench-client "$port" "$ca" "$role_pair" \
       "${common[@]}" >"$pair_dir/client.log" 2>&1
   else
+    local netz_client_extra=()
+    if [[ $netz_prepared_p256 == enabled ]]; then
+      netz_client_extra+=("--prepared-p256-certificate=$work/quinn-cert.der")
+    fi
     timeout 300s taskset -c "$client_cpu" "$netz_bench" client "$port" \
       "$ca" "--role-pair=$role_pair" "${common[@]}" \
+      "${netz_client_extra[@]}" \
       >"$pair_dir/client.log" 2>&1
   fi
   wait "$server_pid"

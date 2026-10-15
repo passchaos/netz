@@ -832,7 +832,10 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "vail", .module = vail_dep.module("vail") },
+            },
         }),
         .filters = test_filters,
     });
@@ -2446,7 +2449,10 @@ pub fn build(b: *std.Build) void {
             ),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+            .imports = &.{
+                .{ .name = "netz", .module = netz_mod },
+                .{ .name = "vail", .module = vail_dep.module("vail") },
+            },
         }),
     });
     const quic_handshake_bench = b.addSystemCommand(

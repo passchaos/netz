@@ -4722,6 +4722,9 @@ four-role matrix when the audited quic-go fixture is unavailable:
 ```sh
 zig build bench-quic-handshake-quinn -Doptimize=ReleaseFast -- \
   --samples=5 --warmup=10 --iterations=100
+zig build bench-quic-handshake-quinn -Doptimize=ReleaseFast -- \
+  --samples=5 --warmup=10 --iterations=100 \
+  --netz-prepared-p256=enabled
 ```
 
 Both stacks are restricted to QUIC v1, TLS 1.3, X25519,
@@ -4837,6 +4840,33 @@ Quinn server measured netz/Quinn at 1.618/1.357 ms P50 (netz 0.839x), while
 fixed netz server measured 1.972/2.201 ms (netz 1.116x). The higher absolute
 latencies than the immediately preceding run demonstrate host-load sensitivity;
 the same-binary A/B above remains the attribution evidence.
+
+The QUIC client now routes server CertificateVerify through the configured
+`ClientVerifier`, so its existing caller-owned prepared Ed25519, P-256, and RSA
+hooks are effective for QUIC as well as ordinary TLS. The Quinn runner exposes
+this explicitly as `--netz-prepared-p256=enabled`: it builds one P-256 public
+table from the fixed leaf before the timed loop, records the mode in every
+sample and aggregate, and still performs ordinary X.509 path verification plus
+a per-handshake exact public-key match before using the table. A mismatched
+prepared table fails the integrated handshake with `InvalidCertificate`.
+
+A 2026-10-15 CPU-0/client, CPU-1/server block ABBA used one ReleaseFast netz
+binary (`575e14df1baf81abffb69805edea6bcde746499659afb4945c4f6f1efe8a9f8c`)
+and pinned Quinn
+`d9c8c4c695fc64292d9b117844ea6924ca0d0815`. Each
+fresh/prepared/prepared/fresh block contained three odd-order samples, ten
+warmups, and thirty measured fresh connections per role pair. Against the
+fixed Quinn server, the first adjacent pair moved netz P50 from 765.724 to
+599.507 us (21.7% lower), and the reverse-order pair moved from 589.814 us
+fresh to 470.333 us prepared (20.3% lower). The corresponding post-trust
+medians, which include CertificateVerify, fell 229.689 to 116.553 us and
+198.246 to 96.276 us (49.3% and 51.4%). Against the fixed netz server, the two
+prepared reductions were 27.2% and 15.8%. In both prepared blocks the complete
+netz-client/Quinn-server P50 was lower than the same-block Quinn client by
+5.3% and 12.1%. The different blocks generated different but equivalent
+CA-signed P-256 leaves, so the two mirrored directions are the causal evidence;
+the absolute cross-block values remain host-load-sensitive, same-security-policy
+results rather than an equal-wire or universal client ranking.
 
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`

@@ -21,6 +21,7 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
             "server_identity=shared-ca-signed-p256-leaf "
             "server_certificate_chain_entries=1 server_certificate_der_bytes=450 "
             f"server_certificate_sha256={'d' * 64} complete=true"
+            " netz_certificate_verify=fresh-p256"
         )
         run_lines = []
         for sample, pair in check.expected_order(samples):
@@ -40,7 +41,7 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
                     "connect_tx_datagrams=2 connect_tx_bytes=1300 "
                     "connect_rx_datagrams=1 connect_rx_bytes=1200 "
                     + ("pre_trust_ns=40 trust_ns=30 post_trust_ns=" + str(30 + sample_number) + " " if client == "netz" else "")
-                    + ("trust_cache=enabled " if client == "netz" else "trust_cache=implementation-specific ")
+                    + ("trust_cache=enabled certificate_verify=fresh-p256 " if client == "netz" else "trust_cache=implementation-specific ")
                     + "verified=true"
                 )
             run_lines.append(
@@ -49,7 +50,7 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
                 "endpoint_role=client timing_scope=client-connect-only "
                 f"client_io={check.io_name(client)} server_io={check.io_name(server)} "
                 "timeout_ms=10000 verification=certificate resumption=disabled "
-                + ("trust_cache=enabled " if client == "netz" else "trust_cache=implementation-specific ")
+                + ("trust_cache=enabled certificate_verify=fresh-p256 " if client == "netz" else "trust_cache=implementation-specific ")
                 + "key_exchange=x25519 "
                 "cipher=aes-128-gcm-sha256 warmup=2 iterations=3 connections=5 "
                 "echo_bytes=160 checksum=10 total_elapsed_ns=306 p50_ns=102 p99_ns=103 "
@@ -68,6 +69,7 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
         for index, pair in enumerate(check.ROLE_PAIRS):
             client, server = check.IMPLEMENTATIONS[pair]
             phase_fields = (
+                "certificate_verify=fresh-p256 "
                 "median_pre_trust_ns=40 median_trust_ns=30 "
                 "median_post_trust_ns=32 "
                 if client == "netz" else ""
@@ -128,6 +130,20 @@ class QuinnHandshakeMatrixCheckTest(unittest.TestCase):
             log, summaries = self.write_case(directory)
             summaries.write_text(summaries.read_text().replace("quinn-tokio-rustls", "wrong", 1), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "client_io|server_io"):
+                check.validate(log, summaries, 1, 0, 1, 2, 3, 10000)
+
+    def test_rejects_certificate_verify_mode_mismatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            log, summaries = self.write_case(directory)
+            log.write_text(
+                log.read_text().replace(
+                    "certificate_verify=fresh-p256",
+                    "certificate_verify=prepared-p256",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "certificate_verify"):
                 check.validate(log, summaries, 1, 0, 1, 2, 3, 10000)
 
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const netz = @import("netz");
+const vail = @import("vail");
 const identity = @import("quic_handshake/identity.zig");
 const timed_verifier = @import("quic_handshake/timed_verifier.zig");
 
@@ -14,6 +15,7 @@ const Config = struct {
     run: usize = 1,
     timeout_ms: u32 = 10_000,
     trust_cache: bool = true,
+    prepared_p256_certificate: ?[]const u8 = null,
 
     fn parse(args: []const []const u8) !Config {
         var role_pair: ?[]const u8 = null;
@@ -37,6 +39,13 @@ const Config = struct {
                     false
                 else
                     return error.InvalidArgument;
+            } else if (option(arg, "--prepared-p256-certificate=")) |value| {
+                if (result.prepared_p256_certificate != null or
+                    !std.Io.Dir.path.isAbsolute(value))
+                {
+                    return error.InvalidArgument;
+                }
+                result.prepared_p256_certificate = value;
             } else {
                 return error.InvalidArgument;
             }
@@ -123,6 +132,11 @@ fn runClient(
         .io = io,
         .verifier = trust_cache.clientVerifier(),
     };
+    var prepared_p256: ?vail.crypto.p256.PreparedVerifier =
+        if (config.prepared_p256_certificate) |path|
+            try loadPreparedP256Verifier(allocator, io, path)
+        else
+            null;
     var socket_traffic: netz.quic.runtime.SocketTrafficCounters = .{};
     const latencies = try allocator.alloc(u64, config.iterations);
     defer allocator.free(latencies);
@@ -146,6 +160,10 @@ fn runClient(
         try std.Io.randomSecure(io, &client_cid);
         const started = nowNs(io);
         verifier.reset(started);
+        var client_verifier = verifier.clientVerifier();
+        if (prepared_p256) |*prepared| {
+            client_verifier.prepared_p256_verifier = prepared;
+        }
         var established = try netz.quic.handshake.connectWithTimeout(
             &endpoint,
             .{ .ip4 = .loopback(port) },
@@ -158,7 +176,7 @@ fn runClient(
                 .alpn_protocols = &.{alpn},
                 .key_exchange_groups = &.{.x25519},
                 .cipher_suites = &.{.aes_128_gcm_sha256},
-                .server_auth = verifier.clientVerifier(),
+                .server_auth = client_verifier,
                 .max_crypto_buffer = 64 * 1024,
                 .initial_one_rtt_config = .{ .max_datagram_size = 4096 },
             },
@@ -183,14 +201,15 @@ fn runClient(
                     "connect_tx_datagrams={d} connect_tx_bytes={d} " ++
                     "connect_rx_datagrams={d} connect_rx_bytes={d} " ++
                     "pre_trust_ns={d} trust_ns={d} post_trust_ns={d} " ++
-                    "trust_cache={s} " ++
+                    "trust_cache={s} certificate_verify={s} " ++
                     "verified=true\n",
                 .{
-                    config.role_pair,           config.run,                 measured_index,
-                    clientIo(config.role_pair), serverIo(config.role_pair), config.timeout_ms,
-                    elapsed,                    traffic.sent_datagrams,     traffic.sent_bytes,
-                    traffic.received_datagrams, traffic.received_bytes,     phases.pre_trust_ns,
-                    phases.trust_ns,            phases.post_trust_ns,       trustCacheName(config.trust_cache),
+                    config.role_pair,              config.run,                 measured_index,
+                    clientIo(config.role_pair),    serverIo(config.role_pair), config.timeout_ms,
+                    elapsed,                       traffic.sent_datagrams,     traffic.sent_bytes,
+                    traffic.received_datagrams,    traffic.received_bytes,     phases.pre_trust_ns,
+                    phases.trust_ns,               phases.post_trust_ns,       trustCacheName(config.trust_cache),
+                    certificateVerifyName(config),
                 },
             );
         }
@@ -407,23 +426,64 @@ fn printResult(
             "timing_scope=client-connect-only " ++
             "client_io={s} server_io={s} timeout_ms={d} " ++
             "verification=certificate resumption=disabled " ++
-            "trust_cache={s} " ++
+            "trust_cache={s} certificate_verify={s} " ++
             "key_exchange=x25519 cipher=aes-128-gcm-sha256 " ++
             "warmup={d} iterations={d} connections={d} echo_bytes={d} " ++
             "checksum={d} total_elapsed_ns={d} p50_ns={d} p99_ns={d} " ++
             "echo_verified=true complete=true\n",
         .{
-            implementation,                     config.role_pair,           config.run,
-            clientIo(config.role_pair),         serverIo(config.role_pair), config.timeout_ms,
-            trustCacheName(config.trust_cache), config.warmup,              config.iterations,
-            config.total(),                     config.total() * 32,        checksum,
-            total_elapsed_ns,                   percentile(latencies, 50),  percentile(latencies, 99),
+            implementation,                     config.role_pair,              config.run,
+            clientIo(config.role_pair),         serverIo(config.role_pair),    config.timeout_ms,
+            trustCacheName(config.trust_cache), certificateVerifyName(config), config.warmup,
+            config.iterations,                  config.total(),                config.total() * 32,
+            checksum,                           total_elapsed_ns,              percentile(latencies, 50),
+            percentile(latencies, 99),
         },
     );
 }
 
 fn trustCacheName(enabled: bool) []const u8 {
     return if (enabled) "enabled" else "disabled";
+}
+
+fn certificateVerifyName(config: Config) []const u8 {
+    return if (config.prepared_p256_certificate != null)
+        "prepared-p256"
+    else
+        "fresh-p256";
+}
+
+fn loadPreparedP256Verifier(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+) !vail.crypto.p256.PreparedVerifier {
+    const certificate_der = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        path,
+        allocator,
+        .limited(64 * 1024),
+    );
+    defer allocator.free(certificate_der);
+    return prepareP256Verifier(certificate_der);
+}
+
+fn prepareP256Verifier(
+    certificate_der: []const u8,
+) !vail.crypto.p256.PreparedVerifier {
+    const parsed = std.crypto.Certificate.parse(.{
+        .buffer = certificate_der,
+        .index = 0,
+    }) catch return error.InvalidCertificate;
+    if (parsed.pub_key_algo != .X9_62_id_ecPublicKey or
+        parsed.pub_key_algo.X9_62_id_ecPublicKey != .X9_62_prime256v1)
+    {
+        return error.UnsupportedCertificateKey;
+    }
+    const public_key = std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey
+        .fromSec1(parsed.pubKey()) catch return error.InvalidCertificate;
+    return vail.crypto.p256.PreparedVerifier.init(public_key.p) catch
+        return error.InvalidCertificate;
 }
 
 fn makeMarker(round: usize) [16]u8 {
@@ -494,10 +554,19 @@ test "QUIC handshake benchmark configuration and marker are stable" {
         "--run=3",
         "--timeout-ms=1000",
         "--trust-cache=disabled",
+        "--prepared-p256-certificate=/tmp/leaf.der",
     });
     try std.testing.expectEqual(@as(usize, 7), config.total());
     try std.testing.expectEqual(@as(usize, 3), config.run);
     try std.testing.expect(!config.trust_cache);
+    try std.testing.expectEqualStrings(
+        "/tmp/leaf.der",
+        config.prepared_p256_certificate.?,
+    );
+    try std.testing.expectEqualStrings(
+        "prepared-p256",
+        certificateVerifyName(config),
+    );
     try std.testing.expectError(
         error.InvalidArgument,
         Config.parse(&.{
@@ -512,10 +581,28 @@ test "QUIC handshake benchmark configuration and marker are stable" {
             "--trust-cache=maybe",
         }),
     );
+    try std.testing.expectError(
+        error.InvalidArgument,
+        Config.parse(&.{
+            "--role-pair=netz-client+quic-go-server",
+            "--prepared-p256-certificate=relative.der",
+        }),
+    );
     const first = makeMarker(0);
     const second = makeMarker(1);
     try std.testing.expectEqualStrings("NZQHSB1\x00", first[0..8]);
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
+}
+
+test "QUIC handshake benchmark prepares the fixed P-256 leaf identity" {
+    var certificate_der: [netz.tls.testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        netz.tls.testing.certificate_base64,
+    );
+    const prepared = try prepareP256Verifier(&certificate_der);
+    const key_pair = try netz.tls.testing.serverKeyPair();
+    try std.testing.expect(prepared.matchesPublicKey(key_pair.public_key.p));
 }
 
 test "QUIC handshake benchmark percentile matches verifier convention" {

@@ -2109,10 +2109,11 @@ fn connectAttempt(
             server_flight.through_certificate orelse
                 return error.InvalidHandshakeFlight,
         );
-        try quic.tls.auth.verifyCertificateVerify(
+        try verifier.verifyPeerCertificateVerify(
             peer_certificate.?.entries[0],
             certificate_verify,
             certificate_transcript_hash.bytes(),
+            .server,
         );
     }
     const server_finished = try quic.tls_client_hello.parseFinishedForHash(
@@ -5533,4 +5534,5 @@ test "QUIC handshake one-RTT config propagates spin-bit policy" {
 test {
     _ = @import("handshake/tests.zig");
     _ = @import("handshake/key_exchange_tests.zig");
+    _ = @import("handshake/prepared_verifier_tests.zig");
 }

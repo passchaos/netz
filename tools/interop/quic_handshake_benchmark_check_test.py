@@ -41,7 +41,7 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
                        "connect_rx_datagrams=1 connect_rx_bytes=1200 "
                        if client_impl != "quic-go" else "")
                     + ("pre_trust_ns=40 trust_ns=30 post_trust_ns=" + str(value - 70) + " " if client_impl == "netz" else "")
-                    + ("trust_cache=enabled " if client_impl == "netz" else "trust_cache=implementation-specific " if client_impl == "quinn" else "")
+                    + ("trust_cache=enabled certificate_verify=fresh-p256 " if client_impl == "netz" else "trust_cache=implementation-specific " if client_impl == "quinn" else "")
                     + "verified=true"
                 )
             ordered = sorted(elapsed)
@@ -52,7 +52,7 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
                 f"server_io={check.io_name(server_impl)} "
                 "timeout_ms=10000 "
                 "timing_scope=client-connect-only verification=certificate resumption=disabled "
-                + ("trust_cache=enabled " if client_impl == "netz" else "trust_cache=implementation-specific " if client_impl == "quinn" else "")
+                + ("trust_cache=enabled certificate_verify=fresh-p256 " if client_impl == "netz" else "trust_cache=implementation-specific " if client_impl == "quinn" else "")
                 +
                 "key_exchange=x25519 cipher=aes-128-gcm-sha256 warmup=2 "
                 f"iterations={iterations} connections={total_connections} "
@@ -185,6 +185,24 @@ class QuicHandshakeBenchmarkCheckTest(unittest.TestCase):
                 check.verify(
                     role_pair="netz-client+quic-go-server", samples=1, warmup=2,
                     iterations=3, timeout_ms=10000, client_log=client, server_log=server,
+                )
+
+    def test_rejects_certificate_verify_mode_drift(self) -> None:
+        with TemporaryDirectory() as directory:
+            client, server = self.write_case(directory)
+            client.write_text(
+                client.read_text().replace(
+                    "certificate_verify=fresh-p256",
+                    "certificate_verify=prepared-p256",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "certificate_verify"):
+                check.verify(
+                    role_pair="netz-client+quic-go-server", samples=1,
+                    warmup=2, iterations=3, timeout_ms=10000,
+                    client_log=client, server_log=server,
                 )
 
 

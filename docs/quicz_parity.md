@@ -762,9 +762,12 @@ and GOAWAY/drain scenario.
 The fresh-handshake matrix now also has a self-contained Quinn/rustls peer at
 the pinned audited revision. It verifies 2,200 full, non-resumed QUIC v1
 handshakes across four role pairs with X25519, AES-128-GCM-SHA256, certificate
-verification, a round-indexed echo, and peer close. Fixed Quinn-server results
-leave a concrete netz-client gap, while the fixed netz-server direction
-reverses; both remain same-security-policy rather than equal-wire claims.
+verification, a round-indexed echo, and peer close. Its explicit prepared-P256
+mode now proves that QUIC honors the same caller-owned CertificateVerify hook as
+ordinary TLS. Two mirrored 3x30 blocks reduced fixed-Quinn-server netz-client
+P50 by 21.7% and 20.3%; prepared netz was 5.3% and 12.1% below the same-block
+Quinn client. The default fresh-verifier results and both modes remain
+same-security-policy rather than equal-wire claims.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
@@ -2174,8 +2177,10 @@ rehashing ClientHello and ServerHello at five successive derivation/signature
 boundaries. SHA-256/SHA-384/SM3 snapshot equivalence plus authenticated, PSK,
 mTLS, and 0-RTT handshake tests cover the ordering. A fixed-Quinn-server 5x100
 same-binary ABBA moved P50 from 1.586 to 1.275 ms and timed-sum rate from 615.7
-to 730.2 connects/s; the next target is the remaining CertificateVerify and
-pre-trust packet/key-schedule work.
+to 730.2 connects/s; that run isolated CertificateVerify and pre-trust
+packet/key-schedule work as the next targets. The prepared-verifier pass below
+addresses repeated fixed-identity CertificateVerify cost without weakening
+fresh-key or multi-identity behavior.
 The final shared-identity 5x100 matrix measured netz/Quinn at 1.136/1.051 ms
 P50 with the fixed Quinn server (netz 0.925x), versus the preceding
 1.679/1.311 ms matrix. UDP counts and bytes were unchanged. The fixed netz
@@ -2193,6 +2198,18 @@ netz/Quinn at 1.618/1.357 ms P50 (netz 0.839x) and fixed-netz-server at
 1.972/2.201 ms (netz 1.116x). Its absolute shift from the immediately preceding
 matrix is treated as host-load noise; the same-binary A/B remains the causal
 evidence.
+
+The client CertificateVerify path now honors `ClientVerifier`'s prepared
+Ed25519, P-256, and RSA hooks. Integrated matching/mismatched P-256 handshakes
+prove success and exact-key rejection. The fixed-identity Quinn runner builds
+the P-256 table outside the timed loop and labels every sample; a
+fresh/prepared/prepared/fresh block ABBA reduced fixed-Quinn-server P50 by
+21.7% and 20.3%, with the post-trust phase down 49.3% and 51.4%. Trust-path
+verification remains enabled on every connection through the separate bounded
+cache, and the prepared table is never installed automatically in that
+multi-identity cache. Remaining handshake work is therefore pre-trust
+packet/key-schedule/event-loop cost and tail scheduling, not another removal of
+certificate authentication.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
