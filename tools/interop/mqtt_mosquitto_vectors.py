@@ -24,6 +24,7 @@ from mqtt_vectors import (
     persistent_incoming_qos2,
     persistent_subscriptions,
     proxy_v1_bad,
+    proxy_v2_bad,
     qos0_live_queue_scope,
     qos2_receive_maximum,
     source_lock,
@@ -42,6 +43,7 @@ SCENARIO_COUNT = (
     + persistent_incoming_qos2.SCENARIO_COUNT
     + persistent_subscriptions.SCENARIO_COUNT
     + proxy_v1_bad.SCENARIO_COUNT
+    + proxy_v2_bad.SCENARIO_COUNT
     + qos0_live_queue_scope.SCENARIO_COUNT
     + qos2_receive_maximum.SCENARIO_COUNT
     + subscription_flip_flop.SCENARIO_COUNT
@@ -6329,6 +6331,10 @@ def main() -> None:
     mqtt31_duplicate_control_flags(args.broker, mqtt_packets)
     proxy_protocol_v1_v2(args.broker, mqtt_packets)
     proxy_v1_bad.run(
+        args.broker, mqtt_packets, mqtt5_props, NetzBroker,
+        expected_connack, expect_packet,
+    )
+    proxy_v2_bad.run(
         args.broker, mqtt_packets, mqtt5_props, NetzBroker,
         expected_connack, expect_packet,
     )
