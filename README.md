@@ -1912,6 +1912,8 @@ zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only -
 # Strict shared-socket scaling matrix: each connection count runs both sender
 # directions and emits aggregate-retention/work-normalized summaries.
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=3 --connection-counts=1,4,16,64 --streams=1 --bytes-per-stream=1048576 --server-topology=shared
+# Capture one perf.data file per sender/count/run from the selected netz role.
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=1 --connections=64 --streams=1 --bytes-per-stream=16777216 --server-topology=shared --profile-role=server --profile-dir=/tmp/netz-quic-profile
 # Exercise shared-endpoint scheduling with 128 connections on one server UDP
 # socket. Shared netz/netz mode accepts up to 256 connections;
 # independent/cross-stack comparisons retain their 16-connection bound.
@@ -2165,6 +2167,12 @@ the ordinary exact checksum/completion/socket counters. The summary reports
 aggregate throughput relative to the first count, work-normalized elapsed time,
 and per-connection throughput without assuming that a fixed two-CPU layout can
 scale aggregate throughput linearly.
+For repeatable process-local profiling, pass
+`--profile-role=client|server --profile-dir=PATH` with `--netz-only`. Each
+sender/count/run writes a uniquely named `perf.data` file while preserving the
+same strict result verification. Aggregate checksum verification uses the exact
+256-byte period of its affine payload generator, so multi-GiB gates remain
+constant-time instead of replaying every logical byte in Python.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request

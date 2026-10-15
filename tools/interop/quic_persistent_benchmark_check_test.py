@@ -13,6 +13,28 @@ SPEC.loader.exec_module(CHECK)
 
 
 class PersistentBenchmarkCheckTest(unittest.TestCase):
+    def test_transfer_checksum_matches_bytewise_oracle_at_cycle_edges(self) -> None:
+        for byte_count in (0, 1, 17, 255, 256, 257, 1023, 1024, 1025):
+            for streams in (1, 4):
+                for connection in (0, 1, 63, 255):
+                    expected = sum(
+                        (
+                            offset * 131
+                            + stream * 17
+                            + connection * 29
+                        ) & 0xFF
+                        for stream in range(streams)
+                        for offset in range(byte_count)
+                    ) & ((1 << 64) - 1)
+                    self.assertEqual(
+                        expected,
+                        CHECK.transfer_checksum(
+                            byte_count,
+                            streams,
+                            connection,
+                        ),
+                    )
+
     def write_pair(self, directory: str, *, checksum: int | None = None):
         expected = sum(CHECK.transfer_checksum(256, 4, index) for index in range(4))
         value = expected if checksum is None else checksum

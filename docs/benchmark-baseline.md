@@ -3798,6 +3798,32 @@ connection-count evidence through 64 concurrent connections; it remains a
 same-application-shape two-process result rather than an equal-wire or
 multi-core scaling claim.
 
+The same runner can launch a selected netz endpoint under `perf record` with
+`--profile-role=client|server --profile-dir=PATH`; filenames include topology,
+connection count, sender and run so a matrix cannot silently overwrite another
+profile. The strict aggregate checksum remains independently recomputed, but
+the checker now uses the payload generator's exact arithmetic: multiplier 131
+is odd, so every 256-offset cycle visits all byte values once. Complete cycles
+therefore contribute 32,640 and only the at-most-255-byte tail is iterated. A
+bytewise oracle covers 0/1/255/256/257 and 1,023/1,024/1,025 boundaries across
+one/four streams and connection biases through 255. A real 64-connection,
+64-MiB-per-connection run then verified both 4-GiB directions and checksum
+547,608,330,240 without the former minutes-long Python pass.
+
+That profile support was used to evaluate sharing one monotonic receive
+timestamp across every datagram returned by one dispatcher batch. Baseline and
+candidate binaries were
+`ead8e956819208cb7eaa8069b9199e775fa010fa1771ff60fbe97bdb76cc2bed` and
+`82fd7ca2154890b303f301741af91848678188dd7c12ac0dcc7bdf5ef9eeef4d`.
+On a 64-connection 1-GiB upload profile, `clock_gettime` fell from 13.47% to
+11.30% and approximate cycles from 8,357,470,339 to 8,259,002,794 (-1.18%),
+but throughput moved from 89.655 to 89.217 MiB/s. Ten fixed-binary,
+order-alternated 64 x 1-MiB pairs likewise gave a 0.996272 upload median ratio
+with only 4/10 candidate wins; the reverse direction measured 1.008218 with
+8/10. The transport candidate was fully removed because it did not improve its
+target upload shape. The profiler and constant-time verifier remain as durable
+evidence infrastructure.
+
 A same-connection transmit-batch candidate was also evaluated and removed. It
 staged up to four resumable STREAM packets per socket submission using the
 existing exact protected/socket-visible prefix result. Five order-alternated

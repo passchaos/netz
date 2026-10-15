@@ -24,6 +24,8 @@ shared_receive_batch=${NETZ_QUIC_PERSISTENT_SHARED_RECEIVE_BATCH:-32}
 server_ack_every=${NETZ_QUIC_PERSISTENT_SERVER_ACK_EVERY:-}
 server_ack_delay_us=${NETZ_QUIC_PERSISTENT_SERVER_ACK_DELAY_US:-25000}
 netz_only=false
+profile_role=
+profile_dir=
 for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
@@ -42,10 +44,27 @@ for arg in "$@"; do
     --shared-receive-batch=*) shared_receive_batch=${arg#--shared-receive-batch=} ;;
     --server-ack-every=*) server_ack_every=${arg#--server-ack-every=} ;;
     --server-ack-delay-us=*) server_ack_delay_us=${arg#--server-ack-delay-us=} ;;
+    --profile-role=*) profile_role=${arg#--profile-role=} ;;
+    --profile-dir=*) profile_dir=${arg#--profile-dir=} ;;
     --netz-only) netz_only=true ;;
     *) echo "unknown persistent benchmark option: $arg" >&2; exit 2 ;;
   esac
 done
+if [[ -n $profile_role || -n $profile_dir ]]; then
+  if [[ $profile_role != client && $profile_role != server ]]; then
+    echo 'profile-role must be client or server' >&2
+    exit 2
+  fi
+  if [[ -z $profile_dir || $netz_only != true ]]; then
+    echo 'profiling requires --profile-dir and --netz-only' >&2
+    exit 2
+  fi
+  if ! command -v perf >/dev/null 2>&1; then
+    echo 'perf not found' >&2
+    exit 127
+  fi
+  mkdir -p "$profile_dir"
+fi
 if [[ -z $server_ack_every ]]; then
   if [[ $server_topology == shared ]]; then
     server_ack_every=4
@@ -237,6 +256,7 @@ run_pair() {
     effective_ack_delay_us=$server_ack_delay_us
   fi
   local pair_dir="$work/$mode-$topology-connections-$connection_count-$role_pair-$sender-$outer_run"
+  local profile_stem="$mode-$topology-connections-$connection_count-$sender-run-$outer_run"
   mkdir -p "$pair_dir"
   local mode_connections=$connection_count mode_streams=$streams warmup=0 iterations=1
   if [[ $mode == echo ]]; then
@@ -269,7 +289,15 @@ run_pair() {
   done
 
   if [[ $server_impl == netz ]]; then
-    timeout 300s taskset -c "$server_cpu" "$netz_bench" server \
+    local -a server_command=(taskset -c "$server_cpu" "$netz_bench")
+    if [[ $profile_role == server ]]; then
+      server_command=(
+        perf record -o "$profile_dir/$profile_stem-server.perf"
+        -F 999 -e cycles:u --call-graph dwarf --
+        taskset -c "$server_cpu" "$netz_bench"
+      )
+    fi
+    timeout 300s "${server_command[@]}" server \
       "${common[@]}" >"$pair_dir/server.log" 2>&1 &
     server_pid=$!
     ports=$(wait_for_ports "$server_pid" "$pair_dir/server.log" NETZ_QUIC_PERSISTENT_PORTS "$mode_connections")
@@ -285,7 +313,15 @@ run_pair() {
   fi
 
   if [[ $client_impl == netz ]]; then
-    timeout 300s taskset -c "$client_cpu" "$netz_bench" client \
+    local -a client_command=(taskset -c "$client_cpu" "$netz_bench")
+    if [[ $profile_role == client ]]; then
+      client_command=(
+        perf record -o "$profile_dir/$profile_stem-client.perf"
+        -F 999 -e cycles:u --call-graph dwarf --
+        taskset -c "$client_cpu" "$netz_bench"
+      )
+    fi
+    timeout 300s "${client_command[@]}" client \
       "--ports=$ports" "--ca=$ca" "${common[@]}" \
       >"$pair_dir/client.log" 2>&1
   else
@@ -312,6 +348,9 @@ run_pair() {
 }
 
 echo "benchmark_cpu_layout=client:$client_cpu,server:$server_cpu samples=$samples"
+if [[ -n $profile_role ]]; then
+  echo "benchmark_profile_role=$profile_role profile_dir=$profile_dir"
+fi
 pairs=(
   'netz-client+quic-go-server:netz:quic-go'
   'quic-go-client+quic-go-server:quic-go:quic-go'

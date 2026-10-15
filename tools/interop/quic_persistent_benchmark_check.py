@@ -63,11 +63,21 @@ def endpoint_ios(role_pair: str) -> tuple[str, str]:
 
 
 def transfer_checksum(bytes_per_stream: int, streams: int, connection: int) -> int:
-    return sum(
-        (offset * 131 + stream * 17 + connection * 29) & 0xFF
-        for stream in range(streams)
-        for offset in range(bytes_per_stream)
-    ) & ((1 << 64) - 1)
+    # 131 is odd, so offset * 131 visits every byte exactly once per
+    # 256-offset cycle. Keep the verifier exact without iterating over a
+    # potentially multi-GiB benchmark payload; only the final partial cycle
+    # depends on the stream/connection bias.
+    full_cycles, tail = divmod(bytes_per_stream, 256)
+    cycle_sum = 255 * 256 // 2
+    total = 0
+    for stream in range(streams):
+        bias = stream * 17 + connection * 29
+        total += full_cycles * cycle_sum
+        total += sum(
+            (offset * 131 + bias) & 0xFF
+            for offset in range(tail)
+        )
+    return total & ((1 << 64) - 1)
 
 
 def echo_checksum(rounds: int, payload_bytes: int) -> int:
