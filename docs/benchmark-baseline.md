@@ -4690,6 +4690,40 @@ verified 16,777,216 bytes and status total 800; those binaries hashed to
 The implementation was removed;
 these overlapping results do not justify adding another internal API parameter.
 
+A later profile attributed roughly 2.8% of the one-packet send microbenchmark
+to compiler-generated `memcpy` below `prepareFramesForSend`. Three narrower
+forms were tested rather than assuming that symbol attribution identified the
+copied object. Borrowing the complete `Frame` union reduced one encoding-side
+copy but left the prepare-side share at roughly 3.5%; ten CPU-0 fixed-binary
+pairs put its sequential candidate/baseline median near 0.995, with the batch
+control neutral. Replacing the private `PreparedFrames` return with caller
+storage likewise left about 3.1% under prepare and produced a 1.000 sequential
+paired median with 5/10 wins. Both forms were removed. Their baseline and
+candidate send-benchmark SHA-256 values were respectively
+`9389c03126434984cd3cc4c7eed7c5dc6087fc702331d7ee0803779253cc0758` /
+`43bae52464b17b5661435682e1d566ce8fc5a6ea81f80c04507581cc2df53adc`
+and
+`9389c03126434984cd3cc4c7eed7c5dc6087fc702331d7ee0803779253cc0758` /
+`ddf823af5d30a5ac2382ad508e1db9eb0fed848b9a1149ab803e859852cee469`.
+
+The final form specialized only the common STREAM length calculation. AArch64
+disassembly proved that it avoided the former 80-byte `Frame` load/store before
+`wireLen`, while every other frame kept the general validation path. Ten fixed
+send-microbenchmark pairs measured a 0.992 sequential paired median with 7/10
+wins; the batch control remained neutral. The baseline/candidate hashes were
+`9389c03126434984cd3cc4c7eed7c5dc6087fc702331d7ee0803779253cc0758` and
+`4c1b863dd2fc79ec179ce43bd86656d76235eb044650a03c7ada36617b611e55`.
+That structural improvement still did not survive the complete workload:
+seventeen CPU-0/1, order-alternated 64 x 1-MiB pairs produced a 1.001
+server-sender paired median with 11/17 wins and a 1.003 client-sender median
+with 9/17. Persistent baseline/candidate hashes were
+`0e4ed798c8896590d664bcdbbd4dccb4a4d52f87d99ff6ea5614d0bb973e19d9` and
+`5bb677fc334adb43f35bcded445e951bf252165f891c129ba27a45a2a2d55abc`.
+Every arm verified 67,108,864 bytes, checksum 8,556,380,160, all 64
+connections, and the completion exchange. The candidate was fully removed:
+avoiding one compiler-generated metadata copy is not retained when both
+end-to-end sender directions remain neutral.
+
 ### Raw QUIC mixed FIN/reset recovery versus quic-go
 
 The separate process gate below exercises terminal stream churn instead of
