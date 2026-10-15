@@ -5035,6 +5035,30 @@ connections/s (0.24% higher); P99 was effectively neutral at 687.571 versus
 688.497 us. This supports a small bounded handshake gain alongside the exact
 allocation reduction, not a general cross-stack latency claim.
 
+Five remaining 182-byte allocation sites were then resolved by conditional
+breakpoints: server Finished, client Finished, the assembled client flight, and
+the CRYPTO reassembler's data/presence arrays. Finished now has a 52-byte
+caller-buffer encoder covering SHA-256, SHA-384, and SM3. The server writes its
+Finished directly into the existing flight; an unauthenticated client sends
+the stack-encoded Finished directly, while mTLS retains one exact-capacity
+owned fallback for Certificate plus CertificateVerify plus Finished. SHA-384
+caller-buffer equivalence, short-buffer rejection, ordinary handshakes, and
+mutual TLS protected-data exchange cover both branches. The two reassembler
+allocations remain for a separate lifecycle change.
+
+A CPU-0 100-connection allocation pair reduced calls from 6,401 to 6,101,
+exactly three per connection (4.7%), cumulative bytes from 7,083,159 to
+7,028,594 (0.77%), and peak live bytes from 56,213 to 56,031; both runs ended
+at zero live bytes. Fixed binaries were
+`1bc8ad59b6e817c6b3ab3ff0ce8cdaf237f83bca2fbb7f07f3437dc6f7ae0837`
+and
+`ea16bad1d60ebcebe117e4d5756ca4dbeeb4cff614c62ed17a8c95e6f37e26bd`;
+benchmark ELF `.text` fell by 1,812 bytes. Twenty 1,000-connection blocks
+formed ten mirrored pairs: candidate P50 improved in nine, with a 576.338 to
+575.273 us midpoint median (0.18%). Rate won six pairs and P99 moved in both
+directions, so only the exact allocation/code reduction and bounded P50 support
+are retained.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256

@@ -1535,6 +1535,20 @@ fn clientOptionsBefore(
     return bounded;
 }
 
+noinline fn clientFlightLen(
+    certificate_len: usize,
+    certificate_verify_len: usize,
+    finished_len: usize,
+) std.mem.Allocator.Error!usize {
+    const prefix_len = std.math.add(
+        usize,
+        certificate_len,
+        certificate_verify_len,
+    ) catch return error.OutOfMemory;
+    return std.math.add(usize, prefix_len, finished_len) catch
+        return error.OutOfMemory;
+}
+
 fn connectAttempt(
     endpoint: *quic.runtime.Endpoint,
     reader: *datagram_reader.Reader,
@@ -2172,35 +2186,49 @@ fn connectAttempt(
             .client,
         );
     }
-    var client_flight: std.ArrayList(u8) = .empty;
-    defer client_flight.deinit(endpoint.allocator);
-    try client_flight.appendSlice(
-        endpoint.allocator,
-        client_certificate.items,
-    );
-    try client_flight.appendSlice(
-        endpoint.allocator,
-        client_certificate_verify.items,
-    );
-    const client_finished_hash = transcript.digestAfter(client_flight.items);
+    var client_transcript = transcript;
+    client_transcript.append(client_certificate.items);
+    client_transcript.append(client_certificate_verify.items);
+    const client_finished_hash = client_transcript.digest();
     const client_verify = try quic.tls_client_hello
         .computeFinishedVerifyDataForHash(
         handshake.client_handshake_traffic_secret,
         client_finished_hash,
     );
-    var client_finished: std.ArrayList(u8) = .empty;
-    defer client_finished.deinit(endpoint.allocator);
-    try quic.tls_client_hello.writeFinishedForHash(
-        &client_finished,
-        endpoint.allocator,
+    var client_finished_storage: [
+        quic.tls_client_hello
+            .max_finished_message_len
+    ]u8 = undefined;
+    const client_finished = try quic.tls_client_hello.writeFinishedInto(
+        &client_finished_storage,
         client_verify,
     );
-    try client_flight.appendSlice(
-        endpoint.allocator,
-        client_finished.items,
-    );
-    transcript.append(client_flight.items);
-    const complete_transcript_hash = transcript.digest();
+    client_transcript.append(client_finished);
+    const complete_transcript_hash = client_transcript.digest();
+    var client_flight_owned: std.ArrayList(u8) = .empty;
+    defer client_flight_owned.deinit(endpoint.allocator);
+    const client_flight = if (client_certificate.items.len == 0 and
+        client_certificate_verify.items.len == 0)
+        client_finished
+    else flight: {
+        const flight_len = try clientFlightLen(
+            client_certificate.items.len,
+            client_certificate_verify.items.len,
+            client_finished.len,
+        );
+        try client_flight_owned.ensureTotalCapacityPrecise(
+            endpoint.allocator,
+            flight_len,
+        );
+        client_flight_owned.appendSliceAssumeCapacity(
+            client_certificate.items,
+        );
+        client_flight_owned.appendSliceAssumeCapacity(
+            client_certificate_verify.items,
+        );
+        client_flight_owned.appendSliceAssumeCapacity(client_finished);
+        break :flight client_flight_owned.items;
+    };
     var client_handshake_send = retransmit.HandshakeFlight{
         .endpoint = endpoint,
         .peer = server_initial.from,
@@ -2214,7 +2242,7 @@ fn connectAttempt(
                 endpoint.io,
                 peer_transport_parameters.grease_quic_bit,
             ),
-            .crypto_data = client_flight.items,
+            .crypto_data = client_flight,
             .max_crypto_frame_data_len = options.max_crypto_frame_data_len,
         },
     };
@@ -3010,15 +3038,13 @@ fn acceptInternal(
         handshake.server_handshake_traffic_secret,
         server_finished_hash,
     );
-    var server_finished: std.ArrayList(u8) = .empty;
-    defer server_finished.deinit(endpoint.allocator);
+    const server_finished_offset = server_flight.items.len;
     try quic.tls_client_hello.writeFinishedForHash(
-        &server_finished,
+        &server_flight,
         endpoint.allocator,
         server_verify,
     );
-    try server_flight.appendSlice(endpoint.allocator, server_finished.items);
-    transcript.append(server_finished.items);
+    transcript.append(server_flight.items[server_finished_offset..]);
     const application_transcript_hash = transcript.digest();
     var send_context = retransmit.InitialHandshakeFlight{
         .endpoint = endpoint,

@@ -756,6 +756,17 @@ pub fn parseFinished(bytes: []const u8) Error![32]u8 {
     return verify_data;
 }
 
+/// Largest encoded TLS 1.3 Finished message across supported transcript hashes.
+pub const max_finished_message_len = 4 + quic.tls.secret.max_len;
+
+/// Encode one Finished message into caller-owned storage.
+pub fn writeFinishedInto(
+    out: []u8,
+    verify_data: quic.tls.secret.Secret,
+) Error![]u8 {
+    return writeFinishedBytesInto(out, verify_data.bytes());
+}
+
 pub fn writeFinishedForHash(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -1561,13 +1572,28 @@ fn writeFinishedBytes(
     allocator: std.mem.Allocator,
     verify_data: []const u8,
 ) Error!void {
-    if (verify_data.len > std.math.maxInt(u24)) return error.InvalidFinished;
-    try list.ensureUnusedCapacity(allocator, 4 + verify_data.len);
-    list.appendAssumeCapacity(handshake_type_finished);
-    list.appendAssumeCapacity(@truncate(verify_data.len >> 16));
-    list.appendAssumeCapacity(@truncate(verify_data.len >> 8));
-    list.appendAssumeCapacity(@truncate(verify_data.len));
-    list.appendSliceAssumeCapacity(verify_data);
+    var storage: [max_finished_message_len]u8 = undefined;
+    try list.appendSlice(
+        allocator,
+        try writeFinishedBytesInto(&storage, verify_data),
+    );
+}
+
+fn writeFinishedBytesInto(
+    out: []u8,
+    verify_data: []const u8,
+) Error![]u8 {
+    if (verify_data.len > quic.tls.secret.max_len) {
+        return error.InvalidFinished;
+    }
+    const message_len = 4 + verify_data.len;
+    if (out.len < message_len) return error.BufferTooShort;
+    out[0] = handshake_type_finished;
+    out[1] = @truncate(verify_data.len >> 16);
+    out[2] = @truncate(verify_data.len >> 8);
+    out[3] = @truncate(verify_data.len);
+    @memcpy(out[4..message_len], verify_data);
+    return out[0..message_len];
 }
 
 fn readU24(cursor: *wire.Cursor) !usize {

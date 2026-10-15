@@ -659,6 +659,19 @@ test "QUIC TLS runtime SHA-384 secrets derive AES-256 packet keys and Finished" 
         std.testing.allocator,
         finished,
     );
+    var finished_storage: [target.max_finished_message_len]u8 = undefined;
+    const finished_direct = try target.writeFinishedInto(
+        &finished_storage,
+        finished,
+    );
+    try std.testing.expectEqualSlices(u8, encoded.items, finished_direct);
+    try std.testing.expectError(
+        error.BufferTooShort,
+        target.writeFinishedInto(
+            finished_storage[0 .. finished_direct.len - 1],
+            finished,
+        ),
+    );
     const parsed = try target.parseFinishedForHash(
         encoded.items,
         .sha384,

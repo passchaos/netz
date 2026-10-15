@@ -2260,8 +2260,16 @@ and plaintext share one allocation instead of separately owned slices. A real
 Ten fixed-binary mirrored pairs all improved P50 and rate; midpoint medians
 moved by 0.27% and 0.24%, while P99 remained neutral. Fail-first OOM and
 single-allocation tests cover all three packet types. Remaining handshake work
-is online crypto/key-schedule cost and tail scheduling rather than long-packet
-ownership churn.
+was online crypto/key-schedule cost and tail scheduling rather than long-packet
+ownership churn. Finished now also encodes into caller storage: the server
+appends directly to its existing flight, the ordinary client sends its stack
+message, and mTLS retains one exact owned fallback. A 100-connection run fell
+from 6,401 to 6,101 allocations (three per connection), reduced cumulative
+bytes 0.77%, and retained zero live bytes. Ten fixed-binary mirrored pairs gave
+nine P50 wins and a 0.18% midpoint reduction; rate and P99 were mixed, so they
+are not promoted. SHA-384, short-buffer, ordinary, and mutual-TLS tests cover
+the caller-storage and fallback branches. The CRYPTO reassembler's two small
+data/presence allocations are the next distinct ownership target.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
