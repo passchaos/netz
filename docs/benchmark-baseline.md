@@ -3171,6 +3171,34 @@ All netz numbers in the tables above predate the zio migration and remain
 historical `std.Io.Threaded` baselines. They must not be cited as current zio
 performance; a fresh fixed-binary, CPU-pinned, odd-sample run is required.
 
+A fresh zio-era process run on 2026-10-15 now supplies a bounded current
+baseline for the four-stream QUIC v1 shape. The Jetson `aarch64` host ran Linux
+`6.8.12-1021-rt-tegra`, Zig 0.16.0, Go 1.27.2, and pinned client/server
+processes to CPUs 0/1. Each role pair completed two warmups and five measured
+fresh certificate-verified connections, with four 1-MiB streams, 16-KiB
+requested application chunks (1,152-byte effective chunks), 1-MiB stream
+windows, disabled netz GSO/GRO, exact 4,194,304-byte/checksum verification, and
+independent server-completion records:
+
+| Sender / fixed peer | Median MiB/s | Range MiB/s |
+|---|---:|---:|
+| netz client / quic-go server, upload | 145.737 | 139.266-166.578 |
+| quic-go client / netz server, upload | 148.170 | 148.030-149.207 |
+| quic-go server / netz client, download | 65.760 | 55.852-73.717 |
+| netz server / quic-go client, download | 162.458 | 152.796-167.907 |
+
+The result records attribute `implementation` to the sender. Consequently the
+lower download row measures quic-go's server send path, not netz's client
+receive path; a candidate that drained each retained UDP batch before the
+aggregate HTTP/3 ready-stream scan left that row unchanged (64.584 to 64.805
+MiB/s in matched one-sample smokes) and was removed. The client-upload medians
+are effectively tied within the wide netz range, while the netz server sender
+is 2.47x the quic-go server median in this same-application-shape capture.
+Because the four role pairs ran sequentially rather than in an odd ABBA
+fixed-peer schedule and their wire shapes remain unequal, this is current
+directional evidence and a corrected attribution baseline, not a general
+cross-stack superiority claim.
+
 ### Allocation / peak-live evidence
 
 `bench-http3-handshake-transfer` supports `--stats`, which wraps the benchmark's
