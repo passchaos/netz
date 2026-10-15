@@ -2251,7 +2251,17 @@ coverage. Four of four short-block instruction pairs improved by 0.08% at the
 midpoint median, while complete-handshake P50 won only three of four and had a
 slightly worse four-block midpoint. This retains the exact copy/stack benefit
 without promoting noisy end-to-end latency. The remaining handshake targets
-are packet/key-schedule work and tail scheduling outside these removed returns.
+were packet/key-schedule work and tail scheduling outside these removed
+returns. Long-header open now additionally retains one mutable packet copy and
+decrypts Initial, Handshake, and 0-RTT payloads in place, so DCID, SCID, token,
+and plaintext share one allocation instead of separately owned slices. A real
+100-connection run reduced allocations from 7,901 to 6,401 (15 per connection,
+19.0%) and cumulative bytes 5.2%, with zero live bytes and neutral peak storage.
+Ten fixed-binary mirrored pairs all improved P50 and rate; midpoint medians
+moved by 0.27% and 0.24%, while P99 remained neutral. Fail-first OOM and
+single-allocation tests cover all three packet types. Remaining handshake work
+is online crypto/key-schedule cost and tail scheduling rather than long-packet
+ownership churn.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,

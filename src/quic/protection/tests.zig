@@ -26,6 +26,15 @@ fn longHeaderFirstByteForTest(
     return 0xc0 | (type_bits << 4) | @as(u8, @intCast(packet_number_len - 1));
 }
 
+fn expectSliceInsideStorage(storage: []const u8, slice: []const u8) !void {
+    try std.testing.expect(slice.len != 0);
+    const storage_start = @intFromPtr(storage.ptr);
+    const storage_end = storage_start + storage.len;
+    const slice_start = @intFromPtr(slice.ptr);
+    try std.testing.expect(slice_start >= storage_start);
+    try std.testing.expect(slice_start + slice.len <= storage_end);
+}
+
 fn appendTruncatedPacketNumberForTest(
     list: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
@@ -679,6 +688,141 @@ test "QUIC Handshake packet seal/open roundtrip" {
     try std.testing.expectEqualSlices(u8, &dcid, opened.destination_connection_id);
     try std.testing.expectEqualSlices(u8, &scid, opened.source_connection_id);
     try std.testing.expectEqualStrings(payload, opened.payload);
+}
+
+test "QUIC allocating long packet open owns one co-located storage" {
+    const allocator = std.testing.allocator;
+    const initial_dcid = [_]u8{ 0x71, 0x72, 0x73, 0x74 };
+    const scid = [_]u8{ 0x81, 0x82, 0x83, 0x84 };
+    const initial_keys = protection.deriveInitialSecrets(&initial_dcid).client;
+    const traffic_keys = protection.deriveAes128Keys(
+        [_]u8{0x75} ** protection.secret_len,
+    );
+    const initial = try protection.sealInitialPacket(allocator, initial_keys, .{
+        .destination_connection_id = &initial_dcid,
+        .source_connection_id = &scid,
+        .token = "token",
+        .packet_number = 1,
+        .payload = "initial",
+    });
+    defer allocator.free(initial);
+    const handshake = try protection.sealHandshakePacket(allocator, traffic_keys, .{
+        .destination_connection_id = &initial_dcid,
+        .source_connection_id = &scid,
+        .packet_number = 2,
+        .payload = "handshake",
+    });
+    defer allocator.free(handshake);
+    const zero_rtt = try protection.sealZeroRttPacket(allocator, traffic_keys, .{
+        .destination_connection_id = &initial_dcid,
+        .source_connection_id = &scid,
+        .packet_number = 3,
+        .payload = "zero-rtt",
+    });
+    defer allocator.free(zero_rtt);
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{});
+    const counted = counting.allocator();
+    var opened_initial = try protection.openInitialPacket(
+        counted,
+        initial_keys,
+        initial,
+        0,
+    );
+    defer opened_initial.deinit(counted);
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+    try expectSliceInsideStorage(
+        opened_initial.storage,
+        opened_initial.destination_connection_id,
+    );
+    try expectSliceInsideStorage(
+        opened_initial.storage,
+        opened_initial.source_connection_id,
+    );
+    try expectSliceInsideStorage(opened_initial.storage, opened_initial.token);
+    try expectSliceInsideStorage(opened_initial.storage, opened_initial.payload);
+
+    var opened_handshake = try protection.openHandshakePacket(
+        counted,
+        traffic_keys,
+        handshake,
+        0,
+    );
+    defer opened_handshake.deinit(counted);
+    try std.testing.expectEqual(@as(usize, 2), counting.allocations);
+    try expectSliceInsideStorage(
+        opened_handshake.storage,
+        opened_handshake.destination_connection_id,
+    );
+    try expectSliceInsideStorage(
+        opened_handshake.storage,
+        opened_handshake.source_connection_id,
+    );
+    try expectSliceInsideStorage(
+        opened_handshake.storage,
+        opened_handshake.payload,
+    );
+
+    var opened_zero_rtt = try protection.openZeroRttPacket(
+        counted,
+        traffic_keys,
+        zero_rtt,
+        0,
+    );
+    defer opened_zero_rtt.deinit(counted);
+    try std.testing.expectEqual(@as(usize, 3), counting.allocations);
+    try expectSliceInsideStorage(
+        opened_zero_rtt.storage,
+        opened_zero_rtt.destination_connection_id,
+    );
+    try expectSliceInsideStorage(
+        opened_zero_rtt.storage,
+        opened_zero_rtt.source_connection_id,
+    );
+    try expectSliceInsideStorage(
+        opened_zero_rtt.storage,
+        opened_zero_rtt.payload,
+    );
+
+    var fail_initial = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        protection.openInitialPacket(
+            fail_initial.allocator(),
+            initial_keys,
+            initial,
+            0,
+        ),
+    );
+    var fail_handshake = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        protection.openHandshakePacket(
+            fail_handshake.allocator(),
+            traffic_keys,
+            handshake,
+            0,
+        ),
+    );
+    var fail_zero_rtt = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        protection.openZeroRttPacket(
+            fail_zero_rtt.allocator(),
+            traffic_keys,
+            zero_rtt,
+            0,
+        ),
+    );
 }
 
 test "QUIC protected long packet peek splits coalesced Initial and Handshake" {

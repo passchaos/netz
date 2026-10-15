@@ -279,6 +279,8 @@ pub const InitialPacketOptions = struct {
 };
 
 pub const OpenedInitialPacket = struct {
+    /// The single owned mutable packet backing every slice below.
+    storage: []u8,
     version: u32,
     destination_connection_id: []u8,
     source_connection_id: []u8,
@@ -288,10 +290,7 @@ pub const OpenedInitialPacket = struct {
     payload: []u8,
 
     pub fn deinit(self: *OpenedInitialPacket, allocator: std.mem.Allocator) void {
-        allocator.free(self.destination_connection_id);
-        allocator.free(self.source_connection_id);
-        allocator.free(self.token);
-        allocator.free(self.payload);
+        allocator.free(self.storage);
         self.* = undefined;
     }
 };
@@ -307,6 +306,8 @@ pub const HandshakePacketOptions = struct {
 };
 
 pub const OpenedHandshakePacket = struct {
+    /// The single owned mutable packet backing every slice below.
+    storage: []u8,
     version: u32,
     destination_connection_id: []u8,
     source_connection_id: []u8,
@@ -315,9 +316,7 @@ pub const OpenedHandshakePacket = struct {
     payload: []u8,
 
     pub fn deinit(self: *OpenedHandshakePacket, allocator: std.mem.Allocator) void {
-        allocator.free(self.destination_connection_id);
-        allocator.free(self.source_connection_id);
-        allocator.free(self.payload);
+        allocator.free(self.storage);
         self.* = undefined;
     }
 };
@@ -333,6 +332,8 @@ pub const ZeroRttPacketOptions = struct {
 };
 
 pub const OpenedZeroRttPacket = struct {
+    /// The single owned mutable packet backing every slice below.
+    storage: []u8,
     version: u32,
     destination_connection_id: []u8,
     source_connection_id: []u8,
@@ -341,9 +342,7 @@ pub const OpenedZeroRttPacket = struct {
     payload: []u8,
 
     pub fn deinit(self: *OpenedZeroRttPacket, allocator: std.mem.Allocator) void {
-        allocator.free(self.destination_connection_id);
-        allocator.free(self.source_connection_id);
-        allocator.free(self.payload);
+        allocator.free(self.storage);
         self.* = undefined;
     }
 };
@@ -1290,7 +1289,7 @@ pub fn openInitialPacketWithFixedBitPolicy(
         return error.InvalidCipherSuite;
     }
     const bytes = try allocator.dupe(u8, packet);
-    defer allocator.free(bytes);
+    errdefer allocator.free(bytes);
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
@@ -1304,12 +1303,12 @@ pub fn openInitialPacketWithFixedBitPolicy(
     if (protectedLongPacketType(protected_first_byte, version) != .initial) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(dcid_len);
-    const dcid = try cursor.readSlice(dcid_len);
+    const dcid = @constCast(try cursor.readSlice(dcid_len));
     const scid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(scid_len);
-    const scid = try cursor.readSlice(scid_len);
+    const scid = @constCast(try cursor.readSlice(scid_len));
     const token_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
-    const token = try cursor.readSlice(token_len);
+    const token = @constCast(try cursor.readSlice(token_len));
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
@@ -1329,26 +1328,25 @@ pub fn openInitialPacketWithFixedBitPolicy(
     const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
     const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
 
-    const payload = try allocator.alloc(u8, ciphertext.len);
-    errdefer allocator.free(payload);
-    try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+    try openPayload(
+        keys,
+        packet_number,
+        bytes[0..payload_offset],
+        ciphertext,
+        tag,
+        ciphertext,
+    );
     try validateLongHeaderReservedBits(bytes[0]);
 
-    const dcid_owned = try allocator.dupe(u8, dcid);
-    errdefer allocator.free(dcid_owned);
-    const scid_owned = try allocator.dupe(u8, scid);
-    errdefer allocator.free(scid_owned);
-    const token_owned = try allocator.dupe(u8, token);
-    errdefer allocator.free(token_owned);
-
     return .{
+        .storage = bytes,
         .version = version,
-        .destination_connection_id = dcid_owned,
-        .source_connection_id = scid_owned,
-        .token = token_owned,
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
+        .token = token,
         .packet_number = packet_number,
         .fixed_bit = (bytes[0] & 0x40) != 0,
-        .payload = payload,
+        .payload = ciphertext,
     };
 }
 
@@ -1488,8 +1486,8 @@ pub fn openHandshakePacketWithFixedBitPolicy(
     expected_packet_number: u64,
     allow_zero_fixed_bit: bool,
 ) Error!OpenedHandshakePacket {
-    var bytes = try allocator.dupe(u8, packet);
-    defer allocator.free(bytes);
+    const bytes = try allocator.dupe(u8, packet);
+    errdefer allocator.free(bytes);
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
@@ -1503,10 +1501,10 @@ pub fn openHandshakePacketWithFixedBitPolicy(
     if (protectedLongPacketType(protected_first_byte, version) != .handshake) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(dcid_len);
-    const dcid = try cursor.readSlice(dcid_len);
+    const dcid = @constCast(try cursor.readSlice(dcid_len));
     const scid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(scid_len);
-    const scid = try cursor.readSlice(scid_len);
+    const scid = @constCast(try cursor.readSlice(scid_len));
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
@@ -1526,23 +1524,24 @@ pub fn openHandshakePacketWithFixedBitPolicy(
     const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
     const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
 
-    const payload = try allocator.alloc(u8, ciphertext.len);
-    errdefer allocator.free(payload);
-    try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+    try openPayload(
+        keys,
+        packet_number,
+        bytes[0..payload_offset],
+        ciphertext,
+        tag,
+        ciphertext,
+    );
     try validateLongHeaderReservedBits(bytes[0]);
 
-    const dcid_owned = try allocator.dupe(u8, dcid);
-    errdefer allocator.free(dcid_owned);
-    const scid_owned = try allocator.dupe(u8, scid);
-    errdefer allocator.free(scid_owned);
-
     return .{
+        .storage = bytes,
         .version = version,
-        .destination_connection_id = dcid_owned,
-        .source_connection_id = scid_owned,
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
         .packet_number = packet_number,
         .fixed_bit = (bytes[0] & 0x40) != 0,
-        .payload = payload,
+        .payload = ciphertext,
     };
 }
 
@@ -1682,8 +1681,8 @@ pub fn openZeroRttPacketWithFixedBitPolicy(
     expected_packet_number: u64,
     allow_zero_fixed_bit: bool,
 ) Error!OpenedZeroRttPacket {
-    var bytes = try allocator.dupe(u8, packet);
-    defer allocator.free(bytes);
+    const bytes = try allocator.dupe(u8, packet);
+    errdefer allocator.free(bytes);
     if (bytes.len < 7 or (bytes[0] & 0x80) == 0) return error.InvalidInitialPacket;
 
     var cursor = wire.Cursor.init(bytes);
@@ -1697,10 +1696,10 @@ pub fn openZeroRttPacketWithFixedBitPolicy(
     if (protectedLongPacketType(protected_first_byte, version) != .zero_rtt) return error.InvalidInitialPacket;
     const dcid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(dcid_len);
-    const dcid = try cursor.readSlice(dcid_len);
+    const dcid = @constCast(try cursor.readSlice(dcid_len));
     const scid_len = try cursor.readByte();
     try validateLongHeaderConnectionIdLen(scid_len);
-    const scid = try cursor.readSlice(scid_len);
+    const scid = @constCast(try cursor.readSlice(scid_len));
     const protected_len = std.math.cast(usize, try varint.decode(&cursor)) orelse return error.InvalidInitialPacket;
     const pn_offset = cursor.pos;
     if (bytes.len < pn_offset + protected_len) return error.BufferTooShort;
@@ -1720,23 +1719,24 @@ pub fn openZeroRttPacketWithFixedBitPolicy(
     const ciphertext = bytes[payload_offset .. packet_end - aead_tag_len];
     const tag = bytes[packet_end - aead_tag_len .. packet_end][0..aead_tag_len].*;
 
-    const payload = try allocator.alloc(u8, ciphertext.len);
-    errdefer allocator.free(payload);
-    try openPayload(keys, packet_number, bytes[0..payload_offset], ciphertext, tag, payload);
+    try openPayload(
+        keys,
+        packet_number,
+        bytes[0..payload_offset],
+        ciphertext,
+        tag,
+        ciphertext,
+    );
     try validateLongHeaderReservedBits(bytes[0]);
 
-    const dcid_owned = try allocator.dupe(u8, dcid);
-    errdefer allocator.free(dcid_owned);
-    const scid_owned = try allocator.dupe(u8, scid);
-    errdefer allocator.free(scid_owned);
-
     return .{
+        .storage = bytes,
         .version = version,
-        .destination_connection_id = dcid_owned,
-        .source_connection_id = scid_owned,
+        .destination_connection_id = dcid,
+        .source_connection_id = scid,
         .packet_number = packet_number,
         .fixed_bit = (bytes[0] & 0x40) != 0,
-        .payload = payload,
+        .payload = ciphertext,
     };
 }
 

@@ -5006,6 +5006,35 @@ their absolute 388.634/370.013 us P50 movement remains host-load-sensitive.
 The retained result is the exact copy-count, stack, ownership, and instruction
 improvement.
 
+The next allocation pass follows Quinn and tquic's inline connection-ID
+ownership and quiche's borrowed-header approach without changing Netz's public
+slice fields. Initial, Handshake, and 0-RTT open now retain their one mutable
+protected-packet copy, remove header protection and AEAD in place, and expose
+DCID, SCID, token, and plaintext slices into that single owned allocation.
+The former payload allocation plus independent CID/token duplicates are gone.
+Focused tests require exactly one allocation for every long-packet open, verify
+that every returned slice lies inside the retained storage, cover all three
+packet types, and force fail-first OOM on each API.
+
+A CPU-0 100-connection authenticated two-endpoint allocation pair used
+baseline binary
+`d2bf2c5c1bbe5f237c5ef2bd265260a4f5571ffb22cd96718efbf45bbd526193`
+and candidate
+`1bc8ad59b6e817c6b3ab3ff0ce8cdaf237f83bca2fbb7f07f3437dc6f7ae0837`.
+Allocation calls fell from 7,901 to 6,401, exactly 15 fewer per connection
+(19.0%); cumulative requested bytes fell 7,472,185 to 7,083,159 (5.2%). Both
+runs ended at zero live bytes, peak live storage remained neutral at
+56,155/56,213 bytes, and benchmark ELF `.text` fell by 1,496 bytes. The
+largest stable 8,900-byte allocations remain the client/server handshake
+receive buffers that transfer directly into established one-RTT scratch.
+
+Twenty fixed-binary 1,000-connection blocks formed ten adjacent mirrored
+pairs. Candidate P50 and derived rate improved in all ten pairs. Their midpoint
+medians moved 577.088 to 575.524 us (0.27% lower) and 1,633.1 to 1,637.0
+connections/s (0.24% higher); P99 was effectively neutral at 687.571 versus
+688.497 us. This supports a small bounded handshake gain alongside the exact
+allocation reduction, not a general cross-stack latency claim.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
