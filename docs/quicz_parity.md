@@ -2244,8 +2244,14 @@ smoke pass. Short same-certificate fixed-binary blocks gave four of four P50
 wins and a 0.12% aggregate instruction reduction, but longer blocks moved with
 host load in both directions; copy, stack, code-size, and instruction evidence
 is causal, while complete-handshake latency remains a bounded observation.
-The remaining handshake targets are packet/key-schedule work and tail
-scheduling outside these removed returns.
+The follow-up caller-storage one-RTT initializer then reduced 9,016-byte copies
+inside `establishedConnection` from three to one and its fixed stack reservation
+from 35,696 to 17,968 bytes, with exhaustive allocation-failure rollback
+coverage. Four of four short-block instruction pairs improved by 0.08% at the
+midpoint median, while complete-handshake P50 won only three of four and had a
+slightly worse four-block midpoint. This retains the exact copy/stack benefit
+without promoting noisy end-to-end latency. The remaining handshake targets
+are packet/key-schedule work and tail scheduling outside these removed returns.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,

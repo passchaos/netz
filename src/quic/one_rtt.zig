@@ -1257,6 +1257,26 @@ pub const Connection = struct {
         config: ConnectionConfig,
         owned_receive_packet: ?[]u8,
     ) Error!Connection {
+        var connection: Connection = undefined;
+        try initWithReceivePacketStorageInto(
+            &connection,
+            endpoint,
+            config,
+            owned_receive_packet,
+        );
+        return connection;
+    }
+
+    /// Initialize established state directly in uninitialized caller storage.
+    /// On error every acquired resource is released and `out` remains invalid.
+    /// This form avoids moving the large connection value through intermediate
+    /// return slots during an integrated handshake.
+    pub fn initWithReceivePacketStorageInto(
+        out: *Connection,
+        endpoint: *quic.runtime.Endpoint,
+        config: ConnectionConfig,
+        owned_receive_packet: ?[]u8,
+    ) Error!void {
         var receive_packet_storage = owned_receive_packet;
         errdefer if (receive_packet_storage) |storage| {
             endpoint.allocator.free(storage);
@@ -1356,7 +1376,7 @@ pub const Connection = struct {
         );
         var scratch_owned = true;
         errdefer if (scratch_owned) scratch.deinit(endpoint.allocator);
-        var connection = Connection{
+        out.* = Connection{
             .endpoint = endpoint,
             .send_endpoint = endpoint,
             .config = stable_config,
@@ -1422,24 +1442,24 @@ pub const Connection = struct {
         scratch_owned = false;
         prepared_key_set = .{};
         peer_connection_id_storage_owned = false;
-        errdefer connection.deinit();
-        connection.fixed_bit_generator = try .init(
+        errdefer out.deinit();
+        out.fixed_bit_generator = try .init(
             endpoint.io,
             config.grease_fixed_bit,
         );
-        connection.pto_jitter_state = try .init(
+        out.pto_jitter_state = try .init(
             endpoint.io,
             config.pto_jitter_percentage,
         );
         if (config.local_stateless_reset_key) |key| {
-            try connection.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
+            try out.local_connection_ids.registerInitialWithStaticKey(config.local_connection_id, key);
         } else {
-            try connection.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
+            try out.local_connection_ids.registerInitial(config.local_connection_id, [_]u8{0} ** 16);
         }
-        try connection.peer_connection_ids.addInitial(
+        try out.peer_connection_ids.addInitial(
             config.peer_connection_id,
         );
-        connection.last_validated_peer_path = .init(
+        out.last_validated_peer_path = .init(
             config.peer,
             endpoint,
             config.peer_connection_id,
@@ -1447,13 +1467,13 @@ pub const Connection = struct {
             null,
         );
         if (config.peer_stateless_reset_token) |token| {
-            try connection.peer_connection_ids.setInitialStatelessResetToken(
+            try out.peer_connection_ids.setInitialStatelessResetToken(
                 token,
             );
         }
         if (config.local_endpoint == .client) {
             if (stable_config.peer_preferred_address) |preferred| {
-                try connection.peer_connection_ids.addWithLimit(
+                try out.peer_connection_ids.addWithLimit(
                     1,
                     preferred.connection_id,
                     preferred.stateless_reset_token,
@@ -1462,15 +1482,14 @@ pub const Connection = struct {
             }
         }
         if (config.tls_handshake_complete) {
-            connection.handshake_status.onTlsComplete(switch (config.local_endpoint) {
+            out.handshake_status.onTlsComplete(switch (config.local_endpoint) {
                 .client => .client,
                 .server => .server,
             });
         }
-        connection.applyCurrentPmtuToPath();
-        connection.observeConnectionStarted(null);
-        connection.observeParametersSet(null);
-        return connection;
+        out.applyCurrentPmtuToPath();
+        out.observeConnectionStarted(null);
+        out.observeParametersSet(null);
     }
 
     pub fn deinit(self: *Connection) void {

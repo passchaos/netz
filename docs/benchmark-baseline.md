@@ -4972,14 +4972,39 @@ rejected, retransmitted, socket-rejected, Retry, Version Negotiation, and replay
 and median UDP packet/byte shapes. Eight same-certificate fixed-Quinn-server
 short blocks used old/new/new/old/new/old/old/new order on CPU 0/1, with ten
 warmups and 100 measured connections. The candidate won all four adjacent
-mirrored P50 pairs
-by 22.4%, 16.4%, 5.9%, and 3.6%; aggregate client instructions had a 112.183M
+mirrored P50 pairs by 22.4%, 16.4%, 5.9%, and 3.6%; aggregate client
+instructions had a 112.183M
 baseline versus 112.044M candidate midpoint median (0.12% lower, three of four
 paired wins). Longer blocks and earlier cross-process blocks moved with host
 frequency/load, including one same-certificate long run in the opposite
 direction. The retained causal claim is therefore the eliminated copies,
 smaller stack/code, and modest instruction reduction; the full-handshake P50
 movement remains supporting rather than universal evidence.
+
+A follow-up keeps the ordinary value-returning one-RTT initializer but adds a
+caller-storage form for the integrated handshake. Its allocation, prepared-key,
+receive-scratch, connection-ID, random-generator, and preferred-address
+ownership all roll back through the completed output object after ownership is
+transferred; an exhaustive allocation-failure test covers that boundary.
+ReleaseFast disassembly of baseline
+`9055a6b20d5aec722ef4935b94d0c8233c6a82c3221214e6ce73847de2373648`
+and candidate
+`a1af6ddfd3afb982f88dc8c52754000f48e900c0b80521f9999e99e4adf6334e`
+reduced the 9,016-byte copies inside `establishedConnection` from three to one
+and its fixed stack reservation from 35,696 to 17,968 bytes (49.7%). The one
+remaining copy installs the finished `Connection` in the public value-returned
+`EstablishedConnection`; benchmark ELF `.text` increased by only 164 bytes.
+
+Eight same-certificate short blocks used the same mirrored order and counts as
+the preceding pass. Aggregate instructions fell in all four candidate pairs;
+the midpoint median moved 111.872M to 111.781M (0.08%). Complete-handshake P50
+won three pairs but lost the fourth, and the four-block midpoint moved 381.536
+to 386.555 us, so no full-handshake latency gain is claimed. Independent
+500-connection profiles passed exact wire/checksum validation and no longer
+attributed a sampled large-copy path directly to `establishedConnection`, but
+their absolute 388.634/370.013 us P50 movement remains host-load-sensitive.
+The retained result is the exact copy-count, stack, ownership, and instruction
+improvement.
 
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`

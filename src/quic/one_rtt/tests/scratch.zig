@@ -38,6 +38,88 @@ test "QUIC one-RTT connection omits plaintext staging scratch" {
     );
 }
 
+test "QUIC one-RTT in-place initialization owns adopted receive storage" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd3} ** quic.protection.secret_len,
+    );
+    const storage = try allocator.alloc(u8, 4096);
+    const storage_ptr = storage.ptr;
+    var connection: one_rtt.Connection = undefined;
+    try one_rtt.Connection.initWithReceivePacketStorageInto(
+        &connection,
+        &endpoint,
+        .{
+            .peer = endpoint.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "in-place-local",
+            .peer_connection_id = "in-place-peer",
+        },
+        storage,
+    );
+    defer connection.deinit();
+
+    try std.testing.expectEqual(
+        storage_ptr,
+        connection.scratch.receive_packet.allocatedSlice().ptr,
+    );
+    try std.testing.expectEqualStrings(
+        "in-place-peer",
+        connection.config.peer_connection_id,
+    );
+    try std.testing.expect(
+        connection.config.peer_connection_id.ptr ==
+            connection.peer_connection_id_storage.ptr,
+    );
+}
+
+test "QUIC one-RTT in-place initialization rolls back allocation failures" {
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        initConnectionInPlace,
+        .{threaded.io()},
+    );
+}
+
+fn initConnectionInPlace(allocator: std.mem.Allocator, io: std.Io) !void {
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xd4} ** quic.protection.secret_len,
+    );
+    var connection: one_rtt.Connection = undefined;
+    try one_rtt.Connection.initWithReceivePacketStorageInto(
+        &connection,
+        &endpoint,
+        .{
+            .peer = endpoint.address(),
+            .receive_keys = keys,
+            .send_keys = keys,
+            .local_connection_id = "allocation-local",
+            .peer_connection_id = "allocation-peer",
+        },
+        null,
+    );
+    defer connection.deinit();
+}
+
 test "QUIC one-RTT initialization consumes adopted receive storage on validation failure" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

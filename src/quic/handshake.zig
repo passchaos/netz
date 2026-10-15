@@ -4585,8 +4585,9 @@ fn establishedConnection(
     errdefer if (peer_certificate_chain) |*chain| chain.deinit();
     const transferred_receive_packet = owned_receive_packet;
     owned_receive_packet = null;
-    var connection = try quic.one_rtt.Connection
-        .initWithReceivePacketStorage(
+    var connection: quic.one_rtt.Connection = undefined;
+    try quic.one_rtt.Connection.initWithReceivePacketStorageInto(
+        &connection,
         endpoint,
         config.apply(
             version,
