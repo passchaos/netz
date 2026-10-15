@@ -2269,7 +2269,16 @@ bytes 0.77%, and retained zero live bytes. Ten fixed-binary mirrored pairs gave
 nine P50 wins and a 0.18% midpoint reduction; rate and P99 were mixed, so they
 are not promoted. SHA-384, short-buffer, ordinary, and mutual-TLS tests cover
 the caller-storage and fallback branches. The CRYPTO reassembler's two small
-data/presence allocations are the next distinct ownership target.
+data/presence allocations were the next distinct ownership target. It now
+shares STREAM's lazy packed bitmap: continuous CRYPTO bytes keep an implicit
+dense prefix, and only the first gap materializes presence words. Transactional
+OOM, matching overlap, sparse fill, and conflicting-data tests retain exact
+semantics. A real 100-connection run fell from 6,101 to 5,701 allocations
+(four per connection, 6.6%) and cumulative bytes 2.2%, with zero live bytes and
+an unchanged peak. Twenty fixed-binary mirrored pairs were timing-neutral at
+10/20 P50 and 9/20 rate wins, so only the deterministic allocation/state
+reduction is claimed. Remaining handshake work is online crypto/key-schedule
+cost and tail scheduling.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,

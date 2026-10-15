@@ -5059,6 +5059,28 @@ formed ten mirrored pairs: candidate P50 improved in nine, with a 576.338 to
 directions, so only the exact allocation/code reduction and bounded P50 support
 are retained.
 
+CRYPTO reassembly now reuses the STREAM receive bitmap's proven representation:
+an ordered prefix is implicit and consumes no presence allocation, while the
+first gap materializes packed machine words. Contiguous appends and matching
+overlap extensions stay implicit; retransmitted bytes are still compared before
+overwrite, sparse fills retain exact conflict detection, and buffer/bitmap
+capacity is reserved transactionally before either logical length changes.
+Focused regressions run the ordered path under a fail-first allocator, force
+gap-materialization OOM and retry, fill that gap, and retain the existing
+out-of-order/conflicting-data model coverage.
+
+An exact clean-`f06ca41e` baseline binary
+`23af254c95614aa8fb21393d1fd3a43c64657db87595694ee53926ec10315c42`
+and candidate
+`8316ef6ac7466204decff6bb69e8f545b167ce877623c5a0bda9005780220a4b`
+reduced a 100-connection run from 6,101 to 5,701 allocations, exactly four per
+connection (6.6%), and cumulative bytes from 7,028,594 to 6,873,454 (2.2%).
+Both ended at zero live bytes with the same 56,031-byte peak, and benchmark ELF
+`.text` changed by only -20 bytes. Forty fixed-binary 1,000-connection blocks
+formed twenty mirrored pairs: P50 won 10/20 and rate 9/20; pair midpoint ratios
+were 1.0002 and 0.9995. Complete-handshake timing is therefore neutral, while
+the allocation and sparse-state reductions are deterministic.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256

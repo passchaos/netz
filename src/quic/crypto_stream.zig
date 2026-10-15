@@ -1,5 +1,6 @@
 const std = @import("std");
 const quic = @import("mod.zig");
+const ReceivedBitmap = @import("stream/received_bitmap.zig").Bitmap;
 
 pub const Error = error{
     InvalidCryptoRange,
@@ -11,7 +12,7 @@ pub const Error = error{
 pub const Reassembler = struct {
     allocator: std.mem.Allocator,
     buffer: std.ArrayList(u8) = .empty,
-    received: std.ArrayList(bool) = .empty,
+    received: ReceivedBitmap = .{},
     read_offset: usize = 0,
     contiguous_end: usize = 0,
     max_buffered: usize,
@@ -31,7 +32,9 @@ pub const Reassembler = struct {
         const offset = std.math.cast(usize, frame.offset) orelse return error.InvalidCryptoRange;
         const end = std.math.add(usize, offset, frame.data.len) catch return error.InvalidCryptoRange;
         if (end > self.max_buffered) return error.CryptoBufferTooLarge;
-        if (end <= self.received.items.len and end <= self.contiguous_end) {
+        const old_len = self.received.len();
+        std.debug.assert(old_len == self.buffer.items.len);
+        if (end <= old_len and end <= self.contiguous_end) {
             if (!std.mem.eql(u8, self.buffer.items[offset..end], frame.data)) {
                 return error.ConflictingCryptoData;
             }
@@ -39,22 +42,34 @@ pub const Reassembler = struct {
         }
         for (frame.data, 0..) |byte, i| {
             const absolute = offset + i;
-            if (absolute >= self.received.items.len) break;
-            if (!self.received.items[absolute]) continue;
+            if (absolute >= old_len) break;
+            if (!self.received.isSet(absolute)) continue;
             if (self.buffer.items[absolute] != byte) return error.ConflictingCryptoData;
         }
-        if (end > self.buffer.items.len) {
-            const old_len = self.buffer.items.len;
-            try self.buffer.resize(self.allocator, end);
-            @memset(self.buffer.items[old_len..end], 0);
-            try self.received.resize(self.allocator, end);
-            @memset(self.received.items[old_len..end], false);
+        if (end > old_len) {
+            const fills_extension = offset <= old_len;
+            try self.buffer.ensureTotalCapacity(self.allocator, end);
+            try self.received.ensureResizeCapacity(
+                self.allocator,
+                end,
+                fills_extension,
+            );
+            self.buffer.items.len = end;
+            self.received.resizeAssumeCapacity(end, fills_extension);
+            if (offset > old_len) {
+                @memset(self.buffer.items[old_len..offset], 0);
+            }
         }
         @memcpy(self.buffer.items[offset..end], frame.data);
-        @memset(self.received.items[offset..end], true);
-        while (self.contiguous_end < self.received.items.len and self.received.items[self.contiguous_end]) {
-            self.contiguous_end += 1;
+        if (offset != old_len or end <= old_len) {
+            self.received.setRangeValue(
+                .{ .start = offset, .end = end },
+                true,
+            );
         }
+        self.contiguous_end = self.received.firstUnsetFrom(
+            self.contiguous_end,
+        );
     }
 
     pub fn available(self: Reassembler) []const u8 {
@@ -187,6 +202,69 @@ test "QUIC CRYPTO reassembler ignores empty no-op frames" {
 
     try reassembler.insert(.{ .offset = 0, .data = "hello" });
     try std.testing.expectEqualStrings("hello", reassembler.available());
+}
+
+test "QUIC ordered CRYPTO reassembly keeps an implicit dense prefix" {
+    const allocator = std.testing.allocator;
+    var reassembler = Reassembler.init(allocator, 16);
+    defer reassembler.deinit();
+    try reassembler.buffer.ensureTotalCapacity(allocator, 16);
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    reassembler.allocator = no_alloc.allocator();
+    try reassembler.insert(.{ .offset = 0, .data = "abcdefgh" });
+    try reassembler.insert(.{ .offset = 6, .data = "ghijklmnop" });
+    reassembler.allocator = allocator;
+
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        reassembler.received.materializedCapacity(),
+    );
+    try std.testing.expectEqual(@as(usize, 16), reassembler.received.len());
+    try std.testing.expectEqualStrings(
+        "abcdefghijklmnop",
+        reassembler.available(),
+    );
+}
+
+test "QUIC CRYPTO gap bitmap materialization is transactional" {
+    const allocator = std.testing.allocator;
+    var reassembler = Reassembler.init(allocator, 16);
+    defer reassembler.deinit();
+    try reassembler.buffer.ensureTotalCapacity(allocator, 16);
+    try reassembler.insert(.{ .offset = 0, .data = "abcd" });
+
+    var fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    reassembler.allocator = fail.allocator();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        reassembler.insert(.{ .offset = 8, .data = "ijkl" }),
+    );
+    reassembler.allocator = allocator;
+
+    try std.testing.expect(fail.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 4), reassembler.buffer.items.len);
+    try std.testing.expectEqual(@as(usize, 4), reassembler.received.len());
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        reassembler.received.materializedCapacity(),
+    );
+    try std.testing.expectEqualStrings("abcd", reassembler.available());
+
+    try reassembler.insert(.{ .offset = 8, .data = "ijkl" });
+    try std.testing.expect(
+        reassembler.received.materializedCapacity() != 0,
+    );
+    try std.testing.expectEqualStrings("abcd", reassembler.available());
+    try reassembler.insert(.{ .offset = 4, .data = "efgh" });
+    try std.testing.expectEqualStrings("abcdefghijkl", reassembler.available());
 }
 
 test "QUIC CRYPTO reassembler rejects conflicting duplicate bytes" {
