@@ -242,6 +242,68 @@ class PersistentBenchmarkSummaryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identical ACK policy"):
                 SUMMARY.compare_topologies(path, 3, 32, 4, 25000)
 
+    def test_shared_connection_scaling_requires_every_count_and_sender(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "results.log")
+            lines = []
+            values = {
+                (1, "client"): (24.0, 25.0, 26.0),
+                (1, "server"): (19.0, 20.0, 21.0),
+                (4, "client"): (78.0, 80.0, 82.0),
+                (4, "server"): (58.0, 60.0, 62.0),
+            }
+            for (connections, sender), samples in values.items():
+                for run, value in enumerate(samples, 1):
+                    lines.append(
+                        "record=result implementation=netz protocol=quic-stream "
+                        "mode=aggregate role_pair=netz-client+netz-server "
+                        f"sender_role={sender} result_owner=client run={run} "
+                        "client_io=zio-std-io server_io=zio-std-io "
+                        f"connections={connections} streams=1 "
+                        "bytes_per_stream=1024 "
+                        "timing_scope=stream-setup-through-verified-completion "
+                        "endpoint_topology=shared-server-udp "
+                        "server_receive_batch=32 server_ack_every=2 "
+                        "server_ack_delay_us=25000 "
+                        f"elapsed_ns=1000 logical_MiB_s={value:.3f} "
+                        "benchmark_scope=same-application-shape "
+                        "completion_exchange_verified=true complete=true"
+                    )
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            output = SUMMARY.summarize_scaling(
+                path, 3, "shared", [1, 4], 32, 2, 25000,
+            )
+            self.assertEqual(len(output), 8)
+            client = next(
+                line for line in output
+                if "record=connection-scaling" in line
+                and "sender_role=client" in line
+                and "connections=4" in line
+            )
+            self.assertIn("throughput_over_base=3.200", client)
+            self.assertIn("work_normalized_elapsed_over_base=0.312", client)
+            self.assertIn("median_per_connection_MiB_s=20.000", client)
+            server = next(
+                line for line in output
+                if "record=connection-scaling" in line
+                and "sender_role=server" in line
+                and "connections=4" in line
+            )
+            self.assertIn("throughput_over_base=3.000", server)
+            self.assertIn("work_normalized_elapsed_over_base=0.333", server)
+            self.assertIn("median_per_connection_MiB_s=15.000", server)
+
+            with self.assertRaisesRegex(ValueError, "strictly increasing"):
+                SUMMARY.summarize_scaling(path, 3, "shared", [4, 1])
+            with self.assertRaisesRegex(ValueError, "no aggregate"):
+                SUMMARY.summarize_scaling(path, 3, "shared", [1, 4, 16])
+
+    def test_connection_count_parser_rejects_empty_and_invalid_values(self) -> None:
+        self.assertEqual([1, 4, 16], SUMMARY.parse_connection_counts("1,4,16"))
+        for value in ("", "1,,4", "0,1", "one,4"):
+            with self.assertRaisesRegex(ValueError, "invalid connection counts"):
+                SUMMARY.parse_connection_counts(value)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1909,6 +1909,9 @@ zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --warmup=2 --iterations=5
 zig build bench-quic-quic-go -Doptimize=ReleaseFast -- --netz-only --streams=1 --warmup=0 --iterations=1 --bytes-per-stream=262144
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --mode=both --samples=5 --connections=4 --warmup=200 --iterations=5000 --payload-bytes=1024 --bytes-per-stream=1048576
 zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=3 --connections=4 --streams=1 --bytes-per-stream=1048576 --server-topology=independent
+# Strict shared-socket scaling matrix: each connection count runs both sender
+# directions and emits aggregate-retention/work-normalized summaries.
+zig build bench-quic-persistent-external -Doptimize=ReleaseFast -- --netz-only --mode=aggregate --samples=3 --connection-counts=1,4,16,64 --streams=1 --bytes-per-stream=1048576 --server-topology=shared
 # Exercise shared-endpoint scheduling with 128 connections on one server UDP
 # socket. Shared netz/netz mode accepts up to 256 connections;
 # independent/cross-stack comparisons retain their 16-connection bound.
@@ -2146,7 +2149,7 @@ that path from quic-go's netpoll runtime and make legacy backend records fail
 strict validation. It deliberately reports `same-application-shape`: endpoint
 workers share one process CPU, but this is not a shared-socket QUIC listener or
 an equal-wire comparison.
-Pass `--server-topology=shared` to benchmark the netz/netz client-upload shape
+Pass `--server-topology=shared` to benchmark both netz/netz sender directions
 with one server UDP socket and the production endpoint dispatcher. That mode
 uses a bounded caller-buffer receive drain (32 messages by default, selectable
 with `--shared-receive-batch=1..64`) and records the selected batch size in
@@ -2156,6 +2159,12 @@ support, but the server does not request sparser client ACKs, preserving the
 download control. Independent topology retains ACK/2. An explicit option still
 overrides either default; delays below 1 ms exercise the legacy local benchmark
 policy without sending ACK_FREQUENCY.
+Combine `--netz-only` with `--connection-counts=1,4,...` to run a strictly
+increasing shared- or independent-topology scaling matrix. Every count retains
+the ordinary exact checksum/completion/socket counters. The summary reports
+aggregate throughput relative to the first count, work-normalized elapsed time,
+and per-connection throughput without assuming that a fixed two-CPU layout can
+scale aggregate throughput linearly.
 
 `bench-http3-quic-go` runs certificate-verified HTTP/3 upload/download in both
 client/server role pairings, with a fresh connection and untimed ready request

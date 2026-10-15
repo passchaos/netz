@@ -2350,9 +2350,9 @@ reduction is claimed. Remaining handshake work is online crypto/key-schedule
 cost and tail scheduling.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
-   capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
-   and broader connection-count scaling. Persistent echo, four independent
-   connections, and a four-connection shared-server-socket event loop are now
+   capture, WebSocket/WebTransport allocation telemetry, and lossy/reordered
+   on-wire lifecycle churn. Persistent echo, four independent connections,
+   and one-socket shared-server scaling at 1/4/16/64 connections are now
    covered. The pinned zio backend now fulfills multi-slot `std.Io` UDP receive
    with native batching. A five-sample mirrored-order topology run measured
    shared/independent medians of 1.031x for client-sender and 1.052x for
@@ -2364,6 +2364,12 @@ cost and tail scheduling.
    mirrored-order topology gate. It fixes both sides to ACK-every=2 and 25 ms,
    then reports per-sender shared/independent median ratios after strict
    completion validation.
+   Its `--connection-counts=1,4,16,64 --server-topology=shared` companion runs
+   both sender roles at each size and reports aggregate retention without
+   assuming linear throughput on two fixed CPUs. A three-sample 1-MiB-per-
+   connection run retained 66.2%/89.0% of one-connection aggregate throughput
+   at 64 client/server-sender connections while verifying exact 64-MiB delivery
+   and all 64 completions in every arm.
    Complete-connection userspace UDP counters and the new loopback packet
    captures expose materially different wire shapes. Equalize GRO, ACK/pacing,
    packetization, and application stream

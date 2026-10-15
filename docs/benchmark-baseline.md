@@ -3776,6 +3776,28 @@ coverage rather than a directional throughput advantage. A separate four-
 connection/four-stream smoke verified 4 MiB, every FIN, checksum, and the
 DONE/DONE_ACK exchange in both directions.
 
+The fixed runner now accepts a strictly increasing
+`--connection-counts=1,4,...` matrix in netz-only aggregate mode. It executes
+both sender directions at every count, filters mixed result logs back to one
+shape before computing medians, and emits aggregate-throughput retention,
+work-normalized elapsed ratio, and per-connection throughput relative to the
+first count. It deliberately does not call linear aggregate throughput an
+ideal on a fixed two-CPU layout.
+
+A CPU-10/11 three-sample shared-server run used 1, 4, 16, and 64 connections,
+one 1-MiB stream per connection, one server UDP socket, receive batch 32, and
+ACK-every 4 with a 25-ms maximum delay. All 24 arms passed certificate, FIN,
+byte, checksum, socket/datagram/event-counter, and DONE/DONE_ACK validation.
+At 64 connections each direction transferred exactly 67,108,864 bytes with
+checksum 8,556,380,160. Client-sender median aggregate throughput was
+159.702, 163.320, 142.315, and 105.753 MiB/s, retaining 1.000x, 1.023x,
+0.891x, and 0.662x of the one-connection result. Server-sender medians were
+147.155, 143.308, 139.297, and 130.898 MiB/s, retaining 1.000x, 0.974x,
+0.947x, and 0.890x. The matrix closes the missing shared-socket
+connection-count evidence through 64 concurrent connections; it remains a
+same-application-shape two-process result rather than an equal-wire or
+multi-core scaling claim.
+
 A same-connection transmit-batch candidate was also evaluated and removed. It
 staged up to four resumable STREAM packets per socket submission using the
 existing exact protected/socket-visible prefix result. Five order-alternated
@@ -8099,11 +8121,6 @@ Hyper's freshness model without weakening deadline or timer semantics.
 
 ## Gaps before a completion audit can pass
 
-- Extend the new cross-process raw QUIC aggregate matrix into connection-count
-  scaling and a shared-socket event-loop shape. Persistent echo, four
-  independent connections, fresh handshakes, transfer loss/reordering, and
-  32/64-stream mixed FIN/reset churn are now covered in every relevant role
-  direction.
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
   host that permits pcap. The current complete-connection userspace UDP
   counters prove the existing shapes differ and therefore remain

@@ -9,6 +9,8 @@ fixture_dir="$repo_root/tools/interop/quic_go_module"
 modes=both
 samples=${NETZ_QUIC_PERSISTENT_SAMPLES:-5}
 connections=${NETZ_QUIC_PERSISTENT_CONNECTIONS:-4}
+connections_explicit=false
+connection_counts_text=
 echo_warmup=${NETZ_QUIC_PERSISTENT_ECHO_WARMUP:-200}
 echo_iterations=${NETZ_QUIC_PERSISTENT_ECHO_ITERATIONS:-5000}
 payload_bytes=${NETZ_QUIC_PERSISTENT_PAYLOAD_BYTES:-1024}
@@ -26,7 +28,8 @@ for arg in "$@"; do
   case $arg in
     --mode=*) modes=${arg#--mode=} ;;
     --samples=*) samples=${arg#--samples=} ;;
-    --connections=*) connections=${arg#--connections=} ;;
+    --connections=*) connections=${arg#--connections=}; connections_explicit=true ;;
+    --connection-counts=*) connection_counts_text=${arg#--connection-counts=} ;;
     --warmup=*) echo_warmup=${arg#--warmup=} ;;
     --iterations=*) echo_iterations=${arg#--iterations=} ;;
     --payload-bytes=*) payload_bytes=${arg#--payload-bytes=} ;;
@@ -72,6 +75,21 @@ if [[ $server_topology == compare ]] &&
   echo 'topology comparison requires identical ACK policy 2/25000' >&2
   exit 2
 fi
+if [[ -n $connection_counts_text ]]; then
+  if [[ $connections_explicit == true ]]; then
+    echo 'connections and connection-counts are mutually exclusive' >&2
+    exit 2
+  fi
+  if [[ $modes != aggregate || $netz_only != true ||
+        $server_topology == compare ]]; then
+    echo 'connection scaling requires aggregate netz-only one-topology mode' >&2
+    exit 2
+  fi
+  if [[ ! $connection_counts_text =~ ^[0-9]+(,[0-9]+)+$ ]]; then
+    echo 'connection-counts must be a comma-separated increasing list' >&2
+    exit 2
+  fi
+fi
 if [[ $server_topology == independent && $netz_only != true ]]; then
   if [[ ! -f $fixture_dir/raw/main.go ]]; then
     echo "repository-owned quic-go persistent fixture not found under $fixture_dir" >&2
@@ -93,8 +111,21 @@ max_connections=16
 if [[ $netz_only == true && $server_topology == shared ]]; then
   max_connections=256
 fi
-if (( samples < 1 || samples % 2 == 0 || connections < 1 ||
-      connections > max_connections ||
+connection_counts=("$connections")
+if [[ -n $connection_counts_text ]]; then
+  IFS=, read -r -a connection_counts <<<"$connection_counts_text"
+fi
+previous_connections=0
+for connection_count in "${connection_counts[@]}"; do
+  if [[ ! $connection_count =~ ^[0-9]+$ ]] ||
+     (( connection_count < 1 || connection_count > max_connections ||
+        connection_count <= previous_connections )); then
+    echo 'connection counts must be strictly increasing and in range' >&2
+    exit 2
+  fi
+  previous_connections=$connection_count
+done
+if (( samples < 1 || samples % 2 == 0 ||
       echo_warmup < 0 || echo_iterations < 1 || payload_bytes < 1 ||
       aggregate_bytes < 1 || chunk_bytes < 1 || chunk_bytes > aggregate_bytes ||
       stream_window < 1 || timeout_ms < 1 )); then
@@ -198,15 +229,16 @@ wait_for_ports() {
 run_pair() {
   local mode=$1 role_pair=$2 client_impl=$3 server_impl=$4 sender=$5 outer_run=$6
   local topology=${7:-$server_topology}
+  local connection_count=${8:-$connections}
   local effective_ack_every=2
   local effective_ack_delay_us=25000
   if [[ $topology == shared ]]; then
     effective_ack_every=$server_ack_every
     effective_ack_delay_us=$server_ack_delay_us
   fi
-  local pair_dir="$work/$mode-$topology-$role_pair-$sender-$outer_run"
+  local pair_dir="$work/$mode-$topology-connections-$connection_count-$role_pair-$sender-$outer_run"
   mkdir -p "$pair_dir"
-  local mode_connections=$connections mode_streams=$streams warmup=0 iterations=1
+  local mode_connections=$connection_count mode_streams=$streams warmup=0 iterations=1
   if [[ $mode == echo ]]; then
     mode_connections=1; mode_streams=1
     warmup=$echo_warmup; iterations=$echo_iterations
@@ -303,34 +335,38 @@ if [[ $server_topology == compare ]]; then
     for trial in "${trial_order[@]}"; do
       IFS=: read -r topology sender_role <<<"$trial"
       run_pair aggregate netz-client+netz-server netz netz \
-        "$sender_role" "$outer_run" "$topology"
+        "$sender_role" "$outer_run" "$topology" "$connections"
     done
   done
 elif [[ $server_topology != compare ]]; then
-  for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
-    if [[ $server_topology == shared || $netz_only == true ]]; then
-    order=(0)
-    elif (( outer_run % 2 == 1 )); then
-      order=(0 1 2 3)
-    else
-      order=(3 2 1 0)
-    fi
-    for index in "${order[@]}"; do
-      IFS=: read -r role_pair client_impl server_impl <<<"${pairs[index]}"
-      if [[ $modes == echo || $modes == both ]]; then
-        run_pair echo "$role_pair" "$client_impl" "$server_impl" client "$outer_run"
+  for connection_count in "${connection_counts[@]}"; do
+    for ((outer_run = 1; outer_run <= samples; outer_run += 1)); do
+      if [[ $server_topology == shared || $netz_only == true ]]; then
+        order=(0)
+      elif (( outer_run % 2 == 1 )); then
+        order=(0 1 2 3)
+      else
+        order=(3 2 1 0)
       fi
-      if [[ $modes == aggregate || $modes == both ]]; then
-        if (( outer_run % 2 == 1 )); then
-          sender_order=(client server)
-        else
-          sender_order=(server client)
+      for index in "${order[@]}"; do
+        IFS=: read -r role_pair client_impl server_impl <<<"${pairs[index]}"
+        if [[ $modes == echo || $modes == both ]]; then
+          run_pair echo "$role_pair" "$client_impl" "$server_impl" \
+            client "$outer_run" "$server_topology" "$connection_count"
         fi
-        for sender_role in "${sender_order[@]}"; do
-          run_pair aggregate "$role_pair" "$client_impl" "$server_impl" \
-            "$sender_role" "$outer_run"
-        done
-      fi
+        if [[ $modes == aggregate || $modes == both ]]; then
+          if (( outer_run % 2 == 1 )); then
+            sender_order=(client server)
+          else
+            sender_order=(server client)
+          fi
+          for sender_role in "${sender_order[@]}"; do
+            run_pair aggregate "$role_pair" "$client_impl" "$server_impl" \
+              "$sender_role" "$outer_run" "$server_topology" \
+              "$connection_count"
+          done
+        fi
+      done
     done
   done
 fi
@@ -347,7 +383,8 @@ if [[ $modes == aggregate || $modes == both ]]; then
       "--samples=$samples" "--log=$work/results.log" \
       "--shared-receive-batch=$shared_receive_batch" \
       "--server-ack-every=$server_ack_every" \
-      "--server-ack-delay-us=$server_ack_delay_us"
+      "--server-ack-delay-us=$server_ack_delay_us" \
+      "--connections=$connections"
     exit 0
   fi
   summary_args=(
@@ -358,6 +395,11 @@ if [[ $modes == aggregate || $modes == both ]]; then
     "--server-ack-delay-us=$server_ack_delay_us"
   )
   [[ $netz_only == true ]] && summary_args+=(--netz-only)
+  if [[ -n $connection_counts_text ]]; then
+    summary_args+=("--connection-counts=$connection_counts_text")
+  else
+    summary_args+=("--connections=$connections")
+  fi
   python3 "$repo_root/tools/interop/quic_persistent_benchmark_summary.py" \
     "${summary_args[@]}"
 fi
