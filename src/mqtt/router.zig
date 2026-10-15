@@ -326,6 +326,31 @@ pub const Router = struct {
         publisher_id: ?SubscriberId,
         out: []Match,
     ) Error![]Match {
+        // Broker callers reserve `subscriptionCount()` entries before
+        // matching. Without shared groups there is no cursor to protect, so a
+        // complete-capacity output can emit in one traversal instead of
+        // repeating the trie walk for count and commit.
+        if (self.shared_entry_count == 0 and
+            out.len >= self.active_entry_count)
+        {
+            const capacity = out[0..self.active_entry_count];
+            if (self.matchTrie(
+                topic,
+                publisher_id,
+                capacity,
+                null,
+            )) |counts| {
+                std.debug.assert(counts.shared == 0);
+                return capacity[0..counts.normal];
+            }
+            const written = self.matchNormalLinear(
+                topic,
+                publisher_id,
+                capacity,
+            );
+            return capacity[0..written];
+        }
+
         const trie_counts = self.matchTrie(topic, publisher_id, null, null);
         const normal_count = if (trie_counts) |counts|
             counts.normal
@@ -444,6 +469,7 @@ pub const Router = struct {
         normal_out: ?[]Match,
         shared_out: ?[]Match,
     ) ?MatchCounts {
+        const has_shared = self.shared_entry_count != 0;
         var current: [128]usize = undefined;
         var next: [128]usize = undefined;
         current[0] = 0;
@@ -462,12 +488,14 @@ pub const Router = struct {
                         normal_out,
                         counts.normal,
                     );
-                    counts.shared = self.emitSharedEntries(
-                        topic,
-                        node.multi_wildcard_entries.items,
-                        shared_out,
-                        counts.shared,
-                    );
+                    if (has_shared) {
+                        counts.shared = self.emitSharedEntries(
+                            topic,
+                            node.multi_wildcard_entries.items,
+                            shared_out,
+                            counts.shared,
+                        );
+                    }
                 }
                 if (depth == 0 and std.mem.startsWith(u8, topic, "$")) {
                     if (findLiteralChild(node.*, level)) |child| {
@@ -495,24 +523,28 @@ pub const Router = struct {
                 normal_out,
                 counts.normal,
             );
-            counts.shared = self.emitSharedEntries(
-                topic,
-                node.terminal_entries.items,
-                shared_out,
-                counts.shared,
-            );
+            if (has_shared) {
+                counts.shared = self.emitSharedEntries(
+                    topic,
+                    node.terminal_entries.items,
+                    shared_out,
+                    counts.shared,
+                );
+            }
             counts.normal = self.emitNormalEntries(
                 node.multi_wildcard_entries.items,
                 publisher_id,
                 normal_out,
                 counts.normal,
             );
-            counts.shared = self.emitSharedEntries(
-                topic,
-                node.multi_wildcard_entries.items,
-                shared_out,
-                counts.shared,
-            );
+            if (has_shared) {
+                counts.shared = self.emitSharedEntries(
+                    topic,
+                    node.multi_wildcard_entries.items,
+                    shared_out,
+                    counts.shared,
+                );
+            }
         }
         return counts;
     }
@@ -980,6 +1012,48 @@ test "MQTT router matches literal and wildcard subscriptions" {
     const system = try router.matchInto("$SYS/uptime", &storage);
     try std.testing.expectEqual(@as(usize, 1), system.len);
     try std.testing.expectEqual(@as(SubscriberId, 5), system[0].subscriber_id);
+}
+
+test "MQTT router full-capacity normal fast path matches bounded count path" {
+    const allocator = std.testing.allocator;
+    var router = try Router.init(allocator);
+    defer router.deinit();
+
+    try router.subscribe(1, .{ .topic_filter = "jobs/ready" });
+    try router.subscribe(2, .{ .topic_filter = "jobs/+" });
+    try router.subscribe(3, .{
+        .topic_filter = "jobs/ready",
+        .no_local = true,
+    });
+    try router.subscribe(4, .{ .topic_filter = "other/topic" });
+
+    var full_storage: [4]Match = undefined;
+    const fast = try router.matchIntoForPublisher(
+        "jobs/ready",
+        3,
+        &full_storage,
+    );
+    // Capacity below subscriptionCount() forces the count-before-emit path,
+    // while still fitting every actual match after No Local and topic checks.
+    var bounded_storage: [3]Match = undefined;
+    const bounded = try router.matchIntoForPublisher(
+        "jobs/ready",
+        3,
+        &bounded_storage,
+    );
+
+    try std.testing.expectEqual(@as(usize, 2), fast.len);
+    try std.testing.expectEqual(fast.len, bounded.len);
+    for (fast, bounded) |fast_match, bounded_match| {
+        try std.testing.expectEqual(
+            fast_match.subscriber_id,
+            bounded_match.subscriber_id,
+        );
+        try std.testing.expectEqualStrings(
+            fast_match.subscription.topic_filter,
+            bounded_match.subscription.topic_filter,
+        );
+    }
 }
 
 test "MQTT router combined trie preserves normal and shared ordering" {

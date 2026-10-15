@@ -4532,6 +4532,18 @@ proxy evidence for the entire suite.
    to 2.53%. Both focused optimization modes and all 1,825 source-locked
    Mosquitto packet sequences pass. This is bounded scheduling/lock evidence,
    not closure of the serial QoS 2 or RSS gap.
+   Normal-subscription routing now also consumes the broker's complete
+   `subscriptionCount()` output capacity in one trie traversal. Previously it
+   counted and then emitted even when no shared group existed, although only a
+   shared-selection cursor or insufficient capacity requires that transaction
+   boundary. Shared subscriptions, small buffers, wildcard frontier overflow,
+   No Local and `$SYS` retain the existing paths. Eight fixed-binary serial
+   durable QoS 2 pairs reduced broker instructions by 4.16% with 8/8 wins,
+   raised throughput 0.36% (5/8), and reduced p50/p99 by 3.88%/4.99% with 5/8
+   and 6/8 wins. A 100,000-message profile reduced `matchTrie` from 2.59% to
+   1.41%. Debug/ReleaseFast router gates passed 62 tests and focused live,
+   No Local, shared, and QoS 2 broker gates passed 47 tests. This closes the
+   common double traversal while preserving the broader serial/RSS gap.
 3. Expand the source-hash-locked gate beyond its current 1,825 upstream packet
    sequences, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

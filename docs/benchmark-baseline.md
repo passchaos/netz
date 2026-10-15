@@ -7823,6 +7823,38 @@ is the eliminated writer-lock handoff, instruction/p99 support, and exact
 protocol/lifecycle coverage rather than closure of the broader durable QoS 2
 serial gap.
 
+The broker already reserves `Router.subscriptionCount()` route slots before a
+PUBLISH match, but the router still traversed its trie once to count and again
+to emit. When no shared subscription exists and caller capacity covers every
+live subscription, there is no round-robin cursor or post-count capacity error
+to protect. That common normal-subscription path now emits in one traversal;
+shared groups, undersized output, No Local filtering, `$SYS`, wildcard edges,
+and a trie frontier wider than the 128-node stack keep the original
+count-before-commit or exact linear fallback. A direct regression compares the
+new full-capacity result with a deliberately bounded count-path result,
+including exact and `+` subscriptions, an unmatched entry, and No Local.
+
+Eight fixed-binary durable QoS 2 serial pairs reused the preceding CPU 0/1,
+1,000-warmup, 10,000-publish, window-one shape. Baseline broker SHA-256 was
+`c997fe419acaedaab671b786a4fbd8e8cd971f47e2c2ee2786f509768be08974`,
+candidate
+`6e227cf7230b201eb97089f001907c82eb71ad498324e1e4bdde5ff57bb4d0bd`,
+and the fixed driver remained
+`94274aac3e3b17cb4a2a34dc851d6808ad6b5ea7f721edf75dc493b0a80cb396`.
+All 16 arms completed 10,000 deliveries with checksum 2,695,000. Broker
+instructions fell by a 0.958415 paired median (4.16%, 8/8 wins), throughput
+rose by 1.003569 (0.36%, 5/8), p50 fell by 0.961156 (3.88%, 5/8), and p99 by
+0.950137 (4.99%, 6/8). The two broker ELFs have identical GNU `size` totals.
+
+Zero-loss 100,000-message profiles moved `Router.matchTrie` from 2.59% to
+1.41% and `ClientTask.runLoop` from 10.07% to 9.69%. Their absolute durations
+moved 7.088 to 4.617 seconds under different host load, so only the fixed-pair
+results and explanatory call-path shares are retained. Debug/ReleaseFast
+router gates passed 62 tests, and focused live routing, No Local, shared-group,
+and inbound QoS 2 gates passed 47 tests. The result closes the redundant
+normal-route count traversal without changing shared-subscription cursor
+semantics.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
