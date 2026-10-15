@@ -2219,8 +2219,15 @@ reduced X25519 public recovery 26.1% and a pure in-memory TLS client handshake
 was host-noisy and is not promoted as a complete-handshake gain. Vail
 `ad3f8e7` additionally makes the QUIC TLS server reject a non-empty initial
 client-auth request context before emitting either output flight, matching RFC
-8446 and the ordinary TLS server path. ARM64 variable-base X25519 and the
-remaining roughly two-times AWS-LC fixed-base gap are the next crypto targets.
+8446 and the ordinary TLS server path. Published Vail `89d6292` subsequently
+adds a constant-time s2n-bignum-derived ARM64 variable-base ladder with explicit
+secret-stack and caller-register clearing. Fixed-binary CPU-0 evidence reduced
+the shared-secret primitive 42.5% and a pure in-memory TLS client handshake
+20.6%, with every candidate arm faster; ReleaseFast/ReleaseSafe differential
+tests cover 4,096 deterministic arbitrary points. Cross-process Quinn blocks
+remained host-noisy and are not cited as end-to-end gains. The remaining
+fixed-base gap, packet/key-schedule work, and tail scheduling are the next
+handshake targets.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,

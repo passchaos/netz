@@ -4895,6 +4895,34 @@ gate and not used to claim an end-to-end latency gain. Same-host AWS-LC
 microbenchmarks still leave concrete ARM64 targets: about 9,915 versus 19,290
 ns for public-key recovery and 41,210 versus 49,460 ns for the shared secret.
 
+Published Vail `89d6292` closes the measured variable-base gap with an embedded
+Linux ARM64 ReleaseFast/ReleaseSafe ladder derived from the formally verified
+s2n-bignum schedule. It masks the peer's high bit, clamps the scalar, uses a
+fixed 251-step ladder plus three final doublings and constant-schedule
+inversion, then clears its complete 320-byte secret stack and caller-saved GPRs.
+Debug and ReleaseSmall retain the portable implementation. ReleaseFast and
+ReleaseSafe RFC 7748, 1,000-step iterated, boundary, and 4,096 deterministic
+arbitrary-point differential cases all matched Zig std, including all-zero
+rejection. Disassembly separately confirmed all twenty 16-byte zero stores and
+x0--x17 clearing before the callee-saved register restore.
+
+Eight CPU-0 fixed-binary ABBA arms reduced the shared-secret midpoint median
+from 97,889 to 56,310 ns under the same throttled window (42.5%, every candidate
+arm faster); unthrottled samples moved 48,818 to about 28,100 ns with the same
+ratio. The latter is about 31.8% below the same-host AWS-LC 41,210 ns reference.
+A separate 5,000-iteration in-memory TLS client handshake ABBA reduced the
+midpoint median from 102,013 to 80,991.5 ns (20.6%, every candidate arm faster)
+with identical wire lengths and checksum. A zero-loss 997-Hz profile attributed
+94.4% of 2,828 samples to the fixed ladder loop, 5.4% to inversion, and only
+0.2% to the wrapper, all-zero check, and explicit clearing. Primitive/TLS
+benchmark ELF `.text` increased by 4,152/9,428 bytes. The matching
+portable/ARM64 netz benchmark hashes were
+`afd5ddca976d88236c62076fb394e341b0a862461fb045c00f74197f7ac69924`
+and `aa036f0c66426b7463f509c0f2101380fff83c4cc1cc3fe8c5f796fb0dd53c3e`.
+Their cross-process Quinn blocks again moved with host load rather than in a
+stable old/new direction, so the strict four-role matrices remain passing
+interop controls and do not support an end-to-end latency claim.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
