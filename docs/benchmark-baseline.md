@@ -3848,6 +3848,20 @@ with only 4/10 candidate wins; the reverse direction measured 1.008218 with
 target upload shape. The profiler and constant-time verifier remain as durable
 evidence infrastructure.
 
+After the periodic exact payload helper removed the former 19.80% verifier
+tax, the same dispatcher timestamp idea was rebuilt and evaluated again rather
+than assuming the old result still applied. Current baseline
+`0e4ed798c8896590d664bcdbbd4dccb4a4d52f87d99ff6ea5614d0bb973e19d9`
+and candidate
+`ef38e20353b4789865dc4a0b139764fa7c78bb98954e7c997445e009b72b6ba5`
+ran twenty CPU-10/11, order-alternated 64 x 1-MiB pairs. The target
+client-sender median ratio was 0.998541 with only 8/20 candidate wins;
+server-sender was 1.009257 with 12/20. A three-datagram clock-count regression
+proved the intended five-to-three read reduction, but the cleaner end-to-end
+upload evidence remained neutral. The production candidate and its private
+timestamp plumbing were therefore removed again; this rules out retrying that
+isolated optimization without a materially different clock/timer design.
+
 A same-connection transmit-batch candidate was also evaluated and removed. It
 staged up to four resumable STREAM packets per socket submission using the
 existing exact protected/socket-visible prefix result. Five order-alternated
