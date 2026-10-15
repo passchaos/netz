@@ -4868,6 +4868,33 @@ CA-signed P-256 leaves, so the two mirrored directions are the causal evidence;
 the absolute cross-block values remain host-load-sensitive, same-security-policy
 results rather than an equal-wire or universal client ranking.
 
+The prepared-P256 profile then isolated the next client CPU costs instead of
+guessing from complete-process latency. A 500-connection fixed-Quinn-server run
+measured 412.062 us P50 with 325.628 us before trust, 0.630 us in the cached
+trust callback, and 83.851 us after trust. `perf record -F 1999 -e cycles:u`
+captured 6,496 samples with zero loss; filtering the unique netz-client PID
+left 368 call-chain samples. X25519 arbitrary-point multiplication accounted
+for 21.9%, while fixed-base public-key recovery's inversion, additions, and
+constant-time table selections accounted for roughly another 14--15%.
+Packet protection, transport-parameter parsing, and the remaining key-schedule
+entries were individually below 3%.
+
+Published Vail `2317957` therefore gives portable X25519 public-key recovery a
+dedicated five-group/four-column/13-window table, while its prepared Ed25519
+verifier retains the original four-group/five-column table. This avoids the
+13% prepared-Ed25519 regression found when the table was initially shared.
+Eight CPU-0 fixed-binary microbenchmark arms reduced X25519 public-key recovery
+from a 26,096 ns midpoint median to 19,287.5 ns (26.1%, every arm faster). An
+independent 5,000-iteration in-memory TLS client handshake ABBA reduced the
+midpoint median from 109,244.5 to 101,980 ns (6.65%, every arm faster) with
+identical ClientHello/server-flight/Finished sizes and checksums. The
+representative benchmark ELF `.text` also fell from 2,999,624 to 2,961,696
+bytes. A corresponding cross-process Quinn block run moved in opposite
+directions under host load, so it is retained only as a passing interop/control
+gate and not used to claim an end-to-end latency gain. Same-host AWS-LC
+microbenchmarks still leave concrete ARM64 targets: about 9,915 versus 19,290
+ns for public-key recovery and 41,210 versus 49,460 ns for the shared secret.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256

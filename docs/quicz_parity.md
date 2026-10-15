@@ -2209,7 +2209,18 @@ verification remains enabled on every connection through the separate bounded
 cache, and the prepared table is never installed automatically in that
 multi-identity cache. Remaining handshake work is therefore pre-trust
 packet/key-schedule/event-loop cost and tail scheduling, not another removal of
-certificate authentication.
+certificate authentication. A prepared-mode fixed-Quinn-server profile then
+attributed 21.9% of isolated netz-client cycles to X25519 shared-secret
+multiplication and roughly another 14--15% to fixed-base public-key recovery.
+Published Vail `2317957` splits a portable five-group/four-column X25519 table
+from the unchanged Ed25519 prepared-verifier table. Fixed-binary CPU-0 evidence
+reduced X25519 public recovery 26.1% and a pure in-memory TLS client handshake
+6.65%, with every candidate arm faster. The cross-process Quinn block result
+was host-noisy and is not promoted as a complete-handshake gain. Vail
+`ad3f8e7` additionally makes the QUIC TLS server reject a non-empty initial
+client-auth request context before emitting either output flight, matching RFC
+8446 and the ordinary TLS server path. ARM64 variable-base X25519 and the
+remaining roughly two-times AWS-LC fixed-base gap are the next crypto targets.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,
