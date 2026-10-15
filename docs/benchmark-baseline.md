@@ -5209,6 +5209,46 @@ the paired median 4.69%. The retained change is therefore the exact allocation,
 memory, duplicate-detection, and small instruction result without the extra
 encoding prepass.
 
+Published Vail `209f58b` then replaces the portable public-scalar binary-GCD
+inside ARM64 P-256 verification with BoringSSL/AWS-LC's ISC-licensed,
+four-limb variable-time BEEU schedule pinned to `7eab8046`. Inputs and output
+remain canonical little-endian integers modulo the subgroup order before Vail
+converts the inverse back to its Montgomery scalar representation. The route is
+strictly limited to public signature-verification input; secret signing
+inversion retains the constant-schedule implementation. The one, `n - 1`, and
+256 deterministic nonzero cases match the fixed-time inverse in ReleaseFast
+and ReleaseSafe, while Debug and ReleaseSmall retain the portable binary-GCD
+oracle. Complete Debug/ReleaseFast Vail suites, both optimized P-256 suites,
+and the x86_64 ReleaseFast compile gate pass.
+
+The component benchmark moved Vail public inversion from 2,797 to 971 ns/op
+(65.28%). Eight CPU-0 fixed-binary prepared-verifier pairs used baseline
+SHA-256
+`259cccb3e8e5f9986b6caccadc7e284eaa04654bdcc338942d2ccd56cba2cb94`
+and candidate
+`bccdaaba164bf3368b537ca1c1feb84417a72bfea1119e3967bc57784247e148`.
+Every candidate arm won: the midpoint median fell from 17,789.5 to 15,520.5
+ns/verify (12.75%), with a 0.872092 median paired ratio. Preparation remained
+neutral at 0.999954 with four wins per side. The candidate is 68.41% below the
+same-host 49,135 ns AWS-LC parsed-key reference, or about 3.17x its throughput;
+GNU `size` text also fell from 554,200 to 552,472 bytes (-1,728).
+
+The fixed-Quinn-server matrix used netz baseline SHA-256
+`d23674a7d4ad1d5cb8a50cdc8287675c64cf118f9f955a789268d1fd3cddcc73`
+and candidate
+`04292422d29463f89658be67abd97c9f392a46212a9539d6567dc76ee3253975`.
+Client instructions improved in all eight mirrored 100-connection pairs with a
+0.964808 median ratio (3.52%). Complete P50 split 4/8 at a neutral 1.005035
+ratio, and both pre/post-trust timings followed host-load excursions rather
+than the primitive direction, so no complete-handshake latency gain is claimed.
+The candidate passed the four-role Quinn certificate/echo/close smoke and its
+GNU `size` text fell 1,632 bytes. A zero-loss 1,000-connection profile recorded
+219 samples at 352.603 us P50 and 685.160 us P99. X25519 variable/fixed loops
+now account for 19.44%/4.26%, while the P-256 verifier body, mixed-add, public
+inverse, and doubling account for 7.37%/5.40%/2.98%/1.47%. The next crypto pass
+therefore returns to X25519 or must isolate a new point/verifier sub-hotspot;
+public scalar inversion is no longer an independent implementation gap.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
