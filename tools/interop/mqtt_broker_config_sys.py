@@ -148,7 +148,11 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
     port = free_port()
     config = directory / "sys-interval-reload.conf"
 
-    def write_config(sys_interval: str, retain_minutes: int = 0) -> None:
+    def write_config(
+        sys_interval: str,
+        retain_minutes: int = 0,
+        extra_global: str = "",
+    ) -> None:
         retained = (
             f"retain_expiry_interval {retain_minutes}\n"
             if retain_minutes
@@ -157,6 +161,7 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
         config.write_text(
             f"sys_interval {sys_interval}\n"
             + retained
+            + extra_global
             + f"listener {port} 127.0.0.1\n"
             + "max_topic_alias_broker 0\n"
             + "allow_anonymous true\n"
@@ -167,8 +172,9 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
         process: subprocess.Popen[str],
         sys_interval: str,
         retain_minutes: int = 0,
+        extra_global: str = "",
     ) -> None:
-        write_config(sys_interval, retain_minutes)
+        write_config(sys_interval, retain_minutes, extra_global)
         os.kill(process.pid, signal.SIGHUP)
 
     write_config("0")
@@ -193,6 +199,28 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
                     protocol=5,
                 ),
                 "enabled periodic system statistic",
+            )
+
+            reload(
+                process,
+                "0",
+                extra_global="message_size_limit 1\n",
+            )
+            _wait_for_output(
+                process,
+                "configuration reload failed: "
+                "error=GlobalConfigurationRequiresRestart",
+                "restart-required global rollback",
+            )
+            _expect(
+                client,
+                qos0_publish_packet(
+                    "$SYS/broker/clients/connected",
+                    b"1",
+                    retain=False,
+                    protocol=5,
+                ),
+                "system interval after rejected global reload",
             )
 
             reload(process, "invalid")

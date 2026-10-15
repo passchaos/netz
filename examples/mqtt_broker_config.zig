@@ -15,6 +15,9 @@ const reloadable_identity = @import(
 const configured_bridges = @import(
     "support/mqtt_configured_bridges.zig",
 );
+const reload_compatibility = @import(
+    "support/mqtt_reload_compatibility.zig",
+);
 const tls_ticket_keys = @import("support/mqtt_tls_ticket_keys.zig");
 
 const mqtt = netz.mqtt;
@@ -1126,6 +1129,13 @@ fn reloadConfiguredState(
     } };
     defer reloaded_config.deinit(allocator);
     validateReloadableListenerTopology(
+        initial_config,
+        &reloaded_config,
+    ) catch |err| return .{ .failure = .{
+        .component = .configuration,
+        .err = err,
+    } };
+    reload_compatibility.validateRestartRequiredGlobals(
         initial_config,
         &reloaded_config,
     ) catch |err| return .{ .failure = .{

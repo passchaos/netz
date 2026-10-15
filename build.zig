@@ -957,6 +957,27 @@ pub fn build(b: *std.Build) void {
     mqtt_reloadable_security_step.dependOn(
         &run_mqtt_reloadable_security_tests.step,
     );
+    const mqtt_reload_compatibility_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "examples/support/mqtt_reload_compatibility.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+        .filters = test_filters,
+    });
+    const run_mqtt_reload_compatibility_tests = b.addRunArtifact(
+        mqtt_reload_compatibility_tests,
+    );
+    const mqtt_reload_compatibility_step = b.step(
+        "test-mqtt-reload-compatibility",
+        "Test exhaustive MQTT SIGHUP field classification",
+    );
+    mqtt_reload_compatibility_step.dependOn(
+        &run_mqtt_reload_compatibility_tests.step,
+    );
     const mqtt_reloadable_identity_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(
@@ -1231,6 +1252,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exact_certificate_verifier_tests.step);
     test_step.dependOn(&run_websocket_send_shape_tests.step);
     test_step.dependOn(&run_mqtt_reloadable_security_tests.step);
+    test_step.dependOn(&run_mqtt_reload_compatibility_tests.step);
     test_step.dependOn(&run_mqtt_reloadable_identity_tests.step);
     test_step.dependOn(&run_mqtt_configured_bridges_tests.step);
     test_step.dependOn(&run_webtransport_wtransport_bench_tests.step);
