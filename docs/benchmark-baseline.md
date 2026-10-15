@@ -8042,6 +8042,29 @@ the complete bidirectional Hyper h2c/TLS interoperability matrix and focused
 Debug/ReleaseFast pool and
 SharedSender gates passed.
 
+An executor-local real-clock cache for automatic HTTP `Date` generation was
+evaluated and rejected rather than retained. Seven CPU-10, fixed-binary,
+order-alternated pairs used exact status/checksum validation for HTTP/1's
+16-response pipeline, HTTP/2's persistent SharedSender h2c request, and the
+HTTP/3 development request/response path. Candidate/baseline median latency
+ratios were 1.019127 (0/7 wins), 1.015796 (0/7), and 1.000663 (3/7)
+respectively. Baseline/candidate SHA-256 pairs were
+`438c4775e9f0438d1ca8649e318c02f7c16644ac52ad4a47eb0d6189fa12c596` /
+`5e93f5f48a50a8ced6a014a0e5c555d192e3b535eb129c3f6e77c3d648d02d71`,
+`4ffd53cd74513d9bf65f943dfb697f681684656f3a9e63ebaa9bdf5a6068a8ec` /
+`d9f80e18d18106331c5d2459ab6c163bac36f37c27a1e0cb03c08de069381e66`,
+and
+`143b5480dbfe418978e3c194906ccfdf8817cfc2610f40718a89f306fc1480a0` /
+`f8c2a68627b188233ff51b36efad5a5eadb171f03799e467d7f622ddd1e53ae3`.
+A 50,000-batch HTTP/1 profile completed 800,000 measured responses with exact
+71,200,000-byte checksums in both binaries, but moved from 492,701,045 ns to
+499,033,308 ns: these workloads normally generate one Date per event-loop
+scan, so the candidate still paid the same VDSO real-clock read plus cache
+lookup. The zio experiment at `5700bca8335bd7253b016b2cf3cf124748e5f4e9`
+was reverted by `9d9bbc3`; Netz retains its already allocation-free,
+per-thread/per-second formatted-value cache and fresh real-clock check, matching
+Hyper's freshness model without weakening deadline or timer semantics.
+
 ## Gaps before a completion audit can pass
 
 - Extend the new cross-process raw QUIC aggregate matrix into connection-count

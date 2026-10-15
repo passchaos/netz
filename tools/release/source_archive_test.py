@@ -72,8 +72,8 @@ class SourceArchiveTest(unittest.TestCase):
         .vail = .{ .path = \"../vail\" },
         .vort = .{ .path = \"../vort\" },
         .zio = .{
-            .url = \"git+https://github.com/passchaos/zio#1b258ef7bd2042b1eb04c34c2ebbc522f118635d\",
-            .hash = \"zio-0.19.1-xHbVVAE2LACgCMZ_8iklH7CP4dZb0ECdrdhYPHjeNauz\",
+            .url = \"git+https://github.com/passchaos/zio#494418768cded358e1b3b73eae89e276de2fd13e\",
+            .hash = \"zio-0.19.1-xHbVVE5NLABB6iZgl59g6fGIAAhAVGzGLqHiKewsbsAs\",
         },
         .pbz = .{ .path = \"../pbz\" },
     },
