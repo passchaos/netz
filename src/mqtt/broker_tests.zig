@@ -1911,6 +1911,51 @@ test "broker periodically publishes system statistics" {
     if (serve.err) |err| return err;
 }
 
+test "broker runtime delivery policy commits atomically" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .limits = .{ .max_payload_size = 1 },
+        .persistent_session_expiry_seconds = 10,
+    });
+    defer broker.deinit();
+
+    const initial = broker.runtimeDeliveryPolicy();
+    try std.testing.expectEqual(@as(usize, 1), initial.max_payload_size);
+    try std.testing.expect(!initial.queue_qos0_messages);
+    try std.testing.expect(!initial.upgrade_outgoing_qos);
+    try std.testing.expectEqual(
+        @as(?u32, 10),
+        initial.persistent_session_expiry_seconds,
+    );
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.setRuntimeDeliveryPolicy(.{
+            .max_payload_size = 2,
+            .queue_qos0_messages = true,
+            .upgrade_outgoing_qos = true,
+            .persistent_session_expiry_seconds = 0,
+        }),
+    );
+    try std.testing.expectEqualDeep(
+        initial,
+        broker.runtimeDeliveryPolicy(),
+    );
+
+    const updated = broker_mod.RuntimeDeliveryPolicy{
+        .max_payload_size = 2,
+        .queue_qos0_messages = true,
+        .upgrade_outgoing_qos = true,
+        .persistent_session_expiry_seconds = 1,
+    };
+    try broker.setRuntimeDeliveryPolicy(updated);
+    try std.testing.expectEqualDeep(updated, broker.runtimeDeliveryPolicy());
+}
+
 test "broker runtime scheduling policy resets deadlines atomically" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

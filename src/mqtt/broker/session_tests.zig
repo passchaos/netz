@@ -416,7 +416,7 @@ test "broker drops QoS 0 while a persistent Session is offline" {
     try joinServer(thread, &joined, &serve);
 }
 
-test "broker optionally queues QoS 0 while a persistent Session is offline" {
+test "broker runtime policy queues QoS 0 for an offline Session" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -432,7 +432,6 @@ test "broker optionally queues QoS 0 while a persistent Session is offline" {
                 .max_connections = 3,
                 .max_queued_deliveries_per_connection = 8,
             },
-            .queue_qos0_messages = true,
         },
     );
     defer broker.deinit();
@@ -461,6 +460,9 @@ test "broker optionally queues QoS 0 while a persistent Session is offline" {
     defer suback.deinit(allocator);
     try subscriber.disconnect(0);
     try waitForPeerClose(&subscriber);
+    try broker.setRuntimeDeliveryPolicy(.{
+        .queue_qos0_messages = true,
+    });
 
     var publisher = try connect(
         allocator,

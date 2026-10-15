@@ -204,7 +204,7 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
             reload(
                 process,
                 "0",
-                extra_global="message_size_limit 1\n",
+                extra_global="max_packet_size 100\n",
             )
             _wait_for_output(
                 process,

@@ -45,6 +45,9 @@ from mqtt_broker_config_session import (
     run_persistent_client_expiration_case,
 )
 from mqtt_broker_config_sys import run_system_interval_case
+from mqtt_broker_config_runtime_policy import (
+    run_runtime_delivery_policy_reload_case,
+)
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -6038,6 +6041,7 @@ def main() -> None:
         run_global_max_connections_case(args.broker, directory)
         run_listener_max_connections_case(args.broker, directory)
         run_system_interval_case(args.broker, directory)
+        run_runtime_delivery_policy_reload_case(args.broker, directory)
         run_fail_closed_case(args.broker, directory)
         run_invalid_password_file_case(args.broker, directory)
         run_invalid_acl_file_case(args.broker, directory)
@@ -6071,9 +6075,9 @@ def main() -> None:
         "global client-session plus global/listener live-connection capacity, "
         "persistent-client and "
         "retained-message "
-        "expiration, periodic $SYS policy, and atomic $SYS/retained scheduling "
-        "SIGHUP reload with restart-required global rollback and live-client "
-        "continuity, "
+        "expiration, periodic $SYS policy, atomic $SYS/retained scheduling, "
+        "and message-size/offline-QoS0/QoS-upgrade/session-cap SIGHUP reload "
+        "with restart-required global rollback and live-client continuity, "
         "zero-length and MQTT 3.1 Client ID bounds, global/listener auto-ID "
         "prefixes, required Client ID prefix admission, and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "

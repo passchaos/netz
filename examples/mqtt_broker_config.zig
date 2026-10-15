@@ -558,6 +558,7 @@ pub fn run(
     const initial_scheduling_policy = runtimeSchedulingPolicyFromConfig(
         &config,
     );
+    const initial_delivery_policy = runtimeDeliveryPolicyFromConfig(&config);
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
         .v3_1_connack_mode = .mosquitto,
@@ -568,16 +569,16 @@ pub fn run(
     var broker = try mqtt.broker.Broker.init(allocator, io, .{
         .limits = .{
             .max_connections = active_connection_limit,
-            .max_payload_size = config.message_size_limit,
+            .max_payload_size = initial_delivery_policy.max_payload_size,
             .runtime = .{ .max_packet_size = config.max_packet_size },
         },
         .max_inflight_payload_bytes_per_connection = config.max_inflight_bytes,
         .accept = base_accept,
         .client_id_prefix = config.client_id_prefixes,
-        .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
-        .queue_qos0_messages = config.queue_qos0_messages,
+        .upgrade_outgoing_qos = initial_delivery_policy.upgrade_outgoing_qos,
+        .queue_qos0_messages = initial_delivery_policy.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
-        .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
+        .persistent_session_expiry_seconds = initial_delivery_policy.persistent_session_expiry_seconds,
         .retained_expiry_interval = initial_scheduling_policy.retained_expiry_interval,
         .system_stats_interval = initial_scheduling_policy.system_stats_interval,
         .access_control = source_access_control,
@@ -1062,6 +1063,23 @@ fn serveWithManagement(
                                     ),
                                 },
                             );
+                            std.debug.print(
+                                "netz MQTT runtime delivery reload " ++
+                                    "completed: message_size_limit={d} " ++
+                                    "queue_qos0_messages={} " ++
+                                    "upgrade_outgoing_qos={} " ++
+                                    "persistent_client_expiration={d} " ++
+                                    "source=SIGHUP server_io=zio-std-io\n",
+                                .{
+                                    success.delivery_policy.max_payload_size,
+                                    success.delivery_policy
+                                        .queue_qos0_messages,
+                                    success.delivery_policy
+                                        .upgrade_outgoing_qos,
+                                    success.delivery_policy
+                                        .persistent_session_expiry_seconds orelse 0,
+                                },
+                            );
                         },
                     }
                 }
@@ -1100,6 +1118,7 @@ const ReloadOutcome = union(enum) {
         security_reloaded: bool,
         autosave_policy: AutosavePolicy,
         scheduling_policy: mqtt.broker.RuntimeSchedulingPolicy,
+        delivery_policy: mqtt.broker.RuntimeDeliveryPolicy,
     },
     failure: struct {
         component: ReloadComponent,
@@ -1201,6 +1220,14 @@ fn reloadConfiguredState(
             .component = .configuration,
             .err = err,
         } };
+    const reloaded_delivery_policy = runtimeDeliveryPolicyFromConfig(
+        &reloaded_config,
+    );
+    reloaded_delivery_policy.validate() catch |err|
+        return .{ .failure = .{
+            .component = .configuration,
+            .err = err,
+        } };
     var prepared_bridges = bridges.prepareReload(
         reloaded_config.bridges,
     ) catch |err| return .{ .failure = .{
@@ -1241,6 +1268,9 @@ fn reloadConfiguredState(
     broker.setRuntimeSchedulingPolicy(
         reloaded_scheduling_policy,
     ) catch unreachable;
+    broker.setRuntimeDeliveryPolicy(
+        reloaded_delivery_policy,
+    ) catch unreachable;
     autosave.apply(reloaded_autosave);
     bridge_commit.commit();
     _ = broker.disconnectUnauthorizedConnections(.{
@@ -1254,7 +1284,19 @@ fn reloadConfiguredState(
         .security_reloaded = true,
         .autosave_policy = reloaded_autosave,
         .scheduling_policy = reloaded_scheduling_policy,
+        .delivery_policy = reloaded_delivery_policy,
     } };
+}
+
+fn runtimeDeliveryPolicyFromConfig(
+    config: *const mqtt.broker_config.Config,
+) mqtt.broker.RuntimeDeliveryPolicy {
+    return .{
+        .max_payload_size = config.message_size_limit,
+        .queue_qos0_messages = config.queue_qos0_messages,
+        .upgrade_outgoing_qos = config.upgrade_outgoing_qos,
+        .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
+    };
 }
 
 fn runtimeSchedulingPolicyFromConfig(

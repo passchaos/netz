@@ -16,6 +16,7 @@ const FieldClass = enum {
     persistence_target,
     autosave,
     scheduling,
+    delivery_policy,
     restart_required,
 };
 
@@ -49,12 +50,16 @@ fn fieldClass(comptime name: []const u8) FieldClass {
     {
         return .scheduling;
     }
-    if (std.mem.eql(u8, name, "global_max_clients") or
-        std.mem.eql(u8, name, "global_max_connections") or
+    if (std.mem.eql(u8, name, "message_size_limit") or
         std.mem.eql(u8, name, "queue_qos0_messages") or
         std.mem.eql(u8, name, "upgrade_outgoing_qos") or
+        std.mem.eql(u8, name, "persistent_client_expiration_seconds"))
+    {
+        return .delivery_policy;
+    }
+    if (std.mem.eql(u8, name, "global_max_clients") or
+        std.mem.eql(u8, name, "global_max_connections") or
         std.mem.eql(u8, name, "max_packet_size") or
-        std.mem.eql(u8, name, "message_size_limit") or
         std.mem.eql(u8, name, "max_inflight_messages") or
         std.mem.eql(u8, name, "max_inflight_bytes") or
         std.mem.eql(u8, name, "max_queued_messages") or
@@ -62,7 +67,6 @@ fn fieldClass(comptime name: []const u8) FieldClass {
         std.mem.eql(u8, name, "retain_available") or
         std.mem.eql(u8, name, "check_retain_source") or
         std.mem.eql(u8, name, "client_id_prefixes") or
-        std.mem.eql(u8, name, "persistent_client_expiration_seconds") or
         std.mem.eql(u8, name, "websocket_headers_size") or
         std.mem.eql(u8, name, "set_tcp_nodelay"))
     {
@@ -121,16 +125,7 @@ test "restart-required MQTT globals reject every changed field" {
     candidate.global_max_connections += 1;
     try expectRestart(initial, candidate);
     candidate = initial;
-    candidate.queue_qos0_messages = !candidate.queue_qos0_messages;
-    try expectRestart(initial, candidate);
-    candidate = initial;
-    candidate.upgrade_outgoing_qos = !candidate.upgrade_outgoing_qos;
-    try expectRestart(initial, candidate);
-    candidate = initial;
     candidate.max_packet_size -= 1;
-    try expectRestart(initial, candidate);
-    candidate = initial;
-    candidate.message_size_limit = 1;
     try expectRestart(initial, candidate);
     candidate = initial;
     candidate.max_inflight_messages += 1;
@@ -154,9 +149,6 @@ test "restart-required MQTT globals reject every changed field" {
     candidate.client_id_prefixes = @constCast("changed-");
     try expectRestart(initial, candidate);
     candidate = initial;
-    candidate.persistent_client_expiration_seconds = 1;
-    try expectRestart(initial, candidate);
-    candidate = initial;
     candidate.websocket_headers_size -= 1;
     try expectRestart(initial, candidate);
     candidate = initial;
@@ -174,6 +166,10 @@ test "runtime-owned MQTT globals remain reload-compatible" {
     candidate.autosave_on_changes = true;
     candidate.retain_expiry_interval_seconds = 60;
     candidate.sys_interval_seconds = 1;
+    candidate.message_size_limit = 1;
+    candidate.queue_qos0_messages = true;
+    candidate.upgrade_outgoing_qos = true;
+    candidate.persistent_client_expiration_seconds = 1;
 
     try validateRestartRequiredGlobals(&initial, &candidate);
 }

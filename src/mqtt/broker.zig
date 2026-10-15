@@ -49,6 +49,7 @@ const session_delivery = @import("broker/session_delivery.zig");
 const session_route = @import("broker/session_route.zig");
 const session_writer = @import("broker/session_writer.zig");
 const deadline_driver_mod = @import("broker/deadline_driver.zig");
+const runtime_policy_mod = @import("broker/runtime_policy.zig");
 const retained_mod = @import("retained/mod.zig");
 const session_mod = @import("session/mod.zig");
 const will_mod = @import("will/mod.zig");
@@ -132,6 +133,7 @@ pub const ChangeAutosaveOptions = struct {
 };
 
 pub const RuntimeSchedulingPolicy = deadline_driver_mod.Policy;
+pub const RuntimeDeliveryPolicy = runtime_policy_mod.Delivery;
 
 pub const Options = struct {
     limits: Limits = .{},
@@ -2168,6 +2170,7 @@ pub const Broker = struct {
     io: std.Io,
     server: ?runtime.Server = null,
     options: Options,
+    runtime_delivery_snapshot: runtime_policy_mod.Snapshot,
     router: router_mod.Router,
     pending_qos2: qos2_mod.Store,
     bridge_qos2: bridge_qos2_mod.Store,
@@ -2267,9 +2270,13 @@ pub const Broker = struct {
                 return error.InvalidProperty;
             }
         }
-        if (options.persistent_session_expiry_seconds == 0) {
-            return error.InvalidProperty;
-        }
+        const initial_delivery_policy = RuntimeDeliveryPolicy{
+            .max_payload_size = options.limits.max_payload_size,
+            .queue_qos0_messages = options.queue_qos0_messages,
+            .upgrade_outgoing_qos = options.upgrade_outgoing_qos,
+            .persistent_session_expiry_seconds = options.persistent_session_expiry_seconds,
+        };
+        try initial_delivery_policy.validate();
         if (options.accept.response_information) |value| {
             if (value.len > std.math.maxInt(u16)) {
                 return error.InvalidProperty;
@@ -2382,6 +2389,7 @@ pub const Broker = struct {
             .allocator = allocator,
             .io = io,
             .options = owned_options,
+            .runtime_delivery_snapshot = .init(initial_delivery_policy),
             .router = router,
             .pending_qos2 = pending_qos2,
             .bridge_qos2 = bridge_qos2,
@@ -2516,6 +2524,28 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         return self.statsLocked();
+    }
+
+    /// Return one coherent snapshot of reloadable delivery and Session policy.
+    pub fn runtimeDeliveryPolicy(self: *const Broker) RuntimeDeliveryPolicy {
+        return self.runtime_delivery_snapshot.load();
+    }
+
+    /// Atomically apply delivery and persistent-Session limits to subsequent
+    /// policy decisions without disturbing active Network Connections.
+    pub fn setRuntimeDeliveryPolicy(
+        self: *Broker,
+        policy: RuntimeDeliveryPolicy,
+    ) error{InvalidProperty}!void {
+        try policy.validate();
+        self.state_mutex.lockUncancelable(self.io);
+        self.options.limits.max_payload_size = policy.max_payload_size;
+        self.options.queue_qos0_messages = policy.queue_qos0_messages;
+        self.options.upgrade_outgoing_qos = policy.upgrade_outgoing_qos;
+        self.options.persistent_session_expiry_seconds =
+            policy.persistent_session_expiry_seconds;
+        self.runtime_delivery_snapshot.store(policy);
+        self.state_mutex.unlock(self.io);
     }
 
     /// Return one coherent snapshot of the currently active periodic policy.
@@ -2753,6 +2783,7 @@ pub const Broker = struct {
             null,
             null,
             null,
+            self.options.upgrade_outgoing_qos,
             std.Io.Clock.awake.now(self.io),
             &persistent_changed,
             null,
@@ -2923,6 +2954,7 @@ pub const Broker = struct {
             null,
             null,
             null,
+            self.options.upgrade_outgoing_qos,
             release_now,
             &persistent_changed,
             &publication_effect_committed,
@@ -3156,6 +3188,7 @@ pub const Broker = struct {
                 null,
                 null,
                 null,
+                self.options.upgrade_outgoing_qos,
                 std.Io.Clock.awake.now(self.io),
                 null,
                 null,
@@ -4753,7 +4786,7 @@ pub const Broker = struct {
         const opened_session = try self.sessions.open(
             effective_connect.client_id,
             effective_connect.clean_start,
-            self.sessionExpiryForConnect(effective_connect),
+            self.sessionExpiryForConnectLocked(effective_connect),
             now,
         );
         if (previous_route_id) |route_id| {
@@ -4807,7 +4840,7 @@ pub const Broker = struct {
             effective_connect,
             effective_connect.username,
             retained_source_id,
-            self.sessionExpiryForConnect(effective_connect),
+            self.sessionExpiryForConnectLocked(effective_connect),
             now,
         ) catch |err| {
             self.rollbackOpenedSessionLocked(
@@ -4888,8 +4921,8 @@ pub const Broker = struct {
             );
     }
 
-    fn sessionExpiryForConnect(
-        self: Broker,
+    fn sessionExpiryForConnectLocked(
+        self: *const Broker,
         connect: mqtt.Connect,
     ) u32 {
         const requested = session_mod.Store.expiryForConnect(
@@ -4897,11 +4930,11 @@ pub const Broker = struct {
             connect.clean_start,
             connect.properties,
         );
-        return self.capPersistentSessionExpiry(requested);
+        return self.capPersistentSessionExpiryLocked(requested);
     }
 
-    fn sessionExpiryForDisconnect(
-        self: Broker,
+    fn sessionExpiryForDisconnectLocked(
+        self: *const Broker,
         protocol: mqtt.ProtocolVersion,
         disconnect: mqtt.Disconnect,
     ) ?u32 {
@@ -4909,10 +4942,13 @@ pub const Broker = struct {
         const requested = mqtt.sessionExpiryInterval(
             disconnect.properties,
         ) orelse return null;
-        return self.capPersistentSessionExpiry(requested);
+        return self.capPersistentSessionExpiryLocked(requested);
     }
 
-    fn capPersistentSessionExpiry(self: Broker, requested: u32) u32 {
+    fn capPersistentSessionExpiryLocked(
+        self: *const Broker,
+        requested: u32,
+    ) u32 {
         const maximum = self.options.persistent_session_expiry_seconds orelse
             return requested;
         if (requested == 0) return 0;
@@ -5003,12 +5039,12 @@ pub const Broker = struct {
         now: std.Io.Timestamp,
     ) Error!void {
         const session_expiry_override = if (slot.connection) |connection|
-            self.sessionExpiryForDisconnect(
+            self.sessionExpiryForDisconnectLocked(
                 connection.protocol,
                 disconnect,
             )
         else if (mqtt.sessionExpiryInterval(disconnect.properties)) |requested|
-            self.capPersistentSessionExpiry(requested)
+            self.capPersistentSessionExpiryLocked(requested)
         else
             null;
         return self.closeWillForDisconnectWithExpiryLocked(
@@ -5344,10 +5380,6 @@ pub const Broker = struct {
         disconnect: mqtt.Disconnect,
     ) Error!void {
         const now = std.Io.Clock.awake.now(self.io);
-        const session_expiry_override = self.sessionExpiryForDisconnect(
-            slot.connection.?.protocol,
-            disconnect,
-        );
         self.state_mutex.lockUncancelable(self.io);
         var state_locked = true;
         var persistent_changed = false;
@@ -5356,6 +5388,11 @@ pub const Broker = struct {
             self.state_mutex.unlock(self.io);
             self.finishPartialPersistentChange(persistent_changed);
         };
+        const session_expiry_override =
+            self.sessionExpiryForDisconnectLocked(
+                slot.connection.?.protocol,
+                disconnect,
+            );
         // Validate state-dependent DISCONNECT properties before changing the
         // Will, Session owner, router, or persistence state. In particular,
         // MQTT-3.14.2-2 makes zero-to-nonzero Session Expiry a Protocol Error.
@@ -5898,9 +5935,10 @@ pub const Broker = struct {
         );
     }
 
-    fn payloadTooLarge(self: Broker, payload: []const u8) bool {
-        return self.options.limits.max_payload_size != 0 and
-            payload.len > self.options.limits.max_payload_size;
+    fn payloadTooLarge(self: *Broker, payload: []const u8) bool {
+        const policy = self.runtimeDeliveryPolicy();
+        return policy.max_payload_size != 0 and
+            payload.len > policy.max_payload_size;
     }
 
     fn recordPublishReceived(self: *Broker, payload_len: usize) void {
@@ -6089,6 +6127,7 @@ pub const Broker = struct {
             return err;
         };
         if (maybe_publish) |publish| {
+            const delivery_policy = self.runtimeDeliveryPolicy();
             deferred_plan = self.routeReleasedPublishMode(
                 .deferred,
                 publisher_id,
@@ -6097,6 +6136,7 @@ pub const Broker = struct {
                 pending.source_client_id orelse source_client_id,
                 pending.source_username,
                 pending.source_listener_id,
+                delivery_policy.upgrade_outgoing_qos,
                 false,
                 false,
                 &persistent_changed,
@@ -6145,8 +6185,9 @@ pub const Broker = struct {
         acknowledge_qos1: bool,
         prefixed_packet: ?*runtime.OwnedPacket,
     ) Error!void {
+        const delivery_policy = self.runtimeDeliveryPolicy();
         const mode = networkDeliveryMode(
-            self.options.upgrade_outgoing_qos,
+            delivery_policy.upgrade_outgoing_qos,
             publish.qos,
         );
         const deferred_plan = switch (mode) {
@@ -6158,6 +6199,7 @@ pub const Broker = struct {
                 source_client_id,
                 source_username,
                 source_listener_id,
+                delivery_policy.upgrade_outgoing_qos,
                 acknowledge_qos1,
                 true,
                 null,
@@ -6177,6 +6219,7 @@ pub const Broker = struct {
         source_client_id: []const u8,
         source_username: ?[]const u8,
         source_listener_id: ?u64,
+        upgrade_outgoing_qos: bool,
         acknowledge_qos1: bool,
         count_persistent_change: bool,
         outer_changed: ?*bool,
@@ -6202,6 +6245,7 @@ pub const Broker = struct {
             source_client_id,
             source_username,
             source_listener_id,
+            upgrade_outgoing_qos,
             netz_runtime.cachedAwakeNow(self.io),
             &persistent_changed,
             null,
@@ -6289,6 +6333,7 @@ pub const Broker = struct {
         source_client_id: ?[]const u8,
         source_username: ?[]const u8,
         source_listener_id: ?u64,
+        upgrade_outgoing_qos: bool,
         now: std.Io.Timestamp,
         persistent_changed: ?*bool,
         publication_effect_committed: ?*bool,
@@ -6348,7 +6393,7 @@ pub const Broker = struct {
             matches,
             publish.qos,
             publish.retain,
-            self.options.upgrade_outgoing_qos,
+            upgrade_outgoing_qos,
             &session_plan_scratch,
         );
         defer session_plan.deinit();
@@ -6621,7 +6666,7 @@ pub const Broker = struct {
                 publication.?,
             );
             const delivery_qos = minQos(
-                if (self.options.upgrade_outgoing_qos)
+                if (upgrade_outgoing_qos)
                     match.subscription.qos
                 else
                     minQos(publish.qos, match.subscription.qos),
@@ -7986,6 +8031,7 @@ pub const Broker = struct {
             will.client_id,
             will.source_username,
             will.source_listener_id,
+            self.options.upgrade_outgoing_qos,
             now,
             &progress.persistent_changed,
             &progress.publication_effect_committed,
@@ -8468,6 +8514,7 @@ test "MQTT offline durable fanout adopts and shares prefixed publication bytes" 
         null,
         null,
         null,
+        false,
         .zero,
         &persistent_changed,
         &publication_committed,
@@ -8585,6 +8632,7 @@ test "MQTT released QoS 2 fanout adopts pending publication bytes" {
         null,
         null,
         null,
+        false,
         .zero,
         null,
         null,

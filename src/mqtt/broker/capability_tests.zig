@@ -674,6 +674,73 @@ test "broker enforces Application Message payload limit by QoS" {
     try joinServer(thread, &joined, &serve);
 }
 
+test "broker reloads payload limit for existing connections" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var broker = try context.BrokerType.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .limits = .{
+                .max_connections = 2,
+                .max_queued_deliveries_per_connection = 2,
+                .runtime = .{ .max_packet_size = 4096 },
+            },
+            .accept = .{ .protocol = .v5 },
+        },
+    );
+    defer broker.deinit();
+
+    var serve = ServeState{ .broker = &broker, .connection_count = 2 };
+    const thread = try std.Thread.spawn(.{}, ServeState.run, .{&serve});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var subscriber = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "payload-reload-sub" },
+    );
+    defer subscriber.close();
+    var suback = try subscriber.subscribe(
+        &.{.{ .topic_filter = "payload/reload" }},
+        .{},
+    );
+    defer suback.deinit(allocator);
+
+    var publisher = try context.runtime_mod.Client.connect(
+        allocator,
+        io,
+        broker.address(),
+        .{ .protocol = .v5, .client_id = "payload-reload-pub" },
+    );
+    defer publisher.close();
+
+    try broker.setRuntimeDeliveryPolicy(.{ .max_payload_size = 1 });
+    _ = try publisher.writePublish("payload/reload", "AB", .{
+        .qos = .at_least_once,
+    });
+    var rejected = try publisher.readPubAck();
+    defer rejected.deinit(allocator);
+    try std.testing.expectEqual(@as(u8, 0x83), rejected.ack.reason_code);
+    try subscriber.ping();
+
+    try broker.setRuntimeDeliveryPolicy(.{});
+    try publisher.publish("payload/reload", "AB", .{});
+    var delivered = try subscriber.readPublish();
+    defer delivered.deinit(allocator);
+    try std.testing.expectEqualStrings("AB", delivered.publish.payload);
+
+    try context.disconnectAllFn(&.{ &subscriber, &publisher });
+    try joinServer(thread, &joined, &serve);
+}
+
 test "broker refuses oversized Will payload before Session registration" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
