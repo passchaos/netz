@@ -3862,6 +3862,41 @@ upload evidence remained neutral. The production candidate and its private
 timestamp plumbing were therefore removed again; this rules out retrying that
 isolated optimization without a materially different clock/timer design.
 
+The exposed server-sender profile then motivated a staged ACK-summary
+experiment. A single-ACK packet already validates every range and ECN count
+before mutation, but the ordinary path subsequently rescanned the same sent
+metadata for plain-ACK ECN policy and RTT eligibility. A new
+`bench-quic-ack-ranges` arm models the exact four-packet cumulative cycle:
+prevalidate, plain-ACK preflight, RTT sample, and validated apply. With
+identical benchmark source, seven CPU-0 fixed-binary, order-alternated pairs
+reduced that cycle from a 363 to 247 ns median (0.680x, 7/7 wins). Baseline and
+candidate SHA-256 values were
+`2e84f1471a352e40dbe48e6ae8576b861ecee02a08fba6bc769882426423a336`
+and
+`a47aa97d0795357c06487209972e11828837d97a7fa768fdd4648743130021c0`.
+
+That isolated result was not sufficient to retain the transport change. The
+first token expansion copied the validation summary through the receive path;
+a matched server-sender profile put 2.69% of samples in `memcpy` below
+`applyReceivedFramesForDestination`, versus 0.30% in the baseline. Seven
+64-connection, 64 x 1-MiB fixed-binary pairs then produced a 0.981
+candidate/baseline server-sender median with only 1/7 wins, so that form was
+rejected. A materially narrower retry kept one stack token, passed it by
+pointer, and removed the low-value cached mark window. Its persistent baseline
+and candidate SHA-256 values were
+`0e4ed798c8896590d664bcdbbd4dccb4a4d52f87d99ff6ea5614d0bb973e19d9`
+and
+`98273d96d1c2a659c63d4ce1cb251dd9a043fe052db27924d40afe8774e4a759`.
+Across seven CPU-0/1 AB/BA pairs, client-sender throughput had a 1.009 paired
+median with 5/7 wins, but the target server-sender shape was neutral at 1.001
+with 4/7 wins. Every arm still verified 67,108,864 bytes, checksum
+8,556,380,160, all 64 connections, and the completion exchange. The complete
+production candidate was removed: eliminating duplicate metadata scans is not
+retained when its target end-to-end workload remains neutral. The
+microbenchmark arm remains to make a future smaller representation or fused
+recovery design measurable without weakening validation, RTT, loss, ECN, or
+mutation ordering.
+
 A same-connection transmit-batch candidate was also evaluated and removed. It
 staged up to four resumable STREAM packets per socket submission using the
 existing exact protected/socket-visible prefix result. Five order-alternated

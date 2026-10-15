@@ -7,6 +7,9 @@ const packet_number_base: u64 = 10_000;
 const sent_packets: usize = 4096;
 const recovery_packets: usize = 128;
 const recovery_iterations: usize = 5_000;
+const validated_ack_batch_packets: usize = 4;
+const validated_ack_iterations: usize = 250_000;
+const validated_ack_path_epoch: u32 = 7;
 
 pub fn main() !void {
     const allocator = std.heap.smp_allocator;
@@ -46,6 +49,8 @@ pub fn main() !void {
         allocator,
         io,
     );
+    const validated_ack_ns, const validated_ack_checksum =
+        try measureValidatedAckCycle(allocator, io);
     const speedup_x100 = ratioTimes100(allocating_ns, stack_ns);
 
     std.debug.print(
@@ -58,6 +63,7 @@ pub fn main() !void {
         \\  stale wouldRecordFresh:   {d} ns/op
         \\  sent ACK validation ({d} packets): {d} ns/op
         \\  recovery ACK cycle ({d} packets, {d} ranges): {d} ns/cycle
+        \\  validated ACK cycle ({d} packets): {d} ns/cycle
         \\  checksum: {d}
         \\
     , .{
@@ -74,9 +80,81 @@ pub fn main() !void {
         recovery_packets,
         recovery_packets / 2,
         recovery_ns / recovery_iterations,
+        validated_ack_batch_packets,
+        validated_ack_ns / validated_ack_iterations,
         allocating_checksum +% stack_checksum +% stale_checksum +%
-            sent_validate_checksum +% recovery_checksum,
+            sent_validate_checksum +% recovery_checksum +%
+            validated_ack_checksum,
     });
+}
+
+/// Model the ordinary 1-RTT receive path: validate a cumulative ACK before
+/// recording the containing packet, preflight plain-ACK ECN state, take an RTT
+/// sample, then apply the already validated ACK. Four newly sent packets per
+/// ACK matches the production benchmark's ACK threshold while the cumulative
+/// range also exercises the acknowledged-prefix cursor and compaction.
+fn measureValidatedAckCycle(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+) !struct { u64, u64 } {
+    var sent = netz.quic.packet_space.SentPacketTracker.init(allocator);
+    defer sent.deinit();
+
+    var checksum: u64 = 0;
+    var next_packet_number: u64 = 0;
+    const started = nowNs(io);
+    for (0..validated_ack_iterations) |_| {
+        for (0..validated_ack_batch_packets) |_| {
+            try sent.sentAtWithDatagramSizeAndPathEpoch(
+                next_packet_number,
+                true,
+                1200,
+                1200,
+                .not_ect,
+                next_packet_number + 1,
+                validated_ack_path_epoch,
+            );
+            next_packet_number += 1;
+        }
+
+        const largest = next_packet_number - 1;
+        const ack = netz.quic.AckFrame{
+            .largest_acknowledged = largest,
+            .ack_delay = 0,
+            .first_ack_range = largest,
+        };
+        const validated = try sent.validateAckForApply(
+            ack,
+            validated_ack_path_epoch,
+        );
+        const plain_ack_would_fail = sent.plainAckWouldFailForPathEpoch(
+            ack,
+            validated_ack_path_epoch,
+        );
+        const sample = try sent.ackRttSampleForPathEpoch(
+            ack,
+            largest + 10_000,
+            3,
+            validated_ack_path_epoch,
+        );
+        const result = try sent.applyAckDetailedForProbeValidated(
+            ack,
+            null,
+            0,
+            null,
+            validated_ack_path_epoch,
+            validated,
+        );
+        if (plain_ack_would_fail or sample == null or
+            result.packets != validated_ack_batch_packets)
+        {
+            return error.UnexpectedAckResult;
+        }
+        checksum +%= sample.?.latest_rtt_ns;
+        checksum +%= result.bytes;
+        checksum +%= result.packets;
+    }
+    return .{ nowNs(io) -| started, checksum };
 }
 
 fn measureRecoveryAckRanges(
