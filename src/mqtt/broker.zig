@@ -1919,6 +1919,11 @@ pub const SystemMetric = enum {
 
 pub const ListenerAdmissionSnapshot = struct {
     allow_zero_length_client_id: bool,
+    maximum_qos: ?mqtt.QoS = null,
+    maximum_keep_alive_seconds: ?u16 = null,
+    topic_alias_maximum: u16 = 16,
+    max_outgoing_topic_aliases: u16 = std.math.maxInt(u16),
+    accepted_protocol_versions: mqtt.AcceptedProtocolVersions = .{},
     prefix_storage: [client_id_mod.max_prefix_len]u8 = undefined,
     prefix_len: u6,
 
@@ -1926,9 +1931,39 @@ pub const ListenerAdmissionSnapshot = struct {
         allow_zero_length_client_id: bool,
         prefix: []const u8,
     ) Error!ListenerAdmissionSnapshot {
+        return initWithCapabilities(
+            allow_zero_length_client_id,
+            prefix,
+            null,
+            null,
+            16,
+            std.math.maxInt(u16),
+            .{},
+        );
+    }
+
+    pub fn initWithCapabilities(
+        allow_zero_length_client_id: bool,
+        prefix: []const u8,
+        maximum_qos: ?mqtt.QoS,
+        maximum_keep_alive_seconds: ?u16,
+        topic_alias_maximum: u16,
+        max_outgoing_topic_aliases: u16,
+        accepted_protocol_versions: mqtt.AcceptedProtocolVersions,
+    ) Error!ListenerAdmissionSnapshot {
         try validateAutoClientIdPrefix(prefix);
+        if (maximum_keep_alive_seconds == 0 or
+            !accepted_protocol_versions.any())
+        {
+            return error.InvalidProperty;
+        }
         var result = ListenerAdmissionSnapshot{
             .allow_zero_length_client_id = allow_zero_length_client_id,
+            .maximum_qos = maximum_qos,
+            .maximum_keep_alive_seconds = maximum_keep_alive_seconds,
+            .topic_alias_maximum = topic_alias_maximum,
+            .max_outgoing_topic_aliases = max_outgoing_topic_aliases,
+            .accepted_protocol_versions = accepted_protocol_versions,
             .prefix_len = @intCast(prefix.len),
         };
         @memcpy(result.prefix_storage[0..prefix.len], prefix);
@@ -3725,9 +3760,7 @@ pub const Broker = struct {
             );
             if (listener.admission_policy) |provider| {
                 const snapshot = provider.snapshot(provider.context);
-                try validateAutoClientIdPrefix(
-                    snapshot.autoClientIdPrefix(),
-                );
+                try validateListenerAdmissionSnapshot(snapshot);
             }
             if (!(listener.accept orelse self.options.accept)
                 .accepted_protocol_versions.any())
@@ -3873,9 +3906,7 @@ pub const Broker = struct {
             );
             if (listener.admission_policy) |provider| {
                 const snapshot = provider.snapshot(provider.context);
-                try validateAutoClientIdPrefix(
-                    snapshot.autoClientIdPrefix(),
-                );
+                try validateListenerAdmissionSnapshot(snapshot);
             }
             if (!(listener.accept orelse self.options.accept)
                 .accepted_protocol_versions.any())
@@ -9313,6 +9344,15 @@ const ListenerAcceptTask = struct {
             admission_snapshot = provider.snapshot(provider.context);
             accept_options.allow_zero_length_client_id =
                 admission_snapshot.allow_zero_length_client_id;
+            accept_options.maximum_qos = admission_snapshot.maximum_qos;
+            accept_options.maximum_keep_alive_seconds =
+                admission_snapshot.maximum_keep_alive_seconds;
+            accept_options.topic_alias_maximum =
+                admission_snapshot.topic_alias_maximum;
+            accept_options.max_outgoing_topic_aliases =
+                admission_snapshot.max_outgoing_topic_aliases;
+            accept_options.accepted_protocol_versions =
+                admission_snapshot.accepted_protocol_versions;
             auto_client_id_prefix = admission_snapshot.autoClientIdPrefix();
         }
         var client_task = try task.broker.preparePending(
@@ -9459,6 +9499,15 @@ const ListenerSupervisorAcceptTask = struct {
                 admission_snapshot = provider.snapshot(provider.context);
                 accept_options.allow_zero_length_client_id =
                     admission_snapshot.allow_zero_length_client_id;
+                accept_options.maximum_qos = admission_snapshot.maximum_qos;
+                accept_options.maximum_keep_alive_seconds =
+                    admission_snapshot.maximum_keep_alive_seconds;
+                accept_options.topic_alias_maximum =
+                    admission_snapshot.topic_alias_maximum;
+                accept_options.max_outgoing_topic_aliases =
+                    admission_snapshot.max_outgoing_topic_aliases;
+                accept_options.accepted_protocol_versions =
+                    admission_snapshot.accepted_protocol_versions;
                 auto_client_id_prefix =
                     admission_snapshot.autoClientIdPrefix();
             }
@@ -9856,6 +9905,17 @@ fn validateAutoClientIdPrefix(prefix: []const u8) Error!void {
         return error.InvalidProperty;
     }
     try mqtt.validateUtf8String(prefix);
+}
+
+fn validateListenerAdmissionSnapshot(
+    snapshot: ListenerAdmissionSnapshot,
+) Error!void {
+    try validateAutoClientIdPrefix(snapshot.autoClientIdPrefix());
+    if (snapshot.maximum_keep_alive_seconds == 0 or
+        !snapshot.accepted_protocol_versions.any())
+    {
+        return error.InvalidProperty;
+    }
 }
 
 fn validateClientIdPrefix(prefix: []const u8) Error!void {

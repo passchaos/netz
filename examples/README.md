@@ -570,10 +570,11 @@ later TLS/WSS handshakes without rebinding the listener. In-flight handshakes
 retain their complete TLS policy generation until completion, while established
 TLS connections retain traffic keys and authenticated peer metadata without
 depending on the old files. SIGHUP also updates each existing listener's
-`allow_anonymous`, `allow_zero_length_clientid`, and resolved global/listener
-auto-ID prefix under the same security generation lock. Existing clients stay
-online, while later CONNECT attempts take one owned fixed-capacity policy
-snapshot before Session admission and use the new values.
+`allow_anonymous`, `allow_zero_length_clientid`, resolved global/listener auto-ID
+prefix, accepted protocol versions, Maximum QoS/Keep Alive, and both Topic Alias
+ceilings under the same security generation lock. Existing clients retain their
+negotiated state, while later CONNECT attempts take one owned fixed-capacity
+policy snapshot before Session admission and use the new values.
 Changing listener topology or any other listener transport/admission field
 fails the complete reload instead of being ignored. The persistence
 enable/location/file remain fixed until restart.

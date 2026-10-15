@@ -2502,6 +2502,16 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         first_prefix: str = "initial-first-",
         second_allow_zero: bool = True,
         second_prefix: str = "initial-second-",
+        first_maximum_qos: int = 0,
+        first_max_keepalive: int = 10,
+        first_topic_alias: int = 1,
+        first_outgoing_alias: int = 2,
+        first_protocols: str = "5",
+        second_maximum_qos: int = 1,
+        second_max_keepalive: int = 20,
+        second_topic_alias: int = 2,
+        second_outgoing_alias: int = 3,
+        second_protocols: str = "4,5",
     ) -> None:
         config.write_text(
             "per_listener_settings true\n"
@@ -2510,12 +2520,22 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             f"allow_anonymous {str(first_anonymous).lower()}\n"
             f"allow_zero_length_clientid {str(first_allow_zero).lower()}\n"
             f"listener_auto_id_prefix {first_prefix}\n"
+            f"maximum_qos {first_maximum_qos}\n"
+            f"max_keepalive {first_max_keepalive}\n"
+            f"max_topic_alias {first_topic_alias}\n"
+            f"max_topic_alias_broker {first_outgoing_alias}\n"
+            f"accept_protocol_versions {first_protocols}\n"
             "max_connections 6\n"
             f"listener {second_listener_port} 127.0.0.1\n"
             f"password_file {password_file}\n"
             f"allow_anonymous {str(second_anonymous).lower()}\n"
             f"allow_zero_length_clientid {str(second_allow_zero).lower()}\n"
             f"listener_auto_id_prefix {second_prefix}\n"
+            f"maximum_qos {second_maximum_qos}\n"
+            f"max_keepalive {second_max_keepalive}\n"
+            f"max_topic_alias {second_topic_alias}\n"
+            f"max_topic_alias_broker {second_outgoing_alias}\n"
+            f"accept_protocol_versions {second_protocols}\n"
             "max_connections 6\n"
         )
 
@@ -2525,6 +2545,9 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         expected_reason: int,
         username: str | None = None,
         password: str | None = None,
+        maximum_qos: int | None = None,
+        maximum_keep_alive: int | None = None,
+        topic_alias_maximum: int | None = None,
     ) -> socket.socket:
         client = socket.create_connection(("127.0.0.1", port), timeout=5)
         client.settimeout(5)
@@ -2535,13 +2558,27 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
                 password=password,
             )
         )
-        reason = connack_reason(read_mqtt_packet(client))
+        connack = read_mqtt_packet(client)
+        reason = connack_reason(connack)
         if reason != expected_reason:
             client.close()
             raise AssertionError(
                 f"listener policy reload {client_id} expected "
                 f"{expected_reason:#x}, received {reason:#x}"
             )
+        if maximum_qos is not None:
+            assert_connack_policy(connack, maximum_qos, maximum_keep_alive)
+        if topic_alias_maximum is not None:
+            alias_property = bytes((0x22,)) + topic_alias_maximum.to_bytes(
+                2,
+                "big",
+            )
+            if alias_property not in connack_properties(connack):
+                client.close()
+                raise AssertionError(
+                    f"listener policy reload {client_id} omitted "
+                    f"Topic Alias Maximum {topic_alias_maximum}"
+                )
         return client
 
     def connect_zero(
@@ -2550,6 +2587,10 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         expected_reason: int,
         expected_prefix: str | None = None,
         proto_ver: int = 5,
+        keep_alive: int = 60,
+        maximum_qos: int | None = None,
+        maximum_keep_alive: int | None = None,
+        topic_alias_maximum: int | None = None,
     ) -> socket.socket:
         client = socket.create_connection(("127.0.0.1", port), timeout=5)
         client.settimeout(5)
@@ -2559,6 +2600,7 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
                 username="stable",
                 password="password",
                 proto_ver=proto_ver,
+                keep_alive=keep_alive,
             )
         )
         connack = read_mqtt_packet(client)
@@ -2577,6 +2619,19 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
                     f"listener policy reload {label} assigned {assigned!r}, "
                     f"expected prefix {expected_prefix!r}"
                 )
+        if proto_ver == 5 and maximum_qos is not None:
+            assert_connack_policy(connack, maximum_qos, maximum_keep_alive)
+        if proto_ver == 5 and topic_alias_maximum is not None:
+            alias_property = bytes((0x22,)) + topic_alias_maximum.to_bytes(
+                2,
+                "big",
+            )
+            if alias_property not in connack_properties(connack):
+                client.close()
+                raise AssertionError(
+                    f"listener policy reload {label} omitted "
+                    f"Topic Alias Maximum {topic_alias_maximum}"
+                )
         return client
 
     write_config(True, False)
@@ -2594,14 +2649,22 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
 
     clients: list[socket.socket] = []
     try:
-        existing = connect(first_port, "listener-policy-existing", 0)
+        existing = connect(
+            first_port,
+            "listener-policy-existing",
+            0,
+            maximum_qos=0,
+            maximum_keep_alive=10,
+            topic_alias_maximum=1,
+        )
         clients.append(existing)
         rejected = connect(second_port, "listener-policy-initial-rejected", 0x87)
         rejected.close()
         rejected = connect_zero(
             first_port,
             "listener-policy-initial-zero-rejected",
-            0x80,
+            0x01,
+            proto_ver=4,
         )
         rejected.close()
         initial_zero = connect_zero(
@@ -2609,6 +2672,9 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             "listener-policy-initial-zero-accepted",
             0,
             "initial-second-",
+            maximum_qos=1,
+            maximum_keep_alive=20,
+            topic_alias_maximum=2,
         )
         clients.append(initial_zero)
 
@@ -2619,6 +2685,16 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             first_prefix="reloaded-first-",
             second_allow_zero=False,
             second_prefix="reloaded-second-",
+            first_maximum_qos=1,
+            first_max_keepalive=20,
+            first_topic_alias=2,
+            first_outgoing_alias=3,
+            first_protocols="4,5",
+            second_maximum_qos=0,
+            second_max_keepalive=10,
+            second_topic_alias=1,
+            second_outgoing_alias=2,
+            second_protocols="5",
         )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
@@ -2629,7 +2705,14 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         mqtt_ping(existing)
         rejected = connect(first_port, "listener-policy-first-rejected", 0x87)
         rejected.close()
-        second = connect(second_port, "listener-policy-second-accepted", 0)
+        second = connect(
+            second_port,
+            "listener-policy-second-accepted",
+            0,
+            maximum_qos=0,
+            maximum_keep_alive=10,
+            topic_alias_maximum=1,
+        )
         clients.append(second)
         authenticated = connect(
             first_port,
@@ -2637,6 +2720,9 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             0,
             username="stable",
             password="password",
+            maximum_qos=1,
+            maximum_keep_alive=20,
+            topic_alias_maximum=2,
         )
         clients.append(authenticated)
         reloaded_zero = connect_zero(
@@ -2644,6 +2730,9 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             "listener-policy-reloaded-zero-accepted",
             0,
             "reloaded-first-",
+            maximum_qos=1,
+            maximum_keep_alive=20,
+            topic_alias_maximum=2,
         )
         clients.append(reloaded_zero)
         rejected = connect_zero(
@@ -2657,12 +2746,13 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             "listener-policy-reloaded-v311-zero-accepted",
             0,
             proto_ver=4,
+            keep_alive=20,
         )
         clients.append(reloaded_v311)
         rejected = connect_zero(
             second_port,
             "listener-policy-reloaded-v311-zero-rejected",
-            0x02,
+            0x01,
             proto_ver=4,
         )
         rejected.close()
@@ -2678,6 +2768,16 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             first_prefix="reloaded-first-",
             second_allow_zero=False,
             second_prefix="reloaded-second-",
+            first_maximum_qos=1,
+            first_max_keepalive=20,
+            first_topic_alias=2,
+            first_outgoing_alias=3,
+            first_protocols="4,5",
+            second_maximum_qos=0,
+            second_max_keepalive=10,
+            second_topic_alias=1,
+            second_outgoing_alias=2,
+            second_protocols="5",
         )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
@@ -6002,7 +6102,8 @@ def main() -> None:
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
         "atomic password/ACL with selective live credential revocation and "
         "TLS/WSS identity/key-password/CA/CRL "
-        "plus per-listener anonymous/zero-ID/assigned-prefix admission SIGHUP "
+        "plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/"
+        "Keep-Alive/Topic-Alias admission SIGHUP "
         "reload with topology rollback, "
         "dynamic time/change/disabled autosave SIGHUP reload with fixed-target "
         "rollback, disabled-autosave SIGUSR1 checkpoint recovery, and snapshot restore "

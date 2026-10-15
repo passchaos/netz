@@ -1602,14 +1602,24 @@ test "listener supervisor snapshots reloadable Client ID admission" {
         fn snapshot(context_ptr: *anyopaque) mqtt.broker.ListenerAdmissionSnapshot {
             const self: *@This() = @ptrCast(@alignCast(context_ptr));
             return if (self.generation.load(.acquire) == 0)
-                mqtt.broker.ListenerAdmissionSnapshot.init(
+                mqtt.broker.ListenerAdmissionSnapshot.initWithCapabilities(
                     false,
                     "before-",
+                    .at_least_once,
+                    11,
+                    2,
+                    3,
+                    .{ .v3_1 = true, .v3_1_1 = true, .v5 = false },
                 ) catch unreachable
             else
-                mqtt.broker.ListenerAdmissionSnapshot.init(
+                mqtt.broker.ListenerAdmissionSnapshot.initWithCapabilities(
                     true,
                     "after-",
+                    .at_most_once,
+                    7,
+                    3,
+                    4,
+                    .{ .v3_1 = false, .v3_1_1 = false, .v5 = true },
                 ) catch unreachable;
         }
     };
@@ -1668,6 +1678,18 @@ test "listener supervisor snapshots reloadable Client ID admission" {
         accepted.connack.connack.properties,
     ).?;
     try std.testing.expect(std.mem.startsWith(u8, assigned, "after-"));
+    try std.testing.expectEqual(
+        mqtt.QoS.at_most_once,
+        mqtt.maximumQoS(accepted.connack.connack.properties).?,
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 7),
+        mqtt.serverKeepAlive(accepted.connack.connack.properties),
+    );
+    try std.testing.expectEqual(
+        @as(?u16, 3),
+        mqtt.topicAliasMaximum(accepted.connack.connack.properties),
+    );
     try accepted.connection.ping();
     try accepted.connection.disconnect(0);
 

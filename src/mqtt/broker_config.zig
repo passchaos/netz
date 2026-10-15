@@ -790,7 +790,9 @@ fn parseSources(
                     try markOnce(&seen.auto_id_prefix);
                     listener.auto_id_prefix =
                         try parseAutoIdPrefix(allocator, &words);
-                } else if (std.mem.eql(u8, directive, "max_qos")) {
+                } else if (std.mem.eql(u8, directive, "max_qos") or
+                    std.mem.eql(u8, directive, "maximum_qos"))
+                {
                     try markOnce(&seen.maximum_qos);
                     listener.maximum_qos = switch (try parseOneInteger(u2, &words)) {
                         0 => .at_most_once,
@@ -1096,6 +1098,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "allow_anonymous") or
         std.mem.eql(u8, value, "listener_auto_id_prefix") or
         std.mem.eql(u8, value, "max_qos") or
+        std.mem.eql(u8, value, "maximum_qos") or
         std.mem.eql(u8, value, "max_keepalive") or
         std.mem.eql(u8, value, "max_topic_alias") or
         std.mem.eql(u8, value, "max_topic_alias_broker") or
@@ -1289,7 +1292,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\listener 1883 127.0.0.1
         \\allow_anonymous true
         \\enable_proxy_protocol 1
-        \\max_qos 1
+        \\maximum_qos 1
         \\max_keepalive 30
         \\max_topic_alias 7
         \\max_topic_alias_broker 9
@@ -3679,6 +3682,15 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     try std.testing.expectError(
         error.InvalidInteger,
         parse(allocator, "listener 1883\nmax_qos 3"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\listener 1883
+            \\max_qos 1
+            \\maximum_qos 0
+            \\allow_anonymous true
+        ),
     );
     try std.testing.expectError(
         error.InvalidInteger,

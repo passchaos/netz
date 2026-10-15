@@ -524,12 +524,18 @@ pub fn run(
             !listener.use_identity_as_username and
             !listener.use_subject_as_username;
         anonymous.* = listener.allow_anonymous;
-        admission.* = try mqtt.broker.ListenerAdmissionSnapshot.init(
+        admission.* = try mqtt.broker.ListenerAdmissionSnapshot
+            .initWithCapabilities(
             if (config.per_listener_settings)
                 listener.allow_zero_length_client_id
             else
                 config.allow_zero_length_client_id,
             config.autoIdPrefixForListener(listener),
+            listener.maximum_qos,
+            listener.maximum_keep_alive_seconds,
+            listener.max_topic_alias,
+            listener.max_topic_alias_broker,
+            listener.accepted_protocol_versions,
         );
     }
     var security = try reloadable_security.Security.init(
@@ -718,11 +724,8 @@ pub fn run(
             accept.allow_zero_length_client_id =
                 configured.allow_zero_length_client_id;
         }
-        accept.maximum_qos = configured.maximum_qos;
         accept.maximum_keep_alive_seconds =
             configured.maximum_keep_alive_seconds;
-        accept.accepted_protocol_versions =
-            configured.accepted_protocol_versions;
         accept.topic_alias_maximum = configured.max_topic_alias;
         accept.max_outgoing_topic_aliases =
             configured.max_topic_alias_broker;
@@ -1141,12 +1144,18 @@ fn reloadConfiguredState(
         listener,
         *admission,
     | {
-        admission.* = mqtt.broker.ListenerAdmissionSnapshot.init(
+        admission.* = mqtt.broker.ListenerAdmissionSnapshot
+            .initWithCapabilities(
             if (reloaded_config.per_listener_settings)
                 listener.allow_zero_length_client_id
             else
                 reloaded_config.allow_zero_length_client_id,
             reloaded_config.autoIdPrefixForListener(listener),
+            listener.maximum_qos,
+            listener.maximum_keep_alive_seconds,
+            listener.max_topic_alias,
+            listener.max_topic_alias_broker,
+            listener.accepted_protocol_versions,
         ) catch |err| return .{ .failure = .{
             .component = .security,
             .err = err,
@@ -1300,14 +1309,6 @@ fn listenerReloadCompatible(
         before.use_identity_as_username == after.use_identity_as_username and
         before.use_subject_as_username == after.use_subject_as_username and
         std.mem.eql(u8, before.mount_point, after.mount_point) and
-        before.maximum_qos == after.maximum_qos and
-        before.maximum_keep_alive_seconds == after.maximum_keep_alive_seconds and
-        before.max_topic_alias == after.max_topic_alias and
-        before.max_topic_alias_broker == after.max_topic_alias_broker and
-        std.meta.eql(
-            before.accepted_protocol_versions,
-            after.accepted_protocol_versions,
-        ) and
         equalStringLists(
             before.websocket_origins.items,
             after.websocket_origins.items,

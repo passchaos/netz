@@ -3321,14 +3321,18 @@ that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Bridge
 definitions are one exception: `bridge_reload_type lazy|immediate` selects
 per-bridge generation replacement on the same SIGHUP without rebinding
-listeners. Per-listener `allow_anonymous`, `allow_zero_length_clientid`, and
-resolved global/listener auto-ID prefixes are committed under the same security
-generation lock. Existing connections remain valid, while each later CONNECT
-takes one fixed-capacity stack snapshot after parsing and before Session/Will/
-route mutation, so zero-ID admission and assigned identifiers cannot mix
-generations or borrow replaced prefix storage.
-Listener count/order, bind address, protocol, TLS/authentication paths, mount,
-other Client ID policy, capability, PROXY, Origin, and connection-limit changes fail the
+listeners. Per-listener `allow_anonymous`, `allow_zero_length_clientid`, resolved
+global/listener auto-ID prefixes, accepted protocol versions, Maximum QoS,
+Maximum Keep Alive, and inbound/outbound Topic Alias ceilings are committed
+under the same security generation lock. Existing connections retain their
+negotiated capabilities, while each later CONNECT takes one fixed-capacity stack
+snapshot after parsing and before Session/Will/route mutation, so admission,
+CONNACK capabilities, and assigned identifiers cannot mix generations or borrow
+replaced prefix storage. The parser uses an all-version superset for these
+reloadable listeners and the snapshot performs the authoritative version
+admission, allowing a reload to both enable and disable MQTT 3.1/3.1.1/5.
+Listener count/order, bind address, transport protocol, TLS/authentication paths,
+mount, other Client ID policy, PROXY, Origin, and connection-limit changes fail the
 complete transaction with `ListenerConfigurationRequiresRestart` instead of
 being silently ignored. Autosave policy is the other exception:
 `autosave_interval` and

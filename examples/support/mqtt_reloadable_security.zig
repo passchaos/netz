@@ -789,7 +789,15 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
         snapshot.autoClientIdPrefix(),
     );
     try security.setAdmissionPolicies(&.{
-        try mqtt.broker.ListenerAdmissionSnapshot.init(true, "reloaded-"),
+        try mqtt.broker.ListenerAdmissionSnapshot.initWithCapabilities(
+            true,
+            "reloaded-",
+            .at_most_once,
+            7,
+            3,
+            4,
+            .{ .v3_1 = false, .v3_1_1 = true, .v5 = true },
+        ),
     });
     snapshot = admission.snapshot(admission.context);
     try std.testing.expect(snapshot.allow_zero_length_client_id);
@@ -797,6 +805,14 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
         "reloaded-",
         snapshot.autoClientIdPrefix(),
     );
+    try std.testing.expectEqual(mqtt.QoS.at_most_once, snapshot.maximum_qos.?);
+    try std.testing.expectEqual(
+        @as(?u16, 7),
+        snapshot.maximum_keep_alive_seconds,
+    );
+    try std.testing.expectEqual(@as(u16, 3), snapshot.topic_alias_maximum);
+    try std.testing.expectEqual(@as(u16, 4), snapshot.max_outgoing_topic_aliases);
+    try std.testing.expect(!snapshot.accepted_protocol_versions.v3_1);
     connect.username = authenticated_username;
     connect.password = authenticated_password;
     try std.testing.expect(ListenerPolicy.authorizeConnect(&policy, connect));

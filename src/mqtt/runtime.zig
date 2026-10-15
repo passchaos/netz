@@ -1331,6 +1331,20 @@ pub const PendingAcceptedClient = struct {
             resolved.server_keep_alive_seconds = null;
             return resolved;
         }
+        const maximum_qos = resolved.maximum_qos orelse .exactly_once;
+        if (connect.will) |will| {
+            if (@intFromEnum(will.qos) > @intFromEnum(maximum_qos)) {
+                resolved.reason_code = switch (connect.protocol) {
+                    .v3_1, .v3_1_1 => 0x05,
+                    .v5 => 0x9b,
+                };
+                resolved.session_present = false;
+                resolved.assigned_client_identifier = null;
+                resolved.response_information = null;
+                resolved.server_keep_alive_seconds = null;
+                return resolved;
+            }
+        }
         if (connect.client_id.len == 0 and
             !resolved.allow_zero_length_client_id)
         {
@@ -7776,6 +7790,22 @@ test "MQTT runtime resolves connection acceptance policies" {
         .allow_zero_length_client_id = false,
     });
     try std.testing.expectEqual(@as(u8, 0x80), anonymous.reason_code);
+    pending.connect.connect.client_id = "will-client";
+    pending.connect.connect.will = .{
+        .topic = "will/topic",
+        .payload = "will",
+        .qos = .at_least_once,
+        .retain = false,
+    };
+    const v5_will = try pending.resolvedOptions(.{
+        .maximum_qos = .at_most_once,
+    });
+    try std.testing.expectEqual(@as(u8, 0x9b), v5_will.reason_code);
+    pending.connect.connect.protocol = .v3_1_1;
+    const v311_will = try pending.resolvedOptions(.{
+        .maximum_qos = .at_most_once,
+    });
+    try std.testing.expectEqual(@as(u8, 0x05), v311_will.reason_code);
     try std.testing.expectError(
         error.InvalidProperty,
         pending.resolvedOptions(.{ .maximum_keep_alive_seconds = 0 }),
