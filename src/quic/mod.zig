@@ -773,16 +773,12 @@ pub fn parseTransportParametersTyped(
 ) Error!TransportParameters {
     var cursor = wire.Cursor.init(bytes);
     var params = TransportParameters{};
-    var seen: std.ArrayList(u64) = .empty;
+    var seen = SeenTransportParameters{};
     defer seen.deinit(allocator);
-    try seen.ensureUnusedCapacity(allocator, try transportParameterCount(bytes));
 
     while (!cursor.eof()) {
         const id = try varint.decode(&cursor);
-        for (seen.items) |seen_id| {
-            if (seen_id == id) return error.DuplicateTransportParameter;
-        }
-        seen.appendAssumeCapacity(id);
+        try seen.insert(allocator, id);
 
         const len = try usizeFromVarint(try varint.decode(&cursor));
         const value = try cursor.readSlice(len);
@@ -853,16 +849,58 @@ pub fn parseTransportParametersTyped(
     return params;
 }
 
-fn transportParameterCount(bytes: []const u8) Error!usize {
-    var cursor = wire.Cursor.init(bytes);
-    var count: usize = 0;
-    while (!cursor.eof()) {
-        _ = try varint.decode(&cursor);
-        const len = try usizeFromVarint(try varint.decode(&cursor));
-        try cursor.skip(len);
-        count += 1;
+const inline_unknown_transport_parameters = 8;
+
+const SeenTransportParameters = struct {
+    known: u32 = 0,
+    unknown_inline: [inline_unknown_transport_parameters]u64 = undefined,
+    unknown_inline_len: u8 = 0,
+    unknown_overflow: std.ArrayList(u64) = .empty,
+
+    fn deinit(self: *SeenTransportParameters, allocator: std.mem.Allocator) void {
+        self.unknown_overflow.deinit(allocator);
     }
-    return count;
+
+    fn insert(
+        self: *SeenTransportParameters,
+        allocator: std.mem.Allocator,
+        id: u64,
+    ) Error!void {
+        if (knownTransportParameterBit(id)) |bit| {
+            const mask = @as(u32, 1) << bit;
+            if ((self.known & mask) != 0) {
+                return error.DuplicateTransportParameter;
+            }
+            self.known |= mask;
+            return;
+        }
+
+        for (self.unknown_inline[0..self.unknown_inline_len]) |seen_id| {
+            if (seen_id == id) return error.DuplicateTransportParameter;
+        }
+        for (self.unknown_overflow.items) |seen_id| {
+            if (seen_id == id) return error.DuplicateTransportParameter;
+        }
+        if (self.unknown_inline_len < self.unknown_inline.len) {
+            self.unknown_inline[self.unknown_inline_len] = id;
+            self.unknown_inline_len += 1;
+            return;
+        }
+        try self.unknown_overflow.append(allocator, id);
+    }
+};
+
+fn knownTransportParameterBit(id: u64) ?u5 {
+    if (id <= @intFromEnum(TransportParameterId.version_information)) {
+        return @intCast(id);
+    }
+    return switch (id) {
+        @intFromEnum(TransportParameterId.reset_stream_at) => 18,
+        @intFromEnum(TransportParameterId.max_datagram_frame_size) => 19,
+        @intFromEnum(TransportParameterId.grease_quic_bit) => 20,
+        @intFromEnum(TransportParameterId.min_ack_delay) => 21,
+        else => null,
+    };
 }
 
 const TransportParameterHeader = struct {
@@ -3196,6 +3234,117 @@ test "QUIC typed transport parameters roundtrip and validate" {
             non_empty_reset_stream_at.items,
             .client,
         ),
+    );
+}
+
+test "QUIC typed transport parameters parse known fields without allocation" {
+    const client_cid = [_]u8{ 1, 2, 3, 4 };
+    const versions = [_]u8{
+        0x00, 0x00, 0x00, 0x01,
+        0x6b, 0x33, 0x43, 0xcf,
+    };
+    const params = TransportParameters{
+        .initial_max_data = 4096,
+        .initial_max_stream_data_bidi_local = 1024,
+        .initial_max_stream_data_bidi_remote = 2048,
+        .initial_max_stream_data_uni = 512,
+        .initial_max_streams_bidi = 8,
+        .initial_max_streams_uni = 4,
+        .active_connection_id_limit = 4,
+        .initial_source_connection_id = &client_cid,
+        .version_information = .{
+            .chosen_version = .version_1,
+            .available_versions_wire = &versions,
+        },
+        .max_datagram_frame_size = 1200,
+        .reset_stream_at = true,
+        .grease_quic_bit = true,
+        .min_ack_delay = 1000,
+    };
+
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try encodeTransportParametersForSource(
+        &encoded,
+        allocator,
+        params,
+        .client,
+    );
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const decoded = try parseTransportParametersTyped(
+        no_alloc.allocator(),
+        encoded.items,
+        .client,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+    try std.testing.expectEqual(
+        params.initial_max_data,
+        decoded.initial_max_data,
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &client_cid,
+        decoded.initial_source_connection_id.?,
+    );
+}
+
+test "QUIC typed transport parameter parser spills only excess unknown IDs" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    for (0..inline_unknown_transport_parameters) |index| {
+        try encodeTransportParameter(
+            &encoded,
+            allocator,
+            0x100 + index,
+            &.{},
+        );
+    }
+
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    _ = try parseTransportParametersTyped(
+        no_alloc.allocator(),
+        encoded.items,
+        .client,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    try encodeTransportParameter(
+        &encoded,
+        allocator,
+        0x100 + inline_unknown_transport_parameters,
+        &.{},
+    );
+    var spill_fail = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parseTransportParametersTyped(
+            spill_fail.allocator(),
+            encoded.items,
+            .client,
+        ),
+    );
+
+    try encodeTransportParameter(
+        &encoded,
+        allocator,
+        0x100 + inline_unknown_transport_parameters,
+        &.{ 1, 2, 3 },
+    );
+    try std.testing.expectError(
+        error.DuplicateTransportParameter,
+        parseTransportParametersTyped(allocator, encoded.items, .client),
     );
 }
 

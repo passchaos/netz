@@ -5171,6 +5171,44 @@ crypto pass should therefore re-audit public scalar inversion and the residual
 prepared-verifier body, but X25519 and non-crypto handshake work now outrank
 P-256 doubling; further point-kernel work needs a newly isolated hotspot.
 
+The next handshake allocation pass targets typed QUIC transport-parameter
+duplicate detection. The former parser first scanned the complete extension to
+count parameters, allocated one `u64` entry per parameter, then scanned that
+array linearly for every decoded ID. Known parameters now occupy a 32-bit seen
+set, while up to eight unknown/greasing IDs stay in caller-stack storage; only
+the ninth distinct unknown ID allocates an overflow list. Duplicate detection
+still spans the known set, inline unknown IDs, and overflow. Fail-first tests
+prove a complete practical known-parameter block and eight unknown IDs parse
+without allocation, the ninth unknown reports OOM transactionally, and a
+duplicate after spill is still rejected. Debug and ReleaseFast focused library
+gates pass; the broader filtered build completed 158/158 steps and 153/153
+tests, and the four-role Quinn certificate/echo/close smoke remains green.
+
+A CPU-0 fixed-binary 100-connection local-handshake pair used baseline SHA-256
+`2c7e5987cbf2c253422fd147837097a6d01af14d7d3369178073d0961d708068`
+and candidate
+`5e96d191fe30aaeb81896d087829c2ea5dc79d5d38e894dba9a2d087220b4868`.
+Allocation calls fell from 5,701 to 5,501, exactly two per connection (3.5%),
+and cumulative requested bytes from 6,873,388 to 6,815,920 (-57,468, 0.84%).
+Both runs freed every byte and retained the same 56,031-byte peak. GNU `size`
+text increased only 216 bytes while total static size fell eight bytes after
+the corresponding BSS reduction.
+
+The fixed-Quinn-server client matrix used baseline SHA-256
+`e555bd546538f2c5fca8e09d764b6f306cf6c6c42004327da67df97e32d74986`
+and candidate
+`d23674a7d4ad1d5cb8a50cdc8287675c64cf118f9f955a789268d1fd3cddcc73`.
+Eight mirrored 100-connection pairs produced a 0.998210 median instruction
+ratio (0.179% lower, 6/8 wins) and 0.969649 post-trust ratio (3.04% lower, 6/8
+wins). Complete P50 won only 3/8 with a 1.017151 ratio, so no handshake-latency
+gain is claimed. A zero-loss 1,000-connection follow-up recorded 235 samples;
+the former 2.63% typed-parser entry disappeared below the 0.2% reporting
+threshold. An exact upfront encoder-length/reserve experiment was rejected:
+despite a 0.09% instruction reduction, it won only 1/8 P50 pairs and regressed
+the paired median 4.69%. The retained change is therefore the exact allocation,
+memory, duplicate-detection, and small instruction result without the extra
+encoding prepass.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
