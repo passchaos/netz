@@ -1080,6 +1080,12 @@ fn serveWithManagement(
                                         .persistent_session_expiry_seconds orelse 0,
                                 },
                             );
+                            std.debug.print(
+                                "netz MQTT Client ID prefix reload " ++
+                                    "completed: length={d} source=SIGHUP " ++
+                                    "server_io=zio-std-io\n",
+                                .{success.required_client_id_prefix_length},
+                            );
                         },
                     }
                 }
@@ -1119,6 +1125,7 @@ const ReloadOutcome = union(enum) {
         autosave_policy: AutosavePolicy,
         scheduling_policy: mqtt.broker.RuntimeSchedulingPolicy,
         delivery_policy: mqtt.broker.RuntimeDeliveryPolicy,
+        required_client_id_prefix_length: usize,
     },
     failure: struct {
         component: ReloadComponent,
@@ -1161,6 +1168,14 @@ fn reloadConfiguredState(
         .component = .configuration,
         .err = err,
     } };
+    var prepared_required_client_id_prefix =
+        broker.prepareRequiredClientIdPrefix(
+            reloaded_config.client_id_prefixes,
+        ) catch |err| return .{ .failure = .{
+            .component = .configuration,
+            .err = err,
+        } };
+    defer prepared_required_client_id_prefix.deinit();
     const reloaded_allow_anonymous = allocator.alloc(
         bool,
         reloaded_config.listeners.len,
@@ -1265,6 +1280,11 @@ fn reloadConfiguredState(
     policy.setAllowAnonymousLocked(reloaded_allow_anonymous);
     policy.setAdmissionPoliciesLocked(reloaded_admission_policies);
     policy.lock.unlock(policy.io);
+    const required_client_id_prefix_length =
+        prepared_required_client_id_prefix.bytes.len;
+    broker.commitRequiredClientIdPrefix(
+        &prepared_required_client_id_prefix,
+    );
     broker.setRuntimeSchedulingPolicy(
         reloaded_scheduling_policy,
     ) catch unreachable;
@@ -1285,6 +1305,7 @@ fn reloadConfiguredState(
         .autosave_policy = reloaded_autosave,
         .scheduling_policy = reloaded_scheduling_policy,
         .delivery_policy = reloaded_delivery_policy,
+        .required_client_id_prefix_length = required_client_id_prefix_length,
     } };
 }
 

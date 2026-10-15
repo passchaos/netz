@@ -1956,6 +1956,42 @@ test "broker runtime delivery policy commits atomically" {
     try std.testing.expectEqualDeep(updated, broker.runtimeDeliveryPolicy());
 }
 
+test "broker required Client ID prefix prepares and commits ownership" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{
+        .client_id_prefix = "initial-",
+    });
+    defer broker.deinit();
+
+    var prepared = try broker.prepareRequiredClientIdPrefix("reloaded-");
+    defer prepared.deinit();
+    var prefix = try broker.requiredClientIdPrefixAlloc(allocator);
+    try std.testing.expectEqualStrings("initial-", prefix);
+    allocator.free(prefix);
+
+    broker.commitRequiredClientIdPrefix(&prepared);
+    prefix = try broker.requiredClientIdPrefixAlloc(allocator);
+    try std.testing.expectEqualStrings("reloaded-", prefix);
+    allocator.free(prefix);
+
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.setRequiredClientIdPrefix("bad\x00prefix"),
+    );
+    prefix = try broker.requiredClientIdPrefixAlloc(allocator);
+    try std.testing.expectEqualStrings("reloaded-", prefix);
+    allocator.free(prefix);
+
+    try broker.setRequiredClientIdPrefix("");
+    prefix = try broker.requiredClientIdPrefixAlloc(allocator);
+    defer allocator.free(prefix);
+    try std.testing.expectEqual(@as(usize, 0), prefix.len);
+}
+
 test "broker runtime scheduling policy resets deadlines atomically" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

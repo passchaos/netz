@@ -1793,13 +1793,50 @@ def run_required_client_id_prefix_case(
 ) -> None:
     port = free_port()
     config = directory / "required-client-id-prefix.conf"
-    config.write_text(
-        "clientid_prefixes secure-\n"
-        "auto_id_prefix secure-auto-\n"
-        f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
-        "max_connections 4\n"
-    )
+
+    def write_config(
+        required_prefix: str,
+        auto_prefix: str,
+        extra_global: str = "",
+    ) -> None:
+        config.write_text(
+            f"clientid_prefixes {required_prefix}\n"
+            f"auto_id_prefix {auto_prefix}\n"
+            + extra_global
+            + f"listener {port} 127.0.0.1\n"
+            "allow_anonymous true\n"
+            "max_connections 7\n"
+        )
+
+    def connect(
+        client_id: str,
+        protocol: int,
+        expected_reason: int,
+        expected_assigned_prefix: str | None = None,
+    ) -> socket.socket:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        client.sendall(connect_packet(client_id, proto_ver=protocol))
+        connack = read_mqtt_packet(client)
+        actual_reason = connack_reason(connack)
+        if actual_reason != expected_reason:
+            client.close()
+            raise AssertionError(
+                "Client ID prefix refusal mismatch: "
+                f"client_id={client_id!r} protocol={protocol} "
+                f"expected={expected_reason:#x} actual={actual_reason:#x}"
+            )
+        if expected_assigned_prefix is not None:
+            assigned = assigned_client_identifier(connack)
+            if not assigned.startswith(expected_assigned_prefix):
+                client.close()
+                raise AssertionError(
+                    "assigned Client ID bypassed required prefix: "
+                    f"{assigned!r}"
+                )
+        return client
+
+    write_config("secure-", "secure-auto-")
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,
@@ -1808,44 +1845,69 @@ def run_required_client_id_prefix_case(
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 1 listeners for 4 clients" not in ready:
+    if "configured 1 listeners for 7 clients" not in ready:
         raise RuntimeError(f"Client ID prefix broker failed: {ready}")
+    clients: list[socket.socket] = []
+    try:
+        existing = connect("secure-existing", 5, 0)
+        clients.append(existing)
+        rejected = connect("other-initial", 5, 0x87)
+        rejected.close()
 
-    cases = (
-        ("secure-client", 5, 0x00),
-        ("other-client", 5, 0x87),
-        ("other-v311", 4, 0x05),
-        ("", 5, 0x00),
-    )
-    for client_id, protocol, expected_reason in cases:
-        client = socket.create_connection(("127.0.0.1", port), timeout=5)
-        client.settimeout(5)
-        try:
-            client.sendall(connect_packet(client_id, proto_ver=protocol))
-            connack = read_mqtt_packet(client)
-            actual_reason = connack_reason(connack)
-            if actual_reason != expected_reason:
-                raise AssertionError(
-                    "Client ID prefix refusal mismatch: "
-                    f"client_id={client_id!r} protocol={protocol} "
-                    f"expected={expected_reason:#x} actual={actual_reason:#x}"
-                )
-            if client_id == "":
-                assigned = assigned_client_identifier(connack)
-                if not assigned.startswith("secure-auto-"):
-                    raise AssertionError(
-                        "assigned Client ID bypassed required prefix: "
-                        f"{assigned!r}"
-                    )
-            if expected_reason == 0:
-                client.sendall(bytes.fromhex("e000"))
-        finally:
-            client.close()
-
-    if process.wait(timeout=5) != 0:
-        raise RuntimeError(
-            "Client ID prefix broker failed: " + process.stdout.read()
+        write_config("next-", "next-auto-")
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "Client ID prefix reload completed: length=5",
+            "required Client ID prefix reload",
         )
+        mqtt_ping(existing)
+
+        rejected = connect("secure-old", 4, 0x05)
+        rejected.close()
+        accepted = connect("next-client", 5, 0)
+        accepted.sendall(bytes.fromhex("e000"))
+        accepted.close()
+        assigned = connect("", 5, 0, "next-auto-")
+        assigned.sendall(bytes.fromhex("e000"))
+        assigned.close()
+
+        write_config(
+            "blocked-",
+            "blocked-auto-",
+            extra_global="max_packet_size 100\n",
+        )
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "configuration reload failed: "
+            "error=GlobalConfigurationRequiresRestart",
+            "required Client ID prefix rollback",
+        )
+        rejected = connect("blocked-client", 5, 0x87)
+        rejected.close()
+        accepted = connect("next-still-active", 5, 0)
+        accepted.sendall(bytes.fromhex("e000"))
+        accepted.close()
+        mqtt_ping(existing)
+        existing.sendall(bytes.fromhex("e000"))
+        existing.close()
+        clients.remove(existing)
+
+        if process.wait(timeout=5) != 0:
+            raise RuntimeError(
+                "Client ID prefix broker failed: " + process.stdout.read()
+            )
+    finally:
+        for client in clients:
+            client.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
 
 def run_upgrade_outgoing_qos_case(broker: Path, directory: Path) -> None:
@@ -6079,7 +6141,8 @@ def main() -> None:
         "and message-size/offline-QoS0/QoS-upgrade/session-cap SIGHUP reload "
         "with restart-required global rollback and live-client continuity, "
         "zero-length and MQTT 3.1 Client ID bounds, global/listener auto-ID "
-        "prefixes, required Client ID prefix admission, and outgoing QoS policy, ordered "
+        "prefixes, atomic required Client ID prefix SIGHUP reload with rollback, "
+        "and outgoing QoS policy, ordered "
         "include_dir and global/per-listener security files, "
         "configured cleartext/TLS inbound/outbound bridge prefix mapping, "
         "immediate/lazy SIGHUP bridge reload with cross-subsystem rollback "

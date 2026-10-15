@@ -135,6 +135,29 @@ pub const ChangeAutosaveOptions = struct {
 pub const RuntimeSchedulingPolicy = deadline_driver_mod.Policy;
 pub const RuntimeDeliveryPolicy = runtime_policy_mod.Delivery;
 
+/// Fallible preparation for a no-fail required Client ID prefix commit.
+pub const PreparedRequiredClientIdPrefix = struct {
+    allocator: std.mem.Allocator,
+    bytes: []u8,
+    consumed: bool = false,
+
+    pub fn deinit(self: *PreparedRequiredClientIdPrefix) void {
+        if (!self.consumed and self.bytes.len != 0) {
+            self.allocator.free(self.bytes);
+        }
+        self.bytes = &.{};
+        self.consumed = true;
+    }
+
+    fn take(self: *PreparedRequiredClientIdPrefix) []u8 {
+        std.debug.assert(!self.consumed);
+        const bytes = self.bytes;
+        self.bytes = &.{};
+        self.consumed = true;
+        return bytes;
+    }
+};
+
 pub const Options = struct {
     limits: Limits = .{},
     /// Maximum outgoing QoS 1/2 payload bytes held by each transient Network
@@ -2548,6 +2571,60 @@ pub const Broker = struct {
         self.state_mutex.unlock(self.io);
     }
 
+    /// Validate and own a required Client ID prefix before an atomic reload
+    /// reaches its no-fail commit phase.
+    pub fn prepareRequiredClientIdPrefix(
+        self: *Broker,
+        prefix: []const u8,
+    ) Error!PreparedRequiredClientIdPrefix {
+        try validateClientIdPrefix(prefix);
+        return .{
+            .allocator = self.allocator,
+            .bytes = if (prefix.len == 0)
+                &.{}
+            else
+                try self.allocator.dupe(u8, prefix),
+        };
+    }
+
+    /// Commit a prepared prefix without allocation. Readers compare under the
+    /// same state mutex, so the retired allocation can be released immediately
+    /// after the swap without a dangling CONNECT view.
+    pub fn commitRequiredClientIdPrefix(
+        self: *Broker,
+        prepared: *PreparedRequiredClientIdPrefix,
+    ) void {
+        std.debug.assert(prepared.allocator.ptr == self.allocator.ptr);
+        std.debug.assert(prepared.allocator.vtable == self.allocator.vtable);
+        const replacement = prepared.take();
+        self.state_mutex.lockUncancelable(self.io);
+        const retired = self.options.client_id_prefix;
+        self.options.client_id_prefix = replacement;
+        self.state_mutex.unlock(self.io);
+        if (retired.len != 0) self.allocator.free(@constCast(retired));
+    }
+
+    /// Convenience wrapper for callers that do not need a larger reload
+    /// transaction. Allocation failure leaves the active prefix unchanged.
+    pub fn setRequiredClientIdPrefix(
+        self: *Broker,
+        prefix: []const u8,
+    ) Error!void {
+        var prepared = try self.prepareRequiredClientIdPrefix(prefix);
+        defer prepared.deinit();
+        self.commitRequiredClientIdPrefix(&prepared);
+    }
+
+    /// Return an owned diagnostic snapshot that remains valid across reloads.
+    pub fn requiredClientIdPrefixAlloc(
+        self: *Broker,
+        allocator: std.mem.Allocator,
+    ) std.mem.Allocator.Error![]u8 {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return allocator.dupe(u8, self.options.client_id_prefix);
+    }
+
     /// Return one coherent snapshot of the currently active periodic policy.
     pub fn runtimeSchedulingPolicy(self: *Broker) RuntimeSchedulingPolicy {
         self.state_mutex.lockUncancelable(self.io);
@@ -4728,7 +4805,9 @@ pub const Broker = struct {
                 auto_client_id_prefix,
             );
         }
-        if (!self.clientIdMatchesRequiredPrefix(effective_connect.client_id)) {
+        if (!self.clientIdMatchesRequiredPrefixLocked(
+            effective_connect.client_id,
+        )) {
             return error.ClientIdPrefixMismatch;
         }
         const previous_session_handle = self.sessions.find(
@@ -4910,6 +4989,15 @@ pub const Broker = struct {
     }
 
     fn clientIdMatchesRequiredPrefix(
+        self: *Broker,
+        client_id: []const u8,
+    ) bool {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return self.clientIdMatchesRequiredPrefixLocked(client_id);
+    }
+
+    fn clientIdMatchesRequiredPrefixLocked(
         self: *const Broker,
         client_id: []const u8,
     ) bool {
