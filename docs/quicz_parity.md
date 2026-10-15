@@ -2225,9 +2225,15 @@ secret-stack and caller-register clearing. Fixed-binary CPU-0 evidence reduced
 the shared-secret primitive 42.5% and a pure in-memory TLS client handshake
 20.6%, with every candidate arm faster; ReleaseFast/ReleaseSafe differential
 tests cover 4,096 deterministic arbitrary points. Cross-process Quinn blocks
-remained host-noisy and are not cited as end-to-end gains. The remaining
-fixed-base gap, packet/key-schedule work, and tail scheduling are the next
-handshake targets.
+remained host-noisy and are not cited as end-to-end gains. Published Vail
+`8571f55` then adds the companion constant-time ARM64 fixed-base kernel with a
+48,576-byte affine table and explicit 448-byte stack/register clearing.
+Fixed-binary evidence reduced public recovery 59.4% and a pure in-memory TLS
+client handshake another 14.3%, with every candidate arm faster and 4,096
+deterministic public-key differential cases. Two mirrored fixed-Quinn-server
+blocks improved netz-client P50 by 0.4% and 4.9% despite slower Quinn controls;
+this remains bounded workload evidence. Packet/key-schedule work and tail
+scheduling are now the next handshake targets.
 
 1. Extend the two-CPU raw QUIC process comparison with kernel/interface packet
    capture, WebSocket/WebTransport allocation telemetry, lossy/reordered on-wire lifecycle churn,

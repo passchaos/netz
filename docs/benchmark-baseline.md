@@ -4923,6 +4923,31 @@ Their cross-process Quinn blocks again moved with host load rather than in a
 stable old/new direction, so the strict four-role matrices remain passing
 interop controls and do not support an end-to-end latency claim.
 
+Published Vail `8571f55` adds the companion s2n-bignum-derived ARM64 fixed-base
+kernel and its 48,576-byte affine table. It consumes 63 signed four-bit windows
+with constant-time selection, performs constant-schedule projection/inversion,
+then clears the complete 448-byte secret stack and x0--x17. Debug and
+ReleaseSmall retain the 11.25 KiB portable table. ReleaseFast/ReleaseSafe RFC
+7748, iterated, boundary, and 4,096 deterministic public-key differential cases
+matched Zig std; disassembly confirmed all twenty-eight 16-byte zero stores and
+register clearing before return.
+
+Eight CPU-0 fixed-binary ABBA arms reduced public-key recovery from a 19,289.5
+ns midpoint median to 7,829 ns (59.4%, every candidate arm faster), about 21.0%
+below the same-host AWS-LC 9,915 ns reference. A 5,000-iteration in-memory TLS
+client handshake ABBA reduced 81,138 to 69,570.5 ns (14.3%, every candidate arm
+faster) with identical wire lengths and checksum. A zero-loss 997-Hz profile
+attributed 81.9% of 800 samples to the fixed-window loop and 18.1% to inversion;
+the wrapper and clearing were below the reporting threshold. Primitive/TLS
+benchmark ELF `.text` increased by 17,816/55,900 bytes. The matching netz
+baseline/candidate hashes were
+`aa036f0c66426b7463f509c0f2101380fff83c4cc1cc3fe8c5f796fb0dd53c3e`
+and `b13d01c01518c277395b38ebbed3d8addd4d667faa2a8b8455352529dd8281da`.
+Two mirrored fixed-Quinn-server blocks reduced complete netz-client P50 by 0.4%
+and 4.9% even though Quinn's controls were slower in both candidate blocks.
+This is bounded supporting evidence for the tested workload, not a universal
+cross-stack latency claim.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
