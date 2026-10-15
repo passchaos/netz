@@ -131,6 +131,8 @@ pub const ChangeAutosaveOptions = struct {
     enabled: bool = true,
 };
 
+pub const RuntimeSchedulingPolicy = deadline_driver_mod.Policy;
+
 pub const Options = struct {
     limits: Limits = .{},
     /// Maximum outgoing QoS 1/2 payload bytes held by each transient Network
@@ -2211,6 +2213,9 @@ pub const Broker = struct {
     load_tracker: load_metrics.Tracker = .{},
     next_retained_expiry_ns: ?i96 = null,
     next_system_stats_ns: ?i96 = null,
+    /// Prevent an in-flight `$SYS` publication from overwriting a deadline
+    /// installed by a concurrent runtime policy update.
+    system_stats_schedule_generation: u64 = 0,
 
     pub fn listen(
         allocator: std.mem.Allocator,
@@ -2253,12 +2258,10 @@ pub const Broker = struct {
         }
         try validateAutoClientIdPrefix(options.auto_client_id_prefix);
         try validateClientIdPrefix(options.client_id_prefix);
-        if (options.system_stats_interval) |interval| {
-            if (interval.nanoseconds <= 0) return error.InvalidProperty;
-        }
-        if (options.retained_expiry_interval) |interval| {
-            if (interval.nanoseconds <= 0) return error.InvalidProperty;
-        }
+        try (RuntimeSchedulingPolicy{
+            .retained_expiry_interval = options.retained_expiry_interval,
+            .system_stats_interval = options.system_stats_interval,
+        }).validate();
         if (options.persistent_change_autosave) |autosave| {
             if (autosave.sub_path.len == 0 or autosave.max_changes == 0) {
                 return error.InvalidProperty;
@@ -2513,6 +2516,72 @@ pub const Broker = struct {
         self.state_mutex.lockUncancelable(self.io);
         defer self.state_mutex.unlock(self.io);
         return self.statsLocked();
+    }
+
+    /// Return one coherent snapshot of the currently active periodic policy.
+    pub fn runtimeSchedulingPolicy(self: *Broker) RuntimeSchedulingPolicy {
+        self.state_mutex.lockUncancelable(self.io);
+        defer self.state_mutex.unlock(self.io);
+        return .{
+            .retained_expiry_interval = self.options.retained_expiry_interval,
+            .system_stats_interval = self.options.system_stats_interval,
+        };
+    }
+
+    /// Atomically enable, disable, or retune broker-owned periodic work.
+    ///
+    /// Changed intervals start a fresh period at commit time. The deadline
+    /// driver is notified after the state lock is released so newly enabled or
+    /// shortened intervals take effect without waiting for an older timeout.
+    pub fn setRuntimeSchedulingPolicy(
+        self: *Broker,
+        policy: RuntimeSchedulingPolicy,
+    ) error{InvalidProperty}!void {
+        try policy.validate();
+
+        self.state_mutex.lockUncancelable(self.io);
+        const retained_changed = !deadline_driver_mod.intervalsEqual(
+            self.options.retained_expiry_interval,
+            policy.retained_expiry_interval,
+        );
+        const system_stats_changed = !deadline_driver_mod.intervalsEqual(
+            self.options.system_stats_interval,
+            policy.system_stats_interval,
+        );
+        const retained_deadline_missing =
+            policy.retained_expiry_interval != null and
+            self.next_retained_expiry_ns == null;
+        const system_stats_deadline_missing =
+            policy.system_stats_interval != null and
+            self.next_system_stats_ns == null;
+        const update_retained_deadline =
+            retained_changed or retained_deadline_missing;
+        const update_system_stats_deadline =
+            system_stats_changed or system_stats_deadline_missing;
+        if (!update_retained_deadline and !update_system_stats_deadline) {
+            self.state_mutex.unlock(self.io);
+            return;
+        }
+
+        const now = std.Io.Clock.awake.now(self.io);
+        self.options.retained_expiry_interval =
+            policy.retained_expiry_interval;
+        self.options.system_stats_interval = policy.system_stats_interval;
+        if (update_retained_deadline) {
+            self.next_retained_expiry_ns = if (policy.retained_expiry_interval) |interval|
+                now.addDuration(interval).nanoseconds
+            else
+                null;
+        }
+        if (update_system_stats_deadline) {
+            self.next_system_stats_ns = if (policy.system_stats_interval) |interval|
+                now.addDuration(interval).nanoseconds
+            else
+                null;
+            self.system_stats_schedule_generation +%= 1;
+        }
+        self.state_mutex.unlock(self.io);
+        self.deadline_driver.notify(self.io);
     }
 
     /// Return the most recent background change-autosave failure.
@@ -7684,6 +7753,7 @@ pub const Broker = struct {
             // deadline only after a complete snapshot is published. A failed
             // update is therefore retryable instead of silently skipped.
             var publish_system_stats = false;
+            var system_stats_schedule_generation: u64 = 0;
             if (self.options.system_stats_interval != null) {
                 // Wait one full interval after startup. Publishing before the
                 // first accepted connection is registered would expose a
@@ -7696,7 +7766,11 @@ pub const Broker = struct {
                 const due = self.next_system_stats_ns.?;
                 if (now.nanoseconds >= due) {
                     publish_system_stats = true;
+                    system_stats_schedule_generation =
+                        self.system_stats_schedule_generation;
                 }
+            } else {
+                self.next_system_stats_ns = null;
             }
             const lifecycle_deadline = earliestDeadline(
                 self.wills.nextDeadline(),
@@ -7722,11 +7796,19 @@ pub const Broker = struct {
             if (publish_system_stats) {
                 self.publishSystemStats() catch |err| return err;
                 self.state_mutex.lockUncancelable(self.io);
-                const interval = self.options.system_stats_interval.?;
-                // Skip missed ticks instead of bursting stale snapshots after
-                // a long scheduling pause.
-                self.next_system_stats_ns = std.Io.Clock.awake.now(self.io)
-                    .addDuration(interval).nanoseconds;
+                if (self.system_stats_schedule_generation ==
+                    system_stats_schedule_generation)
+                {
+                    if (self.options.system_stats_interval) |interval| {
+                        // Skip missed ticks instead of bursting stale snapshots
+                        // after a long scheduling pause.
+                        self.next_system_stats_ns =
+                            std.Io.Clock.awake.now(self.io)
+                                .addDuration(interval).nanoseconds;
+                    } else {
+                        self.next_system_stats_ns = null;
+                    }
+                }
                 self.state_mutex.unlock(self.io);
             }
             self.deadline_driver.wait(

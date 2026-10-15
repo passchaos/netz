@@ -1911,6 +1911,122 @@ test "broker periodically publishes system statistics" {
     if (serve.err) |err| return err;
 }
 
+test "broker runtime scheduling policy resets deadlines atomically" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var broker = try Broker.init(allocator, io, .{});
+    defer broker.deinit();
+
+    const initial_driver_generation =
+        broker.deadline_driver.currentGeneration();
+    const enabled_before = std.Io.Clock.awake.now(io);
+    try broker.setRuntimeSchedulingPolicy(.{
+        .retained_expiry_interval = .fromMilliseconds(200),
+        .system_stats_interval = .fromMilliseconds(300),
+    });
+    const enabled_after = std.Io.Clock.awake.now(io);
+    const enabled = broker.runtimeSchedulingPolicy();
+    try std.testing.expect(
+        enabled.retained_expiry_interval.?.nanoseconds ==
+            std.Io.Duration.fromMilliseconds(200).nanoseconds,
+    );
+    try std.testing.expect(
+        enabled.system_stats_interval.?.nanoseconds ==
+            std.Io.Duration.fromMilliseconds(300).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_retained_expiry_ns.? >= enabled_before
+            .addDuration(.fromMilliseconds(200)).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_retained_expiry_ns.? <= enabled_after
+            .addDuration(.fromMilliseconds(200)).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_system_stats_ns.? >= enabled_before
+            .addDuration(.fromMilliseconds(300)).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_system_stats_ns.? <= enabled_after
+            .addDuration(.fromMilliseconds(300)).nanoseconds,
+    );
+    try std.testing.expectEqual(
+        initial_driver_generation +% 1,
+        broker.deadline_driver.currentGeneration(),
+    );
+
+    const shortened_before = std.Io.Clock.awake.now(io);
+    try broker.setRuntimeSchedulingPolicy(.{
+        .retained_expiry_interval = .fromMilliseconds(20),
+        .system_stats_interval = .fromMilliseconds(30),
+    });
+    const shortened_after = std.Io.Clock.awake.now(io);
+    try std.testing.expect(
+        broker.next_retained_expiry_ns.? >= shortened_before
+            .addDuration(.fromMilliseconds(20)).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_retained_expiry_ns.? <= shortened_after
+            .addDuration(.fromMilliseconds(20)).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_system_stats_ns.? >= shortened_before
+            .addDuration(.fromMilliseconds(30)).nanoseconds,
+    );
+    try std.testing.expect(
+        broker.next_system_stats_ns.? <= shortened_after
+            .addDuration(.fromMilliseconds(30)).nanoseconds,
+    );
+
+    const valid = broker.runtimeSchedulingPolicy();
+    const valid_retained_deadline = broker.next_retained_expiry_ns;
+    const valid_system_stats_deadline = broker.next_system_stats_ns;
+    const valid_driver_generation =
+        broker.deadline_driver.currentGeneration();
+    try std.testing.expectError(
+        error.InvalidProperty,
+        broker.setRuntimeSchedulingPolicy(.{
+            .retained_expiry_interval = .fromMilliseconds(1),
+            .system_stats_interval = .fromNanoseconds(0),
+        }),
+    );
+    const after_invalid = broker.runtimeSchedulingPolicy();
+    try std.testing.expectEqual(
+        valid.retained_expiry_interval.?.nanoseconds,
+        after_invalid.retained_expiry_interval.?.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        valid.system_stats_interval.?.nanoseconds,
+        after_invalid.system_stats_interval.?.nanoseconds,
+    );
+    try std.testing.expectEqual(
+        valid_retained_deadline,
+        broker.next_retained_expiry_ns,
+    );
+    try std.testing.expectEqual(
+        valid_system_stats_deadline,
+        broker.next_system_stats_ns,
+    );
+    try std.testing.expectEqual(
+        valid_driver_generation,
+        broker.deadline_driver.currentGeneration(),
+    );
+
+    try broker.setRuntimeSchedulingPolicy(.{});
+    const disabled = broker.runtimeSchedulingPolicy();
+    try std.testing.expect(disabled.retained_expiry_interval == null);
+    try std.testing.expect(disabled.system_stats_interval == null);
+    try std.testing.expect(broker.next_retained_expiry_ns == null);
+    try std.testing.expect(broker.next_system_stats_ns == null);
+    try std.testing.expectEqual(
+        valid_driver_generation +% 1,
+        broker.deadline_driver.currentGeneration(),
+    );
+}
+
 test "broker rejects non-positive system statistics interval" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -7,6 +7,28 @@
 
 const std = @import("std");
 
+/// Broker-owned periodic work that can be changed while serving clients.
+/// Null disables the corresponding task.
+pub const Policy = struct {
+    retained_expiry_interval: ?std.Io.Duration = null,
+    system_stats_interval: ?std.Io.Duration = null,
+
+    pub fn validate(self: Policy) error{InvalidProperty}!void {
+        if (self.retained_expiry_interval) |interval| {
+            if (interval.nanoseconds <= 0) return error.InvalidProperty;
+        }
+        if (self.system_stats_interval) |interval| {
+            if (interval.nanoseconds <= 0) return error.InvalidProperty;
+        }
+    }
+};
+
+pub fn intervalsEqual(a: ?std.Io.Duration, b: ?std.Io.Duration) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return left.nanoseconds == right.nanoseconds;
+}
+
 pub const Driver = struct {
     generation: std.atomic.Value(u32) = .init(1),
     stopping: std.atomic.Value(bool) = .init(false),

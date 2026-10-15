@@ -552,6 +552,9 @@ pub fn run(
     try security.setAdmissionPolicies(admission_policies);
     const source_access_control = security.sourceAccessControl();
     const max_inflight_messages = config.effectiveMaxInflightMessages();
+    const initial_scheduling_policy = runtimeSchedulingPolicyFromConfig(
+        &config,
+    );
     const base_accept = mqtt.runtime.AcceptOptions{
         .protocol = .v5,
         .v3_1_connack_mode = .mosquitto,
@@ -572,14 +575,8 @@ pub fn run(
         .queue_qos0_messages = config.queue_qos0_messages,
         .check_retain_source = config.check_retain_source,
         .persistent_session_expiry_seconds = config.persistent_client_expiration_seconds,
-        .retained_expiry_interval = if (config.retain_expiry_interval_seconds == 0)
-            null
-        else
-            .fromSeconds(config.retain_expiry_interval_seconds),
-        .system_stats_interval = if (config.sys_interval_seconds == 0)
-            null
-        else
-            .fromSeconds(config.sys_interval_seconds),
+        .retained_expiry_interval = initial_scheduling_policy.retained_expiry_interval,
+        .system_stats_interval = initial_scheduling_policy.system_stats_interval,
         .access_control = source_access_control,
         .session = .{
             .max_sessions = config.global_max_clients,
@@ -1046,6 +1043,22 @@ fn serveWithManagement(
                                     },
                                 );
                             }
+                            std.debug.print(
+                                "netz MQTT runtime scheduling reload " ++
+                                    "completed: sys_interval={d} " ++
+                                    "retain_expiry_interval={d} " ++
+                                    "source=SIGHUP server_io=zio-std-io\n",
+                                .{
+                                    intervalSeconds(
+                                        success.scheduling_policy
+                                            .system_stats_interval,
+                                    ),
+                                    intervalSeconds(
+                                        success.scheduling_policy
+                                            .retained_expiry_interval,
+                                    ),
+                                },
+                            );
                         },
                     }
                 }
@@ -1083,6 +1096,7 @@ const ReloadOutcome = union(enum) {
     success: struct {
         security_reloaded: bool,
         autosave_policy: AutosavePolicy,
+        scheduling_policy: mqtt.broker.RuntimeSchedulingPolicy,
     },
     failure: struct {
         component: ReloadComponent,
@@ -1169,6 +1183,14 @@ fn reloadConfiguredState(
         .component = .persistence,
         .err = err,
     } };
+    const reloaded_scheduling_policy = runtimeSchedulingPolicyFromConfig(
+        &reloaded_config,
+    );
+    reloaded_scheduling_policy.validate() catch |err|
+        return .{ .failure = .{
+            .component = .configuration,
+            .err = err,
+        } };
     var prepared_bridges = bridges.prepareReload(
         reloaded_config.bridges,
     ) catch |err| return .{ .failure = .{
@@ -1206,6 +1228,9 @@ fn reloadConfiguredState(
     policy.setAllowAnonymousLocked(reloaded_allow_anonymous);
     policy.setAdmissionPoliciesLocked(reloaded_admission_policies);
     policy.lock.unlock(policy.io);
+    broker.setRuntimeSchedulingPolicy(
+        reloaded_scheduling_policy,
+    ) catch unreachable;
     autosave.apply(reloaded_autosave);
     bridge_commit.commit();
     _ = broker.disconnectUnauthorizedConnections(.{
@@ -1218,7 +1243,28 @@ fn reloadConfiguredState(
     return .{ .success = .{
         .security_reloaded = true,
         .autosave_policy = reloaded_autosave,
+        .scheduling_policy = reloaded_scheduling_policy,
     } };
+}
+
+fn runtimeSchedulingPolicyFromConfig(
+    config: *const mqtt.broker_config.Config,
+) mqtt.broker.RuntimeSchedulingPolicy {
+    return .{
+        .retained_expiry_interval = if (config.retain_expiry_interval_seconds == 0)
+            null
+        else
+            .fromSeconds(config.retain_expiry_interval_seconds),
+        .system_stats_interval = if (config.sys_interval_seconds == 0)
+            null
+        else
+            .fromSeconds(config.sys_interval_seconds),
+    };
+}
+
+fn intervalSeconds(interval: ?std.Io.Duration) u64 {
+    const value = interval orelse return 0;
+    return @intCast(@divExact(value.nanoseconds, std.time.ns_per_s));
 }
 
 fn autosavePolicyForReload(

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import os
+import signal
 import socket
 import subprocess
+import time
 from typing import Iterator
 
 from mqtt_commit_log_support import (
@@ -19,7 +22,9 @@ from mqtt_commit_log_support import (
 
 
 @contextmanager
-def _configured_broker(broker: Path, config: Path) -> Iterator[None]:
+def _configured_broker(
+    broker: Path, config: Path
+) -> Iterator[subprocess.Popen[str]]:
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,
@@ -31,7 +36,7 @@ def _configured_broker(broker: Path, config: Path) -> Iterator[None]:
         ready = process.stdout.readline().strip()
         if "configured 1 listeners for 1 clients" not in ready:
             raise RuntimeError(f"sys-interval broker failed to start: {ready}")
-        yield
+        yield process
         if process.wait(timeout=5) != 0:
             raise RuntimeError(
                 "sys-interval broker failed: " + process.stdout.read()
@@ -53,6 +58,57 @@ def _expect(sock: socket.socket, expected: bytes, label: str) -> None:
         raise AssertionError(
             f"{label}: expected {expected.hex()}, got {actual.hex()}"
         )
+
+
+def _expect_no_packet(sock: socket.socket, timeout: float, label: str) -> None:
+    sock.settimeout(timeout)
+    try:
+        first, body = read_packet(sock)
+    except TimeoutError:
+        return
+    finally:
+        sock.settimeout(5)
+    raise AssertionError(
+        f"{label}: unexpected packet "
+        + (bytes((first,)) + body).hex()
+    )
+
+
+def _ping_barrier(sock: socket.socket, label: str) -> None:
+    sock.sendall(packet(0xC0, b""))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        first, body = read_packet(sock)
+        if first == 0xD0 and body == b"":
+            return
+        if first >> 4 != 3:
+            raise AssertionError(
+                f"{label}: expected PUBLISH or PINGRESP, "
+                f"got {(bytes((first,)) + body).hex()}"
+            )
+    raise TimeoutError(f"{label}: timed out waiting for PINGRESP")
+
+
+def _wait_for_output(
+    process: subprocess.Popen[str], expected: str, label: str
+) -> None:
+    assert process.stdout is not None
+    os.set_blocking(process.stdout.fileno(), False)
+    deadline = time.monotonic() + 5
+    observed: list[str] = []
+    while time.monotonic() < deadline:
+        line = process.stdout.readline()
+        if not line:
+            if process.poll() is not None:
+                break
+            time.sleep(0.01)
+            continue
+        observed.append(line.rstrip())
+        if expected in line:
+            return
+    raise RuntimeError(
+        f"{label}: missing {expected!r}; observed={observed!r}"
+    )
 
 
 def _disconnect(sock: socket.socket) -> None:
@@ -89,18 +145,45 @@ def _subscribe(port: int, client_id: str) -> socket.socket:
 
 
 def run_system_interval_case(broker: Path, directory: Path) -> None:
-    enabled_port = free_port()
-    enabled_config = directory / "sys-interval-enabled.conf"
-    enabled_config.write_text(
-        "sys_interval 1\n"
-        f"listener {enabled_port} 127.0.0.1\n"
-        "max_topic_alias_broker 0\n"
-        "allow_anonymous true\n"
-        "max_connections 1\n"
-    )
-    with _configured_broker(broker, enabled_config):
-        client = _subscribe(enabled_port, "sys-interval-enabled")
+    port = free_port()
+    config = directory / "sys-interval-reload.conf"
+
+    def write_config(sys_interval: str, retain_minutes: int = 0) -> None:
+        retained = (
+            f"retain_expiry_interval {retain_minutes}\n"
+            if retain_minutes
+            else ""
+        )
+        config.write_text(
+            f"sys_interval {sys_interval}\n"
+            + retained
+            + f"listener {port} 127.0.0.1\n"
+            + "max_topic_alias_broker 0\n"
+            + "allow_anonymous true\n"
+            + "max_connections 1\n"
+        )
+
+    def reload(
+        process: subprocess.Popen[str],
+        sys_interval: str,
+        retain_minutes: int = 0,
+    ) -> None:
+        write_config(sys_interval, retain_minutes)
+        os.kill(process.pid, signal.SIGHUP)
+
+    write_config("0")
+    with _configured_broker(broker, config) as process:
+        client = _subscribe(port, "sys-interval-reload")
         try:
+            _expect_no_packet(client, 1.2, "disabled system interval")
+
+            reload(process, "1")
+            _wait_for_output(
+                process,
+                "runtime scheduling reload completed: sys_interval=1 "
+                "retain_expiry_interval=0",
+                "enable system interval reload",
+            )
             _expect(
                 client,
                 qos0_publish_packet(
@@ -109,37 +192,64 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
                     retain=False,
                     protocol=5,
                 ),
-                "periodic system statistic",
+                "enabled periodic system statistic",
             )
-            _disconnect(client)
-        finally:
-            client.close()
 
-    disabled_port = free_port()
-    disabled_config = directory / "sys-interval-disabled.conf"
-    disabled_config.write_text(
-        "sys_interval 0\n"
-        f"listener {disabled_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
-        "max_connections 1\n"
-    )
-    with _configured_broker(broker, disabled_config):
-        client = _subscribe(disabled_port, "sys-interval-disabled")
-        try:
-            client.settimeout(1.2)
-            try:
-                first, body = read_packet(client)
-            except TimeoutError:
-                pass
-            else:
-                raise AssertionError(
-                    "disabled system interval published unexpectedly: "
-                    + (bytes((first,)) + body).hex()
-                )
-            finally:
-                client.settimeout(5)
-            client.sendall(packet(0xC0, b""))
-            _expect(client, packet(0xD0, b""), "disabled system PINGRESP")
+            reload(process, "invalid")
+            _wait_for_output(
+                process,
+                "configuration reload failed: error=InvalidInteger",
+                "invalid scheduling rollback",
+            )
+            _expect(
+                client,
+                qos0_publish_packet(
+                    "$SYS/broker/clients/connected",
+                    b"1",
+                    retain=False,
+                    protocol=5,
+                ),
+                "system interval after failed reload",
+            )
+
+            reload(process, "10", retain_minutes=1)
+            _wait_for_output(
+                process,
+                "runtime scheduling reload completed: sys_interval=10 "
+                "retain_expiry_interval=60",
+                "long scheduling interval reload",
+            )
+            reload(process, "1")
+            _wait_for_output(
+                process,
+                "runtime scheduling reload completed: sys_interval=1 "
+                "retain_expiry_interval=0",
+                "shortened scheduling interval reload",
+            )
+            _expect(
+                client,
+                qos0_publish_packet(
+                    "$SYS/broker/clients/connected",
+                    b"1",
+                    retain=False,
+                    protocol=5,
+                ),
+                "shortened periodic system statistic",
+            )
+
+            reload(process, "0")
+            _wait_for_output(
+                process,
+                "runtime scheduling reload completed: sys_interval=0 "
+                "retain_expiry_interval=0",
+                "disable scheduling interval reload",
+            )
+            _ping_barrier(client, "disabled scheduling barrier")
+            _expect_no_packet(
+                client,
+                1.2,
+                "disabled system interval after reload",
+            )
             _disconnect(client)
         finally:
             client.close()
