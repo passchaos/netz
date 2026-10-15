@@ -739,8 +739,36 @@ fn parseHeadLines(
         return error.BufferTooShort;
     const start_line = bytes[0..first_line_end];
 
+    if (!policy.allow_spaces_before_colon and !policy.ignore_invalid) {
+        return parseStrictHeadLines(
+            bytes,
+            header_storage,
+            options,
+            start_line,
+            first_line_end + 2,
+        );
+    }
+
+    return parseCompatibleHeadLines(
+        bytes,
+        header_storage,
+        options,
+        policy,
+        start_line,
+        first_line_end + 2,
+    );
+}
+
+fn parseCompatibleHeadLines(
+    bytes: []const u8,
+    header_storage: []Header,
+    options: ParseOptions,
+    policy: HeaderParsePolicy,
+    start_line: []const u8,
+    initial_pos: usize,
+) Error!BorrowedHead {
     var count: usize = 0;
-    var pos = first_line_end + 2;
+    var pos = initial_pos;
     while (true) {
         const line_end_rel = std.mem.indexOf(
             u8,
@@ -785,6 +813,107 @@ fn parseHeadLines(
         pos += line_end_rel + 2;
         if (pos > bytes.len) return error.BufferTooShort;
     }
+}
+
+/// Single-pass field parser for the default strict borrowed-head policy. The
+/// compatibility paths still use complete line slices because they may
+/// skip malformed fields; strict parsing can validate name, value, and CRLF in
+/// one traversal without weakening incomplete-input classification.
+fn parseStrictHeadLines(
+    bytes: []const u8,
+    header_storage: []Header,
+    options: ParseOptions,
+    start_line: []const u8,
+    initial_pos: usize,
+) Error!BorrowedHead {
+    var count: usize = 0;
+    var pos = initial_pos;
+    while (true) {
+        if (pos >= bytes.len) return error.BufferTooShort;
+        if (bytes[pos] == '\r') {
+            if (pos + 1 >= bytes.len) return error.BufferTooShort;
+            if (bytes[pos + 1] == '\n') {
+                return .{
+                    .start_line = start_line,
+                    .headers = header_storage[0..count],
+                    .head_len = pos + 2,
+                };
+            }
+        }
+        if (bytes[pos] == ' ' or bytes[pos] == '\t') {
+            // Borrowed values cannot expose unfolded storage. Even when the
+            // allocating parser accepts obs-fold, the strict borrowed API has
+            // always rejected it after the physical line became complete.
+            _ = options.allow_obs_fold;
+            return rejectCompleteHeaderLine(bytes, pos + 1);
+        }
+
+        const name_start = pos;
+        while (true) : (pos += 1) {
+            if (pos >= bytes.len) return error.BufferTooShort;
+            const byte = bytes[pos];
+            if (byte == ':') break;
+            if (byte == '\r') {
+                if (pos + 1 >= bytes.len) return error.BufferTooShort;
+                if (bytes[pos + 1] == '\n') {
+                    return error.MalformedHeader;
+                }
+            }
+            if (!validHeaderNameByte(byte)) {
+                return rejectCompleteHeaderLine(bytes, pos + 1);
+            }
+        }
+        if (pos == name_start) {
+            return rejectCompleteHeaderLine(bytes, pos + 1);
+        }
+        const name = bytes[name_start..pos];
+        pos += 1;
+        while (pos < bytes.len and
+            (bytes[pos] == ' ' or bytes[pos] == '\t'))
+        {
+            pos += 1;
+        }
+
+        const value_start = pos;
+        var value_end = value_start;
+        while (true) : (pos += 1) {
+            if (pos >= bytes.len) return error.BufferTooShort;
+            const byte = bytes[pos];
+            if (byte == '\r') {
+                if (pos + 1 >= bytes.len) return error.BufferTooShort;
+                if (bytes[pos + 1] != '\n') {
+                    return rejectCompleteHeaderLine(bytes, pos + 1);
+                }
+                break;
+            }
+            if ((byte < 0x20 and byte != '\t') or byte == 0x7f) {
+                return rejectCompleteHeaderLine(bytes, pos + 1);
+            }
+            if (byte != ' ' and byte != '\t') value_end = pos + 1;
+        }
+
+        if (count >= options.max_headers or count >= header_storage.len) {
+            return error.TooManyHeaders;
+        }
+        header_storage[count] = .{
+            .name = name,
+            .value = bytes[value_start..value_end],
+        };
+        count += 1;
+        pos += 2;
+    }
+}
+
+fn rejectCompleteHeaderLine(
+    bytes: []const u8,
+    scan_start: usize,
+) Error {
+    if (scan_start >= bytes.len or
+        std.mem.indexOf(u8, bytes[scan_start..], "\r\n") == null)
+    {
+        return error.BufferTooShort;
+    }
+    return error.MalformedHeader;
 }
 
 /// Parse one complete request with strict Host cardinality and syntax before
@@ -4188,6 +4317,127 @@ test "HTTP/1 borrowed heads validate storage host and folding" {
             .{},
         ),
     );
+}
+
+test "HTTP/1 strict borrowed heads defer malformed fields until line completion" {
+    var headers: [4]Header = undefined;
+    const prefix = "GET / HTTP/1.1\r\nHost: example.com\r\n";
+
+    try std.testing.expectError(
+        error.BufferTooShort,
+        parseRequestHead(prefix ++ "Bad Header", &headers, .{}),
+    );
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseRequestHead(prefix ++ "Bad Header\r\n", &headers, .{}),
+    );
+    try std.testing.expectError(
+        error.BufferTooShort,
+        parseRequestHead(prefix ++ "X-Test: bad\x00value", &headers, .{}),
+    );
+    try std.testing.expectError(
+        error.MalformedHeader,
+        parseRequestHead(
+            prefix ++ "X-Test: bad\x00value\r\n",
+            &headers,
+            .{},
+        ),
+    );
+}
+
+test "HTTP/1 strict borrowed field scan matches compatibility parser" {
+    const prefix = "GET / HTTP/1.1\r\n";
+    const Compare = struct {
+        fn run(bytes: []const u8) !void {
+            const first_line_end = std.mem.indexOf(u8, bytes, "\r\n") orelse
+                return error.TestUnexpectedResult;
+            const start_line = bytes[0..first_line_end];
+            const initial_pos = first_line_end + 2;
+            var strict_storage: [8]Header = undefined;
+            var compatible_storage: [8]Header = undefined;
+            const strict_result = parseStrictHeadLines(
+                bytes,
+                &strict_storage,
+                .{},
+                start_line,
+                initial_pos,
+            );
+            const compatible_result = parseCompatibleHeadLines(
+                bytes,
+                &compatible_storage,
+                .{},
+                .{},
+                start_line,
+                initial_pos,
+            );
+            if (strict_result) |strict| {
+                const compatible = try compatible_result;
+                try std.testing.expectEqual(
+                    compatible.head_len,
+                    strict.head_len,
+                );
+                try std.testing.expectEqualStrings(
+                    compatible.start_line,
+                    strict.start_line,
+                );
+                try std.testing.expectEqual(
+                    compatible.headers.len,
+                    strict.headers.len,
+                );
+                for (strict.headers, compatible.headers) |
+                    strict_header,
+                    compatible_header,
+                | {
+                    try std.testing.expectEqualStrings(
+                        compatible_header.name,
+                        strict_header.name,
+                    );
+                    try std.testing.expectEqualStrings(
+                        compatible_header.value,
+                        strict_header.value,
+                    );
+                }
+            } else |strict_error| {
+                try std.testing.expectError(
+                    strict_error,
+                    compatible_result,
+                );
+            }
+        }
+    };
+
+    const valid = prefix ++
+        "Host: example.com\r\n" ++
+        "X-Whitespace:\t value \t\r\n" ++
+        "Empty:\r\n\r\n";
+    for (prefix.len..valid.len + 1) |end| {
+        try Compare.run(valid[0..end]);
+    }
+
+    const name_suffix = ": value\r\n\r\n";
+    var name_case: [prefix.len + 2 + name_suffix.len]u8 = undefined;
+    @memcpy(name_case[0..prefix.len], prefix);
+    name_case[prefix.len] = 'X';
+    @memcpy(name_case[prefix.len + 2 ..], name_suffix);
+    for (0..256) |raw| {
+        name_case[prefix.len + 1] = @intCast(raw);
+        try Compare.run(&name_case);
+    }
+
+    const value_lead = "X-Test: a";
+    const value_suffix = "b\r\n\r\n";
+    var value_case: [prefix.len + value_lead.len + 1 + value_suffix.len]u8 =
+        undefined;
+    @memcpy(value_case[0..prefix.len], prefix);
+    @memcpy(
+        value_case[prefix.len .. prefix.len + value_lead.len],
+        value_lead,
+    );
+    @memcpy(value_case[prefix.len + value_lead.len + 1 ..], value_suffix);
+    for (0..256) |raw| {
+        value_case[prefix.len + value_lead.len] = @intCast(raw);
+        try Compare.run(&value_case);
+    }
 }
 
 test "HTTP/1 validates header field syntax" {

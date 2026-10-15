@@ -311,10 +311,12 @@ Finally, explicitly inlining the now compact `parseHeaderLine` hot helper
 removed its call boundary in both borrowed and owned loops. Five CPU-0
 5-million-parse samples measured 231-234 ns/op (231 ns median), another 2.9%
 below 238 ns. Five default-shape runs measured 236-241 ns borrowed,
-766-769 ns owned and 791-796 ns owned plus Host validation. Two attempted
-alternatives were rejected by A/B evidence: scalar CRLF/header fusion regressed
-to 259-261 ns/op, and vectorized colon search followed by token validation
-regressed to 253-257 ns/op.
+766-769 ns owned and 791-796 ns owned plus Host validation. Two earlier
+implementations were rejected by A/B evidence at their then-current revisions:
+the first scalar CRLF/header fusion regressed to 259-261 ns/op, and vectorized
+colon search followed by token validation regressed to 253-257 ns/op. The
+strict-only design below was independently reworked and measured against the
+current baseline; it does not retain either rejected implementation.
 The ordinary no-obs-fold owned parser now retains up to sixteen validated
 header descriptors on the stack during its counting pass. Common requests copy
 those descriptors into the one exact result allocation instead of parsing and
@@ -329,6 +331,36 @@ scenario improved in all seven pairs from 920 ns/op median (920-928) to
 pipeline control used binaries `e8d53279`/`ea584e02` and moved from 794 to
 803 ns/request by paired medians (+1.1%) with overlapping ranges; that runtime
 uses its caller-buffer borrowed parser, so no pipeline improvement is claimed.
+The borrowed strict parser now likewise avoids a redundant physical-line pass:
+it validates each field name and value while locating its terminating CRLF.
+Spaces-before-colon and ignore-invalid compatibility policies retain the
+original complete-line parser, which is also used as a differential oracle.
+The regression matrix compares every possible byte in a representative field
+name and value plus every truncation boundary, and fixes the existing rule that
+an incomplete malformed field remains `BufferTooShort` until its CRLF arrives.
+
+Twenty CPU-10, fixed-binary, order-alternated pairs used two million borrowed
+parses per arm with exact 348,000,000-byte totals. Baseline SHA-256
+`d7257413a6a858f19b8743d9e2e3168867e5f7daa691ed3a8fba0856fd93adef`
+and candidate
+`e74fa2cda556da25a9a53c32719712f16cbdfcede0472df8232c35c05a4583bd`
+measured a 0.832031 paired median ratio (-16.797%, 20/20 wins), with
+257/214 ns/op standalone medians. Seven paired `perf stat` arms reduced
+instructions to 0.859603 (-14.040%, 7/7) and cycles to 0.833336 (-16.666%,
+7/7). Equal-duration 10-million-parse profiles moved approximate event count
+from 6,700,536,659 to 5,552,467,677 (-17.134%); the former separate
+`mem.findPosLinear` CRLF scan disappeared from strict field parsing.
+
+The independent 16-request TCP pipeline used binaries
+`fa46bb325e2515b5a89ecebb4f166b7c74e2c9c62f18c356fd29849d9480c9ea` and
+`06e076fc9735fe37bb15915dd42dce9a75d6fe0d7901a44bc4627c90f5641aa1`,
+500 warmup plus 5,000 measured batches per arm, and exact 7,120,000-byte
+checksums with 88,000 server requests. Its paired latency ratio was 0.994490
+(-0.551%, 18/20 wins); instructions fell to 0.962999 (-3.700%, 7/7) and
+cycles to 0.982606 (-1.739%, 7/7). This is a parser and same-process pipeline
+result, not a claim about end-to-end Internet latency. Debug/ReleaseFast HTTP/1
+tests, parser/cleartext/TLS connection fuzz gates, and complete bidirectional
+Hyper cleartext/TLS interoperability passed.
 HTTP/1 aggregate message-boundary logic now lives under
 `runtime/message/framing.zig`: head limits, Content-Length and
 Transfer-Encoding classification, decoded chunk limits, trailer limits,
