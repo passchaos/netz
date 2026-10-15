@@ -7855,6 +7855,41 @@ and inbound QoS 2 gates passed 47 tests. The result closes the redundant
 normal-route count traversal without changing shared-subscription cursor
 semantics.
 
+The zio runtime's task-local timed-I/O path previously submitted the socket
+operation and, once it had to park, used a second waiter timer whose completion
+had to be cleared after ordinary I/O won. The revised path preserves
+already-ready I/O without arming a timer, then directly links a blocking
+operation to its deadline. Natural completion removes that timer and wakes the
+task; timeout and external cancellation still wait for the underlying I/O to
+settle before stack-owned state can be released. A same-deadline regression
+also proves that a natural I/O result wins the contested handoff.
+
+Sixteen CPU-0/client, CPU-1/broker fixed-binary pairs used 1,000 warmups plus
+10,000 measured durable QoS 2 serial publishes, window one, 256-byte payloads,
+and 3,600-second Sessions. Baseline broker SHA-256 was
+`6e227cf7230b201eb97089f001907c82eb71ad498324e1e4bdde5ff57bb4d0bd`,
+candidate
+`abdd898a564795ee1f433d8cc7bd10e9ecbcf250c31b15640f46ddc1d3861eaa`,
+and the fixed driver remained
+`94274aac3e3b17cb4a2a34dc851d6808ad6b5ea7f721edf75dc493b0a80cb396`.
+All 32 arms completed 10,000 exact deliveries with checksum 2,695,000.
+Broker instructions fell by a 0.993655 paired median (0.634%, 16/16 wins),
+throughput rose by 1.023601 (2.36%, 15/16), p50 fell by 0.983143 (1.69%,
+13/16), and p99 by 0.991456 (0.85%, 12/16).
+
+Matched zero-loss 100,000-message profiles completed in 4.791 and 4.591
+seconds under the same host session. The baseline's standalone
+`Waiter.timedWaitClock` and `runtime.loopClearTimer` symbols accounted for
+4.18% and 2.39% of sampled cycles; neither remained a standalone top symbol
+in the candidate. Symbol shares are explanatory rather than additive cost
+claims, while the fixed-pair instruction result is the retained performance
+evidence. zio's complete default suite passed 767 tests with 8 platform skips;
+the 17 focused timed-I/O tests passed in Debug, ReleaseFast, single-executor,
+pinned, poll, and epoll configurations. Netz Keep Alive tests passed 54/54
+across TCP, TLS, and WebSocket, and the source-locked Mosquitto gate passed all
+1,825 packet sequences. MQTT's 1.5x Keep Alive limit, zero-disable behavior,
+large-packet progress renewal, and resumable fragmented reads are unchanged.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000
@@ -7867,10 +7902,10 @@ result.
 
 zio's focused runtime-task tests cover natural I/O completion, timeout-driven
 cancellation, and external cancellation under the default, epoll, poll,
-single-executor, and pinned schedules. Its final complete suite passed 763
-tests with 8 platform skips. With the remote dependency selected, netz's complete
-`zig build test --summary all` gate also passed, covering HTTP, WebSocket,
-WebTransport, QUIC, MQTT, TLS, fuzz smoke, and Python checkers.
+single-executor, and pinned schedules. Its final complete suite passed 767
+tests with 8 platform skips. With the remote dependency selected, Netz's
+focused Keep Alive gate passed 54 tests and the Mosquitto packet-sequence gate
+passed all 1,825 source-locked scenarios.
 
 ## Reference context from `~/Work`
 

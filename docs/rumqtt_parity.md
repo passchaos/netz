@@ -4544,6 +4544,19 @@ proxy evidence for the entire suite.
    1.41%. Debug/ReleaseFast router gates passed 62 tests and focused live,
    No Local, shared, and QoS 2 broker gates passed 47 tests. This closes the
    common double traversal while preserving the broader serial/RSS gap.
+   zio's runtime-task timed-I/O path now also preserves the already-ready
+   operation fast path without arming a timer, then directly links a blocking
+   operation to its deadline. Natural completion removes that timer without
+   completing a generic race-group sibling; timeout and external cancellation
+   still wait for the underlying I/O to settle. Sixteen fixed-binary CPU-0/1
+   durable QoS 2 serial pairs reduced broker instructions by 0.634% with 16/16
+   wins, raised throughput 2.36% (15/16), and reduced p50/p99 by 1.69%/0.85%
+   with 13/16 and 12/16 wins. The complete zio suite passed 767 tests, focused
+   timed-I/O coverage passed under Debug, ReleaseFast, single-executor, pinned,
+   poll, and epoll configurations, Netz Keep Alive passed 54/54 across TCP,
+   TLS, and WebSocket, and all 1,825 source-locked Mosquitto sequences passed.
+   Keep Alive timing, large-packet progress renewal, and timeout-resumable
+   framing remain unchanged.
 3. Expand the source-hash-locked gate beyond its current 1,825 upstream packet
    sequences, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
