@@ -4517,6 +4517,21 @@ proxy evidence for the entire suite.
    A seven-pair fixed-binary durable QoS 2 matrix was neutral in all five
    shapes; a matched 100,000-message serial profile reduced
    `flushSlotLocked` from 211 samples (4.35%) to 156 (3.22%).
+   PUBACK, terminal PUBREC, and PUBCOMP processing now also retain the
+   per-connection writer mutex across the immediately following durable
+   Session flush. The former success path released it and called `flushSlot`,
+   which reacquired the same mutex before selecting the next packet. A shared
+   helper now calls `flushSlotLocked` directly and releases the mutex on every
+   success/error path. Persistent state still finalizes before network bytes,
+   and exactly-once/Receive Maximum ordering is unchanged. Eight fixed-binary
+   CPU-0/1 pairs used 1,000 warmups and 10,000 measured serial durable QoS 2
+   publishes. Instructions improved by a 0.998182 paired median (7/8 wins) and
+   p99 by 0.963928 (6/8 wins); throughput/p50 stayed neutral at 0.998355 and
+   1.001291. Matched 100,000-message profiles were load-sensitive but reduced
+   `ClientTask.runLoop` from 10.56% to 10.07% and `flushSlotLocked` from 2.82%
+   to 2.53%. Both focused optimization modes and all 1,825 source-locked
+   Mosquitto packet sequences pass. This is bounded scheduling/lock evidence,
+   not closure of the serial QoS 2 or RSS gap.
 3. Expand the source-hash-locked gate beyond its current 1,825 upstream packet
    sequences, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence

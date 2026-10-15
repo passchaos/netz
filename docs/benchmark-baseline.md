@@ -7787,6 +7787,42 @@ Artifacts are retained under `zig-out/mqtt-session-tail-probe-sync-final`,
 `zig-out/mqtt-current-head-serial-profile`, and
 `zig-out/mqtt-session-tail-probe-sync-profile`.
 
+The acknowledgement side now retains the per-connection writer mutex while a
+successful PUBACK, terminal PUBREC, or PUBCOMP immediately flushes newly
+available durable Session credit. The old path released that mutex after
+committing acknowledgement state, then called `flushSlot`, which reacquired the
+same mutex before selecting the next packet. The new shared helper releases on
+every success/error return but calls `flushSlotLocked` directly when work is
+required. Persistence finalize and exactly-once ordering remain unchanged:
+durable state is still committed before bytes reach the peer, and the writer
+ownership interval now has no interleaving gap. Mosquitto's corresponding
+single event-loop handlers likewise update outgoing state and release the next
+message without an intervening connection-writer handoff.
+
+Eight CPU-0/client, CPU-1/broker fixed-binary pairs used 1,000 warmups plus
+10,000 measured durable QoS 2 serial publishes, window one, 256-byte payloads,
+and 3,600-second Sessions. Baseline broker SHA-256 was
+`6eb6322b1f97c74cc8ff4fc4f27d2b204507e0c7df2008bf1002ed93ff9eeab3`,
+candidate
+`c997fe419acaedaab671b786a4fbd8e8cd971f47e2c2ee2786f509768be08974`,
+and fixed driver
+`94274aac3e3b17cb4a2a34dc851d6808ad6b5ea7f721edf75dc493b0a80cb396`.
+All arms completed 10,000 exact deliveries with checksum 2,695,000. Broker
+instructions had a 0.998182 paired median (0.182% lower, 7/8 wins), p99 a
+0.963928 ratio (3.61% lower, 6/8 wins), while throughput and p50 remained
+neutral at 0.998355 and 1.001291 with four and three wins. GNU `size` text fell
+256 bytes with unchanged total static size.
+
+Matched 100,000-message profiles had zero lost samples. Their absolute
+durations moved 6.984 to 7.088 seconds under host load, so they do not support
+a latency claim; explanatory sample shares moved `ClientTask.runLoop` from
+10.56% to 10.07% and `Broker.flushSlotLocked` from 2.82% to 2.53%. Debug and
+ReleaseFast focused broker gates each passed 47 tests, and the source-locked
+Mosquitto packet-sequence gate passed all 1,825 scenarios. The retained result
+is the eliminated writer-lock handoff, instruction/p99 support, and exact
+protocol/lifecycle coverage rather than closure of the broader durable QoS 2
+serial gap.
+
 For WebTransport, independently built baseline and candidate binaries each
 completed a real QUIC/TLS/HTTP/3 burst of 10,000 1-KiB DATAGRAMs with batch
 size 16, maximum 64 in flight, caller-buffer receive, zero timeouts, 10,000

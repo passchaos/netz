@@ -9152,6 +9152,20 @@ const ClientTask = struct {
         );
     }
 
+    /// Finish one acknowledgement while retaining the connection's writer
+    /// ownership across the resulting durable Session flush. The caller has
+    /// already locked `slot.writer_mutex`; every return path releases it.
+    fn flushAcknowledgedSessionWhileLocked(
+        task: ClientTask,
+        slot: *ClientSlot,
+        should_flush: bool,
+    ) Error!void {
+        defer slot.writer_mutex.unlock(task.broker.io);
+        if (should_flush) {
+            try task.broker.flushSlotLocked(slot, true);
+        }
+    }
+
     fn runLoop(
         task: ClientTask,
         slot: *ClientSlot,
@@ -9310,10 +9324,9 @@ const ClientTask = struct {
                             ));
                         }
                     }
-                    slot.writer_mutex.unlock(task.broker.io);
-                    try task.broker.flushSlot(
-                        task.slot_index,
+                    try task.flushAcknowledgedSessionWhileLocked(
                         slot,
+                        true,
                     );
                 },
                 .pubrec => |*owned| {
@@ -9394,13 +9407,10 @@ const ClientTask = struct {
                             };
                         }
                     }
-                    slot.writer_mutex.unlock(task.broker.io);
-                    if (session_ack.owned or transient_completed) {
-                        try task.broker.flushSlot(
-                            task.slot_index,
-                            slot,
-                        );
-                    }
+                    try task.flushAcknowledgedSessionWhileLocked(
+                        slot,
+                        session_ack.owned or transient_completed,
+                    );
                 },
                 .pubrel => |*owned| {
                     try task.broker.handlePubRel(
@@ -9468,10 +9478,9 @@ const ClientTask = struct {
                             ));
                         }
                     }
-                    slot.writer_mutex.unlock(task.broker.io);
-                    try task.broker.flushSlot(
-                        task.slot_index,
+                    try task.flushAcknowledgedSessionWhileLocked(
                         slot,
+                        true,
                     );
                 },
                 .pingreq => {
