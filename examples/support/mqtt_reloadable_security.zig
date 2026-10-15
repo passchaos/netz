@@ -1,9 +1,10 @@
 //! Atomic password/ACL/CRL file reload for the Mosquitto-style broker example.
 //!
-//! Paths and listener topology remain fixed for the process lifetime. A reload
-//! parses every configured file into a detached set before one write-locked
-//! swap. Callbacks hold the read lock through password, ACL, CA, or CRL
-//! evaluation, so the previous set is destroyed only after all readers leave.
+//! Listener topology remains fixed for the process lifetime. A reload owns the
+//! candidate password/ACL paths and parses every configured file into a
+//! detached set before one write-locked swap. Callbacks hold the read lock
+//! through password, ACL, CA, or CRL evaluation, so the previous generation is
+//! destroyed only after all readers leave.
 
 const std = @import("std");
 const netz = @import("netz");
@@ -22,12 +23,15 @@ pub const ClientAuthPaths = struct {
 
 pub const PreparedReload = struct {
     security: *Security,
+    paths: ?[]Paths,
     files: ?FileSet,
     client_crls: ?ClientCrlSet,
 
     pub fn deinit(self: *PreparedReload) void {
         if (self.files) |*files| files.deinit(self.security.allocator);
         if (self.client_crls) |*crls| crls.deinit(self.security.allocator);
+        if (self.paths) |paths| deinitPaths(self.security.allocator, paths);
+        self.paths = null;
         self.files = null;
         self.client_crls = null;
     }
@@ -35,6 +39,7 @@ pub const PreparedReload = struct {
 
 pub const RetiredReload = struct {
     security: *Security,
+    paths: []Paths,
     files: FileSet,
     client_crls: ?ClientCrlSet,
 
@@ -75,6 +80,7 @@ pub const RetiredReload = struct {
     pub fn deinit(self: *RetiredReload) void {
         self.files.deinit(self.security.allocator);
         if (self.client_crls) |*crls| crls.deinit(self.security.allocator);
+        deinitPaths(self.security.allocator, self.paths);
         self.* = undefined;
     }
 };
@@ -157,6 +163,56 @@ const FileSet = struct {
     }
 };
 
+fn clonePaths(
+    allocator: std.mem.Allocator,
+    paths: []const Paths,
+) std.mem.Allocator.Error![]Paths {
+    const owned = try allocator.alloc(Paths, paths.len);
+    @memset(owned, .{});
+    var initialized: usize = 0;
+    errdefer {
+        for (owned[0..initialized]) |entry| {
+            if (entry.password_file.len != 0) {
+                allocator.free(@constCast(entry.password_file));
+            }
+            if (entry.acl_file.len != 0) {
+                allocator.free(@constCast(entry.acl_file));
+            }
+        }
+        allocator.free(owned);
+    }
+    for (paths, owned) |source, *destination| {
+        destination.password_file = if (source.password_file.len == 0)
+            &.{}
+        else
+            try allocator.dupe(u8, source.password_file);
+        destination.acl_file = if (source.acl_file.len == 0)
+            &.{}
+        else
+            allocator.dupe(u8, source.acl_file) catch |err| {
+                if (destination.password_file.len != 0) {
+                    allocator.free(@constCast(destination.password_file));
+                    destination.password_file = &.{};
+                }
+                return err;
+            };
+        initialized += 1;
+    }
+    return owned;
+}
+
+fn deinitPaths(allocator: std.mem.Allocator, paths: []Paths) void {
+    for (paths) |entry| {
+        if (entry.password_file.len != 0) {
+            allocator.free(@constCast(entry.password_file));
+        }
+        if (entry.acl_file.len != 0) {
+            allocator.free(@constCast(entry.acl_file));
+        }
+    }
+    allocator.free(paths);
+}
+
 const ClientCrlSet = struct {
     crls: []?netz.tls.client_crl_file.File,
 
@@ -207,16 +263,17 @@ pub const Security = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     dir: std.Io.Dir,
-    paths: []const Paths,
+    paths: []Paths,
     listener_ids: []const u16,
     per_listener_settings: bool,
-    /// Optional per-listener description of whether CONNECT authentication
-    /// actually uses the configured password file. An empty slice derives the
-    /// legacy all-password-listeners behavior from `paths`.
-    password_authentication: []const bool = &.{},
+    /// Per-listener eligibility for password authentication. The active file
+    /// may appear or disappear across reload generations.
+    password_authentication: []bool,
     allow_anonymous: []bool,
     admission_policies: []mqtt.broker.ListenerAdmissionSnapshot,
     files: FileSet,
+    acl_enabled: []std.atomic.Value(bool),
+    has_any_acl: std.atomic.Value(bool),
     client_auth_paths: []const ClientAuthPaths = &.{},
     client_crls: ?ClientCrlSet = null,
     lock: std.Io.RwLock = .init,
@@ -238,6 +295,12 @@ pub const Security = struct {
         const allow_anonymous = try allocator.alloc(bool, listener_ids.len);
         errdefer allocator.free(allow_anonymous);
         @memset(allow_anonymous, false);
+        const password_authentication = try allocator.alloc(
+            bool,
+            listener_ids.len,
+        );
+        errdefer allocator.free(password_authentication);
+        @memset(password_authentication, true);
         const admission_policies = try allocator.alloc(
             mqtt.broker.ListenerAdmissionSnapshot,
             listener_ids.len,
@@ -249,22 +312,46 @@ pub const Security = struct {
                 "netz-",
             ) catch unreachable;
         }
+        const owned_paths = try clonePaths(allocator, paths);
+        errdefer deinitPaths(allocator, owned_paths);
+        const files = try FileSet.load(allocator, io, dir, owned_paths);
+        errdefer {
+            var owned_files = files;
+            owned_files.deinit(allocator);
+        }
+        const acl_enabled = try allocator.alloc(
+            std.atomic.Value(bool),
+            files.acls.len,
+        );
+        errdefer allocator.free(acl_enabled);
+        var has_any_acl = false;
+        for (files.acls, acl_enabled) |maybe_acl, *enabled| {
+            const present = maybe_acl != null;
+            enabled.* = .init(present);
+            has_any_acl = has_any_acl or present;
+        }
         return .{
             .allocator = allocator,
             .io = io,
             .dir = dir,
-            .paths = paths,
+            .paths = owned_paths,
             .listener_ids = listener_ids,
             .per_listener_settings = per_listener_settings,
+            .password_authentication = password_authentication,
             .allow_anonymous = allow_anonymous,
             .admission_policies = admission_policies,
-            .files = try FileSet.load(allocator, io, dir, paths),
+            .files = files,
+            .acl_enabled = acl_enabled,
+            .has_any_acl = .init(has_any_acl),
         };
     }
 
     pub fn deinit(self: *Security) void {
         if (self.client_crls) |*crls| crls.deinit(self.allocator);
         self.files.deinit(self.allocator);
+        deinitPaths(self.allocator, self.paths);
+        self.allocator.free(self.acl_enabled);
+        self.allocator.free(self.password_authentication);
         self.allocator.free(self.allow_anonymous);
         self.allocator.free(self.admission_policies);
         self.* = undefined;
@@ -277,7 +364,7 @@ pub const Security = struct {
         if (enabled.len != self.listener_ids.len) {
             return error.InvalidSecurityLayout;
         }
-        self.password_authentication = enabled;
+        @memcpy(self.password_authentication, enabled);
     }
 
     pub fn setAllowAnonymous(
@@ -344,11 +431,21 @@ pub const Security = struct {
     /// lets the broker validate TLS identities and authorization files before
     /// committing either part of one SIGHUP transaction.
     pub fn prepareReload(self: *Security) !PreparedReload {
+        return self.prepareReloadWithPaths(self.paths);
+    }
+
+    pub fn prepareReloadWithPaths(
+        self: *Security,
+        paths: []const Paths,
+    ) !PreparedReload {
+        if (paths.len != self.paths.len) return error.InvalidSecurityLayout;
+        const owned_paths = try clonePaths(self.allocator, paths);
+        errdefer deinitPaths(self.allocator, owned_paths);
         var files = try FileSet.load(
             self.allocator,
             self.io,
             self.dir,
-            self.paths,
+            owned_paths,
         );
         errdefer files.deinit(self.allocator);
         const client_crls = if (self.client_crls != null)
@@ -362,6 +459,7 @@ pub const Security = struct {
             null;
         return .{
             .security = self,
+            .paths = owned_paths,
             .files = files,
             .client_crls = client_crls,
         };
@@ -384,16 +482,28 @@ pub const Security = struct {
         prepared: *PreparedReload,
     ) RetiredReload {
         std.debug.assert(prepared.security == self);
+        const replacement_paths = prepared.paths orelse unreachable;
+        prepared.paths = null;
         const replacement = prepared.files orelse unreachable;
         prepared.files = null;
         const replacement_crls = prepared.client_crls;
         prepared.client_crls = null;
+        const previous_paths = self.paths;
+        self.paths = replacement_paths;
         const previous = self.files;
         self.files = replacement;
+        var has_any_acl = false;
+        for (self.files.acls, self.acl_enabled) |maybe_acl, *enabled| {
+            const present = maybe_acl != null;
+            enabled.store(present, .release);
+            has_any_acl = has_any_acl or present;
+        }
+        self.has_any_acl.store(has_any_acl, .release);
         const previous_crls = self.client_crls;
         self.client_crls = replacement_crls;
         return .{
             .security = self,
+            .paths = previous_paths,
             .files = previous,
             .client_crls = previous_crls,
         };
@@ -403,31 +513,6 @@ pub const Security = struct {
         var prepared = try self.prepareReload();
         defer prepared.deinit();
         self.commitReload(&prepared);
-    }
-
-    pub fn hasReloadableFiles(self: *const Security) bool {
-        for (self.paths) |entry| {
-            if (entry.password_file.len != 0 or entry.acl_file.len != 0) {
-                return true;
-            }
-        }
-        for (self.client_auth_paths) |entry| {
-            if (entry.crl_file.len != 0) return true;
-        }
-        return false;
-    }
-
-    pub fn hasPasswordFile(self: *const Security, listener_index: usize) bool {
-        return self.paths[self.securityIndex(listener_index)].password_file.len != 0;
-    }
-
-    pub fn hasAclFile(self: *const Security, listener_index: usize) bool {
-        return self.paths[self.securityIndex(listener_index)].acl_file.len != 0;
-    }
-
-    pub fn hasAnyAclFile(self: *const Security) bool {
-        for (self.paths) |entry| if (entry.acl_file.len != 0) return true;
-        return false;
     }
 
     pub fn listenerPolicy(
@@ -455,7 +540,6 @@ pub const Security = struct {
     pub fn sourceAccessControl(
         self: *Security,
     ) ?mqtt.broker.AccessControlHandler {
-        if (!self.hasAnyAclFile()) return null;
         return .{
             .context = self,
             .authorize_publish = allowSourcePublish,
@@ -474,10 +558,7 @@ pub const Security = struct {
         self: *const Security,
         listener_index: usize,
     ) bool {
-        if (self.password_authentication.len != 0) {
-            return self.password_authentication[listener_index];
-        }
-        return self.files.passwords[self.securityIndex(listener_index)] != null;
+        return self.password_authentication[listener_index];
     }
 
     fn aclAllows(
@@ -487,11 +568,11 @@ pub const Security = struct {
         identity: mqtt.acl_file.Identity,
         topic: []const u8,
     ) bool {
+        const index = self.securityIndex(listener_index);
+        if (!self.acl_enabled[index].load(.acquire)) return true;
         self.lock.lockSharedUncancelable(self.io);
         defer self.lock.unlockShared(self.io);
-        const file = self.files.acls[
-            self.securityIndex(listener_index)
-        ] orelse return true;
+        const file = self.files.acls[index] orelse return true;
         return file.allows(operation, identity, topic);
     }
 
@@ -501,6 +582,7 @@ pub const Security = struct {
         identity: mqtt.acl_file.Identity,
         topic: []const u8,
     ) bool {
+        if (!self.has_any_acl.load(.acquire)) return true;
         self.lock.lockSharedUncancelable(self.io);
         defer self.lock.unlockShared(self.io);
         const index = if (!self.per_listener_settings)
@@ -612,6 +694,9 @@ pub const ListenerPolicy = struct {
         const self: *ListenerPolicy = @ptrCast(@alignCast(context));
         self.security.lock.lockSharedUncancelable(self.security.io);
         defer self.security.lock.unlockShared(self.security.io);
+        if (!self.security.listenerUsesPasswordAuthentication(
+            self.listener_index,
+        )) return true;
         const maybe_file = &self.security.files.passwords[
             self.security.securityIndex(self.listener_index)
         ];
@@ -643,7 +728,6 @@ pub const ListenerPolicy = struct {
     pub fn accessControl(
         self: *ListenerPolicy,
     ) ?mqtt.broker.ListenerAccessControlHandler {
-        if (!self.security.hasAclFile(self.listener_index)) return null;
         return .{
             .context = self,
             .authorize_publish = authorizePublish,
@@ -933,6 +1017,120 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
             .retain = true,
             .properties = &.{},
         },
+    ));
+}
+
+test "reloadable MQTT security adds and swaps per-listener file paths" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "first.passwords",
+        .data = "first:" ++ password_hash ++ "\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "second.passwords",
+        .data = "second:" ++ password_hash ++ "\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "first.acl",
+        .data = "user first\ntopic write first/#\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "second.acl",
+        .data = "user second\ntopic write second/#\n",
+    });
+    const initial_paths = [_]Paths{ .{}, .{} };
+    const listener_ids = [_]u16{ 1883, 1884 };
+    var security = try Security.init(
+        allocator,
+        io,
+        tmp.dir,
+        &initial_paths,
+        &listener_ids,
+        true,
+    );
+    defer security.deinit();
+    try security.setAllowAnonymous(&.{ true, true });
+    var first_policy = security.listenerPolicy(0);
+    var second_policy = security.listenerPolicy(1);
+    const first_access = first_policy.accessControl().?;
+    const second_access = second_policy.accessControl().?;
+
+    const candidate_paths = [_]Paths{
+        .{
+            .password_file = "first.passwords",
+            .acl_file = "first.acl",
+        },
+        .{
+            .password_file = "second.passwords",
+            .acl_file = "second.acl",
+        },
+    };
+    var prepared = try security.prepareReloadWithPaths(&candidate_paths);
+    defer prepared.deinit();
+    security.commitReload(&prepared);
+    try security.setAllowAnonymous(&.{ false, false });
+
+    const first_connect = mqtt.Connect{
+        .protocol = .v5,
+        .clean_start = true,
+        .keep_alive_seconds = 60,
+        .client_id = "first-client",
+        .username = "first",
+        .password = "password",
+    };
+    const second_connect = mqtt.Connect{
+        .protocol = .v5,
+        .clean_start = true,
+        .keep_alive_seconds = 60,
+        .client_id = "second-client",
+        .username = "second",
+        .password = "password",
+    };
+    try std.testing.expect(ListenerPolicy.authorizeConnect(
+        &first_policy,
+        first_connect,
+    ));
+    try std.testing.expect(!ListenerPolicy.authorizeConnect(
+        &first_policy,
+        second_connect,
+    ));
+    try std.testing.expect(ListenerPolicy.authorizeConnect(
+        &second_policy,
+        second_connect,
+    ));
+    const publish = mqtt.Publish{
+        .dup = false,
+        .qos = .at_most_once,
+        .retain = false,
+        .topic = "first/value",
+        .packet_id = null,
+        .payload = "value",
+    };
+    try std.testing.expect(first_access.authorize_publish.?(
+        first_access.context,
+        first_connect,
+        publish,
+    ));
+    try std.testing.expect(!second_access.authorize_publish.?(
+        second_access.context,
+        second_connect,
+        publish,
+    ));
+
+    const missing_paths = [_]Paths{
+        .{ .password_file = "missing.passwords" },
+        candidate_paths[1],
+    };
+    try std.testing.expectError(
+        error.FileNotFound,
+        security.prepareReloadWithPaths(&missing_paths),
+    );
+    try std.testing.expect(ListenerPolicy.authorizeConnect(
+        &second_policy,
+        second_connect,
     ));
 }
 

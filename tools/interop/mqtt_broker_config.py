@@ -2348,6 +2348,8 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
     port = free_port()
     password_file = directory / "reload.pwfile"
     acl_file = directory / "reload.acl"
+    next_password_file = directory / "reload-next.pwfile"
+    next_acl_file = directory / "reload-next.acl"
     config = directory / "reload.conf"
     password_hash = (
         "$7$1000$"
@@ -2366,13 +2368,16 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         "topic read after/#\n"
         "topic read revoked/#\n"
     )
-    config.write_text(
-        f"password_file {password_file}\n"
-        f"acl_file {acl_file}\n"
-        f"listener {port} 127.0.0.1\n"
-        "allow_anonymous false\n"
-        "max_connections 5\n"
-    )
+    def write_config(password_path: Path, acl_path: Path) -> None:
+        config.write_text(
+            f"password_file {password_path}\n"
+            f"acl_file {acl_path}\n"
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous false\n"
+            "max_connections 5\n"
+        )
+
+    write_config(password_file, acl_file)
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,
@@ -2470,10 +2475,18 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 "security reload did not update existing subscription ACL"
             )
 
-        password_file.write_text(
+        next_password_file.write_text(
             f"stable:{password_hash}\n"
             f"new:{password_hash}\n"
         )
+        next_acl_file.write_text(
+            "user old\ntopic readwrite after/#\n"
+            "topic write revoked/will\n"
+            "user stable\ntopic read after/#\n"
+            "topic read revoked/#\n"
+            "user new\ntopic write after/#\n"
+        )
+        write_config(next_password_file, next_acl_file)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -2504,6 +2517,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
 
         password_file.write_text(f"third:{password_hash}\n")
         acl_file.write_text("unsupported directive\n")
+        write_config(password_file, acl_file)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -2557,6 +2571,12 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ=="
     )
     password_file.write_text(f"stable:{password_hash}\n")
+    first_reloaded_password = directory / "listener-policy-first.pwfile"
+    second_reloaded_password = directory / "listener-policy-second.pwfile"
+    first_reloaded_password.write_text(
+        f"stable:{password_hash}\nfirst-user:{password_hash}\n"
+    )
+    second_reloaded_password.write_text(f"second-user:{password_hash}\n")
     config = directory / "listener-policy-reload.conf"
 
     def write_config(
@@ -2577,11 +2597,13 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
         second_topic_alias: int = 2,
         second_outgoing_alias: int = 3,
         second_protocols: str = "4,5",
+        first_password_path: Path = first_reloaded_password,
+        second_password_path: Path = second_reloaded_password,
     ) -> None:
         config.write_text(
             "per_listener_settings true\n"
             f"listener {first_port} 127.0.0.1\n"
-            f"password_file {password_file}\n"
+            f"password_file {first_password_path}\n"
             f"allow_anonymous {str(first_anonymous).lower()}\n"
             f"allow_zero_length_clientid {str(first_allow_zero).lower()}\n"
             f"listener_auto_id_prefix {first_prefix}\n"
@@ -2592,7 +2614,7 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             f"accept_protocol_versions {first_protocols}\n"
             "max_connections 6\n"
             f"listener {second_listener_port} 127.0.0.1\n"
-            f"password_file {password_file}\n"
+            f"password_file {second_password_path}\n"
             f"allow_anonymous {str(second_anonymous).lower()}\n"
             f"allow_zero_length_clientid {str(second_allow_zero).lower()}\n"
             f"listener_auto_id_prefix {second_prefix}\n"
@@ -2699,7 +2721,12 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
                 )
         return client
 
-    write_config(True, False)
+    write_config(
+        True,
+        False,
+        first_password_path=password_file,
+        second_password_path=password_file,
+    )
     process = subprocess.Popen(
         [str(broker), f"--config={config}"],
         stdout=subprocess.PIPE,
@@ -2774,6 +2801,8 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             second_port,
             "listener-policy-second-accepted",
             0,
+            username="second-user",
+            password="password",
             maximum_qos=0,
             maximum_keep_alive=10,
             topic_alias_maximum=1,
@@ -2783,7 +2812,7 @@ def run_listener_policy_reload_case(broker: Path, directory: Path) -> None:
             first_port,
             "listener-policy-authenticated",
             0,
-            username="stable",
+            username="first-user",
             password="password",
             maximum_qos=1,
             maximum_keep_alive=20,
@@ -6169,7 +6198,8 @@ def main() -> None:
         "certificate CN/full-Subject identity mapping, "
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
-        "atomic password/ACL with selective live credential revocation and "
+        "atomic global/per-listener password/ACL path and content reload "
+        "with selective live credential revocation and "
         "TLS/WSS identity/key-password/CA/CRL "
         "plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/"
         "Keep-Alive/Topic-Alias admission SIGHUP "

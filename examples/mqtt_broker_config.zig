@@ -457,6 +457,27 @@ fn listenerLimits(
     };
 }
 
+fn securityPathsForConfig(
+    allocator: std.mem.Allocator,
+    config: *const mqtt.broker_config.Config,
+) std.mem.Allocator.Error![]reloadable_security.Paths {
+    const count = if (config.per_listener_settings)
+        config.listeners.len
+    else
+        1;
+    const paths = try allocator.alloc(reloadable_security.Paths, count);
+    for (paths, 0..) |*entry, index| {
+        entry.* = if (config.per_listener_settings) .{
+            .password_file = config.listeners[index].password_file,
+            .acl_file = config.listeners[index].acl_file,
+        } else .{
+            .password_file = config.password_file,
+            .acl_file = config.acl_file,
+        };
+    }
+    return paths;
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -479,24 +500,8 @@ pub fn run(
         null;
     defer if (persistence_path) |path| allocator.free(path);
 
-    const security_file_count = if (config.per_listener_settings)
-        config.listeners.len
-    else
-        1;
-    const security_paths = try allocator.alloc(
-        reloadable_security.Paths,
-        security_file_count,
-    );
+    const security_paths = try securityPathsForConfig(allocator, &config);
     defer allocator.free(security_paths);
-    for (0..security_file_count) |index| {
-        security_paths[index] = if (config.per_listener_settings) .{
-            .password_file = config.listeners[index].password_file,
-            .acl_file = config.listeners[index].acl_file,
-        } else .{
-            .password_file = config.password_file,
-            .acl_file = config.acl_file,
-        };
-    }
     const listener_ids = try allocator.alloc(u16, config.listeners.len);
     defer allocator.free(listener_ids);
     const password_authentication = try allocator.alloc(
@@ -519,12 +524,7 @@ pub fn run(
         admission_policies,
     ) |listener, *id, *uses_password, *anonymous, *admission| {
         id.* = listener.address.getPort();
-        const password_file = if (config.per_listener_settings)
-            listener.password_file
-        else
-            config.password_file;
-        uses_password.* = password_file.len != 0 and
-            !listener.use_identity_as_username and
+        uses_password.* = !listener.use_identity_as_username and
             !listener.use_subject_as_username;
         anonymous.* = listener.allow_anonymous;
         admission.* = try mqtt.broker.ListenerAdmissionSnapshot
@@ -736,9 +736,7 @@ pub fn run(
         const listener_access_control = security_policies[config_index]
             .accessControl();
         const authorization = mqtt.broker.ListenerAuthorization{
-            .connect = if (security.hasPasswordFile(config_index) and
-                !configured.use_identity_as_username and
-                !configured.use_subject_as_username) .{
+            .connect = if (password_authentication[config_index]) .{
                 .context = &security_policies[config_index],
                 .authorize = reloadable_security.ListenerPolicy
                     .authorizeConnect,
@@ -1168,6 +1166,14 @@ fn reloadConfiguredState(
         .component = .configuration,
         .err = err,
     } };
+    const reloaded_security_paths = securityPathsForConfig(
+        allocator,
+        &reloaded_config,
+    ) catch |err| return .{ .failure = .{
+        .component = .security,
+        .err = err,
+    } };
+    defer allocator.free(reloaded_security_paths);
     var prepared_required_client_id_prefix =
         broker.prepareRequiredClientIdPrefix(
             reloaded_config.client_id_prefixes,
@@ -1252,7 +1258,9 @@ fn reloadConfiguredState(
     defer prepared_bridges.deinit();
 
     const policy = security;
-    var prepared_security = policy.prepareReload() catch |err|
+    var prepared_security = policy.prepareReloadWithPaths(
+        reloaded_security_paths,
+    ) catch |err|
         return .{ .failure = .{
             .component = .security,
             .err = err,
@@ -1363,9 +1371,7 @@ fn validateReloadableListenerTopology(
     candidate: *const mqtt.broker_config.Config,
 ) !void {
     if (initial.per_listener_settings != candidate.per_listener_settings or
-        initial.listeners.len != candidate.listeners.len or
-        !std.mem.eql(u8, initial.password_file, candidate.password_file) or
-        !std.mem.eql(u8, initial.acl_file, candidate.acl_file))
+        initial.listeners.len != candidate.listeners.len)
     {
         return error.ListenerConfigurationRequiresRestart;
     }
@@ -1385,8 +1391,6 @@ fn listenerReloadCompatible(
         before.socket_domain == after.socket_domain and
         std.mem.eql(u8, before.bind_interface, after.bind_interface) and
         before.protocol == after.protocol and
-        std.mem.eql(u8, before.password_file, after.password_file) and
-        std.mem.eql(u8, before.acl_file, after.acl_file) and
         std.mem.eql(u8, before.certfile, after.certfile) and
         std.mem.eql(u8, before.keyfile, after.keyfile) and
         std.mem.eql(
