@@ -47,6 +47,67 @@ pub const Paths = struct {
     }
 };
 
+fn clonePaths(
+    allocator: std.mem.Allocator,
+    paths: []const Paths,
+) std.mem.Allocator.Error![]Paths {
+    const owned = try allocator.alloc(Paths, paths.len);
+    @memset(owned, .{});
+    errdefer deinitPaths(allocator, owned);
+    for (paths, owned) |source, *destination| {
+        destination.certificate_file = try dupeOrEmpty(
+            allocator,
+            source.certificate_file,
+        );
+        destination.private_key_file = try dupeOrEmpty(
+            allocator,
+            source.private_key_file,
+        );
+        destination.private_key_password_file = try dupeOrEmpty(
+            allocator,
+            source.private_key_password_file,
+        );
+        destination.client_ca_file = try dupeOrEmpty(
+            allocator,
+            source.client_ca_file,
+        );
+        destination.client_ca_path = try dupeOrEmpty(
+            allocator,
+            source.client_ca_path,
+        );
+        destination.crl_file = try dupeOrEmpty(
+            allocator,
+            source.crl_file,
+        );
+        destination.require_client_certificate =
+            source.require_client_certificate;
+    }
+    return owned;
+}
+
+fn dupeOrEmpty(
+    allocator: std.mem.Allocator,
+    value: []const u8,
+) std.mem.Allocator.Error![]const u8 {
+    return if (value.len == 0) &.{} else try allocator.dupe(u8, value);
+}
+
+fn deinitPaths(allocator: std.mem.Allocator, paths: []Paths) void {
+    for (paths) |entry| {
+        inline for (.{
+            entry.certificate_file,
+            entry.private_key_file,
+            entry.private_key_password_file,
+            entry.client_ca_file,
+            entry.client_ca_path,
+            entry.crl_file,
+        }) |value| {
+            if (value.len != 0) allocator.free(@constCast(value));
+        }
+    }
+    allocator.free(paths);
+}
+
 const Generation = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -191,7 +252,7 @@ const Shared = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     dir: std.Io.Dir,
-    paths: []const Paths,
+    paths: []Paths,
     current: []?*Generation,
     initial: []?*Generation,
     providers: []ProviderContext,
@@ -200,21 +261,27 @@ const Shared = struct {
 
 pub const PreparedReload = struct {
     shared: *Shared,
+    paths: ?[]Paths,
     generations: []?*Generation,
 
     pub fn deinit(self: *PreparedReload) void {
-        if (self.generations.len == 0) return;
-        releaseGenerations(self.shared.allocator, self.generations);
+        if (self.generations.len != 0) {
+            releaseGenerations(self.shared.allocator, self.generations);
+        }
+        if (self.paths) |paths| deinitPaths(self.shared.allocator, paths);
+        self.paths = null;
         self.generations = &.{};
     }
 };
 
 pub const RetiredGenerations = struct {
     shared: *Shared,
+    paths: []Paths,
     generations: []?*Generation,
 
     pub fn deinit(self: *RetiredGenerations) void {
         releaseGenerations(self.shared.allocator, self.generations);
+        deinitPaths(self.shared.allocator, self.paths);
         self.generations = &.{};
     }
 };
@@ -232,7 +299,9 @@ pub const Set = struct {
         if (paths.len == 0) return error.EmptyServerIdentityLayout;
         const shared = try allocator.create(Shared);
         errdefer allocator.destroy(shared);
-        const current = try loadGenerations(allocator, io, dir, paths);
+        const owned_paths = try clonePaths(allocator, paths);
+        errdefer deinitPaths(allocator, owned_paths);
+        const current = try loadGenerations(allocator, io, dir, owned_paths);
         errdefer releaseGenerations(allocator, current);
         const initial = try allocator.dupe(?*Generation, current);
         errdefer allocator.free(initial);
@@ -248,7 +317,7 @@ pub const Set = struct {
             .allocator = allocator,
             .io = io,
             .dir = dir,
-            .paths = paths,
+            .paths = owned_paths,
             .current = current,
             .initial = initial,
             .providers = providers,
@@ -267,6 +336,7 @@ pub const Set = struct {
         const shared = self.shared;
         releaseGenerations(shared.allocator, shared.current);
         releaseGenerations(shared.allocator, shared.initial);
+        deinitPaths(shared.allocator, shared.paths);
         shared.allocator.free(shared.providers);
         const allocator = shared.allocator;
         shared.* = undefined;
@@ -313,13 +383,26 @@ pub const Set = struct {
     }
 
     pub fn prepareReload(self: *Set) !PreparedReload {
+        return self.prepareReloadWithPaths(self.shared.paths);
+    }
+
+    pub fn prepareReloadWithPaths(
+        self: *Set,
+        paths: []const Paths,
+    ) !PreparedReload {
+        if (paths.len != self.shared.paths.len) {
+            return error.InvalidServerIdentityLayout;
+        }
+        const owned_paths = try clonePaths(self.shared.allocator, paths);
+        errdefer deinitPaths(self.shared.allocator, owned_paths);
         return .{
             .shared = self.shared,
+            .paths = owned_paths,
             .generations = try loadGenerations(
                 self.shared.allocator,
                 self.shared.io,
                 self.shared.dir,
-                self.shared.paths,
+                owned_paths,
             ),
         };
     }
@@ -339,10 +422,18 @@ pub const Set = struct {
     ) RetiredGenerations {
         std.debug.assert(prepared.shared == self.shared);
         std.debug.assert(prepared.generations.len != 0);
+        const replacement_paths = prepared.paths orelse unreachable;
+        prepared.paths = null;
+        const previous_paths = self.shared.paths;
+        self.shared.paths = replacement_paths;
         const previous = self.shared.current;
         self.shared.current = prepared.generations;
         prepared.generations = &.{};
-        return .{ .shared = self.shared, .generations = previous };
+        return .{
+            .shared = self.shared,
+            .paths = previous_paths,
+            .generations = previous,
+        };
     }
 
     pub fn reload(self: *Set) !void {
@@ -463,6 +554,18 @@ test "reloadable MQTT identities retain old handshakes and roll back failure" {
         .sub_path = "clients.pem",
         .data = test_client_ca_pem,
     });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "server-next.crt",
+        .data = test_certificate_pem,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "server-next.key",
+        .data = test_private_key_pem,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "clients-next.pem",
+        .data = test_client_ca_pem,
+    });
     const paths = [_]Paths{.{
         .certificate_file = "server.crt",
         .private_key_file = "server.key",
@@ -482,7 +585,13 @@ test "reloadable MQTT identities retain old handshakes and roll back failure" {
     try std.testing.expectEqual(ClientAuthRequirement.required, old_lease.client_auth.?.requirement);
     try std.testing.expectEqual(@as(usize, 1), old_authorities.len);
 
-    var prepared = try identities.prepareReload();
+    const next_paths = [_]Paths{.{
+        .certificate_file = "server-next.crt",
+        .private_key_file = "server-next.key",
+        .client_ca_file = "clients-next.pem",
+        .require_client_certificate = true,
+    }};
+    var prepared = try identities.prepareReloadWithPaths(&next_paths);
     defer prepared.deinit();
     identities.commitReload(&prepared);
     var current_lease = provider.acquire();
@@ -499,10 +608,19 @@ test "reloadable MQTT identities retain old handshakes and roll back failure" {
     try std.testing.expectEqual(@as(u8, 0x30), old_authorities[0][0]);
 
     try tmp.dir.writeFile(io, .{
-        .sub_path = "clients.pem",
+        .sub_path = "clients-invalid.pem",
         .data = "not a certificate\n",
     });
-    try std.testing.expectError(error.InvalidPem, identities.reload());
+    const invalid_paths = [_]Paths{.{
+        .certificate_file = "server-next.crt",
+        .private_key_file = "server-next.key",
+        .client_ca_file = "clients-invalid.pem",
+        .require_client_certificate = true,
+    }};
+    try std.testing.expectError(
+        error.InvalidPem,
+        identities.prepareReloadWithPaths(&invalid_paths),
+    );
     var rollback_lease = provider.acquire();
     defer rollback_lease.deinit();
     try rollback_lease.identity.validate();

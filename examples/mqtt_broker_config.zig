@@ -478,6 +478,28 @@ fn securityPathsForConfig(
     return paths;
 }
 
+fn identityPathsForConfig(
+    allocator: std.mem.Allocator,
+    config: *const mqtt.broker_config.Config,
+) std.mem.Allocator.Error![]reloadable_identity.Paths {
+    const paths = try allocator.alloc(
+        reloadable_identity.Paths,
+        config.listeners.len,
+    );
+    for (config.listeners, paths) |configured, *entry| {
+        entry.* = .{
+            .certificate_file = configured.certfile,
+            .private_key_file = configured.keyfile,
+            .private_key_password_file = configured.keyfile_password_file,
+            .client_ca_file = configured.cafile,
+            .client_ca_path = configured.capath,
+            .crl_file = configured.crlfile,
+            .require_client_certificate = configured.require_certificate,
+        };
+    }
+    return paths;
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -647,22 +669,8 @@ pub fn run(
     else
         null;
     defer if (checkpoint_signal) |*signal| signal.deinit();
-    const identity_paths = try allocator.alloc(
-        reloadable_identity.Paths,
-        config.listeners.len,
-    );
+    const identity_paths = try identityPathsForConfig(allocator, &config);
     defer allocator.free(identity_paths);
-    for (config.listeners, identity_paths) |configured, *paths| {
-        paths.* = .{
-            .certificate_file = configured.certfile,
-            .private_key_file = configured.keyfile,
-            .private_key_password_file = configured.keyfile_password_file,
-            .client_ca_file = configured.cafile,
-            .client_ca_path = configured.capath,
-            .crl_file = configured.crlfile,
-            .require_client_certificate = configured.require_certificate,
-        };
-    }
     var identities = try reloadable_identity.Set.init(
         allocator,
         io,
@@ -1174,6 +1182,14 @@ fn reloadConfiguredState(
         .err = err,
     } };
     defer allocator.free(reloaded_security_paths);
+    const reloaded_identity_paths = identityPathsForConfig(
+        allocator,
+        &reloaded_config,
+    ) catch |err| return .{ .failure = .{
+        .component = .security,
+        .err = err,
+    } };
+    defer allocator.free(reloaded_identity_paths);
     var prepared_required_client_id_prefix =
         broker.prepareRequiredClientIdPrefix(
             reloaded_config.client_id_prefixes,
@@ -1267,7 +1283,9 @@ fn reloadConfiguredState(
         } };
     defer prepared_security.deinit();
     const identity_set = identities;
-    var prepared_identities = identity_set.prepareReload() catch |err|
+    var prepared_identities = identity_set.prepareReloadWithPaths(
+        reloaded_identity_paths,
+    ) catch |err|
         return .{ .failure = .{
             .component = .security,
             .err = err,
@@ -1391,16 +1409,7 @@ fn listenerReloadCompatible(
         before.socket_domain == after.socket_domain and
         std.mem.eql(u8, before.bind_interface, after.bind_interface) and
         before.protocol == after.protocol and
-        std.mem.eql(u8, before.certfile, after.certfile) and
-        std.mem.eql(u8, before.keyfile, after.keyfile) and
-        std.mem.eql(
-            u8,
-            before.keyfile_password_file,
-            after.keyfile_password_file,
-        ) and
-        std.mem.eql(u8, before.cafile, after.cafile) and
-        std.mem.eql(u8, before.capath, after.capath) and
-        std.mem.eql(u8, before.crlfile, after.crlfile) and
+        before.usesTls() == after.usesTls() and
         std.mem.eql(
             std.meta.Elem(@TypeOf(before.tls13_cipher_suites)),
             before.tls13_cipher_suites,
@@ -1428,7 +1437,6 @@ fn listenerReloadCompatible(
         ) and
         before.tls13_session_ticket_lifetime_seconds ==
             after.tls13_session_ticket_lifetime_seconds and
-        before.require_certificate == after.require_certificate and
         before.use_identity_as_username == after.use_identity_as_username and
         before.use_subject_as_username == after.use_subject_as_username and
         std.mem.eql(u8, before.mount_point, after.mount_point) and

@@ -2956,12 +2956,12 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         "-passout",
         f"pass:{second_key_password}",
     )
-    active_certificate = directory / "identity-reload-active.crt"
-    active_key = directory / "identity-reload-active.key"
-    key_password_file = directory / "identity-reload-key.password"
-    active_certificate.write_bytes(first_certificate.read_bytes())
-    active_key.write_bytes(first_encrypted_key.read_bytes())
-    key_password_file.write_text(first_key_password + "\n")
+    first_key_password_file = directory / "identity-reload-first.password"
+    second_key_password_file = directory / "identity-reload-second.password"
+    wrong_key_password_file = directory / "identity-reload-wrong.password"
+    first_key_password_file.write_text(first_key_password + "\n")
+    second_key_password_file.write_text(second_key_password + "\n")
+    wrong_key_password_file.write_text("wrong-key-password\n")
     password_file = directory / "identity-reload.pwfile"
     password_hash = (
         "$7$1000$"
@@ -2975,21 +2975,33 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
     while websocket_port == mqtt_port:
         websocket_port = free_port()
     config = directory / "identity-reload.conf"
-    config.write_text(
-        f"password_file {password_file}\n"
-        f"listener {mqtt_port} 127.0.0.1\n"
-        f"certfile {active_certificate}\n"
-        f"keyfile {active_key}\n"
-        f"keyfile_password_file {key_password_file}\n"
-        "allow_anonymous false\n"
-        "max_connections 16\n"
-        f"listener {websocket_port} 127.0.0.1\n"
-        "protocol websockets\n"
-        f"certfile {active_certificate}\n"
-        f"keyfile {active_key}\n"
-        f"keyfile_password_file {key_password_file}\n"
-        "allow_anonymous false\n"
-        "max_connections 16\n"
+
+    def write_config(
+        certificate: Path,
+        key: Path,
+        key_password_path: Path,
+    ) -> None:
+        config.write_text(
+            f"password_file {password_file}\n"
+            f"listener {mqtt_port} 127.0.0.1\n"
+            f"certfile {certificate}\n"
+            f"keyfile {key}\n"
+            f"keyfile_password_file {key_password_path}\n"
+            "allow_anonymous false\n"
+            "max_connections 16\n"
+            f"listener {websocket_port} 127.0.0.1\n"
+            "protocol websockets\n"
+            f"certfile {certificate}\n"
+            f"keyfile {key}\n"
+            f"keyfile_password_file {key_password_path}\n"
+            "allow_anonymous false\n"
+            "max_connections 16\n"
+        )
+
+    write_config(
+        first_certificate,
+        first_encrypted_key,
+        first_key_password_file,
     )
     environment = os.environ.copy()
     environment.pop(FINITE_TEST_ENV, None)
@@ -3082,9 +3094,11 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
         old_wss = wss_connect(first_ca, "identity-old-wss")
         clients.append(old_wss)
 
-        active_certificate.write_bytes(second_certificate.read_bytes())
-        active_key.write_bytes(second_encrypted_key.read_bytes())
-        key_password_file.write_text(second_key_password + "\n")
+        write_config(
+            second_certificate,
+            second_encrypted_key,
+            second_key_password_file,
+        )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3107,7 +3121,11 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
             "WSS reload",
         )
 
-        key_password_file.write_text("wrong-key-password\n")
+        write_config(
+            second_certificate,
+            second_encrypted_key,
+            wrong_key_password_file,
+        )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3119,10 +3137,14 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
             "identity-password-rollback",
         )
         clients.append(password_rollback)
-        key_password_file.write_text(second_key_password + "\n")
-
-        active_certificate.write_text("not a certificate\n")
+        invalid_certificate = directory / "identity-reload-invalid.crt"
+        invalid_certificate.write_text("not a certificate\n")
         password_file.write_text(f"new:{password_hash}\n")
+        write_config(
+            invalid_certificate,
+            second_encrypted_key,
+            second_key_password_file,
+        )
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3198,6 +3220,9 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
     active_ca_directory.mkdir()
     active_ca_directory_file = active_ca_directory / "client.pem"
     active_ca_directory_file.write_bytes(first_ca.read_bytes())
+    next_ca_directory = directory / "ca-reload-next-client-dir"
+    next_ca_directory.mkdir()
+    (next_ca_directory / "client.pem").write_bytes(second_ca.read_bytes())
 
     mqtt_port = free_port()
     websocket_port = free_port()
@@ -3207,30 +3232,38 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
     while capath_port in (mqtt_port, websocket_port):
         capath_port = free_port()
     config = directory / "ca-reload.conf"
-    config.write_text(
-        f"listener {mqtt_port} 127.0.0.1\n"
-        f"certfile {server_certificate}\n"
-        f"keyfile {server_key}\n"
-        f"cafile {active_ca}\n"
-        "require_certificate true\n"
-        "allow_anonymous true\n"
-        "max_connections 16\n"
-        f"listener {capath_port} 127.0.0.1\n"
-        f"certfile {server_certificate}\n"
-        f"keyfile {server_key}\n"
-        f"capath {active_ca_directory}\n"
-        "require_certificate true\n"
-        "allow_anonymous true\n"
-        "max_connections 16\n"
-        f"listener {websocket_port} 127.0.0.1\n"
-        "protocol websockets\n"
-        f"certfile {server_certificate}\n"
-        f"keyfile {server_key}\n"
-        f"cafile {active_ca}\n"
-        "require_certificate true\n"
-        "allow_anonymous true\n"
-        "max_connections 16\n"
-    )
+
+    def write_config(
+        cafile: Path,
+        capath: Path,
+        require_certificate: bool,
+    ) -> None:
+        config.write_text(
+            f"listener {mqtt_port} 127.0.0.1\n"
+            f"certfile {server_certificate}\n"
+            f"keyfile {server_key}\n"
+            f"cafile {cafile}\n"
+            f"require_certificate {str(require_certificate).lower()}\n"
+            "allow_anonymous true\n"
+            "max_connections 16\n"
+            f"listener {capath_port} 127.0.0.1\n"
+            f"certfile {server_certificate}\n"
+            f"keyfile {server_key}\n"
+            f"capath {capath}\n"
+            f"require_certificate {str(require_certificate).lower()}\n"
+            "allow_anonymous true\n"
+            "max_connections 16\n"
+            f"listener {websocket_port} 127.0.0.1\n"
+            "protocol websockets\n"
+            f"certfile {server_certificate}\n"
+            f"keyfile {server_key}\n"
+            f"cafile {cafile}\n"
+            f"require_certificate {str(require_certificate).lower()}\n"
+            "allow_anonymous true\n"
+            "max_connections 16\n"
+        )
+
+    write_config(active_ca, active_ca_directory, False)
     environment = os.environ.copy()
     environment.pop(FINITE_TEST_ENV, None)
     process = subprocess.Popen(
@@ -3340,9 +3373,9 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
         expect_mqtt_rejected(second_client, second_key, "initial second CA")
         expect_capath_rejected(second_client, second_key, "initial second CA")
         expect_wss_rejected(second_client, second_key, "initial-second-ca")
+        assert_openssl_mqtt_success(openssl_mqtt_client(mqtt_port, server_ca))
 
-        active_ca.write_bytes(second_ca.read_bytes())
-        active_ca_directory_file.write_bytes(second_ca.read_bytes())
+        write_config(second_ca, next_ca_directory, True)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3375,6 +3408,11 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
         expect_mqtt_rejected(first_client, first_key, "retired first CA")
         expect_capath_rejected(first_client, first_key, "retired first CA")
         expect_wss_rejected(first_client, first_key, "retired-first-ca")
+        without_certificate = openssl_mqtt_client(mqtt_port, server_ca)
+        if without_certificate.stdout.startswith(b"\x20"):
+            raise AssertionError(
+                "reloaded required client certificate accepted no certificate"
+            )
         diagnostics = openssl_certificate_request_diagnostics(
             mqtt_port,
             server_ca,
@@ -3389,7 +3427,9 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
                 "reloaded CertificateRequest CA names are stale: " + diagnostics
             )
 
-        active_ca.write_text("not a certificate\n")
+        invalid_ca = directory / "ca-reload-invalid-client.crt"
+        invalid_ca.write_text("not a certificate\n")
+        write_config(invalid_ca, next_ca_directory, True)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3482,16 +3522,20 @@ def run_crl_reload_case(broker: Path, directory: Path) -> None:
 
     port = free_port()
     config = directory / "crl-reload.conf"
-    config.write_text(
-        f"listener {port} 127.0.0.1\n"
-        f"certfile {server_certificate}\n"
-        f"keyfile {server_key}\n"
-        f"cafile {client_ca}\n"
-        f"crlfile {active_crl}\n"
-        "require_certificate true\n"
-        "allow_anonymous true\n"
-        "max_connections 8\n"
-    )
+
+    def write_config(crl_file: Path) -> None:
+        config.write_text(
+            f"listener {port} 127.0.0.1\n"
+            f"certfile {server_certificate}\n"
+            f"keyfile {server_key}\n"
+            f"cafile {client_ca}\n"
+            f"crlfile {crl_file}\n"
+            "require_certificate true\n"
+            "allow_anonymous true\n"
+            "max_connections 8\n"
+        )
+
+    write_config(active_crl)
     environment = os.environ.copy()
     environment.pop(FINITE_TEST_ENV, None)
     process = subprocess.Popen(
@@ -3531,7 +3575,7 @@ def run_crl_reload_case(broker: Path, directory: Path) -> None:
         expect_client(first_client, first_key, True, "initial first client")
         expect_client(second_client, second_key, False, "initial second client")
 
-        active_crl.write_bytes(replacement_crl.read_bytes())
+        write_config(replacement_crl)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -3541,7 +3585,7 @@ def run_crl_reload_case(broker: Path, directory: Path) -> None:
         expect_client(first_client, first_key, False, "reloaded first client")
         expect_client(second_client, second_key, True, "reloaded second client")
 
-        active_crl.write_bytes(tampered_crl.read_bytes())
+        write_config(tampered_crl)
         os.kill(process.pid, signal.SIGHUP)
         wait_process_line(
             process,
@@ -6200,7 +6244,7 @@ def main() -> None:
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
         "atomic global/per-listener password/ACL path and content reload "
         "with selective live credential revocation and "
-        "TLS/WSS identity/key-password/CA/CRL "
+        "TLS/WSS identity/key-password/CA/capath/CRL path and content reload "
         "plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/"
         "Keep-Alive/Topic-Alias admission SIGHUP "
         "reload with topology rollback, "
