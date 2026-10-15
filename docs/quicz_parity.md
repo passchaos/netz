@@ -769,6 +769,24 @@ P50 by 21.7% and 20.3%; prepared netz was 5.3% and 12.1% below the same-block
 Quinn client. The default fresh-verifier results and both modes remain
 same-security-policy rather than equal-wire claims.
 
+Published Vail `73e2a4c` now routes Linux ARM64 ReleaseFast/ReleaseSafe P-256
+Montgomery multiply and square through fixed `s2n-bignum` kernels while keeping
+the portable implementation for Debug and ReleaseSmall. Eight fixed-binary
+prepared-verifier pairs all improved, from a 35,642 to 29,458 ns midpoint
+median (17.4%); the prepared benchmark added 5,080 bytes of `.text`. In the
+fixed-Quinn-server netz-client handshake, instructions and the post-trust
+interval improved in all eight mirrored pairs by median paired ratios of
+0.913918 and 0.875768. Complete P50 improved in only five pairs (0.977508
+median ratio), so the end-to-end result remains bounded support rather than a
+general cross-stack claim; the handshake benchmark added 8,168 bytes of
+`.text`. A zero-loss 1,000-sample follow-up profile removed portable field
+multiplication from the hotspot list: P-256 time now concentrates in public
+double-scalar comb/add/double work (14.72%), the new multiply kernel (4.13%),
+and public-scalar inversion (2.52%), while X25519 variable/fixed loops retain
+14.52%/3.71%. These are the next measured crypto targets; worker scheduling,
+packetization, and the load-sensitive tail still need separate equal-wire
+evidence before any whole-handshake superiority claim.
+
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered with local and cross-process latency evidence plus an equal-CPU-layout quic-go throughput harness | `examples/quic_echo.zig`, `examples/bench_quic_handshake_stream.zig`, `bench-quic-quic-go`, and `bench-quic-persistent-external`; CPU-0-pinned local netz P50/P99/P99.9 echo ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The certificate-verified two-process persistent 1-KiB echo keeps one request outstanding: five historical pre-zio runs gave netz-client median P50 24.172 us versus quic-go-client 25.851 us against a fixed quic-go server (1.069x), and 23.729 versus 24.361 us against a fixed netz server (1.027x). The fresh-connection throughput harness pins client/server separately, runs both sender roles, and requires exact FIN/bytes/checksum for 1 and 4 unidirectional streams. Its netz endpoints and persistent netz endpoints now run on zio behind `std.Io`; strict result, completion, socket, and memory validation rejects legacy or mismatched backend identities. Complete-connection userspace socket accounting is also available. All external comparisons remain `same-application-shape`, and historical Threaded ratios are not zio results. | Re-run the cross-library matrices on zio, then add kernel/interface capture on a permitted host and equalize GRO, ACK/pacing, packetization, and application scheduling before a general STREAM ratio. |

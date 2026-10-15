@@ -5081,6 +5081,48 @@ formed twenty mirrored pairs: P50 won 10/20 and rate 9/20; pair midpoint ratios
 were 1.0002 and 0.9995. Complete-handshake timing is therefore neutral, while
 the allocation and sparse-state reductions are deterministic.
 
+Published Vail `73e2a4c` then replaces the remaining portable ARM64 P-256
+Montgomery field multiply/square operations in ReleaseFast and ReleaseSafe
+with fixed `s2n-bignum` kernels pinned to upstream commit
+`4d1356a7470663c752660a59375dc3a9ef548428`. Debug and ReleaseSmall retain the
+portable Zig path. Both optimized modes passed the P-256 differential and
+verifier gates, the complete Vail suite passed, and the x86_64 ReleaseFast
+compile gate confirmed that the ARM64 assembly did not leak into other targets.
+Eight CPU-0 fixed-binary prepared-verifier pairs all favored the candidate:
+the midpoint median fell from 35,642 to 29,458 ns/verify (17.4%), with a
+0.82597 median paired ratio. Prepared-table construction, which stays outside
+the online handshake timer and is reused by the caller, fell from 923,607.5 to
+728,520.5 ns (21.1%). The candidate's 29,533 ns smoke result was 40.0% below
+the same-host AWS-LC parsed-verifier result of 49,135 ns. The representative
+prepared-verifier ELF `.text` grew from 640,784 to 645,864 bytes (+5,080).
+
+The corresponding fixed-Quinn-server netz-client comparison used baseline
+SHA-256
+`17d408bc8e524ff38655533a79a997f94a4d433ea856913c2a928c1774ed4526`
+and candidate
+`0e4a9fcb160ccf0c8500a63652381458b95eed7f5350a09b847a611b3fb7fb94`.
+Across eight mirrored pairs, client instructions fell in every pair with a
+0.913918 median paired ratio (8.6%), and the post-trust interval likewise fell
+in every pair with a 0.875768 ratio (12.4%). Complete-handshake P50 won only
+five pairs, with a 0.977508 ratio (2.25%), so that movement is bounded support
+rather than a general latency claim. The handshake benchmark ELF `.text` grew
+from 3,770,543 to 3,778,711 bytes (+8,168). A fixed Quinn-client/netz-server
+control left server instructions near 383.12M and effectively unchanged; the
+prepared verifier is therefore not presented as a signer optimization.
+
+A post-candidate 1,000-connection netz-client profile recorded 1,000 samples
+with none lost. Host load inflated its 7.532 ms P99, so the 399.446 us P50 is
+not used as an absolute A/B claim. The profile is still useful for call-path
+ordering: the former portable field-multiply hotspot disappeared, while
+`doubleScalarMulComb` accounted for 14.72%, the ARM64 Montgomery multiply
+kernel 4.13%, public-scalar inversion 2.52%, and the X25519 variable/fixed
+loops 14.52%/3.71%. Compared with the preceding profile's approximately 27.8%
+prepared P-256 total and 17.1%/4.2% X25519 loops, field multiplication is no
+longer the dominant P-256 target. The next cryptographic work should therefore
+measure the public comb/add/double and inversion paths alongside X25519 rather
+than further tuning handshake allocation or key-schedule sites already down
+near 1--2%.
+
 The historical 2026-09-16 5 x 100 full-handshake capture used netz binary SHA-256
 `fbb112f461774e4edb8fa8f05f46b78af138f3ce348ffade25d3d57929d307b6`
 and Quinn binary SHA-256
