@@ -59,6 +59,9 @@ fn prepareUriBatch(
     const first_uri = std.Uri.parse(requests[0].uri) catch
         return error.InvalidUri;
     const first_secure = try secureForScheme(first_uri.scheme);
+    var parsed_uri_stack: [stack_request_count]std.Uri = undefined;
+    const retain_parsed_uris = requests.len <= parsed_uri_stack.len;
+    if (retain_parsed_uris) parsed_uri_stack[0] = first_uri;
     var first_endpoint: ?http1_runtime.UriEndpoint =
         if (requests.len > 1)
             try http1_runtime.uriEndpoint(
@@ -72,7 +75,11 @@ fn prepareUriBatch(
 
     var total_target_bytes: usize = 0;
     for (requests, 0..) |item, index| {
-        const uri = std.Uri.parse(item.uri) catch return error.InvalidUri;
+        const uri = if (index == 0)
+            first_uri
+        else
+            std.Uri.parse(item.uri) catch return error.InvalidUri;
+        if (retain_parsed_uris) parsed_uri_stack[index] = uri;
         const secure = try secureForScheme(uri.scheme);
         if (index != 0) {
             var endpoint = try http1_runtime.uriEndpoint(
@@ -112,8 +119,11 @@ fn prepareUriBatch(
     errdefer if (targets_allocated) pool.allocator.free(target_storage);
 
     var target_offset: usize = 0;
-    for (requests, native_requests) |item, *native| {
-        const uri = std.Uri.parse(item.uri) catch unreachable;
+    for (requests, native_requests, 0..) |item, *native, index| {
+        const uri = if (retain_parsed_uris)
+            parsed_uri_stack[index]
+        else
+            std.Uri.parse(item.uri) catch unreachable;
         const len = try targetLength(uri);
         const target = target_storage[target_offset..][0..len];
         writeTarget(target, uri);

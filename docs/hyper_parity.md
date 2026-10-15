@@ -1366,6 +1366,27 @@ worst-shape cost buys default task cancellation while blocked in admission or
 frame read; direct pool/connection APIs retain their non-dispatcher fast paths.
 This is an explicit lifecycle/latency tradeoff, not a general HTTP/2 throughput
 regression claim.
+The following URI-preparation audit found that a common batch parsed each URI
+once for origin/target sizing and then again to write the final `:path`, after
+already parsing the first URI for scheme selection. Batches of at most sixteen
+now retain borrowed `std.Uri` views in caller-stack storage, so every member is
+parsed once during preparation; larger batches retain the allocation-neutral
+fallback and still reuse the first parse during validation. Pool admission and
+its cancellation Select are unchanged. Twenty CPU-0 fixed-binary pairs of the
+same 1,000-warmup/2,000-request SharedSender shape reduced the paired latency
+median to 0.989356 (-1.064%, 18/20 wins) and process instructions to 0.962067
+(-3.793%, 20/20). Baseline/candidate SHA-256 values were
+`3d2636d58637653d5f33465886a18ba418a1c8b3f2403c89faf26bd77943e310`
+and
+`51f467b4f07adecd78417f7abab38294cc13f0c9cbdd23f88ff67f1d0689df9b`;
+their total static sizes were identical. Matched zero-loss profiles moved
+`Uri.parse` from 3.54% to 0.94% and approximate sampled event count from
+5,174,996,464 to 5,030,381,374. Both binaries retained exactly 6,000 measured
+allocator calls, 1,286,000 requested bytes, 71,946 live bytes, and 140,592 peak
+bytes. Debug client-pool/shared-sender gates passed 60/60 and 48/48,
+ReleaseFast shared-sender passed 48/48, and the complete bidirectional Hyper
+h2c/TLS pool, cancellation, redirect, trailers, reuse, KeyUpdate and GOAWAY
+matrix passed.
 The pool adapter preserves stack-first URI target preparation, maps compacted
 active requests back to their original command indices, and retries capacity
 admission after expiring only the earliest deadline. This carries the low-level
