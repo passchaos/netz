@@ -3862,6 +3862,26 @@ upload evidence remained neutral. The production candidate and its private
 timestamp plumbing were therefore removed again; this rules out retrying that
 isolated optimization without a materially different clock/timer design.
 
+A materially different send-side clock candidate was also rejected for
+correctness rather than timing. `endpoint_server.Server.trySend` temporarily
+used zio's already refreshed event-loop awake snapshot, with the existing
+exact-clock fallback for foreign runtimes and calls outside the matching task.
+This resembles Quinn's caller-supplied `poll_transmit(now)` boundary and left
+ordinary Connection send/receive, RTT, PTO, and deadline APIs unchanged. The
+64-connection client-sender arm completed 67,108,864 bytes with checksum
+8,556,380,160 at 140.244 MiB/s, but the first server-sender arm failed its
+30-second deadline before producing a result. A continuously runnable shared
+server can revisit pacing without yielding through a backend poll, so its scan
+snapshot need not advance soon enough to release the pacing block. Baseline and
+candidate SHA-256 values were
+`0e4ed798c8896590d664bcdbbd4dccb4a4d52f87d99ff6ea5614d0bb973e19d9`
+and
+`16412e977e0a0e6bc1d78beb8fedc3c697b6049a94c0f011059bb74f2a9c5df0`.
+The candidate was fully removed after that first terminal failure. QUIC send
+timestamps and pacing retain fresh awake-clock reads; a future shared-time
+design must define and test explicit refresh/yield ownership rather than reuse
+an event-loop snapshot implicitly.
+
 The exposed server-sender profile then motivated a staged ACK-summary
 experiment. A single-ACK packet already validates every range and ECN count
 before mutation, but the ordinary path subsequently rescanned the same sent
