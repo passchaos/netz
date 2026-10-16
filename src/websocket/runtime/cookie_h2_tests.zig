@@ -30,6 +30,21 @@ test "WebSocket HTTP2 CookieJar covers accepted and rejected attempts" {
         "seed=one; HttpOnly; Path=/",
         now,
     );
+    _ = try jar.storeSetCookie(
+        "ws://localhost/accepted",
+        "deep=accepted; Path=/accepted",
+        now,
+    );
+    _ = try jar.storeSetCookie(
+        "wss://localhost/accepted",
+        "secure=secret; Secure; Path=/",
+        now,
+    );
+    _ = try jar.storeSetCookie(
+        "ws://victim.example/accepted",
+        "victim=secret; Path=/",
+        now,
+    );
 
     var server = try http2_runtime.Server.listen(
         allocator,
@@ -68,11 +83,14 @@ test "WebSocket HTTP2 CookieJar covers accepted and rejected attempts" {
                 var pending_owned = true;
                 defer if (pending_owned) pending.deinit();
                 try std.testing.expectEqualStrings(
-                    "/accepted",
+                    "/accepted?token=a%2Fb",
                     pending.target(),
                 );
                 const cookie = try requiredCookie(pending.headers());
-                try std.testing.expectEqualStrings("seed=one", cookie.value);
+                try std.testing.expectEqualStrings(
+                    "deep=accepted; seed=one",
+                    cookie.value,
+                );
                 try std.testing.expect(cookie.never_index);
                 var ws = try pending.acceptWithHeaders(&.{.{
                     .name = "set-cookie",
@@ -125,10 +143,10 @@ test "WebSocket HTTP2 CookieJar covers accepted and rejected attempts" {
     defer h2.close();
 
     try std.testing.expectError(
-        error.CookieScopeRequired,
+        error.InvalidUri,
         runtime.H2Client.openAttempt(allocator, &h2, .{
             .authority = "localhost",
-            .path = "/missing-scope",
+            .path = "missing-leading-slash",
             .cookies = .{ .jar = &jar },
         }),
     );
@@ -141,20 +159,14 @@ test "WebSocket HTTP2 CookieJar covers accepted and rejected attempts" {
                 .name = "Cookie",
                 .value = "caller=ambiguous",
             }},
-            .cookies = .{
-                .jar = &jar,
-                .scope_uri = "ws://localhost/caller-cookie",
-            },
+            .cookies = .{ .jar = &jar },
         }),
     );
 
     var accepted = try runtime.H2Client.openAttempt(allocator, &h2, .{
         .authority = "localhost",
-        .path = "/accepted",
-        .cookies = .{
-            .jar = &jar,
-            .scope_uri = "ws://localhost/accepted",
-        },
+        .path = "/accepted?token=a%2Fb",
+        .cookies = .{ .jar = &jar },
     });
     try std.testing.expect(accepted.accepted());
     accepted.deinit();
@@ -162,10 +174,7 @@ test "WebSocket HTTP2 CookieJar covers accepted and rejected attempts" {
     var rejected = try runtime.H2Client.openAttempt(allocator, &h2, .{
         .authority = "localhost",
         .path = "/rejected",
-        .cookies = .{
-            .jar = &jar,
-            .scope_uri = "ws://localhost/rejected",
-        },
+        .cookies = .{ .jar = &jar },
     });
     defer rejected.deinit();
     try std.testing.expect(!rejected.accepted());

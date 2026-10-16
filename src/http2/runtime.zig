@@ -3768,6 +3768,26 @@ pub const Connection = struct {
         }
     }
 
+    /// Resolve the scheme that request encoders will place in `:scheme`.
+    /// Protocol adapters use this to bind auxiliary state to the exact same
+    /// origin as the eventual HTTP/2 request.
+    pub fn resolveRequestScheme(
+        self: *const Connection,
+        explicit: ?[]const u8,
+    ) []const u8 {
+        return explicit orelse self.default_scheme orelse "https";
+    }
+
+    /// Resolve the authority that request encoders will place in `:authority`.
+    /// The returned slice remains connection-owned when it comes from the
+    /// constructor default.
+    pub fn resolveRequestAuthority(
+        self: *const Connection,
+        explicit: ?[]const u8,
+    ) ?[]const u8 {
+        return explicit orelse self.default_authority;
+    }
+
     pub fn close(self: *Connection) void {
         if (self.default_authority) |authority| self.allocator.free(authority);
         self.send_stream_windows.deinit(self.allocator);
@@ -8802,12 +8822,14 @@ pub const Connection = struct {
     ) ResponseTimeoutError!ExtendedConnectAttempt {
         if (self.role != .client) return error.UnexpectedFrame;
         var request_options = options;
-        if (request_options.authority == null) request_options.authority = self.default_authority;
+        request_options.authority = self.resolveRequestAuthority(
+            request_options.authority,
+        );
         if (!methodIsConnect(request_options.method)) return error.InvalidHeader;
         const protocol = request_options.protocol orelse return error.InvalidHeader;
         if (!self.peer_enable_connect_protocol) return error.ExtendedConnectDisabled;
         if (request_options.body.len != 0 or request_options.trailers.len != 0) return error.InvalidContentLength;
-        const scheme = request_options.scheme orelse self.default_scheme orelse "https";
+        const scheme = self.resolveRequestScheme(request_options.scheme);
 
         var fields_stack: [16]http2.Hpack.HeaderField = undefined;
         const fields_capacity = std.math.add(

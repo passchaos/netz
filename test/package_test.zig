@@ -1775,9 +1775,21 @@ test "public modules are reachable" {
         netz.websocket.runtime,
         "CookieHandshakeOptions",
     ));
+    try std.testing.expect(!@hasField(
+        netz.websocket.runtime.CookieHandshakeOptions,
+        "scope_uri",
+    ));
     try std.testing.expect(@hasField(
         netz.websocket.runtime.H2ConnectOptions,
         "cookies",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "resolveRequestScheme",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http2.runtime.Connection,
+        "resolveRequestAuthority",
     ));
     try std.testing.expect(@hasDecl(
         netz.http2.runtime,

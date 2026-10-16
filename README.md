@@ -1147,10 +1147,11 @@ Current protocol coverage includes:
   while RFC 8441 and RFC 9220 client attempts accept the same Jar through
   `CookieHandshakeOptions`, emit its Cookie field as HPACK/QPACK Never Indexed,
   and commit Set-Cookie from both accepted and rejected final responses.
-  Connection-oriented H2/H3 calls require the caller to supply the actual
-  request `scope_uri`; the H3 URI client replaces it with its parsed URI before
-  opening QUIC. Missing/invalid scope and caller Cookie/Cookie2 conflicts fail
-  before request I/O,
+  H2 derives Cookie scope from its transport-resolved `:scheme` plus the actual
+  `:authority`/`:path`; H3 derives it from its HTTPS authority/path or parsed
+  URI. Callers therefore cannot bind a Jar lookup to a different host or Path.
+  Invalid authority/path and caller Cookie/Cookie2 conflicts fail before
+  request I/O,
   shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
   optional client authentication and concurrent serving, and RFC 8441

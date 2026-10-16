@@ -161,10 +161,20 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
 
     var jar = try http_cookies.Jar.init(allocator, .{});
     defer jar.deinit();
-    const scope_uri = "https://localhost/rejected";
+    const request_uri = "https://localhost/rejected?code=expired";
     _ = try jar.storeSetCookie(
-        scope_uri,
+        request_uri,
         "seed=one; Secure; HttpOnly; Path=/",
+        std.Io.Clock.real.now(io).toSeconds(),
+    );
+    _ = try jar.storeSetCookie(
+        request_uri,
+        "deep=rejected; Secure; Path=/rejected",
+        std.Io.Clock.real.now(io).toSeconds(),
+    );
+    _ = try jar.storeSetCookie(
+        "https://victim.example/rejected",
+        "victim=secret; Secure; Path=/",
         std.Io.Clock.real.now(io).toSeconds(),
     );
 
@@ -172,7 +182,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
     // The one-shot server below therefore still observes exactly the later,
     // valid request rather than a stray preflight connection.
     try std.testing.expectError(
-        error.CookieScopeRequired,
+        error.InvalidUri,
         h3.Client.connectAttemptWithTimeout(
             allocator,
             io,
@@ -182,7 +192,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
             client_handshake,
             .{
                 .authority = "localhost",
-                .path = "/missing-scope",
+                .path = "missing-leading-slash",
                 .cookies = .{ .jar = &jar },
             },
             .fromSeconds(3),
@@ -204,7 +214,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
                     .name = "Cookie2",
                     .value = "caller=ambiguous",
                 }},
-                .cookies = .{ .jar = &jar, .scope_uri = scope_uri },
+                .cookies = .{ .jar = &jar },
             },
             .fromSeconds(3),
         ),
@@ -219,12 +229,9 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
             .{},
             client_handshake,
             .{
-                .authority = "localhost",
-                .path = "/invalid-scope",
-                .cookies = .{
-                    .jar = &jar,
-                    .scope_uri = "ftp://localhost/invalid-scope",
-                },
+                .authority = "user@localhost",
+                .path = "/invalid-authority",
+                .cookies = .{ .jar = &jar },
             },
             .fromSeconds(3),
         ),
@@ -248,11 +255,14 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
             var pending_owned = true;
             defer if (pending_owned) pending.deinit();
             try std.testing.expectEqualStrings(
-                "/rejected",
+                "/rejected?code=expired",
                 pending.target(),
             );
             const cookie = try requiredCookie(pending.headers());
-            try std.testing.expectEqualStrings("seed=one", cookie.value);
+            try std.testing.expectEqualStrings(
+                "deep=rejected; seed=one",
+                cookie.value,
+            );
             try std.testing.expect(cookie.never_indexed);
             try pending.rejectWithBody(
                 401,
@@ -281,8 +291,8 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
         client_handshake,
         .{
             .authority = "localhost",
-            .path = "/rejected",
-            .cookies = .{ .jar = &jar, .scope_uri = scope_uri },
+            .path = "/rejected?code=expired",
+            .cookies = .{ .jar = &jar },
         },
         .fromSeconds(3),
     );
@@ -293,7 +303,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
 
     const value = try jar.cookieHeaderValueAlloc(
         allocator,
-        scope_uri,
+        "https://localhost/final",
         std.Io.Clock.real.now(io).toSeconds(),
         .{},
     );

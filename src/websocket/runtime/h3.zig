@@ -269,8 +269,8 @@ pub const ConnectOptions = struct {
     require_subprotocol: bool = false,
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
-    /// Optional single-owner CookieJar adapter. Connection-oriented calls
-    /// require `scope_uri` to be the actual HTTPS request URI.
+    /// Optional single-owner CookieJar adapter. Scope is derived from the
+    /// actual HTTPS `:authority` and `:path` values.
     cookies: ?CookieHandshakeOptions = null,
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
@@ -292,8 +292,8 @@ pub const UriConnectOptions = struct {
     require_subprotocol: bool = false,
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
-    /// Optional single-owner CookieJar adapter. URI clients replace any
-    /// supplied scope with the actual URI argument before deriving Cookie.
+    /// Optional single-owner CookieJar adapter. Scope is derived from the
+    /// parsed URI argument before opening QUIC.
     cookies: ?CookieHandshakeOptions = null,
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
@@ -4472,7 +4472,7 @@ pub const Client = struct {
         h3_options: http3.runtime.HandshakeClientOptions,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
-        try preflightClientOptions(options);
+        try preflightClientOptions(allocator, options);
         var h3_options_with_connect = h3_options;
         h3_options_with_connect.session.local_settings
             .enable_connect_protocol = true;
@@ -4532,7 +4532,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
         const absolute = try deadline_policy.usableAwake(io, deadline);
-        try preflightClientOptions(options);
+        try preflightClientOptions(allocator, options);
         var h3_options_with_connect = h3_options;
         h3_options_with_connect.session.local_settings
             .enable_connect_protocol = true;
@@ -4730,11 +4730,8 @@ pub const Client = struct {
         const path = try http3.runtime.uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
 
-        if (options.cookies) |cookie_options| {
-            try cookie_handshake.validate(
-                cookie_options.withScope(uri_text),
-                options.extra_headers,
-            );
+        if (options.cookies != null) {
+            try cookie_handshake.validate(uri_text, options.extra_headers);
         }
 
         var h3_options = options.h3;
@@ -4772,10 +4769,7 @@ pub const Client = struct {
                 .require_subprotocol = options.require_subprotocol,
                 .origin = options.origin,
                 .extra_headers = options.extra_headers,
-                .cookies = if (options.cookies) |cookie_options|
-                    cookie_options.withScope(uri_text)
-                else
-                    null,
+                .cookies = options.cookies,
                 .enable_permessage_deflate = options.enable_permessage_deflate,
                 .allow_context_takeover = options.allow_context_takeover,
                 .client_max_window_bits = options.client_max_window_bits,
@@ -4789,11 +4783,21 @@ pub const Client = struct {
     }
 };
 
-fn preflightClientOptions(options: ConnectOptions) Error!void {
+fn preflightClientOptions(
+    allocator: std.mem.Allocator,
+    options: ConnectOptions,
+) Error!void {
     try validateClientExtraHeaders(options.extra_headers);
     try validateProtocols(options.protocols);
-    if (options.cookies) |cookie_options| {
-        try cookie_handshake.validate(cookie_options, options.extra_headers);
+    if (options.cookies != null) {
+        const scope = try cookie_handshake.scopeUriAlloc(
+            allocator,
+            "https",
+            options.authority,
+            options.path,
+        );
+        defer allocator.free(scope);
+        try cookie_handshake.validate(scope, options.extra_headers);
     }
 }
 
@@ -4806,11 +4810,22 @@ fn connectAttemptEstablishedBefore(
 ) Error!ConnectAttempt {
     try validateClientExtraHeaders(options.extra_headers);
     try validateProtocols(options.protocols);
+    const cookie_scope: ?[]u8 = if (options.cookies != null)
+        try cookie_handshake.scopeUriAlloc(
+            allocator,
+            "https",
+            options.authority,
+            options.path,
+        )
+    else
+        null;
+    defer if (cookie_scope) |uri| allocator.free(uri);
     var prepared_cookie: ?cookie_handshake.Prepared = if (options.cookies) |cookie_options|
         try cookie_handshake.prepare(
             allocator,
             h3.established.connection.endpoint.io,
             cookie_options,
+            cookie_scope.?,
             options.extra_headers,
         )
     else
@@ -4935,6 +4950,7 @@ fn connectAttemptEstablishedBefore(
         try cookie_handshake.store(
             h3.established.connection.endpoint.io,
             cookie_options,
+            cookie_scope.?,
             response.headers,
         );
     }

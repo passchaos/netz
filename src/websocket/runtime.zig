@@ -10591,11 +10591,23 @@ pub const H2Client = struct {
         );
         defer protocol_value.deinit(allocator);
         try validateH2ClientExtraHeaders(options.extra_headers);
+        const cookie_scope: ?[]u8 = if (options.cookies != null)
+            try cookie_handshake.scopeUriAlloc(
+                allocator,
+                connection.resolveRequestScheme(options.scheme),
+                connection.resolveRequestAuthority(options.authority) orelse
+                    return error.InvalidUri,
+                options.path,
+            )
+        else
+            null;
+        defer if (cookie_scope) |uri| allocator.free(uri);
         var prepared_cookie: ?cookie_handshake.Prepared = if (options.cookies) |cookie_options|
             try cookie_handshake.prepare(
                 allocator,
                 connection.io,
                 cookie_options,
+                cookie_scope.?,
                 options.extra_headers,
             )
         else
@@ -10699,6 +10711,7 @@ pub const H2Client = struct {
             try cookie_handshake.store(
                 connection.io,
                 cookie_options,
+                cookie_scope.?,
                 response.headers,
             );
         }
@@ -11609,8 +11622,8 @@ pub const H2ConnectOptions = struct {
     /// Optional browser Origin value sent as a regular RFC 8441 header.
     origin: ?[]const u8 = null,
     extra_headers: []const http2.Hpack.HeaderField = &.{},
-    /// Optional single-owner CookieJar adapter. `scope_uri` must describe the
-    /// actual request URI carried by this existing HTTP/2 connection.
+    /// Optional single-owner CookieJar adapter. Scope is derived from the
+    /// effective `:scheme`, `:authority`, and `:path` sent on this connection.
     cookies: ?CookieHandshakeOptions = null,
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.

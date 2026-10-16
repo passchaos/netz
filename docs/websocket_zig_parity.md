@@ -243,16 +243,19 @@ the derived Cookie is an origin Upgrade field under the original chain
 deadline.
 
 RFC 8441 and RFC 9220 client attempts now use the same single-owner CookieJar
-through `CookieHandshakeOptions`. Existing-connection APIs require an explicit
-actual `scope_uri`, while the RFC 9220 URI API replaces that field with its
-parsed HTTPS input. The adapters reject Cookie/Cookie2 ownership conflicts and
-missing or invalid scope before request I/O, derive WebSocket state with GET
+through `CookieHandshakeOptions`. No caller-supplied scope is accepted: H2
+derives it from the transport-resolved `:scheme` and actual
+`:authority`/`:path`, while H3 uses its HTTPS authority/path or parsed URI.
+Cookie selection therefore cannot diverge from the Extended CONNECT request's
+host or Path. The adapters reject Cookie/Cookie2 ownership conflicts and
+invalid targets/authorities before request I/O, derive WebSocket state with GET
 and HTTP-API semantics, encode Cookie as HPACK/QPACK Never Indexed, and ingest
 every Set-Cookie field before returning either an accepted or rejected attempt.
 Real H2 and authenticated H3 exchanges inspect the peer-decoded sensitivity
-bit and prove accepted plus non-2xx response state reaches the Jar; the H3
-one-shot-server regression also proves invalid configuration cannot consume a
-QUIC handshake before the valid request.
+bit; cover query-insensitive Path selection, cleartext Secure exclusion and
+cross-authority isolation; and prove accepted plus non-2xx response state
+reaches the Jar. The H3 one-shot-server regression also proves invalid
+configuration cannot consume a QUIC handshake before the valid request.
 
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration
