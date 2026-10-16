@@ -2037,6 +2037,8 @@ pub const ConnectAttempt = struct {
     require_subprotocol: bool = false,
     enable_permessage_deflate: bool,
     allow_context_takeover: bool,
+    client_max_window_bits: ?u8,
+    server_max_window_bits: ?u8,
     compression_threshold: usize,
     limits: Limits,
 
@@ -2096,10 +2098,18 @@ pub const ConnectAttempt = struct {
             .enable_permessage_deflate = self.enable_permessage_deflate,
             .allow_context_takeover = self.allow_context_takeover,
         };
+        var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+        const extension_offer = try websocket.ExtensionNegotiation
+            .offerValueInto(
+            &extension_offer_storage,
+            extension_policy,
+            self.client_max_window_bits,
+            self.server_max_window_bits,
+        );
         const selected_extension = try websocket.ExtensionNegotiation
             .validateResponseHeadersForOfferWithPolicy(
             self.response.headers,
-            websocket.ExtensionNegotiation.offerValue(extension_policy),
+            extension_offer,
             extension_policy,
         );
         if (selected_extension.permessage_deflate and
@@ -4084,11 +4094,23 @@ pub const Client = struct {
         );
         defer protocol_value.deinit(allocator);
         try validateHttp1ClientExtraHeadersImpl(options.extra_headers);
+        const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+            .enable_permessage_deflate = options.enable_permessage_deflate,
+            .allow_context_takeover = options.allow_context_takeover,
+        };
+        var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+        const extension_offer = try websocket.ExtensionNegotiation
+            .offerValueInto(
+            &extension_offer_storage,
+            extension_policy,
+            options.client_max_window_bits,
+            options.server_max_window_bits,
+        );
         const headers_count = std.math.add(
             usize,
             4 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
                 @as(usize, @intFromBool(options.origin != null)) +
-                @as(usize, @intFromBool(options.enable_permessage_deflate)),
+                @as(usize, @intFromBool(extension_offer != null)),
             options.extra_headers.len,
         ) catch return error.HeadersTooLarge;
         var headers_stack: [handshake_storage.stack_capacity]http1.Header =
@@ -4125,13 +4147,10 @@ pub const Client = struct {
             headers[header_index] = .{ .name = "Origin", .value = origin };
             header_index += 1;
         }
-        if (websocket.ExtensionNegotiation.offerValue(.{
-            .enable_permessage_deflate = options.enable_permessage_deflate,
-            .allow_context_takeover = options.allow_context_takeover,
-        })) |extension_offer| {
+        if (extension_offer) |value| {
             headers[header_index] = .{
                 .name = "Sec-WebSocket-Extensions",
-                .value = extension_offer,
+                .value = value,
             };
             header_index += 1;
         }
@@ -4251,6 +4270,8 @@ pub const Client = struct {
             .require_subprotocol = options.require_subprotocol,
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
+            .client_max_window_bits = options.client_max_window_bits,
+            .server_max_window_bits = options.server_max_window_bits,
             .compression_threshold = options.compression_threshold,
             .limits = options.limits,
         };
@@ -4291,6 +4312,10 @@ pub const ConnectOptions = struct {
     /// Offer RFC 7692 context takeover. The peer may still select
     /// direction-specific no-context parameters.
     allow_context_takeover: bool = false,
+    /// Offer a bound for this client's compression history.
+    client_max_window_bits: ?u8 = null,
+    /// Require the server compressor to use at most this history window.
+    server_max_window_bits: ?u8 = null,
     /// Minimum complete message size considered for outbound compression.
     /// Set to zero to attempt every data message or maxInt to receive-only.
     compression_threshold: usize = default_compression_threshold,
@@ -10481,11 +10506,23 @@ pub const H2Client = struct {
         );
         defer protocol_value.deinit(allocator);
         try validateH2ClientExtraHeaders(options.extra_headers);
+        const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+            .enable_permessage_deflate = options.enable_permessage_deflate,
+            .allow_context_takeover = options.allow_context_takeover,
+        };
+        var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+        const extension_offer = try websocket.ExtensionNegotiation
+            .offerValueInto(
+            &extension_offer_storage,
+            extension_policy,
+            options.client_max_window_bits,
+            options.server_max_window_bits,
+        );
         const request_count = std.math.add(
             usize,
             1 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
                 @as(usize, @intFromBool(options.origin != null)) +
-                @as(usize, @intFromBool(options.enable_permessage_deflate)),
+                @as(usize, @intFromBool(extension_offer != null)),
             options.extra_headers.len,
         ) catch return error.HeadersTooLarge;
         var request_stack: [handshake_storage.stack_capacity]http2.Hpack.HeaderField = undefined;
@@ -10521,13 +10558,10 @@ pub const H2Client = struct {
             };
             request_index += 1;
         }
-        if (websocket.ExtensionNegotiation.offerValue(.{
-            .enable_permessage_deflate = options.enable_permessage_deflate,
-            .allow_context_takeover = options.allow_context_takeover,
-        })) |extension_offer| {
+        if (extension_offer) |value| {
             request_headers[request_index] = .{
                 .name = "sec-websocket-extensions",
-                .value = extension_offer,
+                .value = value,
             };
             request_index += 1;
         }
@@ -10613,10 +10647,18 @@ pub const H2ConnectAttempt = struct {
             .enable_permessage_deflate = self.options.enable_permessage_deflate,
             .allow_context_takeover = self.options.allow_context_takeover,
         };
+        var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+        const extension_offer = try websocket.ExtensionNegotiation
+            .offerValueInto(
+            &extension_offer_storage,
+            extension_policy,
+            self.options.client_max_window_bits,
+            self.options.server_max_window_bits,
+        );
         const selected_extension = try websocket.ExtensionNegotiation
             .validateResponseHeadersForOfferWithPolicy(
             self.response.headers,
-            websocket.ExtensionNegotiation.offerValue(extension_policy),
+            extension_offer,
             extension_policy,
         );
         if (selected_extension.permessage_deflate and
@@ -11450,6 +11492,10 @@ pub const H2ConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Offer a bound for this client's compression history.
+    client_max_window_bits: ?u8 = null,
+    /// Require the server compressor to use at most this history window.
+    server_max_window_bits: ?u8 = null,
     /// RFC 8441 outbound compression threshold; receive negotiation is
     /// independent of this value.
     compression_threshold: usize = default_compression_threshold,
@@ -13798,6 +13844,7 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
             var connection = try server_ptr.accept(.{
                 .enable_permessage_deflate = true,
                 .allow_context_takeover = true,
+                .client_max_window_bits = 9,
                 .server_max_window_bits = 9,
                 .compression_threshold = 0,
             });
@@ -13812,6 +13859,10 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
             try std.testing.expectEqual(
                 @as(u8, 9),
                 connection.compression_send_max_window_bits,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 9),
+                connection.compression_receive_max_window_bits,
             );
 
             // Expansion fallback must discard its preview. If the first
@@ -13898,6 +13949,8 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
         .target = "/context-takeover",
         .enable_permessage_deflate = true,
         .allow_context_takeover = true,
+        .client_max_window_bits = 9,
+        .server_max_window_bits = 9,
         .compression_threshold = 0,
         .limits = .{
             .max_head_bytes = 4096,
@@ -13911,6 +13964,10 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
     try std.testing.expectEqual(
         @as(u8, 9),
         client.compression_receive_max_window_bits,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 9),
+        client.compression_send_max_window_bits,
     );
 
     try client.sendBinary(&fallback_payload);
@@ -14197,6 +14254,7 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
             var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
                 .enable_permessage_deflate = true,
                 .allow_context_takeover = true,
+                .client_max_window_bits = 9,
                 .server_max_window_bits = 9,
                 .compression_threshold = 0,
                 .limits = .{
@@ -14212,6 +14270,10 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
             try std.testing.expectEqual(
                 @as(u8, 9),
                 ws.compression_send_max_window_bits,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 9),
+                ws.compression_receive_max_window_bits,
             );
 
             // Expansion fallback must not enter the compression history.
@@ -14301,6 +14363,8 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
         .path = "/context-takeover",
         .enable_permessage_deflate = true,
         .allow_context_takeover = true,
+        .client_max_window_bits = 9,
+        .server_max_window_bits = 9,
         .compression_threshold = 0,
         .limits = .{
             .max_head_bytes = 4096,
@@ -14314,6 +14378,10 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
     try std.testing.expectEqual(
         @as(u8, 9),
         client.compression_receive_max_window_bits,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 9),
+        client.compression_send_max_window_bits,
     );
 
     try client.sendBinary(&fallback_payload);

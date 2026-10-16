@@ -143,6 +143,7 @@ pub const FrameHeader = struct {
 };
 
 pub const ExtensionNegotiation = struct {
+    pub const max_offer_value_len: usize = 160;
     permessage_deflate: bool = false,
     client_no_context_takeover: bool = false,
     server_no_context_takeover: bool = false,
@@ -169,6 +170,42 @@ pub const ExtensionNegotiation = struct {
             "permessage-deflate"
         else
             "permessage-deflate; server_no_context_takeover; client_no_context_takeover";
+    }
+
+    /// Render a client offer with optional RFC 7692 window bounds into caller
+    /// storage. The ordinary null-window path remains allocation free and
+    /// byte-identical to `offerValue`.
+    pub fn offerValueInto(
+        out: []u8,
+        policy: Policy,
+        client_max_window_bits: ?u8,
+        server_max_window_bits: ?u8,
+    ) Error!?[]const u8 {
+        try validateOfferWindowBits(
+            policy.enable_permessage_deflate,
+            client_max_window_bits,
+            server_max_window_bits,
+        );
+        if (!policy.enable_permessage_deflate) return null;
+        if (client_max_window_bits == null and
+            server_max_window_bits == null)
+        {
+            return offerValue(policy);
+        }
+        var writer = std.Io.Writer.fixed(out);
+        try writer.writeAll("permessage-deflate");
+        if (!policy.allow_context_takeover) {
+            try writer.writeAll(
+                "; server_no_context_takeover; client_no_context_takeover",
+            );
+        }
+        if (client_max_window_bits) |bits| {
+            try writer.print("; client_max_window_bits={d}", .{bits});
+        }
+        if (server_max_window_bits) |bits| {
+            try writer.print("; server_max_window_bits={d}", .{bits});
+        }
+        return writer.buffered();
     }
 
     pub fn parseOffer(header_value: []const u8) Error!ExtensionNegotiation {
@@ -399,6 +436,23 @@ pub const ExtensionNegotiation = struct {
             if (maybe_bits) |bits| {
                 if (bits < 8 or bits > 15) return error.InvalidExtension;
                 if (!policy.enable_permessage_deflate) {
+                    return error.InvalidExtension;
+                }
+            }
+        }
+    }
+
+    fn validateOfferWindowBits(
+        enabled: bool,
+        client_max_window_bits: ?u8,
+        server_max_window_bits: ?u8,
+    ) Error!void {
+        for ([_]?u8{
+            client_max_window_bits,
+            server_max_window_bits,
+        }) |maybe_bits| {
+            if (maybe_bits) |bits| {
+                if (!enabled or bits < 8 or bits > 15) {
                     return error.InvalidExtension;
                 }
             }
@@ -2909,6 +2963,30 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
                 .enable_permessage_deflate = true,
                 .accept_client_max_window_bits = 7,
             },
+        ),
+    );
+
+    var offer_storage: [ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+    const bounded_offer = try ExtensionNegotiation.offerValueInto(
+        &offer_storage,
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        },
+        9,
+        10,
+    );
+    try std.testing.expectEqualStrings(
+        "permessage-deflate; client_max_window_bits=9; server_max_window_bits=10",
+        bounded_offer.?,
+    );
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.offerValueInto(
+            &offer_storage,
+            .{ .enable_permessage_deflate = true },
+            16,
+            null,
         ),
     );
 

@@ -269,6 +269,10 @@ pub const ConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Offer a bound for this client's compression history.
+    client_max_window_bits: ?u8 = null,
+    /// Require the server compressor to use at most this history window.
+    server_max_window_bits: ?u8 = null,
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
 };
@@ -285,6 +289,10 @@ pub const UriConnectOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// Offer a bound for this client's compression history.
+    client_max_window_bits: ?u8 = null,
+    /// Require the server compressor to use at most this history window.
+    server_max_window_bits: ?u8 = null,
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
     h3_limits: http3.runtime.Limits = .{},
@@ -396,10 +404,18 @@ pub const ConnectAttempt = struct {
             .enable_permessage_deflate = self.options.enable_permessage_deflate,
             .allow_context_takeover = self.options.allow_context_takeover,
         };
+        var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+        const extension_offer = try websocket.ExtensionNegotiation
+            .offerValueInto(
+            &extension_offer_storage,
+            extension_policy,
+            self.options.client_max_window_bits,
+            self.options.server_max_window_bits,
+        );
         const negotiated_extension = try websocket.ExtensionNegotiation
             .validateResponseHeadersForOfferWithPolicy(
             self.response.headers,
-            websocket.ExtensionNegotiation.offerValue(extension_policy),
+            extension_offer,
             extension_policy,
         );
         if (negotiated_extension.permessage_deflate and
@@ -4740,6 +4756,8 @@ pub const Client = struct {
                 .extra_headers = options.extra_headers,
                 .enable_permessage_deflate = options.enable_permessage_deflate,
                 .allow_context_takeover = options.allow_context_takeover,
+                .client_max_window_bits = options.client_max_window_bits,
+                .server_max_window_bits = options.server_max_window_bits,
                 .compression_threshold = options.compression_threshold,
                 .limits = options.limits,
             },
@@ -4772,11 +4790,22 @@ fn connectAttemptEstablishedBefore(
         &protocol_value_stack,
     );
     defer protocol_value.deinit(allocator);
+    const extension_policy: websocket.ExtensionNegotiation.Policy = .{
+        .enable_permessage_deflate = options.enable_permessage_deflate,
+        .allow_context_takeover = options.allow_context_takeover,
+    };
+    var extension_offer_storage: [websocket.ExtensionNegotiation.max_offer_value_len]u8 = undefined;
+    const extension_offer = try websocket.ExtensionNegotiation.offerValueInto(
+        &extension_offer_storage,
+        extension_policy,
+        options.client_max_window_bits,
+        options.server_max_window_bits,
+    );
     const field_count = std.math.add(
         usize,
         2 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
             @as(usize, @intFromBool(options.origin != null)) +
-            @as(usize, @intFromBool(options.enable_permessage_deflate)),
+            @as(usize, @intFromBool(extension_offer != null)),
         options.extra_headers.len,
     ) catch return error.PayloadTooLarge;
     var fields_stack: [handshake_storage.stack_capacity]http3.Qpack.HeaderField = undefined;
@@ -4811,13 +4840,10 @@ fn connectAttemptEstablishedBefore(
         fields[field_index] = .{ .name = "origin", .value = origin };
         field_index += 1;
     }
-    if (websocket.ExtensionNegotiation.offerValue(.{
-        .enable_permessage_deflate = options.enable_permessage_deflate,
-        .allow_context_takeover = options.allow_context_takeover,
-    })) |extension_offer| {
+    if (extension_offer) |value| {
         fields[field_index] = .{
             .name = "sec-websocket-extensions",
-            .value = extension_offer,
+            .value = value,
         };
         field_index += 1;
     }
