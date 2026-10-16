@@ -1,8 +1,11 @@
 //! Public unified HTTP client types and ALPN policy.
 
 const std = @import("std");
+const http1 = @import("../../http1/mod.zig");
 const http1_runtime = @import("../../http1/runtime.zig");
+const http2 = @import("../../http2/mod.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
+const http3 = @import("../../http3/mod.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
 const content_coding = @import("../content_coding.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
@@ -66,6 +69,38 @@ pub const ResponseValue = union(Protocol) {
     http3: http3_runtime.OwnedHandshakeResponse,
 };
 
+const FieldSection = enum { headers, trailers };
+const ResponseFields = union(Protocol) {
+    http1: []const http1.Header,
+    http2: []const http2.Hpack.HeaderField,
+    http3: []const http3.Qpack.HeaderField,
+};
+
+/// Zero-allocation iterator over one unified response field section.
+///
+/// Returned names and values borrow the underlying owned response and become
+/// invalid when that response is deinitialized. An optional name filter uses
+/// the HTTP case-insensitive field-name comparison while retaining original
+/// order, spelling, duplicates, and peer Never-Indexed metadata.
+pub const HeaderIterator = struct {
+    fields: ResponseFields,
+    name: ?[]const u8 = null,
+    index: usize = 0,
+
+    pub fn next(self: *HeaderIterator) ?Header {
+        const count = fieldCount(self.fields);
+        while (self.index < count) {
+            const result = fieldAt(self.fields, self.index);
+            self.index += 1;
+            if (self.name) |name| {
+                if (!std.ascii.eqlIgnoreCase(result.name, name)) continue;
+            }
+            return result;
+        }
+        return null;
+    }
+};
+
 pub const OwnedResponse = struct {
     allocator: std.mem.Allocator,
     value: ResponseValue,
@@ -101,11 +136,35 @@ pub const OwnedResponse = struct {
     }
 
     pub fn header(self: OwnedResponse, name: []const u8) ?[]const u8 {
-        return switch (self.value) {
-            .http1 => |response| findHeader(response.response.headers, name),
-            .http2 => |response| findHeader(response.headers, name),
-            .http3 => |response| findHeader(response.response.headers, name),
-        };
+        var values = self.headerValues(name);
+        return if (values.next()) |field| field.value else null;
+    }
+
+    pub fn trailer(self: OwnedResponse, name: []const u8) ?[]const u8 {
+        var values = self.trailerValues(name);
+        return if (values.next()) |field| field.value else null;
+    }
+
+    pub fn headers(self: OwnedResponse) HeaderIterator {
+        return fieldIterator(self.value, .headers, null);
+    }
+
+    pub fn trailers(self: OwnedResponse) HeaderIterator {
+        return fieldIterator(self.value, .trailers, null);
+    }
+
+    pub fn headerValues(
+        self: OwnedResponse,
+        name: []const u8,
+    ) HeaderIterator {
+        return fieldIterator(self.value, .headers, name);
+    }
+
+    pub fn trailerValues(
+        self: OwnedResponse,
+        name: []const u8,
+    ) HeaderIterator {
+        return fieldIterator(self.value, .trailers, name);
     }
 
     /// Parse every Content-Encoding field without exposing the negotiated
@@ -190,6 +249,36 @@ pub const RedirectedResponse = struct {
         return self.response.contentEncoding();
     }
 
+    pub fn header(self: RedirectedResponse, name: []const u8) ?[]const u8 {
+        return self.response.header(name);
+    }
+
+    pub fn trailer(self: RedirectedResponse, name: []const u8) ?[]const u8 {
+        return self.response.trailer(name);
+    }
+
+    pub fn headers(self: RedirectedResponse) HeaderIterator {
+        return self.response.headers();
+    }
+
+    pub fn trailers(self: RedirectedResponse) HeaderIterator {
+        return self.response.trailers();
+    }
+
+    pub fn headerValues(
+        self: RedirectedResponse,
+        name: []const u8,
+    ) HeaderIterator {
+        return self.response.headerValues(name);
+    }
+
+    pub fn trailerValues(
+        self: RedirectedResponse,
+        name: []const u8,
+    ) HeaderIterator {
+        return self.response.trailerValues(name);
+    }
+
     pub fn decodeContentAlloc(
         self: RedirectedResponse,
         allocator: std.mem.Allocator,
@@ -206,6 +295,59 @@ pub const RedirectedResponse = struct {
         return self.response.decodeContentInto(out, scratch);
     }
 };
+
+fn fieldIterator(
+    response: ResponseValue,
+    section: FieldSection,
+    name: ?[]const u8,
+) HeaderIterator {
+    const fields: ResponseFields = switch (response) {
+        .http1 => |value| .{ .http1 = switch (section) {
+            .headers => value.response.headers,
+            .trailers => value.response.trailers,
+        } },
+        .http2 => |value| .{ .http2 = switch (section) {
+            .headers => value.headers,
+            .trailers => value.trailers,
+        } },
+        .http3 => |value| .{ .http3 = switch (section) {
+            .headers => value.response.headers,
+            .trailers => value.response.trailers,
+        } },
+    };
+    return .{ .fields = fields, .name = name };
+}
+
+fn fieldCount(fields: ResponseFields) usize {
+    return switch (fields) {
+        inline else => |items| items.len,
+    };
+}
+
+fn fieldAt(fields: ResponseFields, index: usize) Header {
+    return switch (fields) {
+        .http1 => |items| blk: {
+            const field = items[index];
+            break :blk .{ .name = field.name, .value = field.value };
+        },
+        .http2 => |items| blk: {
+            const field = items[index];
+            break :blk .{
+                .name = field.name,
+                .value = field.value,
+                .never_indexed = field.never_index,
+            };
+        },
+        .http3 => |items| blk: {
+            const field = items[index];
+            break :blk .{
+                .name = field.name,
+                .value = field.value,
+                .never_indexed = field.never_indexed,
+            };
+        },
+    };
+}
 
 const alpn_prefer_http2 = [_][]const u8{ "h2", "http/1.1" };
 const alpn_http1_only = [_][]const u8{"http/1.1"};
@@ -262,13 +404,6 @@ pub fn selectedProtocol(
         return error.InvalidAlpn;
     }
     return .http1;
-}
-
-fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
-    }
-    return null;
 }
 
 test "unified HTTP ALPN policy selects only permitted protocols" {

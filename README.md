@@ -195,8 +195,10 @@ Current protocol coverage includes:
   policies and legacy no-ALPN-to-H1 fallback are available. Cleartext uses an
   explicit HTTP/1 or H2 prior-knowledge policy. Common method/header/body/
   trailer request options use stack-first protocol mapping, responses expose
-  one owned status/body/header view plus the selected protocol and the shared
-  bounded Content-Encoding decoder, and relative or
+  one owned status/body view plus the selected protocol, zero-allocation
+  ordered header/trailer iterators, case-insensitive repeated-value filters,
+  first-value lookup, preserved H1 spelling and H2/H3 Never-Indexed metadata,
+  and the shared bounded Content-Encoding decoder; relative or
   absolute deadlines cover DNS/TCP, TLS, H2 SETTINGS, and the complete
   response. Bounded redirects may change negotiated protocol between origins
   while retaining method replay, credential/mTLS isolation, downgrade policy,

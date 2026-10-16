@@ -26,6 +26,7 @@ pub const Protocol = types.Protocol;
 pub const ProtocolPolicy = types.ProtocolPolicy;
 pub const CleartextProtocol = types.CleartextProtocol;
 pub const Header = types.Header;
+pub const HeaderIterator = types.HeaderIterator;
 pub const RequestOptions = types.RequestOptions;
 pub const RedirectOptions = types.RedirectOptions;
 pub const Options = types.Options;

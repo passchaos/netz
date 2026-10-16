@@ -27,6 +27,7 @@ pub const Protocol = client.Protocol;
 pub const ProtocolPolicy = client.ProtocolPolicy;
 pub const CleartextProtocol = client.CleartextProtocol;
 pub const Header = client.Header;
+pub const HeaderIterator = client.HeaderIterator;
 pub const RequestOptions = client.RequestOptions;
 pub const RedirectOptions = client.RedirectOptions;
 pub const OwnedResponse = client.OwnedResponse;

@@ -279,9 +279,38 @@ test "public modules are reachable" {
         netz.http.OwnedResponse,
         "decodeContentInto",
     ));
+    try std.testing.expect(@hasDecl(netz.http, "HeaderIterator"));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "headers",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "trailers",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "headerValues",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "trailerValues",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "trailer",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http.RedirectedResponse,
         "decodeContentAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.RedirectedResponse,
+        "headerValues",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.RedirectedResponse,
+        "trailerValues",
     ));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));

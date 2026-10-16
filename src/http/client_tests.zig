@@ -16,6 +16,178 @@ fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {
     return null;
 }
 
+test "unified HTTP responses iterate repeated headers and trailers" {
+    const allocator = std.testing.allocator;
+    var empty_bytes: [0]u8 = .{};
+    var empty_body: [0]u8 = .{};
+
+    var h1_headers = [_]http1.Header{
+        .{ .name = "Set-Cookie", .value = "a=1" },
+        .{ .name = "Link", .value = "</one>; rel=preload" },
+        .{ .name = "set-cookie", .value = "b=2" },
+    };
+    var h1_trailers = [_]http1.Header{
+        .{ .name = "X-Checksum", .value = "one" },
+        .{ .name = "x-checksum", .value = "two" },
+    };
+    const h1 = http.OwnedResponse{
+        .allocator = allocator,
+        .value = .{ .http1 = .{
+            .bytes = &empty_bytes,
+            .response = .{
+                .version = .http_1_1,
+                .status = 200,
+                .reason = "OK",
+                .headers = &h1_headers,
+                .body = &.{},
+                .trailers = &h1_trailers,
+                .consumed = 0,
+            },
+        } },
+    };
+    try expectUnifiedFields(
+        h1,
+        &.{ "Set-Cookie", "Link", "set-cookie" },
+        &.{ false, false, false },
+        &.{ "X-Checksum", "x-checksum" },
+        &.{ false, false },
+    );
+
+    var h2_headers = [_]http2.Hpack.HeaderField{
+        .{ .name = "set-cookie", .value = "a=1", .never_index = true },
+        .{ .name = "link", .value = "</one>; rel=preload" },
+        .{ .name = "set-cookie", .value = "b=2" },
+    };
+    var h2_trailers = [_]http2.Hpack.HeaderField{
+        .{ .name = "x-checksum", .value = "one" },
+        .{ .name = "x-checksum", .value = "two", .never_index = true },
+    };
+    const h2 = http.OwnedResponse{
+        .allocator = allocator,
+        .value = .{ .http2 = .{
+            .headers = &h2_headers,
+            .status = 200,
+            .body = &empty_body,
+            .trailers = &h2_trailers,
+        } },
+    };
+    try expectUnifiedFields(
+        h2,
+        &.{ "set-cookie", "link", "set-cookie" },
+        &.{ true, false, false },
+        &.{ "x-checksum", "x-checksum" },
+        &.{ false, true },
+    );
+
+    var h3_headers = [_]http3.Qpack.HeaderField{
+        .{ .name = "set-cookie", .value = "a=1" },
+        .{ .name = "link", .value = "</one>; rel=preload" },
+        .{ .name = "set-cookie", .value = "b=2", .never_indexed = true },
+    };
+    var h3_trailers = [_]http3.Qpack.HeaderField{
+        .{ .name = "x-checksum", .value = "one", .never_indexed = true },
+        .{ .name = "x-checksum", .value = "two" },
+    };
+    const h3 = http.OwnedResponse{
+        .allocator = allocator,
+        .value = .{ .http3 = .{
+            .stream_bytes = &empty_bytes,
+            .response = .{
+                .status = 200,
+                .headers = &h3_headers,
+                .body = &.{},
+                .trailers = &h3_trailers,
+                .consumed = 0,
+            },
+        } },
+    };
+    try expectUnifiedFields(
+        h3,
+        &.{ "set-cookie", "link", "set-cookie" },
+        &.{ false, false, true },
+        &.{ "x-checksum", "x-checksum" },
+        &.{ true, false },
+    );
+
+    var empty_uri: [0]u8 = .{};
+    const redirected = http.RedirectedResponse{
+        .allocator = allocator,
+        .response = h3,
+        .final_uri = &empty_uri,
+        .redirect_count = 1,
+    };
+    try std.testing.expectEqualStrings(
+        "b=2",
+        (blk: {
+            var values = redirected.headerValues("SET-cookie");
+            _ = values.next().?;
+            break :blk values.next().?.value;
+        }),
+    );
+    try std.testing.expectEqualStrings(
+        "one",
+        redirected.trailer("X-CHECKSUM").?,
+    );
+}
+
+fn expectUnifiedFields(
+    response: http.OwnedResponse,
+    expected_header_names: []const []const u8,
+    expected_header_never_indexed: []const bool,
+    expected_trailer_names: []const []const u8,
+    expected_trailer_never_indexed: []const bool,
+) !void {
+    const header_values = [_][]const u8{
+        "a=1",
+        "</one>; rel=preload",
+        "b=2",
+    };
+    var headers = response.headers();
+    for (
+        expected_header_names,
+        header_values,
+        expected_header_never_indexed,
+    ) |name, value, never_indexed| {
+        const field = headers.next().?;
+        try std.testing.expectEqualStrings(name, field.name);
+        try std.testing.expectEqualStrings(value, field.value);
+        try std.testing.expectEqual(never_indexed, field.never_indexed);
+    }
+    try std.testing.expect(headers.next() == null);
+    try std.testing.expect(headers.next() == null);
+
+    try std.testing.expectEqualStrings("a=1", response.header("SET-cookie").?);
+    try std.testing.expect(response.header("missing") == null);
+    var cookies = response.headerValues("SET-cookie");
+    try std.testing.expectEqualStrings("a=1", cookies.next().?.value);
+    try std.testing.expectEqualStrings("b=2", cookies.next().?.value);
+    try std.testing.expect(cookies.next() == null);
+
+    const trailer_values = [_][]const u8{ "one", "two" };
+    var trailers = response.trailers();
+    for (
+        expected_trailer_names,
+        trailer_values,
+        expected_trailer_never_indexed,
+    ) |name, value, never_indexed| {
+        const field = trailers.next().?;
+        try std.testing.expectEqualStrings(name, field.name);
+        try std.testing.expectEqualStrings(value, field.value);
+        try std.testing.expectEqual(never_indexed, field.never_indexed);
+    }
+    try std.testing.expect(trailers.next() == null);
+
+    try std.testing.expectEqualStrings(
+        "one",
+        response.trailer("X-CHECKSUM").?,
+    );
+    try std.testing.expect(response.trailer("missing") == null);
+    var checksums = response.trailerValues("X-CHECKSUM");
+    try std.testing.expectEqualStrings("one", checksums.next().?.value);
+    try std.testing.expectEqualStrings("two", checksums.next().?.value);
+    try std.testing.expect(checksums.next() == null);
+}
+
 test "unified HTTP responses preserve bounded content decoding across protocols" {
     const allocator = std.testing.allocator;
     const payload = "unified stacked response decoding " ** 16;

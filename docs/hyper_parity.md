@@ -1082,6 +1082,16 @@ semantics therefore remain identical without requiring callers to switch on
 the negotiated protocol. Decoding stays explicit: pools still preserve exact
 wire headers and bodies instead of silently rewriting cache or validator
 semantics.
+The same response surface now exposes zero-allocation `headers()` and
+`trailers()` iterators, plus case-insensitive `headerValues()` and
+`trailerValues()` filters and first-value lookup. They retain field-section
+order and duplicates such as multiple `Set-Cookie` or `Link` values, preserve
+HTTP/1's original field-name spelling, and map the peer's HPACK/QPACK
+Never-Indexed bit into the common field descriptor. Iterators contain only
+borrowed field slices—not a copied owned response—and become invalid at the
+response's existing deinit boundary. This closes the unified equivalent of
+Hyper/http's `HeaderMap::iter`, `get_all`, and body-trailer access without a
+temporary allocation or comma-joining fields whose grammar forbids it.
 
 ## Current feature comparison
 
