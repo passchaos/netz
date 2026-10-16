@@ -119,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
     // browser gates supply a freshly generated DER leaf and raw P-256 scalar.
     // Native wtransport interop keeps using the stable built-in test identity.
     if (args.len != 2 and args.len != 4 and args.len != 5 and
-        args.len != 6 and args.len != 7)
+        args.len != 6 and args.len != 7 and args.len != 8)
     {
         return error.InvalidArgument;
     }
@@ -173,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
     const browser_mode = if (args.len >= 6) args[5] else "";
     const origin_only = std.mem.eql(u8, browser_mode, "origin-only");
     const reject_origin = std.mem.eql(u8, browser_mode, "reject-origin");
-    const client_io = if (args.len == 7)
+    const client_io = if (args.len >= 7)
         args[6]
     else if (args.len >= 4)
         "chromium-network-service"
@@ -184,9 +184,25 @@ pub fn main(init: std.process.Init) !void {
     {
         return error.InvalidArgument;
     }
-    if (args.len == 7 and args[6].len == 0) return error.InvalidArgument;
-    if (args.len == 7 and
+    if (args.len >= 7 and args[6].len == 0) return error.InvalidArgument;
+    if (args.len >= 7 and
         !std.mem.eql(u8, client_io, "chromium-network-service") and
+        !std.mem.eql(u8, client_io, "firefox-necko"))
+    {
+        return error.InvalidArgument;
+    }
+    const stream_cancellation_mode = if (args.len == 8)
+        args[7]
+    else if (std.mem.eql(u8, client_io, "firefox-necko"))
+        "reset-only"
+    else
+        "full";
+    if (!std.mem.eql(u8, stream_cancellation_mode, "full") and
+        !std.mem.eql(u8, stream_cancellation_mode, "reset-only"))
+    {
+        return error.InvalidArgument;
+    }
+    if (std.mem.eql(u8, stream_cancellation_mode, "reset-only") and
         !std.mem.eql(u8, client_io, "firefox-necko"))
     {
         return error.InvalidArgument;
@@ -398,7 +414,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     }
-    if (std.mem.eql(u8, client_io, "firefox-necko")) {
+    if (std.mem.eql(u8, stream_cancellation_mode, "reset-only")) {
         const reuse_stream_id = try receiveExpectedStream(
             &session,
             &read_buffer,

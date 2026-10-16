@@ -27,6 +27,8 @@ zig build interop-webtransport-wtransport-churn -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 WEBTRANSPORT_ORIGIN_ONLY=1 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast
+WEBTRANSPORT_FIREFOX_STOP_SENDING=1 FIREFOX=/path/to/firefox \
+  zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 ```
 
 The external interoperability gate builds the audited `~/Work/wtransport`
@@ -140,6 +142,15 @@ rejects a wrong stream direction, initiator, code, FIN, or payload. Firefox
 server-visible STOP_SENDING code 72 with either a consumed or unread payload,
 including after an outbound DATAGRAM barrier, so that half remains an explicit
 browser-specific gap.
+A current Firefox source audit confirms `WebTransportReceiveStream::Create`
+still installs the generic `InputToReadableStreamAlgorithms` without a
+cancellation callback into WebTransport/Neqo, so switching between
+`reader.cancel()` and `ReadableStream.cancel()` cannot manufacture the missing
+transport frame. The gate no longer hard-codes that reduced matrix from the
+browser name: `WEBTRANSPORT_FIREFOX_STOP_SENDING=1` selects the complete
+Chrome-equivalent client/server path and requires the exact server-visible
+code 72. The default remains the verified reset-only Firefox matrix until an
+installed build actually implements that hook.
 The 2026-09-29 artifact run used Chrome 153.0.8010.12 with process-image
 SHA-256 `839efe5fd8b6a773dd81b2e10afdc15f3c0a17316fb82b5908c0533306c4ed9e`
 and Firefox 156.0.1 with process-image SHA-256

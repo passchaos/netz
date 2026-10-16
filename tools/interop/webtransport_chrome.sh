@@ -8,6 +8,14 @@ browser_name=${BROWSER_NAME:-Chrome}
 browser_product=${BROWSER_PRODUCT:-chrome}
 browser_executable=${BROWSER_EXECUTABLE:-${CHROME:-google-chrome}}
 browser_client_io=${BROWSER_CLIENT_IO:-chromium-network-service}
+firefox_stop_sending=${WEBTRANSPORT_FIREFOX_STOP_SENDING:-0}
+case "$firefox_stop_sending" in
+  0|1) ;;
+  *)
+    echo 'WEBTRANSPORT_FIREFOX_STOP_SENDING must be 0 or 1' >&2
+    exit 2
+    ;;
+esac
 case "$browser_product:$browser_name:$browser_client_io" in
   chrome:Chrome:chromium-network-service)
     browser_ua=Chrome/
@@ -22,6 +30,14 @@ case "$browser_product:$browser_name:$browser_client_io" in
     exit 2
     ;;
 esac
+if [[ $browser_product != firefox && $firefox_stop_sending == 1 ]]; then
+  echo 'WEBTRANSPORT_FIREFOX_STOP_SENDING applies only to Firefox' >&2
+  exit 2
+fi
+stream_cancellation_mode=full
+if [[ $browser_product == firefox && $firefox_stop_sending == 0 ]]; then
+  stream_cancellation_mode=reset-only
+fi
 work=$(mktemp -d)
 server_pid=
 origin_pid=
@@ -172,7 +188,7 @@ if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
 else
   server_args+=(full)
 fi
-server_args+=("$browser_client_io")
+server_args+=("$browser_client_io" "$stream_cancellation_mode")
 "${server_args[@]}" \
   >"$work/server.log" 2>&1 &
 server_pid=$!
@@ -233,7 +249,7 @@ if [[ ${WEBTRANSPORT_ORIGIN_ONLY:-0} == 1 ]]; then
   exit 0
 fi
 grep -Fq \
-  "$(if [[ $browser_product == firefox ]]; then
+  "$(if [[ $stream_cancellation_mode == reset-only ]]; then
       printf '%s' 'bidi uni reset=71 reuse-after-reset=true drain-before-close=true close=77/netz-done'
     else
       printf '%s' 'bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close=77/netz-done'
@@ -243,7 +259,7 @@ grep -Fq \
   'netz WebTransport server interop passed: CONNECT DATAGRAM max_datagram_size=' \
   "$work/server.log"
 grep -Fq \
-  "$(if [[ $browser_product == firefox ]]; then
+  "$(if [[ $stream_cancellation_mode == reset-only ]]; then
       printf '%s' 'oversized_rejected=true bidi uni reset=71 reuse-after-reset=true drain-before-close=true close'
     else
       printf '%s' 'oversized_rejected=true bidi uni reset=71 stop=72 concurrent_sibling=true reuse=true drain-before-close=true close'

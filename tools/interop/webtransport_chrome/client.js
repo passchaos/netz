@@ -203,6 +203,15 @@ async function runBrowserProbe({
 
 (async () => {
   const firefox = browserProduct === 'firefox';
+  const firefoxStopSending =
+    process.env.WEBTRANSPORT_FIREFOX_STOP_SENDING === '1';
+  if (!['0', '1', undefined].includes(
+    process.env.WEBTRANSPORT_FIREFOX_STOP_SENDING,
+  )) {
+    throw new Error(
+      'WEBTRANSPORT_FIREFOX_STOP_SENDING must be 0 or 1',
+    );
+  }
   const browser = await puppeteer.launch({
     browser: browserProduct,
     executablePath: browserExecutable,
@@ -254,7 +263,9 @@ async function runBrowserProbe({
       browserVersion,
       browserLauncherSha256,
       browserProcessSha256,
-      streamCancellation: firefox ? 'reset-only' : 'full',
+      streamCancellation: firefox && !firefoxStopSending
+        ? 'reset-only'
+        : 'full',
       originOnly: process.env.WEBTRANSPORT_ORIGIN_ONLY === '1',
       rejectOnly: process.env.WEBTRANSPORT_REJECT_ONLY === '1',
     }));
