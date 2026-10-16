@@ -1433,9 +1433,17 @@ applying TCP-only socket options.
    really reused prior-message history rather than merely accepting the
    parameter. An unmasked frame requires Close(1002), invalid UTF-8 requires
    Close(1007), and a fresh successful connection after each failure proves
-   the listener and reusable worker remain healthy. On
-   2026-08-21, the full WSS run completed all 517 cases with the same result as
-   cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
+   the listener and reusable worker remain healthy.
+   A proposed raw-zlib `server_max_window_bits=9` extension to this smoke was
+   rejected rather than retained: a compliant server may fall back to an
+   uncompressed echo when the 512-byte window expands the selected payload,
+   while Python's raw-DEFLATE inflater accepts long-distance streams even when
+   constructed with `wbits=-9`. It therefore cannot independently prove the
+   emitted LZ77 distance bound. Small-window correctness remains covered by
+   the direct codec/differential tests and historical Autobahn manifest, not
+   overstated by this socket smoke.
+   On 2026-08-21, the full WSS run completed all 517 cases with the same result
+   as cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
    counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed
    all 517 cases with
    behavior counts `OK=514` and `INFORMATIONAL=3`;
