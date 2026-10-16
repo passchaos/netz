@@ -7127,6 +7127,34 @@ test "public modules are reachable" {
         netz.http3.runtime.OwnedEndpointRequest,
         "was_early_data",
     ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "EarlyDataRetryReason",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "EarlyDataRequestResult",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectWithEarlyRequestWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectWithEarlyRequestWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestWithEarlyData",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestWithEarlyDataWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestWithEarlyDataWithTimeout",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingPushEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "PushedResponse"));

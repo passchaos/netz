@@ -615,7 +615,15 @@ Current protocol coverage includes:
   `OwnedEndpointRequest`, so handlers can return 425 or apply application-level
   anti-replay policy. The marker stays true when 1-RTT continues an early
   stream, remains false for independent 1-RTT streams, and rejected 0-RTT never
-  enters request state. Both server paths retain
+  enters request state. `HandshakeClient.requestWithEarlyData*` closes the
+  RFC 8470 client loop: TLS-rejected requests and accepted requests answered
+  with 425 are replayed exactly once after the handshake over 1-RTT, while a
+  second 425 is returned without a retry loop. Results distinguish
+  transport rejection from 425, and one absolute deadline covers handshake,
+  initial response, and replay without renewing the budget. Zero timeout fails
+  before allocation, ticket consumption, packet-number use, or socket I/O.
+  The lower-level `connectWithEarlyRequest*` family now also provides relative
+  and absolute handshake bounds. Both server paths retain
   indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, distinguish an ended request with no initial HEADERS as
@@ -930,7 +938,10 @@ Current protocol coverage includes:
   rejects reduced remembered peer SETTINGS before consuming a response; the
   server preserves accepted early STREAM provenance through aggregate,
   incremental, and endpoint-handler request ownership so replay-sensitive work
-  can receive 425 without classifying requests from stream IDs,
+  can receive 425 without classifying requests from stream IDs. High-level
+  early-data requests automatically replay TLS rejection or the first 425 only
+  after 1-RTT is installed, preserve the complete request, and return a second
+  425 instead of looping,
   bounded thread-safe replay gating, remembered-parameter enforcement, and
   application packet-number/flow/recovery state continuity after key install,
   including sparse import that advances past every protected 0-RTT nonce while

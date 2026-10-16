@@ -1435,7 +1435,15 @@ continuation and is carried by aggregate requests, every streaming event, and
 endpoint-handler-owned requests as `was_early_data`; an independent 1-RTT
 stream remains false and rejected early data creates no request state. Servers
 can therefore return 425 or apply application-specific anti-replay policy
-without guessing from stream IDs.
+without guessing from stream IDs. The one-shot client API completes the other
+half of RFC 8470: it automatically retries a TLS-rejected request or the first
+425 response exactly once after the handshake using 1-RTT, preserves method,
+target, headers, body, and trailers, and returns a second 425 without looping.
+The result distinguishes transport rejection from application 425. Timeout
+and absolute-deadline variants use one unchanged budget across the handshake,
+initial response, and retry; a zero budget fails before allocation, ticket
+consumption, packet-number use, or socket I/O. The lower-level early-request
+connect API exposes matching relative and absolute handshake bounds.
 Initial flight packet plans and datagram views now use stack storage for the
 default 64-packet bound, retaining a heap fallback for explicitly larger
 flights. In back-to-back 50-connection ReleaseFast runs with certificate

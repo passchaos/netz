@@ -3958,6 +3958,40 @@ test "HTTP/3 typed early requests require safe methods by default" {
 
 pub const EarlyRequestDisposition = enum { accepted, rejected };
 
+pub const EarlyDataRetryReason = enum {
+    none,
+    early_data_rejected,
+    too_early,
+};
+
+/// Final response from one RFC 8470 early-data request transaction.
+///
+/// `retry_reason != .none` means the original request was sent once more over
+/// 1-RTT, either because QUIC/TLS rejected early data or because the accepted
+/// early request received 425. A 425 from that 1-RTT retry is returned as the
+/// final response rather than creating an unbounded retry loop.
+pub const EarlyDataRequestResult = struct {
+    response: OwnedHandshakeResponse,
+    disposition: EarlyRequestDisposition,
+    retry_reason: EarlyDataRetryReason,
+
+    pub fn deinit(
+        self: *EarlyDataRequestResult,
+        allocator: std.mem.Allocator,
+    ) void {
+        self.response.deinit(allocator);
+        self.* = undefined;
+    }
+
+    pub fn takeResponse(
+        self: *EarlyDataRequestResult,
+    ) OwnedHandshakeResponse {
+        const response = self.response;
+        self.* = undefined;
+        return response;
+    }
+};
+
 pub const EarlyHandshakeClient = struct {
     client: HandshakeClient,
     disposition: EarlyRequestDisposition,
@@ -11343,6 +11377,89 @@ pub const HandshakeClient = struct {
         cache: *quic.resumption.Cache,
         lease: *quic.resumption.EarlyDataLease,
     ) Error!EarlyHandshakeClient {
+        return connectWithEarlyRequestBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            early_request,
+            cache,
+            lease,
+            try connectDeadline(io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectWithEarlyRequestWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
+        return connectWithEarlyRequestBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            early_request,
+            cache,
+            lease,
+            try cappedConnectDeadline(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    pub fn connectWithEarlyRequestWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        timeout: std.Io.Duration,
+    ) Error!EarlyHandshakeClient {
+        if (timeout.nanoseconds <= 0) return error.HandshakeTimeout;
+        return connectWithEarlyRequestWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            early_request,
+            cache,
+            lease,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn connectWithEarlyRequestBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
         if (options.handshake.early_data != null) {
             return error.InvalidEarlyDataLease;
         }
@@ -11365,7 +11482,7 @@ pub const HandshakeClient = struct {
             server,
             limits,
             early_options,
-            try connectDeadline(io, early_options.connect_timeout),
+            deadline,
             early_request,
         );
         errdefer client.deinit();
@@ -11373,6 +11490,183 @@ pub const HandshakeClient = struct {
             early_request,
         );
         return .{ .client = client, .disposition = disposition };
+    }
+
+    /// Send one complete request in 0-RTT when possible and return its final
+    /// result. RFC 8470 retries a TLS-rejected early request or a 425
+    /// response exactly once after the handshake, never in early data.
+    pub fn requestWithEarlyData(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        request_options: http3.Request,
+        early_options: PreparedEarlyRequestOptions,
+        remembered_peer_settings: http3.Settings,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+    ) Error!EarlyDataRequestResult {
+        return requestWithEarlyDataBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            request_options,
+            early_options,
+            remembered_peer_settings,
+            limits,
+            options,
+            cache,
+            lease,
+            null,
+        ) catch |err| switch (err) {
+            error.Timeout, error.ConcurrencyUnavailable => unreachable,
+            else => |other| return @errorCast(other),
+        };
+    }
+
+    pub fn requestWithEarlyDataWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        request_options: http3.Request,
+        early_options: PreparedEarlyRequestOptions,
+        remembered_peer_settings: http3.Settings,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!EarlyDataRequestResult {
+        return requestWithEarlyDataBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            request_options,
+            early_options,
+            remembered_peer_settings,
+            limits,
+            options,
+            cache,
+            lease,
+            deadline,
+        );
+    }
+
+    pub fn requestWithEarlyDataWithTimeout(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        request_options: http3.Request,
+        early_options: PreparedEarlyRequestOptions,
+        remembered_peer_settings: http3.Settings,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!EarlyDataRequestResult {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return requestWithEarlyDataWithDeadline(
+            allocator,
+            io,
+            local_address,
+            server,
+            request_options,
+            early_options,
+            remembered_peer_settings,
+            limits,
+            options,
+            cache,
+            lease,
+            .fromNow(io, .{ .raw = timeout, .clock = .awake }),
+        );
+    }
+
+    fn requestWithEarlyDataBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        server: net.IpAddress,
+        request_options: http3.Request,
+        early_options: PreparedEarlyRequestOptions,
+        remembered_peer_settings: http3.Settings,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!EarlyDataRequestResult {
+        const operation_deadline = if (deadline) |absolute|
+            try deadline_policy.usableAwake(io, absolute)
+        else
+            null;
+        var early_request = try PreparedEarlyRequest.initWithOptions(
+            allocator,
+            request_options,
+            options.session.local_settings,
+            remembered_peer_settings,
+            early_options,
+        );
+        defer early_request.deinit();
+        const handshake_deadline = if (operation_deadline) |absolute|
+            try cappedConnectDeadline(
+                io,
+                absolute,
+                options.connect_timeout,
+            )
+        else
+            try connectDeadline(io, options.connect_timeout);
+        const connected = try connectWithEarlyRequestBefore(
+            allocator,
+            io,
+            local_address,
+            server,
+            limits,
+            options,
+            &early_request,
+            cache,
+            lease,
+            handshake_deadline,
+        );
+        var client = connected.client;
+        defer client.deinit();
+
+        if (connected.disposition == .accepted) {
+            var response = if (operation_deadline) |absolute|
+                try client.receiveResponseWithDeadline(
+                    early_request.stream_id,
+                    absolute,
+                )
+            else
+                try client.receiveResponse(early_request.stream_id);
+            if (response.response.status != 425) {
+                return .{
+                    .response = response,
+                    .disposition = .accepted,
+                    .retry_reason = .none,
+                };
+            }
+            response.deinit(allocator);
+        }
+
+        const response = if (operation_deadline) |absolute|
+            try client.requestWithDeadline(request_options, absolute)
+        else
+            try client.request(request_options);
+        return .{
+            .response = response,
+            .disposition = connected.disposition,
+            .retry_reason = if (connected.disposition == .accepted)
+                .too_early
+            else
+                .early_data_rejected,
+        };
     }
 
     pub fn connectWithDeadline(
