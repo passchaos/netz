@@ -693,6 +693,14 @@ connection's limit did not leak. A second oversized offline PUBLISH is then
 discarded under a new 40-byte reconnect; another snapshot and 256-byte
 reconnect remain empty, proving the current-connection decision was durably
 retired without poisoning Session Present or its subscription.
+A source-locked extension of
+`15-persist-client-msg-out-dup-v3-1-1.py` runs the complete outgoing QoS 2
+snapshot state machine for MQTT 3.1.1 and MQTT 5. The first restored delivery
+uses Packet Identifier 1 without DUP; an abrupt reconnect retransmits that
+identifier with DUP, and another broker generation does the same. After PUBREC
+is persisted, the following generation resumes directly at PUBREL instead of
+replaying the Application Message. PUBCOMP plus a PING barrier is snapshotted,
+and a fifth generation proves the completed transaction cannot revive.
 The source-locked `15-persist-client-msg-out-clear-v3-1-1.py` production case
 now runs in MQTT 3.1.1 and MQTT 5. An initial broker snapshots three durable
 subscriptions plus offline QoS 1/2 deliveries; the restored broker emits both

@@ -54,6 +54,9 @@ from mqtt_broker_config_expiry_persistence import (
 from mqtt_broker_config_packet_size_persistence import (
     run_packet_size_connection_scope_case,
 )
+from mqtt_broker_config_inflight_persistence import (
+    run_outgoing_qos2_snapshot_case,
+)
 from mqtt_broker_config_sys import run_system_interval_case
 from mqtt_broker_config_runtime_policy import (
     run_runtime_delivery_policy_reload_case,
@@ -6571,6 +6574,7 @@ def main() -> None:
         run_persistent_subscription_snapshot_case(args.broker, directory)
         run_expired_message_persistence_case(args.broker, directory)
         run_packet_size_connection_scope_case(args.broker, directory)
+        run_outgoing_qos2_snapshot_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_autosave_reload_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -6639,7 +6643,8 @@ def main() -> None:
         "routing, QoS2 journal guard, snapshot ACL reauthorization, retained "
         "MQTT 5 property-bundle restore, MQTT 3.1.1/5 Clean Start snapshot "
         "cleanup, subscription/UNSUBSCRIBE restore, shared queued/retained "
-        "downtime expiry, connection-scoped Maximum Packet Size, and restore "
+        "downtime expiry, connection-scoped Maximum Packet Size, outgoing "
+        "QoS2 DUP/PUBREL recovery, and restore "
         + RUNTIME
     )
 

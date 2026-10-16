@@ -193,6 +193,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "c865bd2e87ed6f17f28c89d07006cd628e7ef3c3fa8669d75ee1ed1db425fc30",
     "broker/15-persist-client-msg-out-clear-v3-1-1.py":
         "2ffad66eeda21078788179587c8dbc7539415126d94c12044c03a57cb7b43ef9",
+    "broker/15-persist-client-msg-out-dup-v3-1-1.py":
+        "8beea37623efc3f87a7d7624cf21ab95e3e4595cc3f7b09c516b08de6cb9582a",
     "broker/15-persist-client-msg-out-v5-0.py":
         "2612901cb197a0c602ae6dc34b46d80a742f6b35cdc3757a81ddf10d77093b97",
     "broker/15-persist-publish-properties-v5-0.py":
