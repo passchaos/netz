@@ -252,6 +252,15 @@ transaction are both empty for the complete idle interval. Configuration
 rejects zero durations/counts, inbound-only lazy bridges, and thresholds above
 a finite `max_queued_messages`, which would otherwise make activation
 unreachable.
+A bounded source-locked port of Mosquitto's `15-persist-bridge-queue.py`
+extends that evidence across both brokers. After a warmup establishes the
+persistent remote Session, the target checkpoints and stops; sixteen local QoS
+1 publications are acknowledged into the active bridge's durable source queue,
+then the local broker checkpoints and is killed. Restoring the target Session
+and local broker drains all sixteen in exact order. The lazy bridge's idle
+state is the completion barrier; a second local checkpoint/restart leaves it
+inactive, while the target subscriber's PING proves no completed delivery was
+resurrected.
 
 Configured remote connections also expose Mosquitto's
 `bridge_receive_maximum`, `bridge_max_topic_alias`,

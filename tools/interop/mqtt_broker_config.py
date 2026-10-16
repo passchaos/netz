@@ -34,6 +34,9 @@ from mqtt_broker_config_outbound import (
     run_outbound_bridge_protocol_limits_case,
     run_private_bridge_server_case,
 )
+from mqtt_broker_config_outbound_persistence import (
+    run_outbound_bridge_persistent_queue_case,
+)
 from mqtt_broker_config_ocsp import run_bridge_ocsp_case
 from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_proxy import run_proxy_protocol_case
@@ -6519,6 +6522,7 @@ def main() -> None:
         run_bidirectional_bridge_case(args.broker, directory, 5)
         run_outbound_bridge_case(args.broker, directory)
         run_outbound_bridge_case(args.broker, directory, tls=True)
+        run_outbound_bridge_persistent_queue_case(args.broker, directory)
         run_outbound_bridge_protocol_limits_case(args.broker, directory)
         run_private_bridge_server_case(args.broker, directory)
         run_bridge_cipher_suite_case(args.broker, directory)
@@ -6602,6 +6606,7 @@ def main() -> None:
         "cleartext/TLS bridge source-address binding and traced TCP keepalive/"
         "TCP_USER_TIMEOUT, "
         "QoS 1/2, lazy threshold/idle lifecycle with restart recovery, "
+        "target-offline persistent outbound queue recovery, "
         "decorrelated-jitter reconnect with stable-period reset, "
         "round-robin failover, primary failback, reconnect, and "
         "retained local/remote state notifications with Last Will plus "
