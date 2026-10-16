@@ -37,7 +37,7 @@ test "WebSocket HTTP2 CookieJar covers accepted and rejected attempts" {
     );
     _ = try jar.storeSetCookie(
         "wss://localhost/accepted",
-        "secure=secret; Secure; Path=/",
+        "__Host-Http-secure=secret; Secure; HttpOnly; Path=/",
         now,
     );
     _ = try jar.storeSetCookie(

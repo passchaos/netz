@@ -591,15 +591,19 @@ pub const Jar = struct {
         const explicit_root_path = parsed.path != null and
             std.mem.eql(u8, parsed.path.?, "/");
 
-        const prefix_source = if (parsed.name.len == 0)
-            parsed.value
-        else
-            parsed.name;
-        if (std.ascii.startsWithIgnoreCase(prefix_source, "__Secure-") and
-            (!origin.secure or !parsed.secure)) return .ignored;
-        if (std.ascii.startsWithIgnoreCase(prefix_source, "__Host-") and
-            (!origin.secure or !parsed.secure or !host_only or
-                !explicit_root_path)) return .ignored;
+        if (parsed.name.len == 0 and
+            cookiePrefix(parsed.value) != .none) return .ignored;
+        switch (cookiePrefix(parsed.name)) {
+            .none => {},
+            .secure => if (!origin.secure or !parsed.secure) return .ignored,
+            .host => if (!origin.secure or !parsed.secure or !host_only or
+                !explicit_root_path) return .ignored,
+            .http => if (!origin.secure or !parsed.secure or
+                !parsed.http_only) return .ignored,
+            .host_http => if (!origin.secure or !parsed.secure or
+                !parsed.http_only or !host_only or
+                !explicit_root_path) return .ignored,
+        }
 
         if (!origin.secure and !parsed.secure and
             self.overlaysSecure(parsed.name, domain, path))
@@ -888,21 +892,40 @@ fn validateSnapshotRecord(
             return error.SnapshotPolicyMismatch;
         },
     };
-    const prefix_source = if (record.name.len == 0)
-        record.value
-    else
-        record.name;
-    if (std.ascii.startsWithIgnoreCase(prefix_source, "__Secure-") and
-        !record.secure) return error.CorruptSnapshot;
-    if (std.ascii.startsWithIgnoreCase(prefix_source, "__Host-") and
-        (!record.secure or !record.host_only or
-            !std.mem.eql(u8, record.path, "/")))
-    {
-        return error.CorruptSnapshot;
+    if (record.name.len == 0 and
+        cookiePrefix(record.value) != .none) return error.CorruptSnapshot;
+    switch (cookiePrefix(record.name)) {
+        .none => {},
+        .secure => if (!record.secure) return error.CorruptSnapshot,
+        .host => if (!record.secure or !record.host_only or
+            !std.mem.eql(u8, record.path, "/")) return error.CorruptSnapshot,
+        .http => if (!record.secure or
+            !record.http_only) return error.CorruptSnapshot,
+        .host_http => if (!record.secure or !record.http_only or
+            !record.host_only or
+            !std.mem.eql(u8, record.path, "/")) return error.CorruptSnapshot,
     }
     if (record.same_site == @intFromEnum(SameSite.none) and !record.secure) {
         return error.CorruptSnapshot;
     }
+}
+
+const CookiePrefix = enum {
+    none,
+    secure,
+    host,
+    http,
+    host_http,
+};
+
+fn cookiePrefix(value: []const u8) CookiePrefix {
+    if (std.ascii.startsWithIgnoreCase(value, "__Host-Http-")) {
+        return .host_http;
+    }
+    if (std.ascii.startsWithIgnoreCase(value, "__Secure-")) return .secure;
+    if (std.ascii.startsWithIgnoreCase(value, "__Host-")) return .host;
+    if (std.ascii.startsWithIgnoreCase(value, "__Http-")) return .http;
+    return .none;
 }
 
 fn containsForbiddenStoredOctet(value: []const u8) bool {

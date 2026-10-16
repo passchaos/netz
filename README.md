@@ -192,7 +192,9 @@ Current protocol coverage includes:
   the lenient user-agent syntax with CTL and 4,096-byte bounds; applies
   Max-Age-over-Expires precedence, the recommended 400-day lifetime cap,
   host/default paths, Secure/HttpOnly, case-insensitive `__Secure-`/`__Host-`
-  rules, insecure secure-cookie overlay protection, SameSite
+  rules, plus the current layered-cookies `__Http-`/`__Host-Http-`
+  Secure+HttpOnly constraints and unconditional value-only prefix rejection;
+  insecure secure-cookie overlay protection, SameSite
   Strict/Lax/None/Lax-by-default and the bounded unsafe-navigation window;
   preserves host-only and Domain cookies as distinct keys; and emits ordered
   Cookie values into caller or allocator storage. A dedicated redirected-

@@ -188,7 +188,22 @@ test "CookieJar domain security and prefixes fail closed" {
     );
     _ = try jar.storeSetCookie(
         "https://www.example.com/",
-        "__Secure-value-only; Secure",
+        "__Http-token=server; Secure; HttpOnly",
+        now,
+    );
+    _ = try jar.storeSetCookie(
+        "https://www.example.com/",
+        "__Host-Http-token=server; Secure; HttpOnly; Path=/",
+        now,
+    );
+    _ = try jar.storeSetCookie(
+        "https://www.example.com/",
+        "__http-lower=server; Secure; HttpOnly",
+        now,
+    );
+    _ = try jar.storeSetCookie(
+        "https://www.example.com/",
+        "__HOST-HTTP-lower=server; Secure; HttpOnly; Path=/",
         now,
     );
     try std.testing.expectEqual(
@@ -205,6 +220,64 @@ test "CookieJar domain security and prefixes fail closed" {
             "https://www.example.com/",
             "__Host-bad=x; Secure; Domain=example.com; Path=/",
             now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookie(
+            "https://www.example.com/",
+            "__Http-missing-http-only=x; Secure",
+            now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookie(
+            "https://www.example.com/",
+            "__Http-missing-secure=x; HttpOnly",
+            now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookie(
+            "https://www.example.com/",
+            "__Host-Http-domain=x; Secure; HttpOnly; " ++
+                "Domain=example.com; Path=/",
+            now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookie(
+            "https://www.example.com/",
+            "__Host-Http-path=x; Secure; HttpOnly; Path=/child",
+            now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookie(
+            "https://www.example.com/",
+            "__Secure-value-only; Secure",
+            now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookie(
+            "https://www.example.com/",
+            "__Http-value-only; Secure; HttpOnly",
+            now,
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookieWithContext(
+            "https://www.example.com/",
+            "__Http-non-http-api=x; Secure; HttpOnly",
+            now,
+            .{ .http_api = false },
         ),
     );
     try std.testing.expectEqual(
@@ -233,8 +306,22 @@ test "CookieJar domain security and prefixes fail closed" {
     defer allocator.free(secure);
     try std.testing.expectEqualStrings(
         "shared=one; secure=good; __Secure-token=good; __Host-token=good; " ++
-            "__secure-lower=good; __HOST-lower=good; __Secure-value-only",
+            "__secure-lower=good; __HOST-lower=good; __Http-token=server; " ++
+            "__Host-Http-token=server; __http-lower=server; " ++
+            "__HOST-HTTP-lower=server",
         secure,
+    );
+    const non_http = try jar.cookieHeaderValueAlloc(
+        allocator,
+        "https://www.example.com/",
+        now,
+        .{ .http_api = false },
+    );
+    defer allocator.free(non_http);
+    try std.testing.expectEqualStrings(
+        "shared=one; secure=good; __Secure-token=good; __Host-token=good; " ++
+            "__secure-lower=good; __HOST-lower=good",
+        non_http,
     );
     const clear = try jar.cookieHeaderValueAlloc(
         allocator,

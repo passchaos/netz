@@ -1112,6 +1112,18 @@ independently matches curl 8.5/libcurl's repeated Set-Cookie, default/explicit
 Path, and ordinary/deep request ordering. It now also imports curl's generated
 Netscape file into Netz and exports Netz state back through curl, requiring
 identical Cookie values in both directions.
+The current `draft-ietf-httpbis-layered-cookies` storage algorithm is also
+implemented for `__Http-` and `__Host-Http-`: both require a secure origin plus
+Secure and HttpOnly, while the Host form additionally requires host-only state
+and an explicit `Path=/`. Prefix recognition follows the algorithm's
+byte-lowercased comparison, and an empty-name/value-only cookie beginning with
+any reserved prefix is rejected regardless of attributes. The same invariants
+are enforced transactionally during binary snapshot and Netscape/curl restore,
+so persistence cannot bypass live Set-Cookie policy. Focused tests cover mixed
+case, missing attributes, Domain/Path violations, non-HTTP APIs, full snapshot
+round trips, invalid lossy imports, and RFC 9220 request/response CookieJar
+integration; cleartext RFC 8441 also proves a valid secure Host-Http cookie is
+not emitted.
 Persistent state has two deliberately separate contracts. The full binary
 snapshot preserves SameSite, host-only identity, creation/access order,
 HttpOnly/Secure, absolute expiry and path/domain bytes; it excludes session and

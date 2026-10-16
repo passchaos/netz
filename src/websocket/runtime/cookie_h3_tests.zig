@@ -48,7 +48,7 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
     defer jar.deinit();
     _ = try jar.storeSetCookie(
         uri,
-        "seed=one; Secure; HttpOnly; Path=/",
+        "__Host-Http-seed=one; Secure; HttpOnly; Path=/",
         std.Io.Clock.real.now(io).toSeconds(),
     );
 
@@ -74,11 +74,14 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
                 pending.target(),
             );
             const cookie = try requiredCookie(pending.headers());
-            try std.testing.expectEqualStrings("seed=one", cookie.value);
+            try std.testing.expectEqualStrings(
+                "__Host-Http-seed=one",
+                cookie.value,
+            );
             try std.testing.expect(cookie.never_indexed);
             var connection = try pending.acceptWithHeaders(&.{.{
                 .name = "set-cookie",
-                .value = "accepted=two; Secure; Path=/",
+                .value = "__Http-accepted=two; Secure; HttpOnly; Path=/",
             }});
             pending_owned = false;
             defer connection.deinit();
@@ -120,7 +123,7 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
     );
     defer allocator.free(value);
     try std.testing.expectEqualStrings(
-        "seed=one; accepted=two",
+        "__Host-Http-seed=one; __Http-accepted=two",
         value,
     );
 
@@ -164,7 +167,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
     const request_uri = "https://localhost/rejected?code=expired";
     _ = try jar.storeSetCookie(
         request_uri,
-        "seed=one; Secure; HttpOnly; Path=/",
+        "__Http-seed=one; Secure; HttpOnly; Path=/",
         std.Io.Clock.real.now(io).toSeconds(),
     );
     _ = try jar.storeSetCookie(
@@ -260,7 +263,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
             );
             const cookie = try requiredCookie(pending.headers());
             try std.testing.expectEqualStrings(
-                "deep=rejected; seed=one",
+                "deep=rejected; __Http-seed=one",
                 cookie.value,
             );
             try std.testing.expect(cookie.never_indexed);
@@ -268,7 +271,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
                 401,
                 &.{.{
                     .name = "set-cookie",
-                    .value = "rejected=two; Secure; Path=/",
+                    .value = "__Host-Http-rejected=two; Secure; HttpOnly; Path=/",
                 }},
                 "denied",
                 &.{},
@@ -309,7 +312,7 @@ test "WebSocket HTTP3 CookieJar preflights and stores rejection" {
     );
     defer allocator.free(value);
     try std.testing.expectEqualStrings(
-        "seed=one; rejected=two",
+        "__Http-seed=one; __Host-Http-rejected=two",
         value,
     );
 
