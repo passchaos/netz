@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from pathlib import Path
 import socket
-import subprocess
-from typing import Iterator
 
 from mqtt_commit_log_support import (
     connect_client,
@@ -16,6 +13,12 @@ from mqtt_commit_log_support import (
     read_packet,
     remaining_length,
     subscribe_packet,
+)
+from mqtt_broker_config_persistence_support import (
+    configured_broker,
+    disconnect,
+    expect_packet,
+    ping,
 )
 
 
@@ -56,64 +59,6 @@ def _retained_publish(
     )
 
 
-def _expect_packet(
-    sock: socket.socket,
-    expected: bytes,
-    label: str,
-) -> None:
-    first, body = read_packet(sock)
-    actual = packet(first, body)
-    if actual != expected:
-        raise AssertionError(
-            f"{label}: expected {expected.hex()}, got {actual.hex()}"
-        )
-
-
-def _ping(sock: socket.socket, label: str) -> None:
-    sock.sendall(packet(0xC0, b""))
-    _expect_packet(sock, packet(0xD0, b""), label)
-
-
-def _disconnect(sock: socket.socket) -> None:
-    sock.sendall(packet(0xE0, b""))
-
-
-@contextmanager
-def _configured_broker(
-    broker: Path,
-    config: Path,
-    label: str,
-) -> Iterator[None]:
-    process = subprocess.Popen(
-        [str(broker), f"--config={config}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    assert process.stdout is not None
-    try:
-        ready = process.stdout.readline().strip()
-        if "configured 1 listeners for 1 clients" not in ready:
-            raise RuntimeError(f"{label} failed to start: {ready}")
-        listener = process.stdout.readline().strip()
-        if not listener.startswith("mqtt "):
-            raise RuntimeError(f"{label} listener missing: {listener}")
-        yield
-        return_code = process.wait(timeout=5)
-        if return_code != 0:
-            raise RuntimeError(
-                f"{label} exited {return_code}: " + process.stdout.read()
-            )
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-
-
 def _connect(port: int, client_id: str) -> socket.socket:
     return connect_client(
         port,
@@ -133,7 +78,7 @@ def _subscribe(sock: socket.socket, label: str) -> None:
         qos=0,
         protocol=5,
     ))
-    _expect_packet(
+    expect_packet(
         sock,
         packet(0x90, b"\x00\x01\x00\x00"),
         f"{label} SUBACK",
@@ -179,9 +124,10 @@ def run_retained_property_persistence_case(
         "max_connections 1\n"
     )
 
-    with _configured_broker(
+    with configured_broker(
         broker,
         config,
+        1,
         "initial retained-property broker",
     ):
         client = _connect(port, "persist-retain-properties-v5-0")
@@ -189,12 +135,12 @@ def run_retained_property_persistence_case(
             _subscribe(client, "initial retained-property")
             # A PUBLISH would arrive before PINGRESP if stale retained state
             # existed, matching the upstream no-retained-message assertion.
-            _ping(client, "initial retained-property empty replay")
+            ping(client, "initial retained-property empty replay")
             client.sendall(packet(
                 0xA2,
                 b"\x00\x02\x00" + mqtt_string(_TOPIC),
             ))
-            _expect_packet(
+            expect_packet(
                 client,
                 packet(0xB0, b"\x00\x02\x00\x00"),
                 "initial retained-property UNSUBACK",
@@ -208,8 +154,8 @@ def run_retained_property_persistence_case(
                     topic_alias=1,
                 )
             )
-            _ping(client, "initial retained-property publish barrier")
-            _disconnect(client)
+            ping(client, "initial retained-property publish barrier")
+            disconnect(client)
         finally:
             client.close()
     if not snapshot.is_file() or snapshot.stat().st_size == 0:
@@ -217,7 +163,7 @@ def run_retained_property_persistence_case(
 
     for generation in (1, 2):
         label = f"retained-property restore {generation}"
-        with _configured_broker(broker, config, label):
+        with configured_broker(broker, config, 1, label):
             client = _connect(
                 port,
                 f"persist-retain-properties-restore-{generation}",
@@ -225,7 +171,7 @@ def run_retained_property_persistence_case(
             try:
                 _subscribe(client, label)
                 _expect_retained_bundle(client, label)
-                _ping(client, f"{label} single replay")
-                _disconnect(client)
+                ping(client, f"{label} single replay")
+                disconnect(client)
             finally:
                 client.close()

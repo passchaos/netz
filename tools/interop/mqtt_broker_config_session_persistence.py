@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from pathlib import Path
 import socket
-import subprocess
-from typing import Iterator
 
 from mqtt_commit_log_support import (
     ack_packet,
@@ -15,72 +12,17 @@ from mqtt_commit_log_support import (
     packet,
     publish_packet,
     qos0_publish_packet,
-    read_packet,
     subscribe_packet,
+)
+from mqtt_broker_config_persistence_support import (
+    configured_broker,
+    disconnect,
+    expect_packet,
+    ping,
 )
 
 
 _PAYLOAD = b"message"
-
-
-def _expect_packet(
-    sock: socket.socket,
-    expected: bytes,
-    label: str,
-) -> None:
-    first, body = read_packet(sock)
-    actual = packet(first, body)
-    if actual != expected:
-        raise AssertionError(
-            f"{label}: expected {expected.hex()}, got {actual.hex()}"
-        )
-
-
-def _ping(sock: socket.socket, label: str) -> None:
-    sock.sendall(packet(0xC0, b""))
-    _expect_packet(sock, packet(0xD0, b""), label)
-
-
-def _disconnect(sock: socket.socket) -> None:
-    sock.sendall(packet(0xE0, b""))
-
-
-@contextmanager
-def _configured_broker(
-    broker: Path,
-    config: Path,
-    connection_count: int,
-    label: str,
-) -> Iterator[None]:
-    process = subprocess.Popen(
-        [str(broker), f"--config={config}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    assert process.stdout is not None
-    try:
-        ready = process.stdout.readline().strip()
-        expected = f"configured 1 listeners for {connection_count} clients"
-        if expected not in ready:
-            raise RuntimeError(f"{label} failed to start: {ready}")
-        listener = process.stdout.readline().strip()
-        if not listener.startswith("mqtt "):
-            raise RuntimeError(f"{label} listener missing: {listener}")
-        yield
-        return_code = process.wait(timeout=5)
-        if return_code != 0:
-            raise RuntimeError(
-                f"{label} exited {return_code}: " + process.stdout.read()
-            )
-    finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
 
 
 def _connect(
@@ -113,7 +55,7 @@ def _subscribe(
         qos=qos,
         protocol=protocol,
     ))
-    _expect_packet(
+    expect_packet(
         sock,
         packet(
             0x90,
@@ -150,7 +92,7 @@ def _publish_offline_queue(
             qos=1,
             protocol=protocol,
         ))
-        _expect_packet(
+        expect_packet(
             helper,
             ack_packet(0x40, 1),
             f"MQTT {protocol} offline publisher PUBACK",
@@ -162,19 +104,19 @@ def _publish_offline_queue(
             qos=2,
             protocol=protocol,
         ))
-        _expect_packet(
+        expect_packet(
             helper,
             ack_packet(0x50, 2),
             f"MQTT {protocol} offline publisher PUBREC",
         )
         helper.sendall(ack_packet(0x62, 2))
-        _expect_packet(
+        expect_packet(
             helper,
             ack_packet(0x70, 2),
             f"MQTT {protocol} offline publisher PUBCOMP",
         )
-        _ping(helper, f"MQTT {protocol} offline publisher barrier")
-        _disconnect(helper)
+        ping(helper, f"MQTT {protocol} offline publisher barrier")
+        disconnect(helper)
     finally:
         helper.close()
 
@@ -184,7 +126,7 @@ def _expect_restored_queue(
     protocol: int,
     topics: tuple[str, str, str],
 ) -> None:
-    _expect_packet(
+    expect_packet(
         subscriber,
         publish_packet(
             topics[1],
@@ -195,7 +137,7 @@ def _expect_restored_queue(
         ),
         f"MQTT {protocol} restored QoS 1 PUBLISH",
     )
-    _expect_packet(
+    expect_packet(
         subscriber,
         publish_packet(
             topics[2],
@@ -240,7 +182,7 @@ def _run_clean_start_case(
         f"persist/clear/v{protocol}/2",
     )
 
-    with _configured_broker(
+    with configured_broker(
         broker,
         config,
         2,
@@ -256,7 +198,7 @@ def _run_clean_start_case(
         try:
             for qos, topic in enumerate(topics):
                 _subscribe(subscriber, protocol, topic, qos)
-            _disconnect(subscriber)
+            disconnect(subscriber)
         finally:
             subscriber.close()
         _publish_offline_queue(port, protocol, topics)
@@ -265,7 +207,7 @@ def _run_clean_start_case(
             f"MQTT {protocol} Clean Start snapshot was not written"
         )
 
-    with _configured_broker(
+    with configured_broker(
         broker,
         config,
         2,
@@ -293,12 +235,12 @@ def _run_clean_start_case(
             False,
         )
         try:
-            _ping(clean, f"MQTT {protocol} Clean Start queue purge")
-            _disconnect(clean)
+            ping(clean, f"MQTT {protocol} Clean Start queue purge")
+            disconnect(clean)
         finally:
             clean.close()
 
-    with _configured_broker(
+    with configured_broker(
         broker,
         config,
         2,
@@ -313,7 +255,7 @@ def _run_clean_start_case(
         )
         probe = None
         try:
-            _ping(fresh, f"MQTT {protocol} final empty Session")
+            ping(fresh, f"MQTT {protocol} final empty Session")
             probe = _connect(
                 port,
                 f"persist-clear-probe-v{protocol}",
@@ -328,14 +270,14 @@ def _run_clean_start_case(
                 qos=1,
                 protocol=protocol,
             ))
-            _expect_packet(
+            expect_packet(
                 probe,
                 _no_subscribers_puback(protocol, 9),
                 f"MQTT {protocol} removed subscription PUBACK",
             )
-            _ping(fresh, f"MQTT {protocol} removed subscription barrier")
-            _disconnect(probe)
-            _disconnect(fresh)
+            ping(fresh, f"MQTT {protocol} removed subscription barrier")
+            disconnect(probe)
+            disconnect(fresh)
         finally:
             if probe is not None:
                 probe.close()

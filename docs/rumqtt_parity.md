@@ -673,6 +673,13 @@ messages without acknowledgement, then Clean Start atomically removes the
 subscriptions and restored outgoing inflight state. A third broker requires
 Session Present false, no stale delivery, and a no-subscriber publication
 result, proving the cleanup itself survived another snapshot/restart.
+Source-locked ports of `15-persist-subscription-v3-1-1.py` and
+`15-persist-subscription-v5-0.py` add a separate three-generation subscription
+path. QoS 0/1/2 grants restore with exact live delivery, MQTT 5 preserves
+Subscription Identifiers 100/101/102, and the second generation removes the
+QoS 2 filter. The third generation routes only QoS 0/1, returns MQTT 5 No
+matching subscribers for the removed topic, and answers PING before any stale
+delivery, proving the UNSUBSCRIBE tombstone survived another snapshot.
 Scheduled-Will tests cover downtime deadline reduction, canonical publisher
 restoration, reconnect cancellation, driver publication after an actual broker
 restart and retained-Will storage. This snapshot surface still has narrower
