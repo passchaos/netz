@@ -1300,6 +1300,11 @@ attempt and H1 fallback, repeated advertisements preserve failure backoff, and
 POST is never replayed after an ambiguous H3 failure while GET may safely
 fallback. H3 remains opt-in so the unified layer never invents a weaker
 certificate policy when the caller configured only the TCP TLS backend. Its
+optional early-data policy likewise stays above Hyper's scope: netz requires
+origin-scoped remembered H3 SETTINGS plus an origin+ALPN ticket, uses 0-RTT
+only for newly created safe-method connections, keeps idle reuse on 1-RTT,
+supports per-request opt-out, and reports TLS rejection or 425 retry through
+the common owned response. Cross-origin redirects are excluded. Its
 exclusive QUIC backend retains separate explicit total/idle caps from the TCP
 pool, while the unified owner now also supplies one move-stable cross-transport
 budget. Opt-in `max_total_connections` counts TCP and QUIC idle entries, leases,

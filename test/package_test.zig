@@ -293,6 +293,35 @@ test "public modules are reachable" {
         "decodeContentInto",
     ));
     try std.testing.expect(@hasDecl(netz.http, "HeaderIterator"));
+    try std.testing.expect(@hasDecl(netz.http, "EarlyDataMetadata"));
+    try std.testing.expect(@hasField(
+        netz.http.RequestOptions,
+        "allow_early_data",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http.OwnedResponse,
+        "early_data",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http,
+        "PoolHttp3EarlyDataOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http,
+        "PoolHttp3RememberedSettingsStats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.Pool,
+        "http3RememberedSettingsStats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "peerSettings",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectUriAltSvcWithEarlyRequest",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "CookieJar"));
     try std.testing.expect(@hasDecl(netz.http, "CookieMaximumBytes"));
     try std.testing.expect(@hasDecl(

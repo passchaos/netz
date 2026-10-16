@@ -44,6 +44,9 @@ pub const RequestOptions = struct {
     headers: []const Header = &.{},
     body: []const u8 = &.{},
     trailers: []const Header = &.{},
+    /// Permit an explicitly configured HTTP/3 pool to use 0-RTT for this
+    /// request. HTTP/1, HTTP/2, and reused HTTP/3 connections ignore it.
+    allow_early_data: bool = true,
 };
 
 pub const RedirectOptions = struct {
@@ -67,6 +70,11 @@ pub const ResponseValue = union(Protocol) {
     http1: http1_runtime.OwnedResponse,
     http2: http2_runtime.OwnedResponse,
     http3: http3_runtime.OwnedHandshakeResponse,
+};
+
+pub const EarlyDataMetadata = struct {
+    disposition: http3_runtime.EarlyRequestDisposition,
+    retry_reason: http3_runtime.EarlyDataRetryReason,
 };
 
 const FieldSection = enum { headers, trailers };
@@ -104,6 +112,7 @@ pub const HeaderIterator = struct {
 pub const OwnedResponse = struct {
     allocator: std.mem.Allocator,
     value: ResponseValue,
+    early_data: ?EarlyDataMetadata = null,
 
     pub fn deinit(self: *OwnedResponse) void {
         const allocator = self.allocator;

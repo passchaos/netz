@@ -53,6 +53,8 @@ pub const Options = struct {
 
 pub const Http3Options = h3_support.Options;
 pub const Http3FallbackPolicy = h3_support.FallbackPolicy;
+pub const Http3EarlyDataOptions = h3_support.EarlyDataOptions;
+pub const Http3RememberedSettingsStats = h3_support.RememberedSettingsStats;
 
 pub const Stats = origin_pool.Stats;
 const IdlePool = origin_pool.Pool(client.Connection);
@@ -371,6 +373,13 @@ pub const Pool = struct {
     pub fn http3IdleCount(self: *Pool) usize {
         const state = self.http3 orelse return 0;
         return state.pool.idleCount();
+    }
+
+    pub fn http3RememberedSettingsStats(
+        self: *const Pool,
+    ) ?Http3RememberedSettingsStats {
+        const state = self.http3 orelse return null;
+        return state.rememberedSettingsStats();
     }
 
     fn acquireMaybeBefore(

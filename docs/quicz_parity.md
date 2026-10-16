@@ -898,6 +898,17 @@ resumption, address-validation, early-data, deterministic random/key inputs,
 and client identity unless forwarding was explicitly authorized; a custom
 connector without this boundary fails closed instead of falling back to its
 ordinary alternative-service dial.
+The unified pool now also offers origin-scoped HTTP/3 0-RTT. Peer SETTINGS are
+remembered in a separate bounded LRU, and the default connector scopes its
+resumption cache key to the normalized URI authority rather than a process-
+global server ID. Only a newly reserved connection can consume a ticket and
+prepare a request; an idle H3 hit stays 1-RTT without unused early-request
+allocation. Real handshakes cover accepted early data followed by a
+425/stream-4 retry, TLS-layer rejection followed by a stream-0 replay, ordinary
+idle reuse despite an available ticket, safe-only suppression for POST, and a
+per-request opt-out. Unified responses expose disposition/retry metadata while
+one absolute deadline still covers admission, DNS, handshake, initial response,
+and replay.
 
 The four verified capture artifacts are
 `zig-out/http3-captures/run.0fFQq2` (v1 upload),

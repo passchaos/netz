@@ -94,6 +94,7 @@ pub fn requestUriBefore(
         if (requestHttp3(
             pool,
             h3_state,
+            origin,
             uri_text,
             &alternative.?,
             request,
@@ -161,6 +162,7 @@ pub fn requestUriBefore(
 fn requestHttp3(
     pool: anytype,
     state: anytype,
+    origin: http3.Origin,
     uri_text: []const u8,
     alternative: *const alt_svc_cache.Alternative,
     request: client.RequestOptions,
@@ -186,6 +188,7 @@ fn requestHttp3(
     );
     defer trailers.deinit(pool.allocator);
     const response = try state.request(
+        origin,
         uri_text,
         alternative,
         .{
@@ -194,6 +197,7 @@ fn requestHttp3(
             .body = request.body,
             .trailers = trailers.items,
         },
+        request.allow_early_data,
         deadline,
         crossed_origin,
         forward_client_identity,
@@ -201,7 +205,11 @@ fn requestHttp3(
     );
     return .{
         .allocator = pool.allocator,
-        .value = .{ .http3 = response },
+        .value = .{ .http3 = response.response },
+        .early_data = if (response.early_data) |metadata| .{
+            .disposition = metadata.disposition,
+            .retry_reason = metadata.retry_reason,
+        } else null,
     };
 }
 

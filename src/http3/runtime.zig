@@ -12092,6 +12092,68 @@ pub const HandshakeClient = struct {
         return last_err orelse error.NoAddressReturned;
     }
 
+    fn connectAnyResolvedAddressWithEarlyRequest(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        servers: []const net.IpAddress,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
+        var attempted = false;
+        for (servers, 0..) |server, index| {
+            if (!sameIpAddressFamily(local_address, server)) continue;
+            attempted = true;
+            var attempt_options = options;
+            if (deadline) |absolute| {
+                attempt_options.handshake.handshake_recovery =
+                    try handshakeRecoveryBefore(
+                        io,
+                        absolute,
+                        options.handshake.handshake_recovery,
+                    );
+            }
+            return connectWithEarlyRequestBefore(
+                allocator,
+                io,
+                local_address,
+                server,
+                limits,
+                attempt_options,
+                early_request,
+                cache,
+                lease,
+                deadline,
+            ) catch |err| {
+                if (!shouldTryNextResolvedAddress(err)) return err;
+                // A protected early packet might have reached this address.
+                // Continue only with an ordinary handshake; the caller will
+                // replay the safe request over 1-RTT after `.rejected`.
+                const client = connectAnyResolvedAddress(
+                    allocator,
+                    io,
+                    local_address,
+                    servers[index + 1 ..],
+                    limits,
+                    options,
+                    deadline,
+                ) catch |fallback_err| switch (fallback_err) {
+                    error.AddressFamilyUnsupported,
+                    error.NoAddressReturned,
+                    => return err,
+                    else => return fallback_err,
+                };
+                return .{ .client = client, .disposition = .rejected };
+            };
+        }
+        if (!attempted) return error.AddressFamilyUnsupported;
+        return error.NoAddressReturned;
+    }
+
     fn sameIpAddressFamily(a: net.IpAddress, b: net.IpAddress) bool {
         return switch (a) {
             .ip4 => switch (b) {
@@ -12744,6 +12806,112 @@ pub const HandshakeClient = struct {
                 deadline,
                 options.connect_timeout,
             ),
+        );
+    }
+
+    pub fn connectUriAltSvcWithEarlyRequest(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+    ) Error!EarlyHandshakeClient {
+        return connectUriAltSvcWithEarlyRequestBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+            early_request,
+            cache,
+            lease,
+            try connectDeadline(io, options.connect_timeout),
+        );
+    }
+
+    pub fn connectUriAltSvcWithEarlyRequestWithDeadline(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
+        return connectUriAltSvcWithEarlyRequestBefore(
+            allocator,
+            io,
+            local_address,
+            uri,
+            target,
+            limits,
+            options,
+            early_request,
+            cache,
+            lease,
+            try cappedConnectDeadline(
+                io,
+                deadline,
+                options.connect_timeout,
+            ),
+        );
+    }
+
+    fn connectUriAltSvcWithEarlyRequestBefore(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        local_address: net.IpAddress,
+        uri: std.Uri,
+        target: http3.AltSvcTarget,
+        limits: Limits,
+        options: HandshakeClientOptions,
+        early_request: *const PreparedEarlyRequest,
+        cache: *quic.resumption.Cache,
+        lease: *quic.resumption.EarlyDataLease,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) Error!EarlyHandshakeClient {
+        if (!http3.isHttp3Alpn(target.alpn)) return error.InvalidHeader;
+        var origin = try uriEndpoint(allocator, uri);
+        defer origin.deinit();
+        if (!std.ascii.eqlIgnoreCase(
+            target.origin_host,
+            origin.tls_host,
+        )) return error.InvalidHeader;
+        const servers = try resolveHostPortAddressesBefore(
+            allocator,
+            io,
+            target.connect_host,
+            target.port,
+            deadline,
+        );
+        defer allocator.free(servers);
+
+        var connect_options = options;
+        connect_options.connect_timeout = null;
+        connect_options.handshake.server_name = origin.tls_host;
+        connect_options.handshake.alpn_protocols = &.{target.alpn};
+        return connectAnyResolvedAddressWithEarlyRequest(
+            allocator,
+            io,
+            local_address,
+            servers,
+            limits,
+            connect_options,
+            early_request,
+            cache,
+            lease,
+            deadline,
         );
     }
 
@@ -14846,6 +15014,16 @@ pub const HandshakeClient = struct {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
         };
+    }
+
+    /// Return already-received peer SETTINGS without reading UDP. Connection
+    /// pools use this after a completed response to retain the exact origin-
+    /// scoped settings required by a future 0-RTT request.
+    pub fn peerSettings(self: *const HandshakeClient) ?http3.Settings {
+        return if (self.control.settings.received)
+            self.control.settings.peer
+        else
+            null;
     }
 
     pub fn receivePeerSettingsWithTimeout(

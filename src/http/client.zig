@@ -32,6 +32,7 @@ pub const RedirectOptions = types.RedirectOptions;
 pub const Options = types.Options;
 pub const ResponseValue = types.ResponseValue;
 pub const OwnedResponse = types.OwnedResponse;
+pub const EarlyDataMetadata = types.EarlyDataMetadata;
 pub const RedirectedResponse = types.RedirectedResponse;
 
 const max_stack_headers = header_mapping.max_stack_headers;

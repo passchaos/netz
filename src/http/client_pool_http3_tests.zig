@@ -142,6 +142,8 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
         .server = &h3_server,
         .expected_authority = authority,
     };
+    var reuse_ticket_cache = try quic.resumption.Cache.init(allocator, 1);
+    defer reuse_ticket_cache.deinit();
     const tcp_thread = try std.Thread.spawn(.{}, TcpWorker.run, .{&tcp_worker});
     var tcp_joined = false;
     defer if (!tcp_joined) {
@@ -165,9 +167,15 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
                 .server_auth = .{
                     .pinned_ecdsa_p256_public_key = public_key,
                 },
+                .auto_resumption = .{
+                    .cache = &reuse_ticket_cache,
+                    .server_id = "scoped-by-unified-pool",
+                    .now_ms = 1500,
+                },
             } },
             .idle = .{ .max_idle_per_origin = 1, .max_idle_total = 1 },
             .max_connections = 1,
+            .early_data = .{},
         },
     });
     defer pool.deinit();
@@ -191,11 +199,33 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
         defer response.deinit();
         try std.testing.expectEqual(protocol, response.protocol());
         try std.testing.expectEqualStrings(body, response.body());
+        if (std.mem.eql(u8, path, "/h3-one")) {
+            try reuse_ticket_cache.store(.{
+                .server_id = authority,
+                .alpn = "h3",
+                .ticket = "unused-on-reused-connection",
+                .psk = [_]u8{0x30} ** 32,
+                .issued_at_ms = 1000,
+                .lifetime_seconds = 3600,
+                .age_add = 7,
+                .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+                .transport_parameters = .fromTransportParameters(
+                    quic.practical_transport_parameters,
+                ),
+            });
+        }
+        if (std.mem.eql(u8, path, "/h3-two")) {
+            try std.testing.expect(response.early_data == null);
+        }
     }
     try std.testing.expectEqual(@as(usize, 1), pool.http3ConnectionCount());
     try std.testing.expectEqual(@as(usize, 1), pool.http3IdleCount());
     try std.testing.expectEqual(@as(usize, 2), pool.totalConnectionCount());
     try std.testing.expectEqual(@as(u64, 2), pool.altSvcStats().?.hits);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        pool.http3RememberedSettingsStats().?.entries,
+    );
 
     release.set(io);
     tcp_thread.join();
@@ -207,6 +237,469 @@ test "unified HTTP pool learns Alt-Svc then reuses HTTP3" {
     try std.testing.expectEqual(@as(usize, 1), tcp_worker.requests);
     try std.testing.expectEqual(@as(usize, 1), h3_worker.accepts);
     try std.testing.expectEqual(@as(usize, 2), h3_worker.requests);
+}
+
+test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const identity: @FieldType(http1_runtime.TlsListenOptions, "identity") = .{
+        .certificate_chain = &.{&certificate_der},
+        .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+    };
+    var tcp_server = try http2_runtime.TlsServer.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .identity = identity },
+    );
+    defer tcp_server.deinit();
+    const h3_limits: http3_runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const ticket = "unified-h3-early-ticket";
+    const psk = [_]u8{0xf1} ** 32;
+    var replay_filter = try quic.zero_rtt.ReplayFilter.init(
+        allocator,
+        io,
+        8,
+    );
+    defer replay_filter.deinit();
+    var ticket_cache = try quic.resumption.Cache.init(allocator, 2);
+    defer ticket_cache.deinit();
+    const server_cid = [_]u8{
+        0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
+    };
+    var h3_server = try http3_runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        h3_limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+            .psk = .{
+                .identity = ticket,
+                .secret = psk,
+                .age_add = 41,
+                .issued_at_ms = 1000,
+                .lifetime_seconds = 3600,
+                .now_ms = 1500,
+            },
+            .early_data = .{
+                .accept = true,
+                .replay_filter = &replay_filter,
+                .replay_key = "unified-h3-early",
+            },
+        } },
+    );
+    defer h3_server.deinit();
+    const alt_svc = try std.fmt.allocPrint(
+        allocator,
+        "h3=\":{d}\"; ma=60",
+        .{h3_server.address().ip4.port},
+    );
+    defer allocator.free(alt_svc);
+
+    const TcpWorker = struct {
+        server: *http2_runtime.TlsServer,
+        alt_svc: []const u8,
+        release: *std.Io.Event,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var connection = try self.server.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.server.allocator);
+            try connection.writeResponse(request.stream_id, .{
+                .headers = &.{.{ .name = "alt-svc", .value = self.alt_svc }},
+                .body = "discovered",
+                .request_method = request.method,
+            });
+            try self.release.wait(self.server.io);
+        }
+    };
+    const H3Worker = struct {
+        server: *http3_runtime.HandshakeServer,
+        accepts: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.not_offered,
+                first.established.early_data_status,
+            );
+            var learned = try first.receiveRequestWithTimeout(.fromSeconds(5));
+            defer learned.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/learn-settings", learned.request.path);
+            try std.testing.expect(!learned.was_early_data);
+            try first.sendResponse(learned.stream_id, .{
+                .status = 200,
+                .body = "learned",
+                .request_method = learned.request.method,
+            });
+            first.deinit();
+
+            var second = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.accepted,
+                second.established.early_data_status,
+            );
+            var early = try second.receiveRequestWithTimeout(.fromSeconds(5));
+            defer early.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("/early", early.request.path);
+            try std.testing.expect(early.was_early_data);
+            try second.sendResponse(early.stream_id, .{
+                .status = 425,
+                .request_method = early.request.method,
+            });
+            var retry = try second.receiveRequestWithTimeout(.fromSeconds(5));
+            defer retry.deinit(self.server.allocator);
+            try std.testing.expectEqual(@as(u62, 4), retry.stream_id);
+            try std.testing.expectEqualStrings("/early", retry.request.path);
+            try std.testing.expect(!retry.was_early_data);
+            try second.sendResponse(retry.stream_id, .{
+                .status = 200,
+                .body = "retried",
+                .request_method = retry.request.method,
+            });
+            second.deinit();
+
+            self.server.handshake_options.early_data.?.accept = false;
+            var third = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            defer third.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.rejected,
+                third.established.early_data_status,
+            );
+            var replayed = try third.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            );
+            defer replayed.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/transport-rejected",
+                replayed.request.path,
+            );
+            try std.testing.expect(!replayed.was_early_data);
+            try third.sendResponse(replayed.stream_id, .{
+                .status = 200,
+                .body = "transport-replayed",
+                .request_method = replayed.request.method,
+            });
+
+            self.server.handshake_options.early_data.?.accept = true;
+            var fourth = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            defer fourth.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.not_offered,
+                fourth.established.early_data_status,
+            );
+            var unsafe = try fourth.receiveRequestWithTimeout(.fromSeconds(5));
+            defer unsafe.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings("POST", unsafe.request.method);
+            try std.testing.expectEqualStrings("/unsafe", unsafe.request.path);
+            try std.testing.expect(!unsafe.was_early_data);
+            try fourth.sendResponse(unsafe.stream_id, .{
+                .status = 200,
+                .body = "ordinary-unsafe",
+                .request_method = unsafe.request.method,
+            });
+
+            var fifth = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            defer fifth.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.not_offered,
+                fifth.established.early_data_status,
+            );
+            var opted_out = try fifth.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            );
+            defer opted_out.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "/opt-out",
+                opted_out.request.path,
+            );
+            try std.testing.expect(!opted_out.was_early_data);
+            try fifth.sendResponse(opted_out.stream_id, .{
+                .status = 200,
+                .body = "ordinary-opt-out",
+                .request_method = opted_out.request.method,
+            });
+        }
+    };
+    var release: std.Io.Event = .unset;
+    var tcp_worker = TcpWorker{
+        .server = &tcp_server,
+        .alt_svc = alt_svc,
+        .release = &release,
+    };
+    var h3_worker = H3Worker{ .server = &h3_server };
+    const tcp_thread = try std.Thread.spawn(.{}, TcpWorker.run, .{&tcp_worker});
+    var tcp_joined = false;
+    defer if (!tcp_joined) {
+        release.set(io);
+        tcp_thread.join();
+    };
+    const h3_thread = try std.Thread.spawn(.{}, H3Worker.run, .{&h3_worker});
+    var h3_joined = false;
+    defer if (!h3_joined) h3_thread.join();
+
+    var pool = try http.Pool.init(allocator, io, .{
+        .max_total_connections = 2,
+        .client = .{ .tls = .{ .server_verifier = .{
+            .pinned_ecdsa_p256_public_key = public_key,
+        } } },
+        .http3 = .{
+            .limits = h3_limits,
+            .handshake = .{ .handshake = .{
+                .original_destination_connection_id = &.{},
+                .local_connection_id = &.{},
+                .server_auth = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+                .auto_resumption = .{
+                    .cache = &ticket_cache,
+                    .server_id = "scoped-by-unified-pool",
+                    .now_ms = 1500,
+                },
+            } },
+            .idle = .{ .max_idle_per_origin = 0, .max_idle_total = 0 },
+            .max_connections = 1,
+            .fallback = .never,
+            .early_data = .{},
+        },
+    });
+    defer pool.deinit();
+    const base = try std.fmt.allocPrint(
+        allocator,
+        "https://localhost:{d}",
+        .{tcp_server.address().ip4.port},
+    );
+    defer allocator.free(base);
+
+    const discover_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/discover",
+        .{base},
+    );
+    defer allocator.free(discover_uri);
+    var discovery = try pool.requestUriWithTimeout(
+        discover_uri,
+        .{},
+        .fromSeconds(5),
+    );
+    discovery.deinit();
+
+    const learn_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/learn-settings",
+        .{base},
+    );
+    defer allocator.free(learn_uri);
+    var learned = try pool.requestUriWithTimeout(
+        learn_uri,
+        .{},
+        .fromSeconds(5),
+    );
+    try std.testing.expectEqual(http.Protocol.http3, learned.protocol());
+    try std.testing.expect(learned.early_data == null);
+    learned.deinit();
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        pool.http3RememberedSettingsStats().?.entries,
+    );
+
+    const authority = try std.fmt.allocPrint(
+        allocator,
+        "localhost:{d}",
+        .{tcp_server.address().ip4.port},
+    );
+    defer allocator.free(authority);
+    try ticket_cache.store(.{
+        .server_id = authority,
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 41,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+
+    const early_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/early",
+        .{base},
+    );
+    defer allocator.free(early_uri);
+    var response = pool.requestUriWithTimeout(
+        early_uri,
+        .{},
+        .fromSeconds(5),
+    ) catch |err| {
+        release.set(io);
+        tcp_thread.join();
+        tcp_joined = true;
+        h3_thread.join();
+        h3_joined = true;
+        if (h3_worker.err) |server_err| return server_err;
+        return err;
+    };
+    try std.testing.expectEqual(http.Protocol.http3, response.protocol());
+    try std.testing.expectEqualStrings("retried", response.body());
+    try std.testing.expectEqual(
+        http3_runtime.EarlyRequestDisposition.accepted,
+        response.early_data.?.disposition,
+    );
+    try std.testing.expectEqual(
+        http3_runtime.EarlyDataRetryReason.too_early,
+        response.early_data.?.retry_reason,
+    );
+    response.deinit();
+
+    try ticket_cache.store(.{
+        .server_id = authority,
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 41,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    const rejected_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/transport-rejected",
+        .{base},
+    );
+    defer allocator.free(rejected_uri);
+    var rejected = pool.requestUriWithTimeout(
+        rejected_uri,
+        .{},
+        .fromSeconds(5),
+    ) catch |err| {
+        release.set(io);
+        tcp_thread.join();
+        tcp_joined = true;
+        h3_thread.join();
+        h3_joined = true;
+        if (h3_worker.err) |server_err| return server_err;
+        return err;
+    };
+    try std.testing.expectEqualStrings("transport-replayed", rejected.body());
+    try std.testing.expectEqual(
+        http3_runtime.EarlyRequestDisposition.rejected,
+        rejected.early_data.?.disposition,
+    );
+    try std.testing.expectEqual(
+        http3_runtime.EarlyDataRetryReason.early_data_rejected,
+        rejected.early_data.?.retry_reason,
+    );
+    rejected.deinit();
+
+    try ticket_cache.store(.{
+        .server_id = authority,
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 41,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    const unsafe_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/unsafe",
+        .{base},
+    );
+    defer allocator.free(unsafe_uri);
+    var unsafe = try pool.requestUriWithTimeout(
+        unsafe_uri,
+        .{ .method = "POST", .body = "unsafe-body" },
+        .fromSeconds(5),
+    );
+    defer unsafe.deinit();
+    try std.testing.expectEqualStrings("ordinary-unsafe", unsafe.body());
+    try std.testing.expect(unsafe.early_data == null);
+
+    try ticket_cache.store(.{
+        .server_id = authority,
+        .alpn = "h3",
+        .ticket = ticket,
+        .psk = psk,
+        .issued_at_ms = 1000,
+        .lifetime_seconds = 3600,
+        .age_add = 41,
+        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
+        .transport_parameters = .fromTransportParameters(
+            quic.practical_transport_parameters,
+        ),
+    });
+    const opt_out_uri = try std.fmt.allocPrint(
+        allocator,
+        "{s}/opt-out",
+        .{base},
+    );
+    defer allocator.free(opt_out_uri);
+    var opted_out = try pool.requestUriWithTimeout(
+        opt_out_uri,
+        .{ .allow_early_data = false },
+        .fromSeconds(5),
+    );
+    defer opted_out.deinit();
+    try std.testing.expectEqualStrings("ordinary-opt-out", opted_out.body());
+    try std.testing.expect(opted_out.early_data == null);
+
+    release.set(io);
+    tcp_thread.join();
+    tcp_joined = true;
+    h3_thread.join();
+    h3_joined = true;
+    if (tcp_worker.err) |err| return err;
+    if (h3_worker.err) |err| return err;
+    try std.testing.expectEqual(@as(usize, 5), h3_worker.accepts);
 }
 
 test "unified HTTP pool global budget rebalances TCP and HTTP3 idle" {

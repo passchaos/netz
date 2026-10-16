@@ -52,6 +52,9 @@ pub const PoolOptions = client_pool.Options;
 pub const PoolStats = client_pool.Stats;
 pub const PoolHttp3Options = client_pool.Http3Options;
 pub const PoolHttp3FallbackPolicy = client_pool.Http3FallbackPolicy;
+pub const PoolHttp3EarlyDataOptions = client_pool.Http3EarlyDataOptions;
+pub const PoolHttp3RememberedSettingsStats =
+    client_pool.Http3RememberedSettingsStats;
 pub const Protocol = client.Protocol;
 pub const ProtocolPolicy = client.ProtocolPolicy;
 pub const CleartextProtocol = client.CleartextProtocol;
@@ -60,6 +63,7 @@ pub const HeaderIterator = client.HeaderIterator;
 pub const RequestOptions = client.RequestOptions;
 pub const RedirectOptions = client.RedirectOptions;
 pub const OwnedResponse = client.OwnedResponse;
+pub const EarlyDataMetadata = client.EarlyDataMetadata;
 pub const RedirectedResponse = client.RedirectedResponse;
 pub const Error = client.Error;
 pub const ResponseTimeoutError = client.ResponseTimeoutError;

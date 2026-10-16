@@ -282,6 +282,18 @@ Current protocol coverage includes:
   H3 connection needs a full shared budget, it can retire the oldest idle TCP
   connection and transfer that capacity without exceeding the configured cap;
   a later TCP origin can symmetrically retire the oldest idle H3 connection,
+  The H3 backend can additionally opt into RFC 8470 0-RTT without bypassing
+  the unified surface. Successful responses record peer SETTINGS in a bounded,
+  origin-scoped LRU independent of Alt-Svc and TLS ticket ownership. A safe
+  request is prepared only after acquisition proves a new connection is
+  required; idle H3 reuse remains ordinary 1-RTT with no early-request
+  encoding/allocation. New connections require both remembered SETTINGS and an
+  origin+ALPN ticket, retain one absolute admission/handshake/response budget,
+  and expose accepted/rejected plus 425-retry metadata on `OwnedResponse`.
+  TLS rejection and the first 425 replay once over 1-RTT; a second 425 is final.
+  Unsafe/unknown methods stay 1-RTT under the default safe-only policy, and
+  `RequestOptions.allow_early_data=false` disables even an eligible request.
+  Cross-origin redirects never reuse this early-data path,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the
