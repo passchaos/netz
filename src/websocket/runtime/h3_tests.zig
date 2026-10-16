@@ -2820,7 +2820,7 @@ test "WebSocket HTTP3 client rejects unoffered compression window" {
     if (shared.err) |err| return err;
 }
 
-test "WebSocket over HTTP3 validates reserved handshake metadata" {
+test "WebSocket over HTTP3 rejects reserved handshake metadata before IO" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
     defer threaded.deinit();
@@ -2846,27 +2846,6 @@ test "WebSocket over HTTP3 validates reserved handshake metadata" {
     );
     defer server.deinit();
 
-    const Shared = struct {
-        server: *h3.Server,
-        err: ?anyerror = null,
-
-        fn run(self: *@This()) void {
-            var connection = self.server.transport.accept() catch |err| {
-                self.err = err;
-                return;
-            };
-            connection.ensureSettingsSent() catch |err| {
-                self.err = err;
-            };
-            connection.deinit();
-        }
-    };
-
-    var shared = Shared{ .server = &server };
-    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
-    var joined = false;
-    defer if (!joined) thread.join();
-
     try std.testing.expectError(
         error.InvalidHandshake,
         h3.Client.connect(
@@ -2891,9 +2870,10 @@ test "WebSocket over HTTP3 validates reserved handshake metadata" {
             },
         ),
     );
-    thread.join();
-    joined = true;
-    if (shared.err) |err| return err;
+    try std.testing.expectError(
+        error.HandshakeTimeout,
+        server.transport.acceptWithTimeout(.fromMilliseconds(20)),
+    );
 }
 
 test "WebSocket over HTTP3 rejects peer without extended CONNECT" {

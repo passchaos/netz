@@ -5977,9 +5977,20 @@ fn compressedFragmentRange(
 
 test "WebSocket RFC 9220 connections keep resumable writes compact" {
     if (@sizeOf(usize) == 8) {
+        // Vort retains additional safety-only Huffman state in Debug and
+        // ReleaseSafe. Keep exact baselines for both layouts so this remains
+        // a useful per-connection memory regression guard in every mode.
+        const client_size: usize = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => 18_456,
+            .ReleaseFast, .ReleaseSmall => 18_264,
+        };
+        const server_size: usize = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => 17_856,
+            .ReleaseFast, .ReleaseSmall => 17_696,
+        };
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
-        try std.testing.expectEqual(@as(usize, 18_456), @sizeOf(ClientConnection));
-        try std.testing.expectEqual(@as(usize, 17_856), @sizeOf(ServerConnection));
+        try std.testing.expectEqual(client_size, @sizeOf(ClientConnection));
+        try std.testing.expectEqual(server_size, @sizeOf(ServerConnection));
     }
 }
 
