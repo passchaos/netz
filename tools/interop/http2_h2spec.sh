@@ -8,6 +8,51 @@ if ! command -v "$h2spec" >/dev/null 2>&1 && [[ ! -x "$h2spec" ]]; then
   echo "h2spec not found; install it or set H2SPEC=/absolute/path/to/h2spec" >&2
   exit 127
 fi
+if command -v "$h2spec" >/dev/null 2>&1; then
+  h2spec=$(command -v "$h2spec")
+fi
+h2spec_version=$("$h2spec" --version)
+if [[ "$h2spec_version" != 'Version: 2.6.0 ('*')' ]]; then
+  echo "h2spec 2.6.0 required; found: $h2spec_version" >&2
+  exit 1
+fi
+
+source_root=${H2SPEC_SOURCE_ROOT:-}
+go_archive=${H2SPEC_GO_ARCHIVE:-}
+locked_source_commit=70ac2294010887f48b18e2d64f5cccd48421fad1
+locked_go_archive_sha256=36e720b2d564980c162a48c7e97da2e407dfcc4239e1e58d98082dfa2486a0c1
+locked_binary_sha256=e9c8ab68ca035b3acc8c94ef4858a2965a6c021065a050997ce5e65e4440af0a
+if [[ -n "$source_root" || -n "$go_archive" ]]; then
+  if [[ ! -d "$source_root/.git" || ! -f "$go_archive" ]]; then
+    echo "locked h2spec mode requires H2SPEC_SOURCE_ROOT and H2SPEC_GO_ARCHIVE" >&2
+    exit 127
+  fi
+  source_commit=$(git -C "$source_root" rev-parse HEAD)
+  if [[ "$source_commit" != "$locked_source_commit" ]]; then
+    echo "unexpected h2spec source commit: $source_commit" >&2
+    exit 1
+  fi
+  if [[ -n "$(git -C "$source_root" status --porcelain --untracked-files=all)" ]]; then
+    echo "h2spec source checkout must be clean" >&2
+    exit 1
+  fi
+  go_archive_sha256=$(sha256sum "$go_archive" | awk '{print $1}')
+  if [[ "$go_archive_sha256" != "$locked_go_archive_sha256" ]]; then
+    echo "unexpected Go archive SHA-256: $go_archive_sha256" >&2
+    exit 1
+  fi
+  binary_sha256=$(sha256sum "$h2spec" | awk '{print $1}')
+  if [[ "$binary_sha256" != "$locked_binary_sha256" ]]; then
+    echo "unexpected h2spec binary SHA-256: $binary_sha256" >&2
+    exit 1
+  fi
+  expected_version="Version: 2.6.0 ($locked_source_commit)"
+  if [[ "$h2spec_version" != "$expected_version" ]]; then
+    echo "unexpected locked h2spec version: $h2spec_version" >&2
+    exit 1
+  fi
+  echo "h2spec locked runtime verified: source=$source_commit go_archive_sha256=$go_archive_sha256 binary_sha256=$binary_sha256"
+fi
 
 work=$(mktemp -d)
 server_pid=

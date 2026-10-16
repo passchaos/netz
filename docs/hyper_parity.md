@@ -2088,11 +2088,21 @@ sibling reuse, and connection-error precedence.
    warmup in both implementations and are a matched workload result, not a
    universal allocator or RSS claim.
 3. Keep the external h2spec gate current. The h2c adapter passes all 147 tests
-   in h2spec v2.6.0 strict server mode (`H2SPEC=/tmp/h2spec-download/h2spec zig
-   build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-09-10).
+   in h2spec v2.6.0 strict server mode (`H2SPEC=/absolute/path/to/h2spec zig
+   build interop-http2-h2spec -Doptimize=ReleaseFast`, reconfirmed 2026-10-16).
    The gate now supplies `--strict` itself and parses h2spec's summary so an
    empty selection, skipped case, or failed case cannot be mistaken for a
-   successful conformance run. The long-lived adapter now obtains `std.Io`
+   successful conformance run. It rejects any binary that does not report
+   v2.6.0. Its optional locked mode additionally requires the clean upstream
+   commit `70ac2294010887f48b18e2d64f5cccd48421fad1`, official Go 1.22.2
+   linux-arm64 archive SHA-256
+   `36e720b2d564980c162a48c7e97da2e407dfcc4239e1e58d98082dfa2486a0c1`,
+   injected exact version string, and h2spec binary SHA-256
+   `e9c8ab68ca035b3acc8c94ef4858a2965a6c021065a050997ce5e65e4440af0a`.
+   A direct `go build` of the same source omits upstream's ldflags and reports
+   `2.0.0 ((Unknown))`; its bytes match the formerly suspected old temporary
+   binary, proving that version text reflected build metadata rather than stale
+   test code. The long-lived adapter obtains `std.Io`
    from zio and schedules accepted connections in a `std.Io.Group`, with no
    detached OS-thread fallback; its readiness line identifies
    `server_io=zio-std-io`. This covers the external h2c wire checks.
@@ -2136,16 +2146,16 @@ sibling reuse, and connection-error precedence.
    on the rotated epochs. Passing `--tls` to
    the same h2spec command runs all 147 strict cases through TLS 1.3 and
    negotiated `h2` when h2spec is built with a current Go TLS stack that offers
-   an X25519 key share. This was reconfirmed 147/147 on 2026-09-10 by building
+   an X25519 key share. This was reconfirmed 147/147 on 2026-10-16 by building
    the unchanged upstream v2.6.0 commit `70ac2294` with Go 1.22.2. The old
    release binary reports Go 1.12.7 and fails its first TLS case before the H2
    preface; an OpenSSL control against the same netz listener negotiated TLS
    1.3, `TLS_AES_128_GCM_SHA256`, and ALPN `h2`, isolating that failure to the
    obsolete external ClientHello rather than the HTTP/2 or TLS server path.
-   After the zio migration, both h2c and TLS strict suites were rerun against
-   the upstream v2.6.0 commit `70ac2294`; each completed 147/147 with zero
-   skipped and zero failed cases. Passing `--tls12` now runs the same strict
-   HTTP/2 cases
+   After the zio migration, h2c, TLS 1.3, and forced TLS 1.2 strict suites were
+   rerun against that locked source/toolchain identity; each completed 147/147
+   with zero skipped and zero failed cases. Passing `--tls12` runs the same
+   strict HTTP/2 cases
    through the RFC 7540 TLS 1.2 profile with mandatory `h2` ALPN instead of
    relying on the peer's highest-version choice.
    Bidirectional interoperability now has a separate process boundary rather

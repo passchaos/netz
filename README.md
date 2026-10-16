@@ -1537,7 +1537,10 @@ zig build interop-webtransport-wtransport -Doptimize=ReleaseFast
 zig build interop-webtransport-chrome -Doptimize=ReleaseFast
 FIREFOX=/path/to/firefox zig build interop-webtransport-firefox -Doptimize=ReleaseFast
 # Requires h2spec 2.6.0 on PATH, or H2SPEC=/absolute/path/to/h2spec. The gate
-# always enables strict mode and rejects empty, skipped, or failed test runs.
+# rejects other reported versions, always enables strict mode, and rejects
+# empty, skipped, or failed runs. Supplying H2SPEC_SOURCE_ROOT and
+# H2SPEC_GO_ARCHIVE additionally verifies the locked upstream commit, official
+# Go 1.22.2 archive, injected version, clean checkout, and exact binary hash.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast
 # Also run the same strict suite over TLS 1.3 with mandatory h2 ALPN.
 zig build interop-http2-h2spec -Doptimize=ReleaseFast -- --tls
