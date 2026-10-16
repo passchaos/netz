@@ -1421,8 +1421,11 @@ applying TCP-only socket options.
    passed 14/14 tests. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
    without Docker: eight simultaneous peers verify masked text/binary echo,
-   Ping/Pong and Close, then an unmasked frame requires Close(1002), and a new
-   connection proves the listener and reusable worker remain healthy. On
+   Ping/Pong and Close. A separate connection interleaves Ping/Pong inside a
+   fragmented text message, completes it through Continuation, and verifies the
+   aggregate echo. An unmasked frame then requires Close(1002), invalid UTF-8
+   requires Close(1007), and a fresh successful connection after each failure
+   proves the listener and reusable worker remain healthy. On
    2026-08-21, the full WSS run completed all 517 cases with the same result as
    cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
    counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed

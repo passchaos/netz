@@ -35,16 +35,22 @@ def recv_exact(peer: socket.socket, length: int) -> bytes:
     return bytes(result)
 
 
-def send_frame(peer: socket.socket, opcode: int, payload: bytes) -> None:
+def send_frame(
+    peer: socket.socket,
+    opcode: int,
+    payload: bytes,
+    *,
+    fin: bool = True,
+) -> None:
     mask = os.urandom(4)
     if len(payload) <= 125:
-        header = bytes((0x80 | opcode, 0x80 | len(payload)))
+        header = bytes(((0x80 if fin else 0) | opcode, 0x80 | len(payload)))
     elif len(payload) <= 65535:
-        header = bytes((0x80 | opcode, 0x80 | 126)) + struct.pack(
+        header = bytes(((0x80 if fin else 0) | opcode, 0x80 | 126)) + struct.pack(
             "!H", len(payload)
         )
     else:
-        header = bytes((0x80 | opcode, 0x80 | 127)) + struct.pack(
+        header = bytes(((0x80 if fin else 0) | opcode, 0x80 | 127)) + struct.pack(
             "!Q", len(payload)
         )
     masked = bytes(
@@ -139,6 +145,31 @@ def exercise_protocol_error(port: int, use_tls: bool) -> None:
             raise AssertionError("unexpected protocol-error close code")
 
 
+def exercise_fragmented_control(port: int, use_tls: bool) -> None:
+    with upgrade(port, use_tls) as peer:
+        send_frame(peer, 1, b"frag-", fin=False)
+        send_frame(peer, 9, b"mid-fragment")
+        if receive_frame(peer) != (10, b"mid-fragment"):
+            raise AssertionError("fragment-interleaved Pong mismatch")
+        send_frame(peer, 0, b"text")
+        if receive_frame(peer) != (1, b"frag-text"):
+            raise AssertionError("fragmented text echo mismatch")
+        close = struct.pack("!H", 1000) + b"fragmented-done"
+        send_frame(peer, 8, close)
+        if receive_frame(peer) != (8, close):
+            raise AssertionError("fragmented connection Close mismatch")
+
+
+def exercise_invalid_utf8(port: int, use_tls: bool) -> None:
+    with upgrade(port, use_tls) as peer:
+        send_frame(peer, 1, b"valid-prefix\xf0\x28\x8c\x28")
+        opcode, payload = receive_frame(peer)
+        if opcode != 8 or len(payload) < 2:
+            raise AssertionError("invalid UTF-8 did not produce Close")
+        if struct.unpack("!H", payload[:2])[0] != 1007:
+            raise AssertionError("unexpected invalid-UTF-8 close code")
+
+
 def run_mode(server: Path, use_tls: bool) -> None:
     port = free_port()
     command = [str(server), str(port)]
@@ -176,15 +207,21 @@ def run_mode(server: Path, use_tls: bool) -> None:
         if errors:
             raise AssertionError(f"concurrent client failures: {errors!r}")
 
+        exercise_fragmented_control(port, use_tls)
         exercise_protocol_error(port, use_tls)
         # A connection-local protocol failure must not stop the listener or
         # poison the reusable supervisor worker.
         exercise_echo(port, use_tls, CONCURRENT_CLIENTS)
+        exercise_invalid_utf8(port, use_tls)
+        # UTF-8 failure uses a distinct RFC 6455 Close code but must remain
+        # equally isolated from the listener and reusable worker pool.
+        exercise_echo(port, use_tls, CONCURRENT_CLIENTS + 1)
         transport = "tls" if use_tls else "cleartext"
         print(
             "Autobahn zio smoke passed: "
             f"transport={transport} concurrent={CONCURRENT_CLIENTS} "
-            "protocol_error=isolated recovery_connection=true "
+            "fragmented_control=true protocol_error=isolated "
+            "utf8_error=1007 recovery_connections=2 "
             "workers=64 server_io=zio-std-io"
         )
     finally:
