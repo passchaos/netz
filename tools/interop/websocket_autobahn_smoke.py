@@ -18,6 +18,7 @@ import zlib
 
 CONCURRENT_CLIENTS = 8
 EXPECTED_RUNTIME = "workers=64 server_io=zio-std-io"
+DEFLATE_TAIL = b"\x00\x00\xff\xff"
 
 
 def free_port() -> int:
@@ -99,6 +100,7 @@ def upgrade(
     port: int,
     use_tls: bool,
     extension_offer: str | None = None,
+    expect_no_context_takeover: bool = False,
 ) -> socket.socket:
     peer = connect(port, use_tls)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -139,32 +141,54 @@ def upgrade(
         if b"sec-websocket-extensions:" in lower_response:
             raise AssertionError("server selected an unsolicited extension")
     else:
-        for token in (
-            b"permessage-deflate",
-            b"client_no_context_takeover",
-            b"server_no_context_takeover",
-        ):
+        required_tokens = [b"permessage-deflate"]
+        if expect_no_context_takeover:
+            required_tokens.extend((
+                b"client_no_context_takeover",
+                b"server_no_context_takeover",
+            ))
+        for token in required_tokens:
             if token not in lower_response:
                 raise AssertionError(
                     f"missing negotiated extension parameter: {token!r}"
                 )
+        if not expect_no_context_takeover and (
+            b"client_no_context_takeover" in lower_response
+            or b"server_no_context_takeover" in lower_response
+        ):
+            raise AssertionError("server disabled requested context takeover")
     return peer
 
 
-def deflate_message(payload: bytes) -> bytes:
-    compressor = zlib.compressobj(level=6, wbits=-15)
+def deflate_with_context(
+    compressor: zlib.Compress,
+    payload: bytes,
+) -> bytes:
     encoded = compressor.compress(payload) + compressor.flush(zlib.Z_SYNC_FLUSH)
-    if not encoded.endswith(b"\x00\x00\xff\xff"):
+    if not encoded.endswith(DEFLATE_TAIL):
         raise AssertionError("raw DEFLATE omitted the RFC 7692 tail")
     return encoded[:-4]
 
 
-def inflate_message(payload: bytes) -> bytes:
-    decompressor = zlib.decompressobj(wbits=-15)
-    decoded = decompressor.decompress(payload + b"\x00\x00\xff\xff")
+def deflate_message(payload: bytes) -> bytes:
+    return deflate_with_context(
+        zlib.compressobj(level=6, wbits=-15),
+        payload,
+    )
+
+
+def inflate_with_context(
+    decompressor: zlib.Decompress,
+    payload: bytes,
+) -> bytes:
+    decoded = decompressor.decompress(payload + DEFLATE_TAIL)
     if decompressor.unconsumed_tail:
         raise AssertionError("compressed echo left unconsumed bytes")
     return decoded
+
+
+def inflate_message(payload: bytes) -> bytes:
+    return inflate_with_context(zlib.decompressobj(wbits=-15), payload)
 
 
 def exercise_echo(port: int, use_tls: bool, index: int) -> None:
@@ -223,12 +247,17 @@ def exercise_invalid_utf8(port: int, use_tls: bool) -> None:
             raise AssertionError("unexpected invalid-UTF-8 close code")
 
 
-def exercise_compression(port: int, use_tls: bool) -> None:
+def exercise_compression_no_context(port: int, use_tls: bool) -> None:
     offer = (
         "permessage-deflate; client_no_context_takeover; "
         "server_no_context_takeover"
     )
-    with upgrade(port, use_tls, offer) as peer:
+    with upgrade(
+        port,
+        use_tls,
+        offer,
+        expect_no_context_takeover=True,
+    ) as peer:
         first_plain = b"compressed-fragment-" * 128
         first_encoded = deflate_message(first_plain)
         split = len(first_encoded) // 2
@@ -263,6 +292,49 @@ def exercise_compression(port: int, use_tls: bool) -> None:
         send_frame(peer, 8, close)
         if receive_frame(peer) != (8, close):
             raise AssertionError("compressed connection Close mismatch")
+
+
+def exercise_compression_context_takeover(
+    port: int,
+    use_tls: bool,
+) -> None:
+    with upgrade(port, use_tls, "permessage-deflate") as peer:
+        compressor = zlib.compressobj(level=6, wbits=-15)
+        decompressor = zlib.decompressobj(wbits=-15)
+        first_plain = bytes(
+            (index * 73 + 19) % 251 for index in range(4096)
+        )
+        first_encoded = deflate_with_context(compressor, first_plain)
+        send_frame(peer, 2, first_encoded, rsv1=True)
+        fin, rsv1, opcode, first_echo = receive_frame_details(peer)
+        if not fin or not rsv1 or opcode != 2:
+            raise AssertionError("first context echo flags mismatch")
+        if inflate_with_context(decompressor, first_echo) != first_plain:
+            raise AssertionError("first context echo payload mismatch")
+
+        # Repeating an incompressible 4-KiB message produces a tiny backref to
+        # the prior message. A reset implementation cannot decode either side.
+        second_plain = first_plain
+        second_encoded = deflate_with_context(compressor, second_plain)
+        if len(second_encoded) >= len(first_encoded):
+            raise AssertionError("client compressor did not reuse its history")
+        send_frame(peer, 2, second_encoded, rsv1=True)
+        fin, rsv1, opcode, second_echo = receive_frame_details(peer)
+        if not fin or not rsv1 or opcode != 2:
+            raise AssertionError("second context echo flags mismatch")
+        if inflate_with_context(decompressor, second_echo) != second_plain:
+            raise AssertionError("second context echo payload mismatch")
+        try:
+            fresh_decode = inflate_message(second_echo)
+        except zlib.error:
+            fresh_decode = None
+        if fresh_decode == second_plain:
+            raise AssertionError("server echo did not depend on prior history")
+
+        close = struct.pack("!H", 1000) + b"context-done"
+        send_frame(peer, 8, close)
+        if receive_frame(peer) != (8, close):
+            raise AssertionError("context-takeover Close mismatch")
 
 
 def run_mode(server: Path, use_tls: bool) -> None:
@@ -303,7 +375,8 @@ def run_mode(server: Path, use_tls: bool) -> None:
             raise AssertionError(f"concurrent client failures: {errors!r}")
 
         exercise_fragmented_control(port, use_tls)
-        exercise_compression(port, use_tls)
+        exercise_compression_no_context(port, use_tls)
+        exercise_compression_context_takeover(port, use_tls)
         exercise_protocol_error(port, use_tls)
         # A connection-local protocol failure must not stop the listener or
         # poison the reusable supervisor worker.
@@ -317,6 +390,7 @@ def run_mode(server: Path, use_tls: bool) -> None:
             "Autobahn zio smoke passed: "
             f"transport={transport} concurrent={CONCURRENT_CLIENTS} "
             "fragmented_control=true compression_no_context=true "
+            "compression_context=true "
             "protocol_error=isolated "
             "utf8_error=1007 recovery_connections=2 "
             "workers=64 server_io=zio-std-io"

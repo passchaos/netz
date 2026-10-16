@@ -1427,9 +1427,13 @@ applying TCP-only socket options.
    no-context-takeover parameters; an independent Python raw-DEFLATE encoder
    sends a compressed message across Continuation with an interleaved Ping,
    then a fresh inflater validates each of two compressed echoes. An unmasked
-   frame requires Close(1002), invalid UTF-8 requires Close(1007), and a fresh
-   successful connection after each failure proves the listener and reusable
-   worker remain healthy. On
+   takeover-enabled connection then repeats an incompressible 4-KiB binary
+   message through persistent Python compressor/inflater contexts; its second
+   compressed echo is rejected by a fresh inflater, proving that the server
+   really reused prior-message history rather than merely accepting the
+   parameter. An unmasked frame requires Close(1002), invalid UTF-8 requires
+   Close(1007), and a fresh successful connection after each failure proves
+   the listener and reusable worker remain healthy. On
    2026-08-21, the full WSS run completed all 517 cases with the same result as
    cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
    counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed

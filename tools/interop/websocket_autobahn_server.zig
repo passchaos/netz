@@ -79,7 +79,10 @@ fn serveForever(server: anytype) !void {
         &context,
         EchoContext.handle,
         max_connections,
-        .{ .enable_permessage_deflate = true },
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+        },
         .{
             .shutdown = &shutdown,
             .accept_error_policy = .continue_serving,
