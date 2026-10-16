@@ -632,7 +632,13 @@ Current protocol coverage includes:
   initial response, and replay without renewing the budget. Zero timeout fails
   before allocation, ticket consumption, packet-number use, or socket I/O.
   The lower-level `connectWithEarlyRequest*` family now also provides relative
-  and absolute handshake bounds. Both server paths retain
+  and absolute handshake bounds. The endpoint handler supervisor applies an
+  optional `allow`/`reject`/`inspect` replay-risk policy at request HEADERS,
+  before scheduling application code or copying DATA. A 425 admission drains
+  the remaining body and trailers directly through receive-window credit,
+  queues the HTTP response only after request FIN, and never invokes the
+  business handler; ordinary 1-RTT requests bypass the inspector. Both server
+  paths retain
   indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, distinguish an ended request with no initial HEADERS as

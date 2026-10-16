@@ -577,3 +577,195 @@ test "HTTP/3 endpoint handler supervisor isolates handler failure" {
     try std.testing.expect(shared.context.observed_handle != null);
     try std.testing.expectEqual(@as(?u62, 4), shared.context.observed_stream);
 }
+
+test "HTTP/3 endpoint replay policy sends 425 before handler side effects" {
+    var allocator_state: std.heap.DebugAllocator(.{
+        .thread_safe = true,
+    }) = .init;
+    defer std.testing.expect(allocator_state.deinit() == .ok) catch
+        @panic("HTTP/3 replay-policy leak");
+    const allocator = allocator_state.allocator();
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = "replay-policy-server",
+            .random = [_]u8{0xe1} ** 32,
+            .x25519_secret_key = [_]u8{0xe2} ** 32,
+        } },
+    );
+    defer server.deinit();
+    var endpoint = try runtime.EndpointServer.init(&server, .{});
+    var endpoint_owned = true;
+    defer if (endpoint_owned) endpoint.deinit();
+
+    const PolicyContext = struct {
+        inspected: std.atomic.Value(usize) = .init(0),
+        invalid: std.atomic.Value(bool) = .init(false),
+
+        fn inspect(
+            raw_context: *anyopaque,
+            request: runtime.ReplayRiskRequest,
+        ) runtime.ReplayRiskDecision {
+            const self: *@This() = @ptrCast(@alignCast(raw_context));
+            _ = self.inspected.fetchAdd(1, .acq_rel);
+            if (!request.mightHaveBeenEarly() or request.was_early_data) {
+                self.invalid.store(true, .release);
+            }
+            if (std.mem.eql(u8, request.path, "/reject-early")) {
+                if (request.content_length != "must-not-buffer".len) {
+                    self.invalid.store(true, .release);
+                }
+                return .too_early;
+            }
+            if (!std.mem.eql(u8, request.path, "/allow-early")) {
+                self.invalid.store(true, .release);
+            }
+            return .allow;
+        }
+    };
+    const HandlerContext = struct {
+        calls: std.atomic.Value(usize) = .init(0),
+
+        fn handle(
+            self: *@This(),
+            request: *const runtime.OwnedEndpointRequest,
+        ) runtime.Error!http3.Response {
+            if (!std.mem.eql(u8, request.path, "/allow-early") or
+                !request.mightHaveBeenEarly() or request.was_early_data)
+            {
+                return error.InvalidHeader;
+            }
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return .{ .status = 204 };
+        }
+    };
+    const Shared = struct {
+        endpoint: *runtime.EndpointServer,
+        shutdown: *std.Io.Event,
+        policy: PolicyContext = .{},
+        handler: HandlerContext = .{},
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.endpoint.serveHandlersUntil(
+                HandlerContext,
+                &self.handler,
+                HandlerContext.handle,
+                .{
+                    .shutdown = self.shutdown,
+                    .supported_versions = &.{
+                        quic.Version.version_1.wireValue(),
+                    },
+                    .max_handler_tasks = 1,
+                    .max_pending_requests = 2,
+                    // The rejected body exceeds this bound, proving admission
+                    // happens before aggregate body copying or size rejection.
+                    .max_request_body_bytes = 1,
+                    .stop_after_responses = 2,
+                    .poll_interval = .{
+                        .clock = .awake,
+                        .raw = .fromMilliseconds(1),
+                    },
+                    .error_policy = .stop,
+                    .replay_risk_policy = .{ .inspect = .{
+                        .context = &self.policy,
+                        .inspect = PolicyContext.inspect,
+                    } },
+                },
+            ) catch |err| {
+                self.err = err;
+                self.shutdown.set(
+                    self.endpoint.server.quic_server.endpoint.io,
+                );
+            };
+        }
+    };
+    var shutdown: std.Io.Event = .unset;
+    var shared = Shared{ .endpoint = &endpoint, .shutdown = &shutdown };
+    const server_thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) {
+        shutdown.set(io);
+        if (endpoint_owned) {
+            endpoint.deinit();
+            endpoint_owned = false;
+        }
+        server_thread.join();
+    };
+
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 16,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = "replay-policy-route",
+            .local_connection_id = "replay-policy-client",
+            .server_name = "localhost",
+            .random = [_]u8{0xe3} ** 32,
+            .x25519_secret_key = [_]u8{0xe4} ** 32,
+        } },
+    );
+    defer client.deinit();
+    var rejected = client.requestWithTimeout(.{
+        .method = "POST",
+        .path = "/reject-early",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "early-data", .value = "1" }},
+        .body = "must-not-buffer",
+        .trailers = &.{.{
+            .name = "x-discarded-trailer",
+            .value = "yes",
+        }},
+    }, .fromSeconds(5)) catch |err| {
+        server_thread.join();
+        joined = true;
+        if (shared.err) |server_err| return server_err;
+        return err;
+    };
+    defer rejected.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 425), rejected.response.status);
+
+    var allowed = client.requestWithTimeout(.{
+        .method = "GET",
+        .path = "/allow-early",
+        .authority = "localhost",
+        .headers = &.{.{ .name = "early-data", .value = "1" }},
+    }, .fromSeconds(5)) catch |err| {
+        server_thread.join();
+        joined = true;
+        if (shared.err) |server_err| return server_err;
+        return err;
+    };
+    defer allowed.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 204), allowed.response.status);
+
+    server_thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        shared.policy.inspected.load(.acquire),
+    );
+    try std.testing.expect(!shared.policy.invalid.load(.acquire));
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        shared.handler.calls.load(.acquire),
+    );
+}

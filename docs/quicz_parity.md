@@ -1450,6 +1450,13 @@ invalid or repeated values, remains replay-sensitive; origin-facing sends are
 canonicalized by an explicit gateway action, and responses or trailers reject
 the field. Aggregate and endpoint-handler requests expose this combined result
 through `mightHaveBeenEarly()`, including ordinary 1-RTT current hops.
+The endpoint handler supervisor can enforce `allow`, blanket `reject`, or a
+resource-specific `inspect` decision at HEADERS time. A 425 decision occurs
+before application scheduling and before DATA aggregation; subsequent DATA
+and trailers are discarded without body copying while returning receive
+credit, then the response is queued after request FIN. Ordinary 1-RTT requests
+bypass the inspector, and applications remain responsible for RFC 8470's
+cross-instance consistency requirement when using a callback.
 Initial flight packet plans and datagram views now use stack storage for the
 default 64-packet bound, retaining a heap fallback for explicitly larger
 flights. In back-to-back 50-connection ReleaseFast runs with certificate

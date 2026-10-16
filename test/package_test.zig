@@ -7150,6 +7150,26 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,
+        "ReplayRiskDecision",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ReplayRiskRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ReplayRiskInspector",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ReplayRiskPolicy",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.EndpointHandlerServeOptions,
+        "replay_risk_policy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
         "EarlyDataRetryReason",
     ));
     try std.testing.expect(@hasDecl(

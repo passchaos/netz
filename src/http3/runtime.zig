@@ -4140,6 +4140,10 @@ pub const EndpointHandlerErrorStage = endpoint_handler_supervisor.ErrorStage;
 pub const EndpointHandlerErrorPolicy = endpoint_handler_supervisor.ErrorPolicy;
 pub const EndpointHandlerErrorEvent = endpoint_handler_supervisor.ErrorEvent;
 pub const EndpointHandlerErrorObserver = endpoint_handler_supervisor.ErrorObserver;
+pub const ReplayRiskDecision = endpoint_handler_supervisor.ReplayRiskDecision;
+pub const ReplayRiskRequest = endpoint_handler_supervisor.ReplayRiskRequest;
+pub const ReplayRiskInspector = endpoint_handler_supervisor.ReplayRiskInspector;
+pub const ReplayRiskPolicy = endpoint_handler_supervisor.ReplayRiskPolicy;
 pub const OwnedEndpointRequest = endpoint_handler_supervisor.OwnedRequest;
 
 fn handshakeAdmissionDeadlineNs(

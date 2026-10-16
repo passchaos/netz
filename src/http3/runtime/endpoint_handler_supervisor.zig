@@ -26,6 +26,61 @@ pub const ErrorObserver = struct {
     observe: *const fn (context: *anyopaque, event: ErrorEvent) void,
 };
 
+pub const ReplayRiskDecision = enum { allow, too_early };
+
+/// Borrowed request metadata available before the supervisor reads DATA.
+/// Inspector callbacks run on the sole endpoint thread and must not block.
+pub const ReplayRiskRequest = struct {
+    connection_handle: quic.endpoint_dispatcher.ConnectionHandle,
+    from: std.Io.net.IpAddress,
+    stream_id: u62,
+    was_early_data: bool,
+    method: []const u8,
+    path: []const u8,
+    scheme: []const u8,
+    authority: ?[]const u8,
+    headers: []const http3.Qpack.HeaderField,
+    content_length: ?usize,
+
+    pub fn mightHaveBeenEarly(self: ReplayRiskRequest) bool {
+        return self.was_early_data or
+            early_data.requestMightHaveBeenEarly(self.headers);
+    }
+};
+
+pub const ReplayRiskInspector = struct {
+    context: *anyopaque,
+    inspect: *const fn (
+        context: *anyopaque,
+        request: ReplayRiskRequest,
+    ) ReplayRiskDecision,
+};
+
+/// Admission policy applied only to requests carrying current- or prior-hop
+/// replay risk. Ordinary 1-RTT requests bypass the inspector entirely. RFC
+/// 8470 requires resource decisions to remain consistent across server
+/// instances; applications supply that coordination for `inspect`.
+pub const ReplayRiskPolicy = union(enum) {
+    allow,
+    reject,
+    inspect: ReplayRiskInspector,
+
+    pub fn decide(
+        self: ReplayRiskPolicy,
+        request: ReplayRiskRequest,
+    ) ReplayRiskDecision {
+        if (!request.mightHaveBeenEarly()) return .allow;
+        return switch (self) {
+            .allow => .allow,
+            .reject => .too_early,
+            .inspect => |inspector| inspector.inspect(
+                inspector.context,
+                request,
+            ),
+        };
+    }
+};
+
 pub const Options = struct {
     shutdown: *std.Io.Event,
     supported_versions: []const u32,
@@ -44,6 +99,9 @@ pub const Options = struct {
     },
     error_policy: ErrorPolicy = .continue_serving,
     error_observer: ?ErrorObserver = null,
+    /// Decide replay-sensitive admission before any application handler runs
+    /// or request DATA is copied into the aggregate body buffer.
+    replay_risk_policy: ReplayRiskPolicy = .allow,
 };
 
 const RequestKey = struct {
@@ -371,6 +429,11 @@ fn State(
             .empty,
         responses: std.ArrayList(PendingResponse) = .empty,
         rejected: std.AutoHashMapUnmanaged(RequestKey, void) = .empty,
+        /// Requests admitted for a 425 before body aggregation. Their prepared
+        /// responses remain here until DATA/trailers have been discarded and
+        /// request FIN makes response-side lifecycle completion safe.
+        too_early: std.AutoHashMapUnmanaged(RequestKey, PendingResponse) =
+            .empty,
         abandoned: std.AutoHashMapUnmanaged(RequestKey, void) = .empty,
         rejected_keys: std.ArrayList(RequestKey) = .empty,
         served_requests: usize = 0,
@@ -435,6 +498,10 @@ fn State(
                 allocator,
                 pending_capacity,
             );
+            try supervisor.too_early.ensureTotalCapacity(
+                allocator,
+                pending_capacity,
+            );
             try supervisor.abandoned.ensureTotalCapacity(
                 allocator,
                 pending_capacity,
@@ -469,6 +536,11 @@ fn State(
             }
             self.responses.deinit(self.allocator);
             self.rejected.deinit(self.allocator);
+            var too_early_iterator = self.too_early.valueIterator();
+            while (too_early_iterator.next()) |pending| {
+                pending.deinit(self.allocator);
+            }
+            self.too_early.deinit(self.allocator);
             self.abandoned.deinit(self.allocator);
             self.rejected_keys.deinit(self.allocator);
             self.allocator.destroy(self.worker_context);
@@ -489,7 +561,8 @@ fn State(
                     self.active_requests.count() == 0 and
                     self.collectors.count() == 0 and
                     self.responses.items.len == 0 and
-                    self.rejected.count() == 0)
+                    self.rejected.count() == 0 and
+                    self.too_early.count() == 0)
                 {
                     return;
                 }
@@ -551,6 +624,7 @@ fn State(
                     try self.abandoned.put(self.allocator, key, {});
                 }
                 _ = self.rejected.remove(key);
+                self.removeTooEarly(key);
                 return;
             }
             const message = &event.message;
@@ -571,6 +645,22 @@ fn State(
                 );
                 return;
             }
+            if (self.too_early.contains(key)) {
+                switch (message.value) {
+                    .data_available => {
+                        if ((try session.skipRequestDataOnce(stream_id)) == null) {
+                            self.force_transport_progress = true;
+                        }
+                    },
+                    .finished => try self.finishTooEarly(key),
+                    .trailers => {},
+                    .head, .push_promise => return error.UnexpectedFrame,
+                }
+                try self.endpoint.dispatcher.refreshConnectionTimer(
+                    connection_handle,
+                );
+                return;
+            }
             switch (message.value) {
                 .head => |head| switch (head) {
                     .response => return error.UnexpectedFrame,
@@ -581,7 +671,7 @@ fn State(
                         }
                         const pending_responses = self.collectors.count() +|
                             self.active_workers +| self.responses.items.len +|
-                            @as(usize, 0);
+                            self.too_early.count();
                         const pending = pending_responses +|
                             self.rejected.count();
                         const response_budget_full =
@@ -592,6 +682,31 @@ fn State(
                             response_budget_full)
                         {
                             try self.reject(key, session);
+                            return;
+                        }
+                        const replay_request: ReplayRiskRequest = .{
+                            .connection_handle = connection_handle,
+                            .from = message.from,
+                            .stream_id = stream_id,
+                            .was_early_data = message.was_early_data,
+                            .method = request_head.method,
+                            .path = request_head.path,
+                            .scheme = request_head.scheme,
+                            .authority = request_head.authority,
+                            .headers = request_head.headers,
+                            .content_length = request_head.content_length,
+                        };
+                        if (self.options.replay_risk_policy.decide(
+                            replay_request,
+                        ) == .too_early) {
+                            try self.queueTooEarly(
+                                key,
+                                message,
+                                request_head,
+                            );
+                            try self.endpoint.dispatcher.refreshConnectionTimer(
+                                connection_handle,
+                            );
                             return;
                         }
                         if (request_head.content_length) |length| {
@@ -660,6 +775,54 @@ fn State(
             try self.endpoint.dispatcher.refreshConnectionTimer(
                 connection_handle,
             );
+        }
+
+        fn queueTooEarly(
+            self: *Self,
+            key: RequestKey,
+            message: *Runtime.StreamingRequestEvent.Message,
+            request_head: http3.DecodedRequestHead,
+        ) !void {
+            var collector = Collector{
+                .from = message.from,
+                .was_early_data = message.was_early_data,
+                .head = request_head,
+            };
+            const request_value = collector.takeRequest(
+                self.allocator,
+                key.connection_handle,
+                key.stream_id,
+            ) catch |err| {
+                collector.deinit(self.allocator);
+                return err;
+            };
+            // The request head is now owned by request_value rather than the
+            // event that will be deinitialized by the endpoint loop.
+            message.value = .data_available;
+            const request = self.allocator.create(OwnedRequest) catch |err| {
+                var owned = request_value;
+                owned.deinit(self.allocator);
+                return err;
+            };
+            request.* = request_value;
+            errdefer {
+                request.deinit(self.allocator);
+                self.allocator.destroy(request);
+            }
+            var response = try OwnedResponse.clone(
+                self.options.response_allocator,
+                .{
+                    .status = early_data.too_early_status,
+                    .request_method = request.method,
+                },
+            );
+            errdefer response.deinit();
+            try self.too_early.put(self.allocator, key, .{
+                .key = key,
+                .request = request,
+                .response = response,
+                .invalid_final = false,
+            });
         }
 
         fn dispatchReadyRequests(self: *Self) !void {
@@ -971,6 +1134,21 @@ fn State(
             }
         }
 
+        fn finishTooEarly(self: *Self, key: RequestKey) !void {
+            const removed = self.too_early.fetchRemove(key) orelse
+                return error.UnexpectedStream;
+            var pending = removed.value;
+            self.responses.append(self.allocator, pending) catch |err| {
+                pending.deinit(self.allocator);
+                return err;
+            };
+        }
+
+        fn removeTooEarly(self: *Self, key: RequestKey) void {
+            var removed = self.too_early.fetchRemove(key) orelse return;
+            removed.value.deinit(self.allocator);
+        }
+
         fn dropConnection(
             self: *Self,
             handle: quic.endpoint_dispatcher.ConnectionHandle,
@@ -996,6 +1174,17 @@ fn State(
                     }
                 }
                 _ = self.rejected.remove(found orelse break);
+            }
+            while (true) {
+                var found: ?RequestKey = null;
+                var iterator = self.too_early.keyIterator();
+                while (iterator.next()) |key| {
+                    if (key.connection_handle == handle) {
+                        found = key.*;
+                        break;
+                    }
+                }
+                self.removeTooEarly(found orelse break);
             }
             var active_iterator = self.active_requests.keyIterator();
             while (active_iterator.next()) |key| {
@@ -1063,4 +1252,35 @@ test "HTTP/3 endpoint handler collector preserves early-data provenance" {
     try std.testing.expect(request.was_early_data);
     try std.testing.expectEqual(@as(usize, 7), request.connection_handle);
     try std.testing.expectEqual(@as(u62, 0), request.stream_id);
+}
+
+test "HTTP/3 replay-risk policy bypasses ordinary requests" {
+    const base = ReplayRiskRequest{
+        .connection_handle = 1,
+        .from = .{ .ip4 = .loopback(443) },
+        .stream_id = 0,
+        .was_early_data = false,
+        .method = "GET",
+        .path = "/",
+        .scheme = "https",
+        .authority = "localhost",
+        .headers = &.{},
+        .content_length = null,
+    };
+    try std.testing.expectEqual(
+        ReplayRiskDecision.allow,
+        @as(ReplayRiskPolicy, .reject).decide(base),
+    );
+    var current_hop = base;
+    current_hop.was_early_data = true;
+    try std.testing.expectEqual(
+        ReplayRiskDecision.too_early,
+        @as(ReplayRiskPolicy, .reject).decide(current_hop),
+    );
+    var prior_hop = base;
+    prior_hop.headers = &.{.{ .name = "early-data", .value = "1" }};
+    try std.testing.expectEqual(
+        ReplayRiskDecision.too_early,
+        @as(ReplayRiskPolicy, .reject).decide(prior_hop),
+    );
 }
