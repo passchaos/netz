@@ -427,6 +427,195 @@ test "CookieJar domain security and prefixes fail closed" {
     );
 }
 
+test "CookieJar CHIPS state is isolated by complete partition key" {
+    const allocator = std.testing.allocator;
+    var jar = try cookies.Jar.init(allocator, .{});
+    defer jar.deinit();
+    const request_uri = "https://cdn.example/widget";
+    _ = try jar.storeSetCookie(
+        request_uri,
+        "global=one; Secure; SameSite=None; Path=/",
+        now,
+    );
+    const site_a = cookies.PartitionKey{
+        .top_level_site = "HTTPS://SITE-A.EXAMPLE/",
+    };
+    const site_b = cookies.PartitionKey{
+        .top_level_site = "https://site-b.example",
+    };
+    const site_a_embedded = cookies.PartitionKey{
+        .top_level_site = "https://site-a.example",
+        .has_cross_site_ancestor = true,
+    };
+    _ = try jar.storeSetCookieWithContext(
+        request_uri,
+        "chip=a; Secure; SameSite=None; Partitioned; Path=/",
+        now,
+        .{ .site = .cross_site, .partition_key = site_a },
+    );
+    _ = try jar.storeSetCookieWithContext(
+        request_uri,
+        "chip=b; Secure; SameSite=None; Partitioned; Path=/",
+        now,
+        .{ .site = .cross_site, .partition_key = site_b },
+    );
+    _ = try jar.storeSetCookieWithContext(
+        request_uri,
+        "chip=embedded; Secure; SameSite=None; Partitioned; Path=/",
+        now,
+        .{ .site = .cross_site, .partition_key = site_a_embedded },
+    );
+    try std.testing.expectEqual(@as(usize, 4), jar.count());
+
+    const a = try jar.cookieHeaderValueAlloc(
+        allocator,
+        request_uri,
+        now,
+        .{ .site = .cross_site, .partition_key = .{
+            .top_level_site = "https://site-a.example",
+        } },
+    );
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings("global=one; chip=a", a);
+    const b = try jar.cookieHeaderValueAlloc(
+        allocator,
+        request_uri,
+        now,
+        .{ .site = .cross_site, .partition_key = site_b },
+    );
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings("global=one; chip=b", b);
+    const embedded = try jar.cookieHeaderValueAlloc(
+        allocator,
+        request_uri,
+        now,
+        .{ .site = .cross_site, .partition_key = site_a_embedded },
+    );
+    defer allocator.free(embedded);
+    try std.testing.expectEqualStrings(
+        "global=one; chip=embedded",
+        embedded,
+    );
+    const unpartitioned = try jar.cookieHeaderValueAlloc(
+        allocator,
+        request_uri,
+        now,
+        .{ .site = .cross_site },
+    );
+    defer allocator.free(unpartitioned);
+    try std.testing.expectEqualStrings("global=one", unpartitioned);
+
+    try std.testing.expectEqual(
+        cookies.StoreResult.replaced,
+        try jar.storeSetCookieWithContext(
+            request_uri,
+            "chip=a2; Secure; SameSite=None; Partitioned; Path=/",
+            now + 1,
+            .{ .site = .cross_site, .partition_key = site_a },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 4), jar.count());
+    try std.testing.expectEqual(
+        cookies.StoreResult.deleted,
+        try jar.storeSetCookieWithContext(
+            request_uri,
+            "chip=gone; Secure; SameSite=None; Partitioned; " ++
+                "Path=/; Max-Age=0",
+            now + 2,
+            .{ .site = .cross_site, .partition_key = site_a },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), jar.count());
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookieWithContext(
+            request_uri,
+            "missing-key=x; Secure; Partitioned",
+            now,
+            .{},
+        ),
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.ignored,
+        try jar.storeSetCookieWithContext(
+            request_uri,
+            "missing-secure=x; Partitioned",
+            now,
+            .{ .partition_key = site_a },
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidPartitionKey,
+        jar.storeSetCookieWithContext(
+            request_uri,
+            "invalid-key=x; Secure; Partitioned",
+            now,
+            .{ .partition_key = .{
+                .top_level_site = "https://site-a.example:8443",
+            } },
+        ),
+    );
+    try std.testing.expectEqual(@as(usize, 3), jar.count());
+}
+
+test "CookieJar enforces independent per-partition domain limits" {
+    const allocator = std.testing.allocator;
+    var jar = try cookies.Jar.init(allocator, .{
+        .max_cookies = 16,
+        .max_cookies_per_domain = 1,
+        .max_partitioned_cookies_per_domain = 2,
+    });
+    defer jar.deinit();
+    const uri = "https://cdn.example/";
+    _ = try jar.storeSetCookie(uri, "global-old=one", now);
+    _ = try jar.storeSetCookie(uri, "global-new=two", now + 1);
+    const site_a = cookies.PartitionKey{
+        .top_level_site = "https://site-a.example",
+    };
+    const site_b = cookies.PartitionKey{
+        .top_level_site = "https://site-b.example",
+    };
+    inline for (.{ "a-old=1", "a-middle=2", "a-new=3" }, 0..) |value, index| {
+        _ = try jar.storeSetCookieWithContext(
+            uri,
+            value ++ "; Secure; Partitioned",
+            now + 2 + index,
+            .{ .partition_key = site_a },
+        );
+    }
+    inline for (.{ "b-one=1", "b-two=2" }, 0..) |value, index| {
+        _ = try jar.storeSetCookieWithContext(
+            uri,
+            value ++ "; Secure; Partitioned",
+            now + 5 + index,
+            .{ .partition_key = site_b },
+        );
+    }
+    try std.testing.expectEqual(@as(usize, 5), jar.count());
+    const a = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        now + 8,
+        .{ .partition_key = site_a },
+    );
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings(
+        "global-new=two; a-middle=2; a-new=3",
+        a,
+    );
+    const b = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        now + 8,
+        .{ .partition_key = site_b },
+    );
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings(
+        "global-new=two; b-one=1; b-two=2",
+        b,
+    );
+}
+
 fn publicSuffix(_: ?*anyopaque, domain: []const u8) bool {
     return std.mem.eql(u8, domain, "com") or
         std.mem.eql(u8, domain, "co.uk");

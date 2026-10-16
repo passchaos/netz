@@ -1,8 +1,10 @@
 //! Explicitly lossy Netscape/curl cookies.txt interoperability.
 //!
 //! This format preserves domain scope, path, Secure, HttpOnly, expiry,
-//! name, and value. It cannot preserve SameSite or original creation/access
-//! time, so callers must acknowledge that downgrade on every operation.
+//! name, and value. It cannot preserve SameSite, CHIPS partition keys, or
+//! original creation/access time, so callers must acknowledge that downgrade
+//! on every operation. Partitioned cookies are omitted rather than flattened
+//! into unsafe unpartitioned state.
 
 const std = @import("std");
 const snapshot = @import("snapshot.zig");
@@ -38,6 +40,7 @@ pub fn encode(
     try out.appendSlice(allocator, header);
     var expiration_buffer: [32]u8 = undefined;
     for (cookies) |cookie| {
+        if (cookie.partition_site != null) continue;
         if (cookie.expires_at) |deadline| {
             if (deadline <= now_unix_seconds) continue;
         } else if (!options.include_session) continue;
@@ -165,6 +168,8 @@ pub fn decode(
         }
         const path = try allocator.dupe(u8, fields[2]);
         errdefer allocator.free(path);
+        const partition_site = try allocator.dupe(u8, "");
+        errdefer allocator.free(partition_site);
         const order: u64 = @intCast(records.items.len + 1);
         try records.append(allocator, .{
             .name = name,
@@ -175,6 +180,10 @@ pub fn decode(
             .secure = secure,
             .http_only = http_only,
             .host_only = !domain_cookie,
+            .partitioned = false,
+            .partition_site = partition_site,
+            .partition_secure = false,
+            .partition_cross_site_ancestor = false,
             .same_site = 0,
             .created_at = now_unix_seconds,
             .creation_order = order,

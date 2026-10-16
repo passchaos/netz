@@ -1124,6 +1124,22 @@ case, missing attributes, Domain/Path violations, non-HTTP APIs, full snapshot
 round trips, invalid lossy imports, and RFC 9220 request/response CookieJar
 integration; cleartext RFC 8441 also proves a valid secure Host-Http cookie is
 not emitted.
+CHIPS `Partitioned` is implemented as a true compound storage key rather than
+an ignored extension attribute. `CookiePartitionKey` carries a caller-supplied
+schemeful top-level site plus Chrome's cross-site-ancestor bit; Netz validates
+and canonicalizes the HTTP(S) site but deliberately requires the application
+to resolve its registrable domain with a current PSL. Partitioned Set-Cookie
+requires Secure and an explicit StoreContext key. Cookies with identical
+name/domain/host-only/path coexist across keys, replacement/deletion and secure
+overlay checks remain inside one partition, and retrieval emits only the
+matching partition alongside ordinary unpartitioned cookies. A separate
+configurable per-domain/per-partition limit defaults to 50, while the global
+Jar bound still caps adversarial partition proliferation. Snapshot v2 retains
+the complete key and reads unpartitioned v1 files; Netscape/curl export omits
+partitioned state instead of unsafely flattening it. Tests cover key
+canonicalization, ancestor-bit isolation, same-name replacement/deletion,
+independent eviction, invalid/missing keys, v1 migration, v2 round trips and a
+real RFC 9220 Partitioned request/Set-Cookie exchange.
 Persistent state has two deliberately separate contracts. The full binary
 snapshot preserves SameSite, host-only identity, creation/access order,
 HttpOnly/Secure, absolute expiry and path/domain bytes; it excludes session and

@@ -17,7 +17,10 @@ pub const ContentStreamResult = content_coding.StreamResult;
 pub const ContentStreamStatus = content_coding.StreamStatus;
 pub const CookieJar = cookies.Jar;
 pub const CookieMaximumBytes = cookies.maximum_cookie_bytes;
+pub const CookieMaximumPartitionSiteBytes =
+    cookies.maximum_partition_site_bytes;
 pub const CookieJarConfig = cookies.Config;
+pub const CookiePartitionKey = cookies.PartitionKey;
 pub const CookieDomainPolicy = cookies.DomainPolicy;
 pub const CookiePublicSuffixChecker = cookies.PublicSuffixChecker;
 pub const CookieSiteContext = cookies.SiteContext;

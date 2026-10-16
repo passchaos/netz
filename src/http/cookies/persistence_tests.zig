@@ -24,6 +24,25 @@ test "CookieJar snapshot round trip preserves full persistent metadata" {
         "__Host-Http-server=p; Max-Age=3600; Secure; HttpOnly; Path=/",
         now,
     );
+    const site_a = cookies.PartitionKey{
+        .top_level_site = "https://site-a.example",
+    };
+    const site_b = cookies.PartitionKey{
+        .top_level_site = "https://site-b.example",
+        .has_cross_site_ancestor = true,
+    };
+    _ = try jar.storeSetCookieWithContext(
+        "https://www.example.com/",
+        "chip=a; Max-Age=3600; Secure; Partitioned; Path=/",
+        now,
+        .{ .partition_key = site_a },
+    );
+    _ = try jar.storeSetCookieWithContext(
+        "https://www.example.com/",
+        "chip=b; Max-Age=3600; Secure; Partitioned; Path=/",
+        now,
+        .{ .partition_key = site_b },
+    );
     _ = try jar.storeSetCookie(
         "https://www.example.com/",
         "session=discarded; Path=/",
@@ -36,7 +55,7 @@ test "CookieJar snapshot round trip preserves full persistent metadata" {
     var restored = try cookies.Jar.init(allocator, config);
     defer restored.deinit();
     try restored.restoreSnapshot(encoded.items, now);
-    try std.testing.expectEqual(@as(usize, 3), restored.count());
+    try std.testing.expectEqual(@as(usize, 5), restored.count());
 
     var reencoded: std.ArrayList(u8) = .empty;
     defer reencoded.deinit(allocator);
@@ -53,6 +72,28 @@ test "CookieJar snapshot round trip preserves full persistent metadata" {
     try std.testing.expectEqualStrings(
         "domain=d; host=p; __Host-Http-server=p",
         value,
+    );
+    const partition_a = try restored.cookieHeaderValueAlloc(
+        allocator,
+        "https://www.example.com/docs/item",
+        now,
+        .{ .partition_key = site_a },
+    );
+    defer allocator.free(partition_a);
+    try std.testing.expectEqualStrings(
+        "domain=d; host=p; __Host-Http-server=p; chip=a",
+        partition_a,
+    );
+    const partition_b = try restored.cookieHeaderValueAlloc(
+        allocator,
+        "https://www.example.com/docs/item",
+        now,
+        .{ .partition_key = site_b },
+    );
+    defer allocator.free(partition_b);
+    try std.testing.expectEqualStrings(
+        "domain=d; host=p; __Host-Http-server=p; chip=b",
+        partition_b,
     );
     try std.testing.expectEqual(@as(usize, 0), restored.endSession());
 }
@@ -93,6 +134,52 @@ test "CookieJar snapshot restore is transactional and policy bound" {
         target.restoreSnapshot(corrupt, now),
     );
     try expectCookie(&target, "https://safe.example/", "old=unchanged");
+}
+
+test "CookieJar snapshot v2 restores legacy unpartitioned v1" {
+    const allocator = std.testing.allocator;
+    var source = try cookies.Jar.init(allocator, .{});
+    defer source.deinit();
+    _ = try source.storeSetCookie(
+        "https://legacy.example/",
+        "legacy=one; Max-Age=60; Secure; HttpOnly; Path=/",
+        now,
+    );
+    var current: std.ArrayList(u8) = .empty;
+    defer current.deinit(allocator);
+    try source.encodeSnapshot(now, &current);
+
+    // Version 2 appends one partition-site blob per record. This one-record,
+    // unpartitioned fixture therefore becomes the exact v1 layout by dropping
+    // its zero-length blob, changing the version, and recomputing the CRC.
+    var legacy: std.ArrayList(u8) = .empty;
+    defer legacy.deinit(allocator);
+    try legacy.appendSlice(allocator, current.items[0 .. current.items.len - 8]);
+    const magic = "netz-http-cookie-jar\x00";
+    std.mem.writeInt(
+        u32,
+        legacy.items[magic.len..][0..@sizeOf(u32)],
+        1,
+        .big,
+    );
+    const crc = std.hash.crc.Crc32.hash(legacy.items);
+    const crc_start = legacy.items.len;
+    try legacy.resize(allocator, crc_start + @sizeOf(u32));
+    std.mem.writeInt(
+        u32,
+        legacy.items[crc_start..][0..@sizeOf(u32)],
+        crc,
+        .big,
+    );
+
+    var restored = try cookies.Jar.init(allocator, .{});
+    defer restored.deinit();
+    try restored.restoreSnapshot(legacy.items, now);
+    try expectCookie(
+        &restored,
+        "https://legacy.example/",
+        "legacy=one",
+    );
 }
 
 test "CookieJar snapshot file is atomic and excludes expired state" {
@@ -152,6 +239,14 @@ test "CookieJar Netscape compatibility is explicit and metadata-lossy" {
         "session=three; Path=/",
         now,
     );
+    _ = try jar.storeSetCookieWithContext(
+        "https://www.example.com/",
+        "partitioned=hidden; Max-Age=60; Secure; Partitioned; Path=/",
+        now,
+        .{ .partition_key = .{
+            .top_level_site = "https://top.example",
+        } },
+    );
 
     var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(allocator);
@@ -179,6 +274,9 @@ test "CookieJar Netscape compatibility is explicit and metadata-lossy" {
         ".example.com\tTRUE\t/docs\tFALSE\t",
     ) != null);
     try std.testing.expect(std.mem.indexOf(u8, encoded.items, "session") == null);
+    try std.testing.expect(
+        std.mem.indexOf(u8, encoded.items, "partitioned") == null,
+    );
 
     var restored = try cookies.Jar.init(allocator, config);
     defer restored.deinit();

@@ -46,10 +46,15 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
     defer allocator.free(uri);
     var jar = try http_cookies.Jar.init(allocator, .{});
     defer jar.deinit();
-    _ = try jar.storeSetCookie(
+    const partition_key = http_cookies.PartitionKey{
+        .top_level_site = "https://top.example",
+        .has_cross_site_ancestor = true,
+    };
+    _ = try jar.storeSetCookieWithContext(
         uri,
-        "__Host-Http-seed=one; Secure; HttpOnly; Path=/",
+        "__Host-Http-seed=one; Secure; HttpOnly; Partitioned; Path=/",
         std.Io.Clock.real.now(io).toSeconds(),
+        .{ .partition_key = partition_key },
     );
 
     const Shared = struct {
@@ -81,7 +86,8 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
             try std.testing.expect(cookie.never_indexed);
             var connection = try pending.acceptWithHeaders(&.{.{
                 .name = "set-cookie",
-                .value = "__Http-accepted=two; Secure; HttpOnly; Path=/",
+                .value = "__Http-accepted=two; Secure; HttpOnly; " ++
+                    "Partitioned; Path=/",
             }});
             pending_owned = false;
             defer connection.deinit();
@@ -102,7 +108,11 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
         .{ .ip4 = .loopback(0) },
         uri,
         .{
-            .cookies = .{ .jar = &jar },
+            .cookies = .{
+                .jar = &jar,
+                .request_context = .{ .partition_key = partition_key },
+                .store_context = .{ .partition_key = partition_key },
+            },
             .h3 = .{ .handshake = .{
                 .original_destination_connection_id = &original_dcid,
                 .local_connection_id = &client_cid,
@@ -119,13 +129,23 @@ test "WebSocket HTTP3 URI CookieJar stores accepted response" {
         allocator,
         uri,
         std.Io.Clock.real.now(io).toSeconds(),
-        .{},
+        .{ .partition_key = partition_key },
     );
     defer allocator.free(value);
     try std.testing.expectEqualStrings(
         "__Host-Http-seed=one; __Http-accepted=two",
         value,
     );
+    const isolated = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .{ .partition_key = .{
+            .top_level_site = "https://other.example",
+        } },
+    );
+    defer allocator.free(isolated);
+    try std.testing.expectEqualStrings("", isolated);
 
     thread.join();
     joined = true;

@@ -20,6 +20,7 @@ pub const ParsedCookie = struct {
     expires_at: ?i64 = null,
     secure: bool = false,
     http_only: bool = false,
+    partitioned: bool = false,
     same_site: SameSite = .default,
 };
 
@@ -77,6 +78,8 @@ pub fn parse(
             result.secure = true;
         } else if (std.ascii.eqlIgnoreCase(attribute_name, "httponly")) {
             result.http_only = true;
+        } else if (std.ascii.eqlIgnoreCase(attribute_name, "partitioned")) {
+            result.partitioned = true;
         } else if (std.ascii.eqlIgnoreCase(attribute_name, "samesite")) {
             result.same_site = if (std.ascii.eqlIgnoreCase(
                 attribute_value,
@@ -145,6 +148,7 @@ test "Set-Cookie syntax validates pair and attribute grammar" {
     try std.testing.expectEqualStrings("/docs", parsed.path.?);
     try std.testing.expect(parsed.secure);
     try std.testing.expect(parsed.http_only);
+    try std.testing.expect(!parsed.partitioned);
     try std.testing.expectEqual(SameSite.lax, parsed.same_site);
     try std.testing.expectEqual(@as(?i64, 160), parsed.expires_at);
 
@@ -163,6 +167,14 @@ test "Set-Cookie syntax validates pair and attribute grammar" {
     try std.testing.expect(parse("name=bad\x7fvalue", 4096, 0) == null);
     try std.testing.expect(parse("=", 4096, 0) == null);
     try std.testing.expect(parse("name=value", 8, 0) == null);
+}
+
+test "Set-Cookie syntax recognizes Partitioned case-insensitively" {
+    try std.testing.expect(parse(
+        "sid=one; pArTiTiOnEd=value",
+        4096,
+        0,
+    ).?.partitioned);
 }
 
 test "Set-Cookie Max-Age is strict saturating and overrides Expires" {

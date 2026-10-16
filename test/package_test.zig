@@ -282,7 +282,24 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http, "HeaderIterator"));
     try std.testing.expect(@hasDecl(netz.http, "CookieJar"));
     try std.testing.expect(@hasDecl(netz.http, "CookieMaximumBytes"));
+    try std.testing.expect(@hasDecl(
+        netz.http,
+        "CookieMaximumPartitionSiteBytes",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "CookieJarConfig"));
+    try std.testing.expect(@hasDecl(netz.http, "CookiePartitionKey"));
+    try std.testing.expect(@hasField(
+        netz.http.CookieJarConfig,
+        "max_partitioned_cookies_per_domain",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http.CookieRequestContext,
+        "partition_key",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http.CookieStoreContext,
+        "partition_key",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "CookieDomainPolicy"));
     try std.testing.expect(@hasDecl(netz.http, "CookiePublicSuffixChecker"));
     try std.testing.expect(@hasDecl(netz.http, "CookieSiteContext"));

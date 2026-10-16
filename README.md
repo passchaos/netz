@@ -194,7 +194,10 @@ Current protocol coverage includes:
   host/default paths, Secure/HttpOnly, case-insensitive `__Secure-`/`__Host-`
   rules, plus the current layered-cookies `__Http-`/`__Host-Http-`
   Secure+HttpOnly constraints and unconditional value-only prefix rejection;
-  insecure secure-cookie overlay protection, SameSite
+  CHIPS `Partitioned` cookies with Secure enforcement, explicit schemeful-site
+  plus cross-site-ancestor keys, independent replacement/selection and a
+  separate 50-cookie per-domain/per-partition default; insecure secure-cookie
+  overlay protection, SameSite
   Strict/Lax/None/Lax-by-default and the bounded unsafe-navigation window;
   preserves host-only and Domain cookies as distinct keys; and emits ordered
   Cookie values into caller or allocator storage. A dedicated redirected-
@@ -206,7 +209,8 @@ Current protocol coverage includes:
   aggregate state from creating an unbounded request field. Bounded
   per-domain/global eviction
   prefers non-Secure excess state then oldest access, and `endSession` removes
-  non-persistent cookies. Its full-fidelity persistent snapshot is versioned,
+  non-persistent cookies. Its full-fidelity persistent snapshot is versioned
+  (v2 retains partition keys and restores unpartitioned v1),
   CRC-checked, capacity/policy validated, transactionally restored, excludes
   expired/session state, and uses file fsync, atomic replacement, plus parent-
   directory fsync with mode 0600. CRC detects corruption, not malicious
@@ -215,7 +219,8 @@ Current protocol coverage includes:
   `*NetscapeLossy` APIs preserve curl-compatible
   domain/path/Secure/HttpOnly/expiry/name/value fields but require an explicit
   metadata-loss acknowledgement because SameSite and original timestamps
-  cannot be represented,
+  cannot be represented; partitioned cookies are safely omitted instead of
+  being flattened into cross-site state,
 - A single-owner `http.CookieSession` composition that owns the unified
   H1/H2/optional-H3 Pool plus CookieJar. It rejects ambiguous caller Cookie
   fields, appends derived Cookie as HPACK/QPACK Never Indexed, commits every

@@ -4,7 +4,8 @@ const std = @import("std");
 const durability = @import("../../internal/durability.zig");
 
 const magic = "netz-http-cookie-jar\x00";
-const version: u32 = 1;
+const version: u32 = 2;
+const legacy_version: u32 = 1;
 pub const max_snapshot_bytes: usize = 32 * 1024 * 1024;
 
 pub const Error = std.mem.Allocator.Error || error{
@@ -27,6 +28,10 @@ pub const Record = struct {
     secure: bool,
     http_only: bool,
     host_only: bool,
+    partitioned: bool,
+    partition_site: []u8,
+    partition_secure: bool,
+    partition_cross_site_ancestor: bool,
     same_site: u8,
     created_at: i64,
     creation_order: u64,
@@ -39,6 +44,7 @@ pub const Record = struct {
             allocator.free(self.value);
             allocator.free(self.domain);
             allocator.free(self.path);
+            allocator.free(self.partition_site);
         }
         self.* = undefined;
     }
@@ -86,6 +92,11 @@ pub fn encode(
         flags |= @as(u8, @intFromBool(cookie.secure)) << 0;
         flags |= @as(u8, @intFromBool(cookie.http_only)) << 1;
         flags |= @as(u8, @intFromBool(cookie.host_only)) << 2;
+        flags |= @as(u8, @intFromBool(cookie.partition_site != null)) << 3;
+        flags |= @as(u8, @intFromBool(cookie.partition_secure)) << 4;
+        flags |= @as(u8, @intFromBool(
+            cookie.partition_cross_site_ancestor,
+        )) << 5;
         try appendInt(out, allocator, u8, flags);
         try appendInt(
             out,
@@ -101,6 +112,11 @@ pub fn encode(
         try appendBlob(out, allocator, cookie.value);
         try appendBlob(out, allocator, cookie.domain);
         try appendBlob(out, allocator, cookie.path);
+        try appendBlob(
+            out,
+            allocator,
+            cookie.partition_site orelse &.{},
+        );
         if (out.items.len - start > max_snapshot_bytes - @sizeOf(u32)) {
             return error.SnapshotLimitExceeded;
         }
@@ -137,7 +153,8 @@ pub fn decode(
     if (!std.mem.eql(u8, try cursor.readSlice(magic.len), magic)) {
         return error.CorruptSnapshot;
     }
-    if (try cursor.readInt(u32) != version) {
+    const encoded_version = try cursor.readInt(u32);
+    if (encoded_version != version and encoded_version != legacy_version) {
         return error.UnsupportedSnapshotVersion;
     }
     const saved_at = try cursor.readInt(i64);
@@ -153,7 +170,11 @@ pub fn decode(
     try records.ensureTotalCapacity(allocator, count);
     for (0..count) |_| {
         const flags = try cursor.readInt(u8);
-        if (flags & ~@as(u8, 0x07) != 0) return error.CorruptSnapshot;
+        const allowed_flags: u8 = if (encoded_version == legacy_version)
+            0x07
+        else
+            0x3f;
+        if (flags & ~allowed_flags != 0) return error.CorruptSnapshot;
         const same_site = try cursor.readInt(u8);
         if (same_site > 3) return error.CorruptSnapshot;
         const expires_at = try cursor.readInt(i64);
@@ -168,6 +189,11 @@ pub fn decode(
         errdefer allocator.free(domain);
         const path = try cursor.readBlobAlloc(allocator);
         errdefer allocator.free(path);
+        const partition_site = if (encoded_version == legacy_version)
+            try allocator.dupe(u8, "")
+        else
+            try cursor.readBlobAlloc(allocator);
+        errdefer allocator.free(partition_site);
         records.appendAssumeCapacity(.{
             .name = name,
             .value = value,
@@ -177,6 +203,10 @@ pub fn decode(
             .secure = flags & 0x01 != 0,
             .http_only = flags & 0x02 != 0,
             .host_only = flags & 0x04 != 0,
+            .partitioned = flags & 0x08 != 0,
+            .partition_site = partition_site,
+            .partition_secure = flags & 0x10 != 0,
+            .partition_cross_site_ancestor = flags & 0x20 != 0,
             .same_site = same_site,
             .created_at = created_at,
             .creation_order = creation_order,

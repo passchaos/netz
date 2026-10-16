@@ -15,12 +15,14 @@ const snapshot = @import("snapshot.zig");
 const net = std.Io.net;
 
 pub const maximum_cookie_bytes: usize = 4_096;
+pub const maximum_partition_site_bytes: usize = net.HostName.max_len + 10;
 
 pub const Error = std.mem.Allocator.Error || error{
     InvalidConfig,
     InvalidUri,
     BufferTooShort,
     HeaderTooLarge,
+    InvalidPartitionKey,
 };
 pub const SnapshotError = Error || snapshot.Error;
 pub const SnapshotFileError = SnapshotError || snapshot.FileError;
@@ -35,18 +37,32 @@ pub const SameSite = syntax.SameSite;
 
 pub const SiteContext = enum { same_site, cross_site };
 
+/// Caller-supplied browser/storage partition. `top_level_site` must be a
+/// schemeful site serialization such as `https://example.com`, using a
+/// caller-resolved registrable domain (or IP literal), with no port, path,
+/// query, fragment, or userinfo. Netz validates and canonicalizes it but does
+/// not bundle a potentially stale Public Suffix List.
+pub const PartitionKey = struct {
+    top_level_site: []const u8,
+    /// Separate a same-site top-level document embedded below a cross-site
+    /// ancestor from a genuinely same-site ancestor chain.
+    has_cross_site_ancestor: bool = false,
+};
+
 pub const RequestContext = struct {
     site: SiteContext = .same_site,
     top_level_navigation: bool = false,
     method: []const u8 = "GET",
     /// False models a non-HTTP API and excludes HttpOnly cookies.
     http_api: bool = true,
+    partition_key: ?PartitionKey = null,
 };
 
 pub const StoreContext = struct {
     site: SiteContext = .same_site,
     top_level_navigation: bool = false,
     http_api: bool = true,
+    partition_key: ?PartitionKey = null,
 };
 
 pub const PublicSuffixChecker = struct {
@@ -74,6 +90,7 @@ pub const DomainPolicy = union(enum) {
 pub const Config = struct {
     max_cookies: usize = 3_000,
     max_cookies_per_domain: usize = 180,
+    max_partitioned_cookies_per_domain: usize = 50,
     max_cookie_bytes: usize = maximum_cookie_bytes,
     max_header_bytes: usize = 16 * 1024,
     max_lifetime_seconds: u32 = 400 * std.time.s_per_day,
@@ -118,6 +135,9 @@ const Cookie = struct {
     secure: bool,
     http_only: bool,
     host_only: bool,
+    partition_site: ?[]u8,
+    partition_secure: bool,
+    partition_cross_site_ancestor: bool,
     same_site: SameSite,
     created_at: i64,
     creation_order: u64,
@@ -128,6 +148,7 @@ const Cookie = struct {
         allocator.free(self.value);
         allocator.free(self.domain);
         allocator.free(self.path);
+        if (self.partition_site) |site| allocator.free(site);
         self.* = undefined;
     }
 };
@@ -144,6 +165,7 @@ pub const Jar = struct {
     ) Error!Jar {
         if (config.max_cookies == 0 or
             config.max_cookies_per_domain == 0 or
+            config.max_partitioned_cookies_per_domain == 0 or
             config.max_cookie_bytes == 0 or
             config.max_cookie_bytes > maximum_cookie_bytes or
             config.max_header_bytes == 0 or
@@ -343,11 +365,18 @@ pub const Jar = struct {
                 if (deadline <= now_unix_seconds) continue;
             }
             try validateSnapshotRecord(record.*, self.config);
+            const record_partition_key: ?NormalizedPartitionKey =
+                if (record.partitioned) .{
+                    .site = record.partition_site,
+                    .secure = record.partition_secure,
+                    .has_cross_site_ancestor = record.partition_cross_site_ancestor,
+                } else null;
             if (replacement.find(
                 record.name,
                 record.domain,
                 record.path,
                 record.host_only,
+                record_partition_key,
             ) != null) return error.CorruptSnapshot;
             const maximum_expiry = std.math.add(
                 i64,
@@ -366,11 +395,20 @@ pub const Jar = struct {
                 .secure = record.secure,
                 .http_only = record.http_only,
                 .host_only = record.host_only,
+                .partition_site = if (record.partitioned)
+                    record.partition_site
+                else
+                    null,
+                .partition_secure = record.partition_secure,
+                .partition_cross_site_ancestor = record.partition_cross_site_ancestor,
                 .same_site = @enumFromInt(record.same_site),
                 .created_at = record.created_at,
                 .creation_order = record.creation_order,
                 .last_access_order = record.last_access_order,
             });
+            if (!record.partitioned) {
+                self.allocator.free(record.partition_site);
+            }
             record.transferred = true;
             maximum_sequence = @max(
                 maximum_sequence,
@@ -379,7 +417,12 @@ pub const Jar = struct {
             replacement.restoreRequestOrder(
                 replacement.cookies.items.len - 1,
             );
-            if (replacement.domainCount(record.domain) >
+            if (replacement.domainCount(
+                record.domain,
+                record_partition_key,
+            ) > if (record.partitioned)
+                self.config.max_partitioned_cookies_per_domain
+            else
                 self.config.max_cookies_per_domain)
             {
                 return error.SnapshotLimitExceeded;
@@ -414,11 +457,17 @@ pub const Jar = struct {
     ) Error!StoreResult {
         var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
         const origin = try parseOrigin(uri_text, &host_buffer);
+        var partition_buffer: [net.HostName.max_len + 2]u8 = undefined;
+        const partition_key = try normalizedPartitionKey(
+            context.partition_key,
+            &partition_buffer,
+        );
         return self.storeForOrigin(
             origin,
             value,
             now_unix_seconds,
             context,
+            partition_key,
         );
     }
 
@@ -434,6 +483,11 @@ pub const Jar = struct {
     ) Error!StoreSummary {
         var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
         const origin = try parseOrigin(uri_text, &host_buffer);
+        var partition_buffer: [net.HostName.max_len + 2]u8 = undefined;
+        const partition_key = try normalizedPartitionKey(
+            context.partition_key,
+            &partition_buffer,
+        );
         var summary: StoreSummary = .{};
         var values = response.headerValues("set-cookie");
         while (values.next()) |field| {
@@ -442,6 +496,7 @@ pub const Jar = struct {
                 field.value,
                 now_unix_seconds,
                 context,
+                partition_key,
             ));
         }
         return summary;
@@ -473,17 +528,24 @@ pub const Jar = struct {
     ) Error![]u8 {
         var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
         const origin = try parseOrigin(uri_text, &host_buffer);
+        var partition_buffer: [net.HostName.max_len + 2]u8 = undefined;
+        const partition_key = try normalizedPartitionKey(
+            context.partition_key,
+            &partition_buffer,
+        );
         _ = self.removeExpired(now_unix_seconds);
         const needed = try self.headerValueLength(
             origin,
             now_unix_seconds,
             context,
+            partition_key,
         );
         if (needed > out.len) return error.BufferTooShort;
         return self.writeHeaderValue(
             origin,
             now_unix_seconds,
             context,
+            partition_key,
             out[0..needed],
         );
     }
@@ -497,11 +559,17 @@ pub const Jar = struct {
     ) Error![]u8 {
         var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
         const origin = try parseOrigin(uri_text, &host_buffer);
+        var partition_buffer: [net.HostName.max_len + 2]u8 = undefined;
+        const partition_key = try normalizedPartitionKey(
+            context.partition_key,
+            &partition_buffer,
+        );
         _ = self.removeExpired(now_unix_seconds);
         const needed = try self.headerValueLength(
             origin,
             now_unix_seconds,
             context,
+            partition_key,
         );
         const out = try allocator.alloc(u8, needed);
         errdefer allocator.free(out);
@@ -509,6 +577,7 @@ pub const Jar = struct {
             origin,
             now_unix_seconds,
             context,
+            partition_key,
             out,
         );
     }
@@ -519,6 +588,7 @@ pub const Jar = struct {
         value: []const u8,
         now: i64,
         context: StoreContext,
+        partition_key: ?NormalizedPartitionKey,
     ) Error!StoreResult {
         _ = self.removeExpired(now);
         var parsed = syntax.parse(
@@ -536,6 +606,11 @@ pub const Jar = struct {
             return .ignored;
         }
         if (parsed.same_site == .none and !parsed.secure) return .ignored;
+        if (parsed.partitioned and !parsed.secure) return .ignored;
+        const stored_partition_key = if (parsed.partitioned)
+            partition_key orelse return .ignored
+        else
+            null;
         if (parsed.expires_at) |deadline| {
             const maximum = std.math.add(
                 i64,
@@ -606,7 +681,12 @@ pub const Jar = struct {
         }
 
         if (!origin.secure and !parsed.secure and
-            self.overlaysSecure(parsed.name, domain, path))
+            self.overlaysSecure(
+                parsed.name,
+                domain,
+                path,
+                stored_partition_key,
+            ))
         {
             return .ignored;
         }
@@ -616,6 +696,7 @@ pub const Jar = struct {
             domain,
             path,
             host_only,
+            stored_partition_key,
         );
         if (!context.http_api and existing_index != null and
             self.cookies.items[existing_index.?].http_only)
@@ -639,6 +720,7 @@ pub const Jar = struct {
             domain,
             path,
             host_only,
+            stored_partition_key,
             now,
             sequence,
         );
@@ -657,7 +739,14 @@ pub const Jar = struct {
         try self.cookies.ensureUnusedCapacity(self.allocator, 1);
         self.cookies.appendAssumeCapacity(candidate);
         self.restoreRequestOrder(self.cookies.items.len - 1);
-        self.enforceDomainLimit(domain);
+        self.enforceDomainLimit(
+            domain,
+            stored_partition_key,
+            if (stored_partition_key == null)
+                self.config.max_cookies_per_domain
+            else
+                self.config.max_partitioned_cookies_per_domain,
+        );
         self.enforceTotalLimit();
         return .stored;
     }
@@ -668,12 +757,14 @@ pub const Jar = struct {
         domain: []const u8,
         path: []const u8,
         host_only: bool,
+        partition_key: ?NormalizedPartitionKey,
     ) ?usize {
         for (self.cookies.items, 0..) |cookie, index| {
             if (std.mem.eql(u8, cookie.name, name) and
                 std.ascii.eqlIgnoreCase(cookie.domain, domain) and
                 std.mem.eql(u8, cookie.path, path) and
-                cookie.host_only == host_only) return index;
+                cookie.host_only == host_only and
+                cookiePartitionEquals(cookie, partition_key)) return index;
         }
         return null;
     }
@@ -683,11 +774,13 @@ pub const Jar = struct {
         name: []const u8,
         domain: []const u8,
         path: []const u8,
+        partition_key: ?NormalizedPartitionKey,
     ) bool {
         for (self.cookies.items) |cookie| {
             if (!cookie.secure or !std.mem.eql(u8, cookie.name, name)) continue;
             if (!(domainMatches(domain, cookie.domain) or
                 domainMatches(cookie.domain, domain))) continue;
+            if (!cookiePartitionEquals(cookie, partition_key)) continue;
             if (pathMatches(path, cookie.path)) return true;
         }
         return false;
@@ -698,11 +791,19 @@ pub const Jar = struct {
         origin: Origin,
         now: i64,
         context: RequestContext,
+        partition_key: ?NormalizedPartitionKey,
     ) Error!usize {
         var result: usize = 0;
         var matched_count: usize = 0;
         for (self.cookies.items) |cookie| {
-            if (!matches(cookie, origin, now, context, self.config)) continue;
+            if (!matches(
+                cookie,
+                origin,
+                now,
+                context,
+                partition_key,
+                self.config,
+            )) continue;
             if (cookie.name.len != 0) {
                 result = std.math.add(usize, result, cookie.name.len) catch
                     return error.HeaderTooLarge;
@@ -728,13 +829,21 @@ pub const Jar = struct {
         origin: Origin,
         now: i64,
         context: RequestContext,
+        partition_key: ?NormalizedPartitionKey,
         out: []u8,
     ) []u8 {
         var offset: usize = 0;
         var matched_count: usize = 0;
         const access_order = self.nextSequence();
         for (self.cookies.items) |*cookie| {
-            if (!matches(cookie.*, origin, now, context, self.config)) continue;
+            if (!matches(
+                cookie.*,
+                origin,
+                now,
+                context,
+                partition_key,
+                self.config,
+            )) continue;
             if (matched_count != 0) {
                 @memcpy(out[offset..][0..2], "; ");
                 offset += 2;
@@ -754,10 +863,22 @@ pub const Jar = struct {
         return out;
     }
 
-    fn enforceDomainLimit(self: *Jar, domain: []const u8) void {
-        while (self.domainCount(domain) > self.config.max_cookies_per_domain) {
-            const index = self.oldestAccessIndex(domain, true) orelse
-                self.oldestAccessIndex(domain, false) orelse unreachable;
+    fn enforceDomainLimit(
+        self: *Jar,
+        domain: []const u8,
+        partition_key: ?NormalizedPartitionKey,
+        limit: usize,
+    ) void {
+        while (self.domainCount(domain, partition_key) > limit) {
+            const index = self.oldestPartitionAccessIndex(
+                domain,
+                partition_key,
+                true,
+            ) orelse self.oldestPartitionAccessIndex(
+                domain,
+                partition_key,
+                false,
+            ) orelse unreachable;
             self.removeAt(index);
         }
     }
@@ -769,13 +890,42 @@ pub const Jar = struct {
         }
     }
 
-    fn domainCount(self: *const Jar, domain: []const u8) usize {
+    fn domainCount(
+        self: *const Jar,
+        domain: []const u8,
+        partition_key: ?NormalizedPartitionKey,
+    ) usize {
         var result: usize = 0;
         for (self.cookies.items) |cookie| {
-            result += @intFromBool(std.ascii.eqlIgnoreCase(
-                cookie.domain,
-                domain,
-            ));
+            result += @intFromBool(
+                std.ascii.eqlIgnoreCase(cookie.domain, domain) and
+                    cookiePartitionEquals(cookie, partition_key),
+            );
+        }
+        return result;
+    }
+
+    fn oldestPartitionAccessIndex(
+        self: *const Jar,
+        domain: []const u8,
+        partition_key: ?NormalizedPartitionKey,
+        only_non_secure: bool,
+    ) ?usize {
+        var result: ?usize = null;
+        for (self.cookies.items, 0..) |cookie, index| {
+            if (!std.ascii.eqlIgnoreCase(cookie.domain, domain) or
+                !cookiePartitionEquals(cookie, partition_key) or
+                (only_non_secure and cookie.secure)) continue;
+            if (result == null or
+                cookie.last_access_order <
+                    self.cookies.items[result.?].last_access_order or
+                (cookie.last_access_order ==
+                    self.cookies.items[result.?].last_access_order and
+                    cookie.creation_order <
+                        self.cookies.items[result.?].creation_order))
+            {
+                result = index;
+            }
         }
         return result;
     }
@@ -837,6 +987,7 @@ fn initCookie(
     domain: []const u8,
     path: []const u8,
     host_only: bool,
+    partition_key: ?NormalizedPartitionKey,
     now: i64,
     sequence: u64,
 ) std.mem.Allocator.Error!Cookie {
@@ -851,6 +1002,11 @@ fn initCookie(
     }
     const owned_path = try allocator.dupe(u8, path);
     errdefer allocator.free(owned_path);
+    const owned_partition_site = if (partition_key) |key|
+        try allocator.dupe(u8, key.site)
+    else
+        null;
+    errdefer if (owned_partition_site) |site| allocator.free(site);
     return .{
         .name = name,
         .value = value,
@@ -860,6 +1016,12 @@ fn initCookie(
         .secure = parsed.secure,
         .http_only = parsed.http_only,
         .host_only = host_only,
+        .partition_site = owned_partition_site,
+        .partition_secure = if (partition_key) |key| key.secure else false,
+        .partition_cross_site_ancestor = if (partition_key) |key|
+            key.has_cross_site_ancestor
+        else
+            false,
         .same_site = parsed.same_site,
         .created_at = now,
         .creation_order = sequence,
@@ -885,6 +1047,17 @@ fn validateSnapshotRecord(
         return error.CorruptSnapshot;
     }
     if (!validStoredDomain(record.domain)) return error.CorruptSnapshot;
+    if (record.partitioned != (record.partition_site.len != 0) or
+        (!record.partitioned and
+            (record.partition_secure or
+                record.partition_cross_site_ancestor)) or
+        (record.partitioned and
+            (!record.secure or
+                record.partition_site.len > net.HostName.max_len or
+                !validStoredDomain(record.partition_site))))
+    {
+        return error.CorruptSnapshot;
+    }
     if (!record.host_only) switch (config.domain_policy) {
         .host_only => return error.SnapshotPolicyMismatch,
         .unchecked => {},
@@ -949,6 +1122,67 @@ const Origin = struct {
     secure: bool,
     is_ip: bool,
 };
+
+const NormalizedPartitionKey = struct {
+    site: []const u8,
+    secure: bool,
+    has_cross_site_ancestor: bool,
+};
+
+fn normalizedPartitionKey(
+    key: ?PartitionKey,
+    host_buffer: *[net.HostName.max_len + 2]u8,
+) Error!?NormalizedPartitionKey {
+    const value = key orelse return null;
+    if (value.top_level_site.len == 0 or
+        value.top_level_site.len > maximum_partition_site_bytes)
+    {
+        return error.InvalidPartitionKey;
+    }
+    const uri = std.Uri.parse(value.top_level_site) catch
+        return error.InvalidPartitionKey;
+    if (uri.user != null or uri.password != null or uri.port != null or
+        uri.query != null or uri.fragment != null)
+    {
+        return error.InvalidPartitionKey;
+    }
+    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") and
+        !std.ascii.eqlIgnoreCase(uri.scheme, "https"))
+    {
+        return error.InvalidPartitionKey;
+    }
+    const path = componentBytes(uri.path);
+    if (path.len != 0 and !std.mem.eql(u8, path, "/")) {
+        return error.InvalidPartitionKey;
+    }
+    const origin = parseOrigin(value.top_level_site, host_buffer) catch
+        return error.InvalidPartitionKey;
+    return .{
+        .site = origin.host,
+        .secure = origin.secure,
+        .has_cross_site_ancestor = value.has_cross_site_ancestor,
+    };
+}
+
+fn cookiePartitionEquals(
+    cookie: Cookie,
+    key: ?NormalizedPartitionKey,
+) bool {
+    const site = cookie.partition_site orelse return key == null;
+    const candidate = key orelse return false;
+    return cookie.partition_secure == candidate.secure and
+        cookie.partition_cross_site_ancestor ==
+            candidate.has_cross_site_ancestor and
+        std.mem.eql(u8, site, candidate.site);
+}
+
+fn cookiePartitionAvailable(
+    cookie: Cookie,
+    key: ?NormalizedPartitionKey,
+) bool {
+    if (cookie.partition_site == null) return true;
+    return cookiePartitionEquals(cookie, key);
+}
 
 fn parseOrigin(
     uri_text: []const u8,
@@ -1058,9 +1292,11 @@ fn matches(
     origin: Origin,
     now: i64,
     context: RequestContext,
+    partition_key: ?NormalizedPartitionKey,
     config: Config,
 ) bool {
     if (expired(cookie, now)) return false;
+    if (!cookiePartitionAvailable(cookie, partition_key)) return false;
     if (cookie.host_only) {
         if (!std.ascii.eqlIgnoreCase(origin.host, cookie.domain)) return false;
     } else if (!domainMatches(origin.host, cookie.domain)) return false;
