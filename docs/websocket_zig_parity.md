@@ -1408,17 +1408,28 @@ applying TCP-only socket options.
    cases must report `OK` for both behavior fields, so an arbitrary regression
    to otherwise accepted `NON-STRICT` or `INFORMATIONAL` can no longer pass.
    Explicit case selections remain a non-empty manifest subset and each
-   selected case must match the same status baseline. The 517-case results
-   below predate that migration and remain historical Threaded evidence until
-   the container suite is rerun on zio. The runner defaults to Docker but
-   accepts `AUTOBAHN_CONTAINER_RUNTIME=podman` or an absolute compatible
-   runtime path; digest-locked image inspection, host-network execution,
-   mounted reports, and strict manifest verification remain identical. On
-   2026-10-16 this host had no Docker/Podman-compatible runtime, so the full
-   result was deliberately not relabeled. The zio real-socket smoke and report
-   checker were refreshed instead: cleartext and TLS each passed eight
-   concurrent peers, protocol-error isolation and recovery, while the checker
-   passed 14/14 tests. The separate
+   selected case must match the same status baseline. The runner defaults to
+   Docker and accepts `AUTOBAHN_CONTAINER_RUNTIME=podman` or an absolute
+   compatible runtime path; digest-locked image inspection, host-network
+   execution, mounted reports, and strict manifest verification remain
+   identical. A container-free local mode accepts absolute `AUTOBAHN_WSTEST`,
+   `AUTOBAHN_TESTSUITE_PACKAGE`, and `AUTOBAHN_PYPY_ARCHIVE` paths. It requires
+   the official Testsuite 25.10.1 wheel SHA-256
+   `b57ee6b22de624a03256878ad453c9897d2ad7ee08a4c38b35ee2847637e1383`,
+   official PyPy 2.7 v7.3.20 aarch64 archive SHA-256
+   `f22a1be607deeaa4f9be6bc63aae09fe4fb5b990d6a23aa4e7c5960dc5d93c96`,
+   extracted interpreter SHA-256
+   `49e7090077ad56808642d5a73a44bd8b293780058c0203e6f90a8f9abed1beba`,
+   exact Autobahn 0.10.9/Testsuite 25.10.1 version output, a byte-for-byte
+   comparison of all 195 installed suite files with the wheel, and the
+   checked-in complete dependency freeze. The measured environment's canonical
+   freeze SHA-256 was
+   `87915f06ebb80622877b2257302bf75988fbe245a05b4e58266a85875b922a6c`.
+   This preserves executable-environment identity on the aarch64 host where
+   the published digest-locked image is amd64-only and no Docker/Podman runtime
+   is installed. The real-socket smoke remains green over cleartext and TLS
+   with eight concurrent peers plus protocol-error isolation and worker reuse,
+   while the strict report-checker unit suite passes 14/14. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
    without Docker: eight simultaneous peers verify masked text/binary echo,
    Ping/Pong and Close. A separate connection interleaves Ping/Pong inside a
@@ -1448,10 +1459,10 @@ applying TCP-only socket options.
    a compressed binary echo over both cleartext and WSS. That is negotiation
    and roundtrip evidence only; it is deliberately combined with, rather than
    substituted for, the direct distance-bound tests.
-   On 2026-08-21, the full WSS run completed all 517 cases with the same result
-   as cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
-   counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed
-   all 517 cases with
+   On 2026-10-16, the locked local runner completed all 517 cases against the
+   zio-backed server over WSS with behavior counts `OK=514` and
+   `INFORMATIONAL=3`, and close-behavior counts `OK=514` and
+   `INFORMATIONAL=3`. The cleartext run likewise completed all 517 cases with
    behavior counts `OK=514` and `INFORMATIONAL=3`;
    close-behavior counts were `OK=514` and `INFORMATIONAL=3`. The 54
    compression cases previously reported as `UNIMPLEMENTED` now complete as

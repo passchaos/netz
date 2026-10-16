@@ -1631,13 +1631,18 @@ zig build interop-quic-s2n -Doptimize=ReleaseFast
 # Quinn proves the dropped first DATAGRAM is never retransmitted, observes the
 # reordered pair, and completes the reliable sibling stream and close.
 zig build interop-quic-quinn -Doptimize=ReleaseFast
-# Requires Docker and defaults to the digest-locked Autobahn Testsuite 25.10.1
-# image. Optional trailing arguments select individual case IDs; with none, the
-# report verifier requires the exact versioned set of all 517 cases from the
-# sole `netz` agent and the locked per-case status baseline, rejecting
+# Defaults to the digest-locked Autobahn Testsuite 25.10.1 Docker image. Hosts
+# without a container runtime can set absolute AUTOBAHN_WSTEST,
+# AUTOBAHN_TESTSUITE_PACKAGE, and AUTOBAHN_PYPY_ARCHIVE paths; local mode
+# verifies the official wheel/archive and extracted interpreter SHA-256 values,
+# byte-compares all installed suite files with the wheel, and checks the exact
+# PyPy/Autobahn versions plus complete dependency freeze before execution.
+# Optional trailing arguments select individual case IDs; with none, the report
+# verifier requires the exact versioned set of all 517 cases from the sole
+# `netz` agent and the locked per-case status baseline, rejecting
 # count-preserving substitutions or accepted-but-regressed statuses. Pass
-# --tls before case IDs to run the same gate over native TLS 1.3 WSS.
-# The long-lived netz endpoint uses 64 reusable zio-backed std.Io workers.
+# --tls before case IDs to run the same gate over native TLS 1.3 WSS. The
+# long-lived netz endpoint uses 64 reusable zio-backed std.Io workers.
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast
 zig build interop-websocket-autobahn -Doptimize=ReleaseFast -- --tls
 # Without Docker, exercise the same adapter over real cleartext/TLS sockets,
