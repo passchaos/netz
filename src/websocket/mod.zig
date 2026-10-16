@@ -152,6 +152,15 @@ pub const ExtensionNegotiation = struct {
     pub const Policy = struct {
         enable_permessage_deflate: bool = false,
         allow_context_takeover: bool = false,
+        /// Server-side selection for the peer's compressor. Emitted only when
+        /// the client offered `client_max_window_bits`, and capped by an
+        /// explicit client value. Client offer construction ignores this.
+        accept_client_max_window_bits: ?u8 = null,
+        /// Server-side limit for its own compressor. RFC 7692 permits this
+        /// selection even when the client omitted the parameter; an offered
+        /// maximum remains authoritative. Client offer construction ignores
+        /// this field.
+        accept_server_max_window_bits: ?u8 = null,
     };
 
     pub fn offerValue(policy: Policy) ?[]const u8 {
@@ -233,6 +242,7 @@ pub const ExtensionNegotiation = struct {
         offer: ExtensionNegotiation,
         policy: Policy,
     ) Error!?[]u8 {
+        try validatePolicy(policy);
         if (!policy.enable_permessage_deflate) return null;
         if (!offer.permessage_deflate) return null;
 
@@ -249,7 +259,27 @@ pub const ExtensionNegotiation = struct {
         {
             try value.appendSlice(allocator, "; client_no_context_takeover");
         }
-        if (offer.server_max_window_bits) |bits| {
+        if (policy.accept_client_max_window_bits) |configured| {
+            if (offer.client_max_window_bits) |offered| {
+                var writer = std.Io.Writer.Allocating.fromArrayList(
+                    allocator,
+                    &value,
+                );
+                defer value = writer.toArrayList();
+                try writer.writer.print(
+                    "; client_max_window_bits={d}",
+                    .{@min(configured, offered)},
+                );
+            }
+        }
+        const server_max_window_bits = if (policy.accept_server_max_window_bits) |configured|
+            if (offer.server_max_window_bits) |offered|
+                @min(configured, offered)
+            else
+                configured
+        else
+            offer.server_max_window_bits;
+        if (server_max_window_bits) |bits| {
             var writer = std.Io.Writer.Allocating.fromArrayList(
                 allocator,
                 &value,
@@ -292,6 +322,7 @@ pub const ExtensionNegotiation = struct {
         header_value: ?[]const u8,
         policy: Policy,
     ) Error!ExtensionNegotiation {
+        try validatePolicy(policy);
         const raw = header_value orelse return .{};
         if (!policy.enable_permessage_deflate) return error.InvalidExtension;
         var negotiated: ?ExtensionNegotiation = null;
@@ -305,6 +336,7 @@ pub const ExtensionNegotiation = struct {
         headers: anytype,
         policy: Policy,
     ) Error!ExtensionNegotiation {
+        try validatePolicy(policy);
         var saw_header = false;
         var negotiated: ?ExtensionNegotiation = null;
         for (headers) |header| {
@@ -355,6 +387,20 @@ pub const ExtensionNegotiation = struct {
                     }
                     negotiated.* = parsed;
                 },
+            }
+        }
+    }
+
+    fn validatePolicy(policy: Policy) Error!void {
+        for ([_]?u8{
+            policy.accept_client_max_window_bits,
+            policy.accept_server_max_window_bits,
+        }) |maybe_bits| {
+            if (maybe_bits) |bits| {
+                if (bits < 8 or bits > 15) return error.InvalidExtension;
+                if (!policy.enable_permessage_deflate) {
+                    return error.InvalidExtension;
+                }
             }
         }
     }
@@ -2809,6 +2855,62 @@ test "WebSocket permessage-deflate helpers negotiate and roundtrip" {
     try std.testing.expect(response.permessage_deflate);
     try std.testing.expect(response.client_no_context_takeover);
     try std.testing.expect(response.server_no_context_takeover);
+
+    const bounded = try ExtensionNegotiation.acceptWithPolicy(
+        allocator,
+        "permessage-deflate; client_max_window_bits=12; server_max_window_bits=11",
+        .{
+            .enable_permessage_deflate = true,
+            .allow_context_takeover = true,
+            .accept_client_max_window_bits = 9,
+            .accept_server_max_window_bits = 10,
+        },
+    );
+    defer if (bounded) |value| allocator.free(value);
+    try std.testing.expectEqualStrings(
+        "permessage-deflate; client_max_window_bits=9; server_max_window_bits=10",
+        bounded.?,
+    );
+    const selected_window_response = try ExtensionNegotiation
+        .validateResponseWithPolicy(bounded.?, .{
+        .enable_permessage_deflate = true,
+        .allow_context_takeover = true,
+    });
+    try std.testing.expectEqual(
+        @as(?u8, 9),
+        selected_window_response.client_max_window_bits,
+    );
+    try std.testing.expectEqual(
+        @as(?u8, 10),
+        selected_window_response.server_max_window_bits,
+    );
+
+    const peer_bounded = try ExtensionNegotiation.acceptWithPolicy(
+        allocator,
+        "permessage-deflate; client_max_window_bits=8; server_max_window_bits=9",
+        .{
+            .enable_permessage_deflate = true,
+            .accept_client_max_window_bits = 12,
+            .accept_server_max_window_bits = 12,
+        },
+    );
+    defer if (peer_bounded) |value| allocator.free(value);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        peer_bounded.?,
+        "client_max_window_bits=8; server_max_window_bits=9",
+    ) != null);
+    try std.testing.expectError(
+        error.InvalidExtension,
+        ExtensionNegotiation.acceptWithPolicy(
+            allocator,
+            "permessage-deflate",
+            .{
+                .enable_permessage_deflate = true,
+                .accept_client_max_window_bits = 7,
+            },
+        ),
+    );
 
     const split_headers = [_]http1.Header{
         .{ .name = "Sec-WebSocket-Extensions", .value = "x-unknown" },

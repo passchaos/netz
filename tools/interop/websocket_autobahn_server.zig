@@ -82,6 +82,7 @@ fn serveForever(server: anytype) !void {
         .{
             .enable_permessage_deflate = true,
             .allow_context_takeover = true,
+            .client_max_window_bits = 9,
         },
         .{
             .shutdown = &shutdown,

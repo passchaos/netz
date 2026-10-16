@@ -300,6 +300,10 @@ pub const AcceptOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Permit RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// If offered by the client, select at most this receive-history window.
+    client_max_window_bits: ?u8 = null,
+    /// Select at most this server send-history window.
+    server_max_window_bits: ?u8 = null,
     compression_threshold: usize = 32,
     limits: common.Limits = .{},
 };
@@ -5159,6 +5163,8 @@ fn receiveServerUpgradeBefore(
     const extension_policy: websocket.ExtensionNegotiation.Policy = .{
         .enable_permessage_deflate = options.enable_permessage_deflate,
         .allow_context_takeover = options.allow_context_takeover,
+        .accept_client_max_window_bits = options.client_max_window_bits,
+        .accept_server_max_window_bits = options.server_max_window_bits,
     };
     const selected_extension = try acceptExtensions(
         allocator,

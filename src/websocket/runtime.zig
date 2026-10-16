@@ -1414,6 +1414,8 @@ fn receiveUpgradeRequestFromTransport(
     const extension_policy: websocket.ExtensionNegotiation.Policy = .{
         .enable_permessage_deflate = options.enable_permessage_deflate,
         .allow_context_takeover = options.allow_context_takeover,
+        .accept_client_max_window_bits = options.client_max_window_bits,
+        .accept_server_max_window_bits = options.server_max_window_bits,
     };
     const selected_extension =
         try websocket.ExtensionNegotiation.acceptClientHeadersWithPolicy(
@@ -1720,6 +1722,10 @@ pub const AcceptOptions = struct {
     /// Permit RFC 7692 history retention in either negotiated direction.
     /// Disabled by default so existing endpoints retain no-context behavior.
     allow_context_takeover: bool = false,
+    /// If offered by the client, select at most this receive-history window.
+    client_max_window_bits: ?u8 = null,
+    /// Select at most this server send-history window.
+    server_max_window_bits: ?u8 = null,
     /// Minimum complete message size considered for outbound compression.
     /// Inbound compressed messages remain accepted after negotiation.
     compression_threshold: usize = default_compression_threshold,
@@ -10774,6 +10780,8 @@ pub const H2Server = struct {
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
+            .accept_client_max_window_bits = options.client_max_window_bits,
+            .accept_server_max_window_bits = options.server_max_window_bits,
         };
         const selected_extension = try acceptH2Extensions(
             allocator,
@@ -11458,6 +11466,10 @@ pub const H2AcceptOptions = struct {
     enable_permessage_deflate: bool = false,
     /// Permit RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
+    /// If offered by the client, select at most this receive-history window.
+    client_max_window_bits: ?u8 = null,
+    /// Select at most this server send-history window.
+    server_max_window_bits: ?u8 = null,
     /// RFC 8441 outbound compression threshold.
     compression_threshold: usize = default_compression_threshold,
     limits: Limits = .{},
@@ -13786,6 +13798,7 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
             var connection = try server_ptr.accept(.{
                 .enable_permessage_deflate = true,
                 .allow_context_takeover = true,
+                .server_max_window_bits = 9,
                 .compression_threshold = 0,
             });
             defer connection.close();
@@ -13795,6 +13808,10 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
             );
             try std.testing.expect(
                 connection.compression_receive_context_takeover,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 9),
+                connection.compression_send_max_window_bits,
             );
 
             // Expansion fallback must discard its preview. If the first
@@ -13891,6 +13908,10 @@ test "WebSocket HTTP1 context takeover spans runtime API shapes" {
     defer client.close();
     try std.testing.expect(client.compression_send_context_takeover);
     try std.testing.expect(client.compression_receive_context_takeover);
+    try std.testing.expectEqual(
+        @as(u8, 9),
+        client.compression_receive_max_window_bits,
+    );
 
     try client.sendBinary(&fallback_payload);
     try client.sendBinary(&fallback_payload);
@@ -14176,6 +14197,7 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
             var ws = try H2Server.accept(server_ptr.allocator, &h2, .{
                 .enable_permessage_deflate = true,
                 .allow_context_takeover = true,
+                .server_max_window_bits = 9,
                 .compression_threshold = 0,
                 .limits = .{
                     .max_head_bytes = 4096,
@@ -14187,6 +14209,10 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
             try std.testing.expect(ws.permessage_deflate);
             try std.testing.expect(ws.compression_send_context_takeover);
             try std.testing.expect(ws.compression_receive_context_takeover);
+            try std.testing.expectEqual(
+                @as(u8, 9),
+                ws.compression_send_max_window_bits,
+            );
 
             // Expansion fallback must not enter the compression history.
             for (0..2) |_| {
@@ -14285,6 +14311,10 @@ test "WebSocket HTTP2 context takeover spans runtime API shapes" {
     defer client.close();
     try std.testing.expect(client.compression_send_context_takeover);
     try std.testing.expect(client.compression_receive_context_takeover);
+    try std.testing.expectEqual(
+        @as(u8, 9),
+        client.compression_receive_max_window_bits,
+    );
 
     try client.sendBinary(&fallback_payload);
     try client.sendBinary(&fallback_payload);

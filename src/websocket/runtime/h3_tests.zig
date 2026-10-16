@@ -2100,6 +2100,7 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
                 .allowed_origins = &.{"https://example.test"},
                 .enable_permessage_deflate = true,
                 .allow_context_takeover = true,
+                .server_max_window_bits = 9,
                 .compression_threshold = 1,
                 .limits = .{
                     .max_frame_bytes = compressed_parts.len,
@@ -2121,6 +2122,10 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
             );
             try std.testing.expect(
                 connection.compression_receive_context_takeover,
+            );
+            try std.testing.expectEqual(
+                @as(u8, 9),
+                connection.compression_send_max_window_bits,
             );
 
             var receive_storage: [compressed_parts.len]u8 = undefined;
@@ -2429,6 +2434,10 @@ test "WebSocket over HTTP3 extended CONNECT exchanges frames" {
     try std.testing.expect(client.permessage_deflate);
     try std.testing.expect(client.compression_send_context_takeover);
     try std.testing.expect(client.compression_receive_context_takeover);
+    try std.testing.expectEqual(
+        @as(u8, 9),
+        client.compression_receive_max_window_bits,
+    );
 
     const sibling_stream_id = try client.h3.sendRequest(.{
         .method = "GET",

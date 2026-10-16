@@ -171,9 +171,9 @@ def deflate_with_context(
     return encoded[:-4]
 
 
-def deflate_message(payload: bytes) -> bytes:
+def deflate_message(payload: bytes, window_bits: int = 15) -> bytes:
     return deflate_with_context(
-        zlib.compressobj(level=6, wbits=-15),
+        zlib.compressobj(level=6, wbits=-window_bits),
         payload,
     )
 
@@ -344,17 +344,26 @@ def exercise_compression_server_window(
 ) -> None:
     offer = (
         "permessage-deflate; client_no_context_takeover; "
-        "server_no_context_takeover; server_max_window_bits=9"
+        "server_no_context_takeover; client_max_window_bits=9; "
+        "server_max_window_bits=9"
     )
     with upgrade(
         port,
         use_tls,
         offer,
         expect_no_context_takeover=True,
-        required_extension_tokens=(b"server_max_window_bits=9",),
+        required_extension_tokens=(
+            b"client_max_window_bits=9",
+            b"server_max_window_bits=9",
+        ),
     ) as peer:
         plain = b"nine-bit-server-window-" * 256
-        send_frame(peer, 2, deflate_message(plain), rsv1=True)
+        send_frame(
+            peer,
+            2,
+            deflate_message(plain, window_bits=9),
+            rsv1=True,
+        )
         fin, rsv1, opcode, payload = receive_frame_details(peer)
         if not fin or not rsv1 or opcode != 2:
             raise AssertionError("9-bit compressed echo flags mismatch")
@@ -420,7 +429,8 @@ def run_mode(server: Path, use_tls: bool) -> None:
             "Autobahn zio smoke passed: "
             f"transport={transport} concurrent={CONCURRENT_CLIENTS} "
             "fragmented_control=true compression_no_context=true "
-            "compression_context=true compression_server_window=9 "
+            "compression_context=true compression_client_window=9 "
+            "compression_server_window=9 "
             "protocol_error=isolated "
             "utf8_error=1007 recovery_connections=2 "
             "workers=64 server_io=zio-std-io"
