@@ -3485,6 +3485,40 @@ test "public modules are reachable" {
         netz.http3.runtime.HandshakeClientPool,
         "requestUriWithTimeout",
     ));
+    inline for (&.{
+        "requestUriBatchWithPerStreamDeadlines",
+        "requestUriBatchWithPerStreamDeadlinesAndCancellation",
+        "requestUriAltSvcBatchWithPerStreamDeadlines",
+        "requestUriAltSvcBatchWithPerStreamDeadlinesAndCancellation",
+    }) |decl| try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClientPool,
+        decl,
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "HandshakeClientPoolUriBatchRequest",
+    ));
+    inline for (&.{
+        "HandshakeClientPoolSharedDispatcher",
+        "HandshakeClientPoolSharedSender",
+        "HandshakeClientPoolSharedOptions",
+        "HandshakeClientPoolSharedStats",
+        "HandshakeClientPoolSharedError",
+    }) |decl| try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        decl,
+    ));
+    inline for (&.{
+        "request",
+        "requestWithTimeout",
+        "requestWithDeadline",
+        "requestAltSvc",
+        "requestAltSvcWithTimeout",
+        "requestAltSvcWithDeadline",
+    }) |decl| try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClientPoolSharedSender,
+        decl,
+    ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
         "isReusable",

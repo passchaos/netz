@@ -18869,6 +18869,21 @@ pub const HandshakeClientPoolDefaultConnector =
     handshake_client_pool.DefaultConnectorContext(@This());
 pub const HandshakeClientPoolStats = http3.origin_pool.Stats;
 pub const HandshakeClientPoolError = handshake_client_pool.Error;
+pub const HandshakeClientPoolUriBatchRequest =
+    HandshakeClientPool.UriBatchRequest;
+pub const HandshakeClientPoolSharedDispatcher =
+    @import("runtime/handshake_client_pool/shared.zig").Dispatcher(
+        HandshakeClientPool,
+        @This(),
+    );
+pub const HandshakeClientPoolSharedSender =
+    HandshakeClientPoolSharedDispatcher.Sender;
+pub const HandshakeClientPoolSharedOptions =
+    @import("runtime/handshake_client_pool/shared.zig").Options;
+pub const HandshakeClientPoolSharedStats =
+    @import("runtime/handshake_client_pool/shared.zig").Stats;
+pub const HandshakeClientPoolSharedError =
+    @import("runtime/handshake_client_pool/shared.zig").Error;
 pub const SharedHandshakeClientPool =
     @import("runtime/shared_handshake_client_pool.zig").Pool(@This());
 pub const SharedHandshakeClientPoolOptions =
@@ -34563,6 +34578,8 @@ test {
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");
     _ = @import("runtime/handshake_client_pool_tests.zig");
+    _ = @import("runtime/handshake_client_pool/batch_tests.zig");
+    _ = @import("runtime/handshake_client_pool/shared_tests.zig");
     _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool/alt_svc_tests.zig");

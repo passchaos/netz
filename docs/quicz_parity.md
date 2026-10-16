@@ -1620,6 +1620,16 @@ simultaneously completed response precedence, matching the driver/sender split
 used by mature H3 stacks without adding another socket reader. Real protected
 QUIC coverage includes POST body/trailers, reversed completion, both cancel
 sources, exact peer-visible codes, sibling progress, and reuse.
+The exclusive H3 pool now maps same-origin direct/Alt-Svc URI batches onto that
+runtime primitive, including pre-admission expiry/cancellation filtering,
+original-index translation, SETTINGS observation, 421 handling and lease
+cleanup. A bounded cloneable-sender dispatcher adds stack-owned FIFO commands
+without creating another socket reader. Compatible producers coalesce on one
+QUIC connection; timeout or task cancellation wakes the sole driver and waits
+for target-stream cancellation convergence before releasing borrowed command
+storage. Real coverage verifies four producers, reversed responses, one
+connection, later Alt-Svc reuse, then a short canceled command beside a
+successful long-deadline sibling.
 `beginUriFollowingRedirects*` adds the matching event-driven redirect boundary
 without introducing a competing UDP reader. Its transaction replays borrowed
 bodies through bounded one-packet DATA attempts, consumes only events matching

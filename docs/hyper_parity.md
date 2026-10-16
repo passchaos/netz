@@ -1574,6 +1574,17 @@ races the sole response wait and preserves a response that completes on the
 same handoff. A real TLS/QUIC regression combines POST body/trailers, reversed
 responses, a deadline cancel, an actively woken cancel, exact server-observed
 codes, sibling completion, and final reuse.
+The exclusive H3 pool now carries this primitive through same-origin URI and
+Alt-Svc preparation, expired-member compaction, original-index mapping,
+SETTINGS observation, 421 processing and lease lifecycle. A bounded
+`HandshakeClientPoolSharedDispatcher` then exposes cloneable senders while one
+driver remains the sole pool/connection reader. Compatible queued commands
+coalesce into one H3 batch; producer timeout or task cancellation wakes that
+driver and converges target-stream cancellation before borrowed stack command
+storage is released. Real tests queue four producers before driver start,
+require one connection plus reversed-response correlation, reuse it for a
+later Alt-Svc command, then run a two-producer batch where the short member is
+canceled and the sibling completes.
 
 Both protocol `Limits` now also expose a TCP connect timeout used by literal-IP,
 hostname, URI, Unix-socket and pooled connection paths. Host resolution and all

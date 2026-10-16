@@ -284,6 +284,15 @@ Current protocol coverage includes:
   Connections without a retained certificate chain and certificate-mismatched
   advertisements remain ineligible rather than treating ORIGIN or a public-key
   pin as sufficient authority.
+  The exclusive H3 pool now maps same-origin URI batches, including Alt-Svc
+  routes, onto the connection's independently-deadlined batch core while
+  preserving original request indices, SETTINGS observation, and 421 updates.
+  `HandshakeClientPoolSharedDispatcher` layers a bounded FIFO and cloneable
+  senders over that core: one caller-selected driver remains the sole pool and
+  socket owner, compatible direct or Alt-Svc commands coalesce on one QUIC
+  connection, and producer timeout/cancellation wakes the driver to cancel only
+  that request. Stack-owned commands keep borrowed URI/header/body/trailer
+  storage alive until completion or cancellation convergence.
   The exclusive H3 backend retains its own explicit total/idle limits in
   addition to the TCP pool's limits. An optional move-stable shared budget also
   caps the combined TCP/QUIC idle, leased, and connecting population, with

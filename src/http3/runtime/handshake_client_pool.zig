@@ -14,6 +14,7 @@ const connection_budget = @import("../../internal/connection_budget.zig");
 const http_method = @import("../../internal/http_method.zig");
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 const early_data = @import("../../http/early_data.zig");
+const request_batch = @import("handshake_client_pool/batch.zig");
 
 pub const Error = error{
     InvalidPoolOptions,
@@ -453,6 +454,8 @@ pub fn Pool(comptime Runtime: type) type {
             request: http3.Request,
             config: EarlyRequestConfig,
         };
+
+        pub const UriBatchRequest = request_batch.UriRequest(Runtime);
         const ReuseContext = struct {
             requested_origin: http3.Origin,
         };
@@ -1271,6 +1274,78 @@ pub fn Pool(comptime Runtime: type) type {
                 null,
                 null,
                 null,
+            );
+        }
+
+        pub fn requestUriBatchWithPerStreamDeadlines(
+            self: *Self,
+            requests: []const UriBatchRequest,
+            deadlines: []const ?std.Io.Clock.Timestamp,
+            observer: Runtime.BatchOwnedHandshakeResponseObserver,
+        ) !void {
+            return request_batch.request(
+                Runtime,
+                self,
+                requests,
+                deadlines,
+                observer,
+                null,
+                null,
+            );
+        }
+
+        pub fn requestUriBatchWithPerStreamDeadlinesAndCancellation(
+            self: *Self,
+            requests: []const UriBatchRequest,
+            deadlines: []const ?std.Io.Clock.Timestamp,
+            observer: Runtime.BatchOwnedHandshakeResponseObserver,
+            cancellation: Runtime.BatchHandshakeCancellationObserver,
+        ) !void {
+            return request_batch.request(
+                Runtime,
+                self,
+                requests,
+                deadlines,
+                observer,
+                cancellation,
+                null,
+            );
+        }
+
+        pub fn requestUriAltSvcBatchWithPerStreamDeadlines(
+            self: *Self,
+            requests: []const UriBatchRequest,
+            target: http3.AltSvcTarget,
+            deadlines: []const ?std.Io.Clock.Timestamp,
+            observer: Runtime.BatchOwnedHandshakeResponseObserver,
+        ) !void {
+            return request_batch.request(
+                Runtime,
+                self,
+                requests,
+                deadlines,
+                observer,
+                null,
+                target,
+            );
+        }
+
+        pub fn requestUriAltSvcBatchWithPerStreamDeadlinesAndCancellation(
+            self: *Self,
+            requests: []const UriBatchRequest,
+            target: http3.AltSvcTarget,
+            deadlines: []const ?std.Io.Clock.Timestamp,
+            observer: Runtime.BatchOwnedHandshakeResponseObserver,
+            cancellation: Runtime.BatchHandshakeCancellationObserver,
+        ) !void {
+            return request_batch.request(
+                Runtime,
+                self,
+                requests,
+                deadlines,
+                observer,
+                cancellation,
+                target,
             );
         }
 
