@@ -2393,9 +2393,11 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
     acl_file.write_text(
         "user old\n"
         "topic readwrite before/#\n"
+        "topic write queued/#\n"
         "topic write revoked/will\n"
         "user stable\n"
         "topic read after/#\n"
+        "topic read queued/#\n"
         "topic read revoked/#\n"
     )
     def write_config(password_path: Path, acl_path: Path) -> None:
@@ -2404,7 +2406,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             f"acl_file {acl_path}\n"
             f"listener {port} 127.0.0.1\n"
             "allow_anonymous false\n"
-            "max_connections 5\n"
+            "max_connections 7\n"
         )
 
     write_config(password_file, acl_file)
@@ -2416,7 +2418,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 1 listeners for 5 clients" not in ready:
+    if "configured 1 listeners for 7 clients" not in ready:
         raise RuntimeError(f"security reload broker failed to start: {ready}")
     listener = process.stdout.readline().strip()
     if not listener.startswith("mqtt "):
@@ -2428,6 +2430,9 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         expected_reason: int,
         will_topic: str | None = None,
         will_payload: bytes = b"",
+        proto_ver: int = 5,
+        clean_start: bool = True,
+        expected_session_present: bool = False,
     ) -> socket.socket:
         client = socket.create_connection(("127.0.0.1", port), timeout=5)
         client.settimeout(5)
@@ -2437,13 +2442,23 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             password="password",
             will_topic=will_topic,
             will_payload=will_payload,
+            proto_ver=proto_ver,
+            clean_start=clean_start,
         ))
-        reason = connack_reason(read_mqtt_packet(client))
+        connack = read_mqtt_packet(client)
+        reason = connack_reason(connack)
         if reason != expected_reason:
             client.close()
             raise AssertionError(
                 f"security reload {username} expected {expected_reason:#x}, "
                 f"received {reason:#x}"
+            )
+        session_present = (connack[2] & 0x01) != 0
+        if session_present != expected_session_present:
+            client.close()
+            raise AssertionError(
+                f"security reload {username} Session Present expected "
+                f"{expected_session_present}, received {session_present}"
             )
         return client
 
@@ -2463,6 +2478,43 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 f"{expected_reason:#x}, received {reason:#x}"
             )
 
+    def expect_qos1_delivery(
+        client: socket.socket,
+        expected_topic: str,
+        expected_payload: bytes,
+    ) -> None:
+        packet = read_mqtt_packet(client)
+        if packet[0] != 0x32:
+            raise AssertionError(
+                "security reload expected QoS 1 PUBLISH, received "
+                + packet.hex()
+            )
+        offset = 1
+        multiplier = 1
+        remaining = 0
+        while True:
+            byte = packet[offset]
+            offset += 1
+            remaining += (byte & 0x7F) * multiplier
+            if byte & 0x80 == 0:
+                break
+            multiplier *= 128
+        if offset + remaining != len(packet):
+            raise AssertionError("security reload malformed queued PUBLISH")
+        topic_len = int.from_bytes(packet[offset : offset + 2], "big")
+        offset += 2
+        topic = packet[offset : offset + topic_len].decode()
+        offset += topic_len
+        packet_id = int.from_bytes(packet[offset : offset + 2], "big")
+        offset += 2
+        payload = packet[offset:]
+        if topic != expected_topic or payload != expected_payload:
+            raise AssertionError(
+                "security reload queued PUBLISH mismatch: "
+                f"topic={topic!r} payload={payload!r}"
+            )
+        client.sendall(b"\x40\x02" + packet_id.to_bytes(2, "big"))
+
     clients: list[socket.socket] = []
     try:
         old = connect(
@@ -2481,12 +2533,36 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         subscriber.sendall(subscribe_packet(2, "revoked/#"))
         if read_mqtt_packet(subscriber) != bytes.fromhex("900400020000"):
             raise AssertionError("security reload Will SUBACK mismatch")
+
+        durable = connect(
+            "reload-durable-subscriber",
+            "stable",
+            0,
+            proto_ver=4,
+            clean_start=False,
+        )
+        clients.append(durable)
+        durable.sendall(subscribe_packet(
+            6,
+            "queued/#",
+            proto_ver=4,
+            qos=1,
+        ))
+        if read_mqtt_packet(durable) != bytes.fromhex("9003000601"):
+            raise AssertionError("security reload durable SUBACK mismatch")
+        durable.sendall(bytes.fromhex("e000"))
+        durable.close()
+        clients.remove(durable)
+
         expect_publish_reason(old, "before/value", 1, 0x10)
+        expect_publish_reason(old, "queued/allowed", 10, 0x00)
+        expect_publish_reason(old, "queued/revoked", 11, 0x00)
 
         acl_file.write_text(
             "user old\ntopic readwrite after/#\n"
             "topic write revoked/will\n"
             "user stable\ntopic read after/#\n"
+            "topic read queued/allowed\n"
             "topic read revoked/#\n"
             "user new\ntopic write after/#\n"
         )
@@ -2505,6 +2581,27 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 "security reload did not update existing subscription ACL"
             )
 
+        durable = connect(
+            "reload-durable-subscriber",
+            "stable",
+            0,
+            proto_ver=4,
+            clean_start=False,
+            expected_session_present=True,
+        )
+        clients.append(durable)
+        expect_qos1_delivery(
+            durable,
+            "queued/allowed",
+            b"reload",
+        )
+        # The now-denied queued message must be removed rather than left at
+        # the Session head or delivered from pre-reload authorization state.
+        mqtt_ping(durable)
+        durable.sendall(bytes.fromhex("e000"))
+        durable.close()
+        clients.remove(durable)
+
         next_password_file.write_text(
             f"stable:{password_hash}\n"
             f"new:{password_hash}\n"
@@ -2513,6 +2610,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             "user old\ntopic readwrite after/#\n"
             "topic write revoked/will\n"
             "user stable\ntopic read after/#\n"
+            "topic read queued/allowed\n"
             "topic read revoked/#\n"
             "user new\ntopic write after/#\n"
         )
@@ -6338,7 +6436,8 @@ def main() -> None:
         "P-256/P-384/RSA/Ed25519 signed CRL revocation, strict TLS "
         "key/CA/EKU/identity/CRL rejection, retained-source ACL replay, "
         "atomic global/per-listener password/ACL path and content reload "
-        "with selective live credential revocation and "
+        "with selective live credential revocation, durable queued-delivery "
+        "reauthorization, and "
         "TLS/WSS identity/key-password/CA/capath/CRL path and content reload "
         "plus per-listener anonymous/zero-ID/assigned-prefix/protocol/QoS/"
         "Keep-Alive/Topic-Alias admission SIGHUP "

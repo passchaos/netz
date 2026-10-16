@@ -190,6 +190,8 @@ class SourceLockTests(unittest.TestCase):
                     "78e27c3406d1af3517a3a09190a2e3b95ff1c91ec503ce798e2e4184eb8db0f3",
                 "broker/07-will-takeover.py":
                     "294a4441eef80b1a4fe9599870fd5e7bb1b0f77e0e56a3c64a15b7806bf2c604",
+                "broker/09-acl-change.py":
+                    "548ab0d7ba510dac77b47b2e1b606fcd6d1513cb953149b76e3e97cc643d3ebb",
                 "broker/09-plugin-auth-acl-pub-prop.py":
                     "885df1d4f1556efd585b701c95279ea6c3e36a189498b2a58a41a98d5aba0cec",
                 "broker/09-plugin-auth-acl-sub-denied.py":

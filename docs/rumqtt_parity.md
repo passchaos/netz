@@ -3315,7 +3315,13 @@ while new clients use the new trust roots, verify updated CertificateRequest CA
 names, and verify malformed replacements roll back. The password/ACL gate keeps
 an unchanged authenticated subscriber online, revokes a removed credential on
 the live connection without publishing its Will, and proves a failed later
-reload disconnects nobody. Another starts with client A accepted and client B
+reload disconnects nobody. The same production gate source-locks Mosquitto
+`09-acl-change.py`: an MQTT 3.1.1 durable Session queues two QoS 1 messages
+while offline, SIGHUP removes read access for one topic, and reconnect reports
+Session Present while delivering only the still-authorized message. PUBACK
+followed by an immediate PINGRESP proves the denied queued entry was removed
+rather than delivered or left blocking the Session head. Another starts with
+client A accepted and client B
 revoked, swaps the CRL through SIGHUP and proves
 that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Bridge
