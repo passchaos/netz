@@ -7,6 +7,11 @@ const Protocol = enum { http1, http2 };
 const ClientKind = enum { curl, nghttp };
 const Route = enum { first, second };
 
+const nghttp_request_body = "nghttp-request-body";
+const nghttp_request_trailer_name = "x-nghttp-request-complete";
+const nghttp_request_trailer_value = "yes";
+const nghttp_response_trailer_name = "x-netz-response-complete";
+
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 4 or args.len > 5) return error.InvalidArgument;
@@ -108,6 +113,7 @@ fn serveHttp1(
             request.request.target,
             request.request.headers,
             request.request.body,
+            request.request.trailers,
         );
         try markRoute(&seen, route);
         try connection.writeResponse(.{
@@ -189,47 +195,180 @@ fn serveHttp2(
     var seen: u2 = 0;
     var first_stream_id: ?u31 = null;
     var last_stream_id: u31 = 0;
-    for (0..2) |_| {
-        var request = try connection.readRequest();
-        defer request.deinit(allocator);
-        if (request.stream_id == 0 or request.stream_id & 1 == 0) {
-            return error.InvalidStreamId;
-        }
-        if (first_stream_id) |first| {
-            if (request.stream_id == first) return error.DuplicateStreamId;
-        } else {
-            first_stream_id = request.stream_id;
-        }
-        last_stream_id = @max(last_stream_id, request.stream_id);
-        if (!std.mem.eql(
-            u8,
-            request.scheme,
-            if (use_tls) "https" else "http",
-        )) return error.InvalidScheme;
-        const route = try validateRequest(
-            client,
-            request.method,
-            request.path,
-            request.headers,
-            request.body,
+    if (client == .nghttp) {
+        // nghttp submits both body-bearing streams before either response.
+        // Keep that real multiplexing shape and consume round-robin DATA with
+        // the server batch API instead of serializing the external peer.
+        var requests: [2]netz.http2.runtime.StreamingRequest = undefined;
+        var bodies: NghttpBodyValidator = .{};
+        try connection.readRequestBatchStreamingInto(
+            &requests,
+            &bodies,
+            NghttpBodyValidator.consume,
         );
-        try markRoute(&seen, route);
-        try connection.writeResponse(request.stream_id, .{
-            .status = 200,
-            .headers = &.{
-                .{ .name = "content-type", .value = "text/plain" },
-                .{ .name = "x-netz-sequence", .value = routeNumber(route) },
-            },
-            .body = responseBody(client, route),
-            .request_method = request.method,
-        });
+        defer for (&requests) |*request| request.deinit(allocator);
+        for (&requests) |*request| {
+            try recordHttp2Stream(
+                request.stream_id,
+                request.scheme,
+                use_tls,
+                &first_stream_id,
+                &last_stream_id,
+            );
+            if (!bodies.complete(request.stream_id) or
+                request.body_bytes != nghttp_request_body.len)
+            {
+                return error.InvalidRequest;
+            }
+            const route = try validateRequest(
+                client,
+                request.method,
+                request.path,
+                request.headers,
+                nghttp_request_body,
+                request.trailers,
+            );
+            try markRoute(&seen, route);
+            try writeHttp2Response(
+                &connection,
+                client,
+                request.stream_id,
+                request.method,
+                route,
+            );
+        }
+    } else {
+        for (0..2) |_| {
+            var request = try connection.readRequest();
+            defer request.deinit(allocator);
+            try recordHttp2Stream(
+                request.stream_id,
+                request.scheme,
+                use_tls,
+                &first_stream_id,
+                &last_stream_id,
+            );
+            const route = try validateRequest(
+                client,
+                request.method,
+                request.path,
+                request.headers,
+                request.body,
+                request.trailers,
+            );
+            try markRoute(&seen, route);
+            try writeHttp2Response(
+                &connection,
+                client,
+                request.stream_id,
+                request.method,
+                route,
+            );
+        }
     }
     if (seen != 0b11) return error.MissingRequest;
     try connection.sendGoAway(last_stream_id, .no_error, "external-client-complete");
     std.debug.print(
-        "netz external HTTP client completed protocol=http2 transport={s} client={s} requests=2 connections=1 streams=2 body_bytes={d} server_io=zio-std-io\n",
-        .{ transportName(use_tls), clientName(client), requestBodyBytes(client) },
+        "netz external HTTP client completed protocol=http2 transport={s} client={s} requests=2 connections=1 streams=2 body_bytes={d} request_trailers={d} response_trailers={d} server_io=zio-std-io\n",
+        .{
+            transportName(use_tls),
+            clientName(client),
+            requestBodyBytes(client),
+            @as(usize, if (client == .nghttp) 2 else 0),
+            @as(usize, if (client == .nghttp) 2 else 0),
+        },
     );
+}
+
+const NghttpBodyValidator = struct {
+    stream_ids: [2]?u31 = .{ null, null },
+    offsets: [2]usize = .{ 0, 0 },
+
+    fn consume(self: *@This(), stream_id: u31, data: []const u8) !void {
+        const index = self.indexFor(stream_id) orelse
+            return error.UnexpectedFrame;
+        const end = std.math.add(
+            usize,
+            self.offsets[index],
+            data.len,
+        ) catch return error.InvalidRequest;
+        if (end > nghttp_request_body.len or !std.mem.eql(
+            u8,
+            data,
+            nghttp_request_body[self.offsets[index]..end],
+        )) return error.InvalidRequest;
+        self.offsets[index] = end;
+    }
+
+    fn complete(self: *const @This(), stream_id: u31) bool {
+        for (self.stream_ids, self.offsets) |candidate, offset| {
+            if (candidate == stream_id) {
+                return offset == nghttp_request_body.len;
+            }
+        }
+        return false;
+    }
+
+    fn indexFor(self: *@This(), stream_id: u31) ?usize {
+        for (&self.stream_ids, 0..) |*candidate, index| {
+            if (candidate.* == stream_id) return index;
+        }
+        for (&self.stream_ids, 0..) |*candidate, index| {
+            if (candidate.* == null) {
+                candidate.* = stream_id;
+                return index;
+            }
+        }
+        return null;
+    }
+};
+
+fn recordHttp2Stream(
+    stream_id: u31,
+    scheme: []const u8,
+    use_tls: bool,
+    first_stream_id: *?u31,
+    last_stream_id: *u31,
+) !void {
+    if (stream_id == 0 or stream_id & 1 == 0) {
+        return error.InvalidStreamId;
+    }
+    if (first_stream_id.*) |first| {
+        if (stream_id == first) return error.DuplicateStreamId;
+    } else {
+        first_stream_id.* = stream_id;
+    }
+    last_stream_id.* = @max(last_stream_id.*, stream_id);
+    if (!std.mem.eql(
+        u8,
+        scheme,
+        if (use_tls) "https" else "http",
+    )) return error.InvalidScheme;
+}
+
+fn writeHttp2Response(
+    connection: anytype,
+    client: ClientKind,
+    stream_id: u31,
+    method: []const u8,
+    route: Route,
+) !void {
+    try connection.writeResponse(stream_id, .{
+        .status = 200,
+        .headers = &.{
+            .{ .name = "content-type", .value = "text/plain" },
+            .{ .name = "x-netz-sequence", .value = routeNumber(route) },
+        },
+        .body = responseBody(client, route),
+        .trailers = if (client == .nghttp)
+            &.{.{
+                .name = nghttp_response_trailer_name,
+                .value = @tagName(route),
+            }}
+        else
+            &.{},
+        .request_method = method,
+    });
 }
 
 fn validateRequest(
@@ -238,6 +377,7 @@ fn validateRequest(
     target: []const u8,
     headers: anytype,
     body: []const u8,
+    trailers: anytype,
 ) !Route {
     if (!headerEquals(headers, "x-interop-client", clientName(client))) {
         return error.InvalidHeader;
@@ -245,29 +385,50 @@ fn validateRequest(
     return switch (client) {
         .curl => if (std.mem.eql(u8, target, "/upload?client=curl")) blk: {
             if (!std.mem.eql(u8, method, "POST") or
-                !std.mem.eql(u8, body, "curl-request-body"))
+                !std.mem.eql(u8, body, "curl-request-body") or
+                trailers.len != 0)
             {
                 return error.InvalidRequest;
             }
             break :blk .first;
         } else if (std.mem.eql(u8, target, "/reuse?client=curl")) blk: {
-            if (!std.mem.eql(u8, method, "GET") or body.len != 0) {
+            if (!std.mem.eql(u8, method, "GET") or
+                body.len != 0 or
+                trailers.len != 0)
+            {
                 return error.InvalidRequest;
             }
             break :blk .second;
         } else return error.InvalidRequest,
         .nghttp => if (std.mem.eql(u8, target, "/first?client=nghttp")) blk: {
-            if (!std.mem.eql(u8, method, "GET") or body.len != 0) {
+            if (!validNghttpRequest(method, headers, body, trailers)) {
                 return error.InvalidRequest;
             }
             break :blk .first;
         } else if (std.mem.eql(u8, target, "/second?client=nghttp")) blk: {
-            if (!std.mem.eql(u8, method, "GET") or body.len != 0) {
+            if (!validNghttpRequest(method, headers, body, trailers)) {
                 return error.InvalidRequest;
             }
             break :blk .second;
         } else return error.InvalidRequest,
     };
+}
+
+fn validNghttpRequest(
+    method: []const u8,
+    headers: anytype,
+    body: []const u8,
+    trailers: anytype,
+) bool {
+    return std.mem.eql(u8, method, "POST") and
+        std.mem.eql(u8, body, nghttp_request_body) and
+        headerEquals(headers, "trailer", nghttp_request_trailer_name) and
+        trailers.len == 1 and
+        headerEquals(
+            trailers,
+            nghttp_request_trailer_name,
+            nghttp_request_trailer_value,
+        );
 }
 
 fn headerEquals(
@@ -315,7 +476,7 @@ fn responseBody(client: ClientKind, route: Route) []const u8 {
 fn requestBodyBytes(client: ClientKind) usize {
     return switch (client) {
         .curl => "curl-request-body".len,
-        .nghttp => 0,
+        .nghttp => nghttp_request_body.len * 2,
     };
 }
 

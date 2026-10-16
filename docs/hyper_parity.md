@@ -2096,15 +2096,20 @@ sibling reuse, and connection-error precedence.
    from zio and schedules accepted connections in a `std.Io.Group`, with no
    detached OS-thread fallback; its readiness line identifies
    `server_io=zio-std-io`. This covers the external h2c wire checks.
-   On 2026-09-28,
+   On 2026-10-16,
    `zig build interop-http-external-clients -Doptimize=ReleaseFast` ran
    installed curl 8.5.0 (libcurl/OpenSSL/nghttp2 1.59.0) against netz
    HTTP/1.1 and HTTP/2 servers over cleartext and certificate-verified TLS, and
    nghttp2 1.68.1 against HTTP/2 over both transports. Each arm verifies two
    exact requests and responses on one connection; the HTTP/2 arms require
-   distinct odd stream IDs, and nghttp TLS must report ALPN `h2`. This broadens
-   real client coverage beyond Hyper without claiming exhaustive client
-   behavior. The native
+   distinct odd stream IDs, and nghttp TLS must report ALPN `h2`. The nghttp2
+   arms additionally open both POST streams before either response, send and
+   server-validate a complete 19-byte body plus terminal request trailer on
+   each, and require the two response bodies plus route-specific trailers in
+   terminal HEADERS carrying END_STREAM. The server consumes that round-robin
+   DATA through netz's batch-streaming request API rather than constraining the
+   external peer to serial requests. This broadens real client coverage beyond
+   Hyper without claiming exhaustive client behavior. The native
    TLS 1.3 HTTP/2 runtime separately has an end-to-end encrypted request test
    that verifies `h2` ALPN and the transport-derived `https` pseudo-header,
    plus no-common-ALPN rejection and required-client-certificate tests; verified

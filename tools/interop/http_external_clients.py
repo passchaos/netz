@@ -18,6 +18,10 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 -----END CERTIFICATE-----
 """
 
+NGHTTP_REQUEST_BODY = b"nghttp-request-body"
+NGHTTP_REQUEST_TRAILER = "x-nghttp-request-complete: yes"
+NGHTTP_RESPONSE_TRAILER = "x-netz-response-complete"
+
 
 def free_port() -> int:
     with socket.socket() as listener:
@@ -214,11 +218,17 @@ def run_nghttp_case(
     environment = os.environ.copy()
     if tls:
         environment["SSL_CERT_FILE"] = str(directory / "localhost.pem")
+    request_body = directory / f"{label}-request.body"
+    request_body.write_bytes(NGHTTP_REQUEST_BODY)
+    # nghttp applies -d and --trailer to every URI in this same-origin group;
+    # each stream independently reads the complete file and sends the trailer.
     command = [
         nghttp,
         "--verbose",
         "--timeout=10",
         "--header=x-interop-client: nghttp",
+        f"--data={request_body}",
+        f"--trailer={NGHTTP_REQUEST_TRAILER}",
         f"{scheme}://{host}:{port}/first?client=nghttp",
         f"{scheme}://{host}:{port}/second?client=nghttp",
     ]
@@ -245,6 +255,12 @@ def run_nghttp_case(
                 raise AssertionError(
                     f"{label}: response header {sequence} missing"
                 )
+        for route in ("first", "second"):
+            trailer = f"{NGHTTP_RESPONSE_TRAILER}: {route}"
+            if not received_end_stream_trailer(transcript, trailer):
+                raise AssertionError(
+                    f"{label}: terminal response trailer missing: {trailer}"
+                )
         if tls and "The negotiated protocol: h2" not in transcript:
             raise AssertionError(f"{label}: TLS ALPN h2 not observed")
         if tls and "certificate verification failed" in transcript.lower():
@@ -254,10 +270,22 @@ def run_nghttp_case(
             initial,
             f"completed protocol=http2 transport="
             f"{'tls' if tls else 'cleartext'} client=nghttp requests=2 "
-            "connections=1 streams=2",
+            f"connections=1 streams=2 body_bytes={len(NGHTTP_REQUEST_BODY) * 2} "
+            "request_trailers=2 response_trailers=2",
         )
     finally:
         stop_server(process)
+
+
+def received_end_stream_trailer(transcript: str, trailer: str) -> bool:
+    lines = transcript.splitlines()
+    for index, line in enumerate(lines):
+        if " recv " not in line or trailer not in line:
+            continue
+        frame_tail = "\n".join(lines[index + 1 : index + 5])
+        if "recv HEADERS frame" in frame_tail and "END_STREAM" in frame_tail:
+            return True
+    return False
 
 
 def main() -> None:
@@ -287,6 +315,7 @@ def main() -> None:
     print(
         "External HTTP client interop passed: curl HTTP/1.1+h2 and nghttp2 h2, "
         "cleartext+certificate-verified TLS, two requests over one connection; "
+        "nghttp2 request bodies+trailers and response trailers verified; "
         f"curl={curl_version[0]} nghttp={nghttp_version} server_io=zio-std-io"
     )
 
