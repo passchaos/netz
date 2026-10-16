@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: passchaos/vail
-          ref: 209f58b4f820c88a97ef6ccd225afe871c80a203
+          ref: 0199eb833833fa51819c747ba01e4b5850bb0d2b
           token: ${{ secrets.NETZ_DEPENDENCIES_TOKEN }}
           path: vail
           persist-credentials: false
