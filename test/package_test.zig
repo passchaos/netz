@@ -307,6 +307,18 @@ test "public modules are reachable" {
         "cookieHeaderValueAlloc",
     ));
     try std.testing.expect(@hasDecl(netz.http.CookieJar, "endSession"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSession"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSessionOptions"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSessionError"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSessionInitError"));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieSession,
+        "requestUriWithDeadline",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieSession,
+        "requestUriFollowingRedirectsDetailedWithDeadline",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http.OwnedResponse,
         "headers",

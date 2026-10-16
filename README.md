@@ -205,6 +205,17 @@ Current protocol coverage includes:
   per-domain/global eviction
   prefers non-Secure excess state then oldest access, and `endSession` removes
   non-persistent cookies,
+- A single-owner `http.CookieSession` composition that owns the unified
+  H1/H2/optional-H3 Pool plus CookieJar. It rejects ambiguous caller Cookie
+  fields, appends derived Cookie as HPACK/QPACK Never Indexed, commits every
+  intermediate redirect response's Set-Cookie before resolving its Location,
+  recomputes state for each target URI, binds final state to the actual hop,
+  and preserves the pool's stale retry, Alt-Svc fallback, connection budgets,
+  cross-origin credential/client-identity isolation, method rewriting and one
+  absolute deadline. The actual method of each hop—including a 301/302/303
+  rewrite—drives SameSite Lax eligibility. Cross-origin redirects
+  conservatively become cross-site unless the application explicitly proves
+  otherwise,
 - A unified `http.Client`/`http.Connection` surface for HTTP/1.1 and HTTP/2,
   plus an optional HTTP/3-capable `http.Pool`:
   HTTPS performs one certificate-verified vail TLS 1.2/1.3 handshake offering

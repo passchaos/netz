@@ -3,6 +3,7 @@
 pub const content_coding = @import("content_coding.zig");
 pub const alt_svc_cache = @import("alt_svc_cache.zig");
 pub const cookies = @import("cookies/mod.zig");
+pub const cookie_session = @import("cookie_session.zig");
 pub const AltSvcCache = alt_svc_cache.Cache;
 pub const AltSvcCacheConfig = alt_svc_cache.Config;
 pub const AltSvcAlternative = alt_svc_cache.Alternative;
@@ -26,6 +27,10 @@ pub const CookieStoreResult = cookies.StoreResult;
 pub const CookieStoreSummary = cookies.StoreSummary;
 pub const CookieSameSite = cookies.SameSite;
 pub const CookieJarError = cookies.Error;
+pub const CookieSession = cookie_session.Session;
+pub const CookieSessionOptions = cookie_session.Options;
+pub const CookieSessionError = cookie_session.Error;
+pub const CookieSessionInitError = cookie_session.InitError;
 pub const client = @import("client.zig");
 pub const client_pool = @import("client_pool.zig");
 pub const Client = client.Client;
@@ -54,6 +59,7 @@ test {
     _ = content_coding;
     _ = alt_svc_cache;
     _ = cookies;
+    _ = cookie_session;
     _ = client;
     _ = client_pool;
     _ = @import("content_coding/tests.zig");
@@ -61,4 +67,5 @@ test {
     _ = @import("client_tests.zig");
     _ = @import("client_pool_tests.zig");
     _ = @import("client_pool_http3_tests.zig");
+    _ = @import("cookie_session_tests.zig");
 }

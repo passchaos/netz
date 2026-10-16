@@ -57,7 +57,7 @@ pub fn requestUriWithDeadline(
     );
 }
 
-fn requestUriBefore(
+pub fn requestUriBefore(
     pool: anytype,
     uri_text: []const u8,
     request: client.RequestOptions,

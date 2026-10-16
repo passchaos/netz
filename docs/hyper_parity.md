@@ -1114,6 +1114,21 @@ The shared `fuzz-parsers` target also sends every bounded arbitrary input
 through Set-Cookie parsing, deep-owned storage, URI matching, caller-buffer
 Cookie rendering, and teardown; its structured corpus includes persistent,
 Secure, HttpOnly, SameSite, and Path attributes.
+`http.CookieSession` then composes that jar with the existing unified Pool
+without copying its redirect implementation. Its adapter derives one
+Never-Indexed Cookie field immediately before each hop, commits that hop's
+Set-Cookie fields before Location processing, and recomputes state for the new
+URI. Caller Cookie/Cookie2 fields are rejected instead of ambiguously merged;
+cross-origin Authorization and client identities still follow the existing
+redirect policy, while Cookie state remains host/domain/path scoped. The same
+absolute deadline continues through pool admission, DNS/TCP/TLS or QUIC,
+stale retry, every redirect, and the final response. Real H1 coverage proves
+an unsafe cross-site POST withholds Lax state, the 302 rewrite to GET makes it
+eligible on the next reused connection, an intermediate cookie is applied,
+and a later cookie is retained for the third request. H2 coverage verifies the
+derived field reaches the peer with HPACK Never Indexed. A two-origin H1 test
+proves A's host-only Cookie and Authorization do not reach B while B's cookie
+is stored only for B.
 
 ## Current feature comparison
 
