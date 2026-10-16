@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const websocket = @import("../mod.zig");
 const common = @import("common.zig");
+const cookie_handshake = @import("cookies.zig");
 const compression_scratch = @import("compression_scratch.zig");
 const origin_policy = @import("origin_policy.zig");
 const handshake_headers = @import("handshake/headers.zig");
@@ -244,8 +245,10 @@ fn finishIncomingMessageForConnection(
 pub const PingEvent = common.PingEvent;
 pub const CloseHandshakeEvent = common.CloseHandshakeEvent;
 pub const Message = common.Message;
+pub const CookieHandshakeOptions = cookie_handshake.Options;
 
-pub const Error = websocket.Error || http3.runtime.Error || error{
+pub const Error = websocket.Error || http3.runtime.Error ||
+    cookie_handshake.Error || error{
     ConnectionClosed,
     ConcurrencyUnavailable,
     InvalidResponse,
@@ -266,6 +269,9 @@ pub const ConnectOptions = struct {
     require_subprotocol: bool = false,
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
+    /// Optional single-owner CookieJar adapter. Connection-oriented calls
+    /// require `scope_uri` to be the actual HTTPS request URI.
+    cookies: ?CookieHandshakeOptions = null,
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
@@ -286,6 +292,9 @@ pub const UriConnectOptions = struct {
     require_subprotocol: bool = false,
     origin: ?[]const u8 = null,
     extra_headers: []const http3.Qpack.HeaderField = &.{},
+    /// Optional single-owner CookieJar adapter. URI clients replace any
+    /// supplied scope with the actual URI argument before deriving Cookie.
+    cookies: ?CookieHandshakeOptions = null,
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
@@ -4463,6 +4472,7 @@ pub const Client = struct {
         h3_options: http3.runtime.HandshakeClientOptions,
         options: ConnectOptions,
     ) Error!ConnectAttempt {
+        try preflightClientOptions(options);
         var h3_options_with_connect = h3_options;
         h3_options_with_connect.session.local_settings
             .enable_connect_protocol = true;
@@ -4522,6 +4532,7 @@ pub const Client = struct {
         deadline: std.Io.Clock.Timestamp,
     ) Error!ConnectAttempt {
         const absolute = try deadline_policy.usableAwake(io, deadline);
+        try preflightClientOptions(options);
         var h3_options_with_connect = h3_options;
         h3_options_with_connect.session.local_settings
             .enable_connect_protocol = true;
@@ -4719,6 +4730,13 @@ pub const Client = struct {
         const path = try http3.runtime.uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
 
+        if (options.cookies) |cookie_options| {
+            try cookie_handshake.validate(
+                cookie_options.withScope(uri_text),
+                options.extra_headers,
+            );
+        }
+
         var h3_options = options.h3;
         h3_options.session.local_settings.enable_connect_protocol = true;
         if (h3_options.handshake.server_name == null) {
@@ -4754,6 +4772,10 @@ pub const Client = struct {
                 .require_subprotocol = options.require_subprotocol,
                 .origin = options.origin,
                 .extra_headers = options.extra_headers,
+                .cookies = if (options.cookies) |cookie_options|
+                    cookie_options.withScope(uri_text)
+                else
+                    null,
                 .enable_permessage_deflate = options.enable_permessage_deflate,
                 .allow_context_takeover = options.allow_context_takeover,
                 .client_max_window_bits = options.client_max_window_bits,
@@ -4767,6 +4789,14 @@ pub const Client = struct {
     }
 };
 
+fn preflightClientOptions(options: ConnectOptions) Error!void {
+    try validateClientExtraHeaders(options.extra_headers);
+    try validateProtocols(options.protocols);
+    if (options.cookies) |cookie_options| {
+        try cookie_handshake.validate(cookie_options, options.extra_headers);
+    }
+}
+
 fn connectAttemptEstablishedBefore(
     allocator: std.mem.Allocator,
     h3: *http3.runtime.HandshakeClient,
@@ -4776,6 +4806,16 @@ fn connectAttemptEstablishedBefore(
 ) Error!ConnectAttempt {
     try validateClientExtraHeaders(options.extra_headers);
     try validateProtocols(options.protocols);
+    var prepared_cookie: ?cookie_handshake.Prepared = if (options.cookies) |cookie_options|
+        try cookie_handshake.prepare(
+            allocator,
+            h3.established.connection.endpoint.io,
+            cookie_options,
+            options.extra_headers,
+        )
+    else
+        null;
+    defer if (prepared_cookie) |*prepared| prepared.deinit();
     const peer_settings = if (deadline) |absolute|
         try h3.receivePeerSettingsWithDeadline(absolute)
     else
@@ -4805,7 +4845,11 @@ fn connectAttemptEstablishedBefore(
         usize,
         2 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
             @as(usize, @intFromBool(options.origin != null)) +
-            @as(usize, @intFromBool(extension_offer != null)),
+            @as(usize, @intFromBool(extension_offer != null)) +
+            @as(usize, @intFromBool(
+                prepared_cookie != null and
+                    prepared_cookie.?.value.len != 0,
+            )),
         options.extra_headers.len,
     ) catch return error.PayloadTooLarge;
     var fields_stack: [handshake_storage.stack_capacity]http3.Qpack.HeaderField = undefined;
@@ -4847,7 +4891,20 @@ fn connectAttemptEstablishedBefore(
         };
         field_index += 1;
     }
-    @memcpy(fields[field_index..], options.extra_headers);
+    @memcpy(
+        fields[field_index..][0..options.extra_headers.len],
+        options.extra_headers,
+    );
+    field_index += options.extra_headers.len;
+    if (prepared_cookie) |prepared| if (prepared.value.len != 0) {
+        fields[field_index] = .{
+            .name = "cookie",
+            .value = prepared.value,
+            .never_indexed = true,
+        };
+        field_index += 1;
+    };
+    std.debug.assert(field_index == fields.len);
     if (deadline) |absolute| {
         // Header construction is local work but remains part of the caller's
         // operation. Do not emit CONNECT after its absolute budget elapsed.
@@ -4873,6 +4930,13 @@ fn connectAttemptEstablishedBefore(
     errdefer response.deinit(allocator);
     if (!h3.control.settings.peer.enable_connect_protocol) {
         return error.ExtendedConnectDisabled;
+    }
+    if (options.cookies) |cookie_options| {
+        try cookie_handshake.store(
+            h3.established.connection.endpoint.io,
+            cookie_options,
+            response.headers,
+        );
     }
     if (response.status >= 200 and response.status < 300) {
         // Successful Extended CONNECT transfers receive-loop ownership from

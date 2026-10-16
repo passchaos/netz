@@ -298,6 +298,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http, "CookieNetscapeOptions"));
     try std.testing.expect(@hasDecl(netz.http, "CookieNetscapeError"));
     try std.testing.expect(@hasDecl(netz.http, "CookieNetscapeFileError"));
+    try std.testing.expect(@hasDecl(
+        netz.http.cookies,
+        "validateScopeUri",
+    ));
     try std.testing.expect(@hasDecl(netz.http.CookieJar, "storeSetCookie"));
     try std.testing.expect(@hasDecl(netz.http.CookieJar, "storeResponse"));
     try std.testing.expect(@hasDecl(
@@ -1768,6 +1772,14 @@ test "public modules are reachable" {
         "openAttemptWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "CookieHandshakeOptions",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.H2ConnectOptions,
+        "cookies",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http2.runtime,
         "ExtendedConnectAttempt",
     ));
@@ -1841,6 +1853,18 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.websocket.runtime.h3,
         "UriConnectOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.websocket.runtime.h3,
+        "CookieHandshakeOptions",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.h3.ConnectOptions,
+        "cookies",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.h3.UriConnectOptions,
+        "cookies",
     ));
     try std.testing.expect(@hasField(
         netz.websocket.runtime.h3.ConnectOptions,

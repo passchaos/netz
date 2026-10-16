@@ -242,6 +242,18 @@ existing proxy path remains unchanged: proxy credentials stay on CONNECT and
 the derived Cookie is an origin Upgrade field under the original chain
 deadline.
 
+RFC 8441 and RFC 9220 client attempts now use the same single-owner CookieJar
+through `CookieHandshakeOptions`. Existing-connection APIs require an explicit
+actual `scope_uri`, while the RFC 9220 URI API replaces that field with its
+parsed HTTPS input. The adapters reject Cookie/Cookie2 ownership conflicts and
+missing or invalid scope before request I/O, derive WebSocket state with GET
+and HTTP-API semantics, encode Cookie as HPACK/QPACK Never Indexed, and ingest
+every Set-Cookie field before returning either an accepted or rejected attempt.
+Real H2 and authenticated H3 exchanges inspect the peer-decoded sensitivity
+bit and prove accepted plus non-2xx response state reaches the Jar; the H3
+one-shot-server regression also proves invalid configuration cannot consume a
+QUIC handshake before the valid request.
+
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration
 (shared HTTP/TLS APIs and RFC 8441), but those are different strengths rather

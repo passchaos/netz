@@ -16,6 +16,7 @@ const tls_client_identity = @import(
 );
 const compression_scratch =
     @import("runtime/compression_scratch.zig");
+const cookie_handshake = @import("runtime/cookies.zig");
 const message_buffer = @import("runtime/message/buffer.zig");
 pub const ReceiveBuffer = message_buffer;
 const message_state = @import("runtime/message/state.zig");
@@ -48,7 +49,7 @@ const transport_read_scratch_len: usize = 16 * 1024;
 
 pub const Error = websocket.Error || http1_runtime.Error || redirect.Error ||
     http_cookies.Error ||
-    http2_runtime.Error || tls_stream.Error || error{
+    cookie_handshake.Error || http2_runtime.Error || tls_stream.Error || error{
     HeadersTooLarge,
     ConnectionClosed,
     InvalidResponse,
@@ -2009,6 +2010,7 @@ pub const PendingUpgrade = struct {
 
 pub const TlsClientIdentityOptions = tls_client_identity.Options;
 pub const StapledOcspPolicy = tls_client_identity.StapledOcspPolicy;
+pub const CookieHandshakeOptions = cookie_handshake.Options;
 pub const HttpProxyOptions = http1_runtime.ProxyOptions;
 pub const RedirectPolicy = redirect.Policy;
 
@@ -10589,6 +10591,16 @@ pub const H2Client = struct {
         );
         defer protocol_value.deinit(allocator);
         try validateH2ClientExtraHeaders(options.extra_headers);
+        var prepared_cookie: ?cookie_handshake.Prepared = if (options.cookies) |cookie_options|
+            try cookie_handshake.prepare(
+                allocator,
+                connection.io,
+                cookie_options,
+                options.extra_headers,
+            )
+        else
+            null;
+        defer if (prepared_cookie) |*prepared| prepared.deinit();
         const extension_policy: websocket.ExtensionNegotiation.Policy = .{
             .enable_permessage_deflate = options.enable_permessage_deflate,
             .allow_context_takeover = options.allow_context_takeover,
@@ -10605,7 +10617,11 @@ pub const H2Client = struct {
             usize,
             1 + @as(usize, @intFromBool(protocol_value.value.len != 0)) +
                 @as(usize, @intFromBool(options.origin != null)) +
-                @as(usize, @intFromBool(extension_offer != null)),
+                @as(usize, @intFromBool(extension_offer != null)) +
+                @as(usize, @intFromBool(
+                    prepared_cookie != null and
+                        prepared_cookie.?.value.len != 0,
+                )),
             options.extra_headers.len,
         ) catch return error.HeadersTooLarge;
         var request_stack: [handshake_storage.stack_capacity]http2.Hpack.HeaderField = undefined;
@@ -10648,7 +10664,20 @@ pub const H2Client = struct {
             };
             request_index += 1;
         }
-        @memcpy(request_headers[request_index..], options.extra_headers);
+        @memcpy(
+            request_headers[request_index..][0..options.extra_headers.len],
+            options.extra_headers,
+        );
+        request_index += options.extra_headers.len;
+        if (prepared_cookie) |prepared| if (prepared.value.len != 0) {
+            request_headers[request_index] = .{
+                .name = "cookie",
+                .value = prepared.value,
+                .never_index = true,
+            };
+            request_index += 1;
+        };
+        std.debug.assert(request_index == request_headers.len);
 
         const request_options: http2_runtime.RequestOptions = .{
             .method = "CONNECT",
@@ -10658,13 +10687,21 @@ pub const H2Client = struct {
             .protocol = "websocket",
             .headers = request_headers,
         };
-        const response = if (deadline) |absolute|
+        var response = if (deadline) |absolute|
             try connection.openExtendedConnectAttemptWithDeadline(
                 request_options,
                 absolute,
             )
         else
             try connection.openExtendedConnectAttempt(request_options);
+        errdefer response.deinit(allocator);
+        if (options.cookies) |cookie_options| {
+            try cookie_handshake.store(
+                connection.io,
+                cookie_options,
+                response.headers,
+            );
+        }
         return .{
             .allocator = allocator,
             .response = response,
@@ -11572,6 +11609,9 @@ pub const H2ConnectOptions = struct {
     /// Optional browser Origin value sent as a regular RFC 8441 header.
     origin: ?[]const u8 = null,
     extra_headers: []const http2.Hpack.HeaderField = &.{},
+    /// Optional single-owner CookieJar adapter. `scope_uri` must describe the
+    /// actual request URI carried by this existing HTTP/2 connection.
+    cookies: ?CookieHandshakeOptions = null,
     enable_permessage_deflate: bool = false,
     /// Offer RFC 7692 context takeover on this Extended CONNECT stream.
     allow_context_takeover: bool = false,
@@ -17167,6 +17207,8 @@ test {
     _ = @import("runtime/handshake/capacity_tests.zig");
     _ = @import("runtime/handshake/h1_attempt_tests.zig");
     _ = @import("runtime/handshake/h2_admission_tests.zig");
+    _ = @import("runtime/cookie_h2_tests.zig");
+    _ = @import("runtime/cookie_h3_tests.zig");
     _ = @import("runtime/h3_tests.zig");
     _ = @import("runtime/h3_recovery_tests.zig");
     _ = @import("runtime/unix_tests.zig");

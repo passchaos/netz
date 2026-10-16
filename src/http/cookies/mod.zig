@@ -101,6 +101,14 @@ pub const StoreSummary = struct {
     }
 };
 
+/// Validate that `uri_text` can be used as an HTTP or WebSocket Cookie scope
+/// without reading or mutating a Jar. Connection-establishing adapters use
+/// this preflight to reject invalid configuration before network I/O.
+pub fn validateScopeUri(uri_text: []const u8) Error!void {
+    var host_buffer: [net.HostName.max_len + 2]u8 = undefined;
+    _ = try parseOrigin(uri_text, &host_buffer);
+}
+
 const Cookie = struct {
     name: []u8,
     value: []u8,
