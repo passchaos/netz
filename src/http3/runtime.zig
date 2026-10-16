@@ -18277,6 +18277,12 @@ pub const OwnedHandshakeRequest = struct {
     stream_bytes: []u8,
     request: http3.DecodedRequest,
 
+    /// Whether this request carries replay risk from the current QUIC 0-RTT
+    /// hop or an earlier gateway hop marked with RFC 8470 Early-Data.
+    pub fn mightHaveBeenEarly(self: OwnedHandshakeRequest) bool {
+        return self.was_early_data or self.request.mightHaveBeenEarly();
+    }
+
     pub fn deinit(self: *OwnedHandshakeRequest, allocator: std.mem.Allocator) void {
         self.request.deinit(allocator);
         allocator.free(self.stream_bytes);

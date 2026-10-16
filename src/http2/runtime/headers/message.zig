@@ -2,6 +2,7 @@ const std = @import("std");
 const http2 = @import("../../mod.zig");
 const connection_headers = @import("connection.zig");
 const http_method = @import("../../../internal/http_method.zig");
+const early_data = @import("../../../http/early_data.zig");
 
 const Error = http2.Error || error{
     MissingPseudoHeader,
@@ -167,6 +168,10 @@ pub fn validateHeaderBlock(headers: []const http2.Hpack.HeaderField, kind: Heade
             continue;
         }
         saw_regular = true;
+
+        if (kind != .request and early_data.isHeaderName(header.name)) {
+            return error.InvalidHeader;
+        }
 
         if (kind == .request_trailers or kind == .response_trailers) {
             if (forbiddenTrailerFieldName(header.name)) return error.InvalidHeader;
@@ -396,7 +401,8 @@ const connectionSpecificHeaderName =
     connection_headers.connectionSpecificHeaderName;
 
 fn forbiddenTrailerFieldName(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "authorization") or
+    return early_data.isHeaderName(name) or
+        std.ascii.eqlIgnoreCase(name, "authorization") or
         std.ascii.eqlIgnoreCase(name, "cache-control") or
         std.ascii.eqlIgnoreCase(name, "content-encoding") or
         std.ascii.eqlIgnoreCase(name, "content-length") or

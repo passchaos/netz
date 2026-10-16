@@ -118,6 +118,12 @@ benchmark response:
   deliberately sends a real `Connection: close` trailer over cleartext and
   TLS; netz reports `InvalidTrailer` and closes that connection without a
   response;
+- RFC 8470 Early-Data signaling is shared across HTTP/1, HTTP/2, and HTTP/3.
+  Receivers treat any request instance, including repeated or invalid values,
+  as replay risk; outbound requests require exactly one canonical value;
+  responses and both trailer directions reject the field. Gateway helpers
+  return preserve/set/none so HTTP/1 connection-token stripping cannot erase a
+  replay-risk signal while translating to HTTP/2;
 - response codecs and both owned/caller-storage parsers share the RFC 9112
   status-line grammar. Even an empty optional reason phrase retains its
   mandatory separating SP, while a peer line that omits that delimiter is

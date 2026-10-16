@@ -1,6 +1,7 @@
 const std = @import("std");
 const wire = @import("../internal/wire.zig");
 const http_method = @import("../internal/http_method.zig");
+const early_data = @import("../http/early_data.zig");
 const chunk_extension = @import("chunk_extension.zig");
 pub const content_coding = @import("../http/content_coding.zig");
 
@@ -686,6 +687,8 @@ pub fn parseResponseHead(
     const status = try parseStatusCode(status_line.status_code);
     try validateReasonPhrase(status_line.reason);
     try validateTransferEncodingForVersion(version, parsed.headers);
+    early_data.validateForbiddenFields(parsed.headers) catch
+        return error.InvalidResponse;
     const declared_content_length = try contentLength(parsed.headers);
 
     const forbidden = responseForbidsBody(status, context.request_method);
@@ -964,6 +967,8 @@ pub fn parseRequest(allocator: std.mem.Allocator, bytes: []const u8, options: Pa
     if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
         try parsed_headers.stripContentLength(allocator);
     }
+    early_data.validateForbiddenFields(parsed_body.trailers) catch
+        return error.InvalidTrailer;
 
     return .{
         .method = method,
@@ -1083,6 +1088,8 @@ pub fn parseResponseWithContext(
     );
     errdefer parsed_headers.deinit(allocator);
     try validateTransferEncodingForVersion(version, parsed_headers.headers);
+    early_data.validateForbiddenFields(parsed_headers.headers) catch
+        return error.InvalidResponse;
     const consumed_head = head_end + 4;
     const parsed_body = if (responseForbidsBody(status, context.request_method))
         ParsedBody{
@@ -1096,6 +1103,8 @@ pub fn parseResponseWithContext(
     if (parsed_body.framing == .chunked or parsed_body.framing == .close_delimited) {
         try parsed_headers.stripContentLength(allocator);
     }
+    early_data.validateForbiddenFields(parsed_body.trailers) catch
+        return error.InvalidTrailer;
 
     return .{
         .version = version,
@@ -2303,6 +2312,8 @@ fn validateRequestForWrite(
 ) Error!void {
     if (version == .http_0_9) return error.InvalidVersion;
     try validateRequestTargetForMethod(method, target);
+    early_data.validateOutboundRequestHeaders(headers) catch
+        return error.MalformedHeader;
     try validateTransferEncodingForVersion(version, headers);
     try validateConnectionHeadersForWrite(version, headers);
     try validateRequestTeForWrite(version, headers);
@@ -2411,6 +2422,8 @@ fn validateResponseForWrite(
     try validateResponseTeForWrite(headers);
     try validateResponseExpectForWrite(headers);
     try validateResponseUpgradeForWrite(status, headers);
+    early_data.validateForbiddenFields(headers) catch
+        return error.InvalidResponse;
     try validateOutgoingResponseBodyForStatus(status, headers, body, &.{});
     const has_transfer_encoding = hasHeaderNamed(
         headers,
@@ -3108,7 +3121,8 @@ fn validTrailerFieldName(name: []const u8) bool {
     // their definitions opt into trailers. Keep known pre-content and
     // connection-control fields out, while allowing application extension
     // fields whose semantics are known only to the caller.
-    return !(std.ascii.eqlIgnoreCase(name, "authorization") or
+    return !(early_data.isHeaderName(name) or
+        std.ascii.eqlIgnoreCase(name, "authorization") or
         std.ascii.eqlIgnoreCase(name, "cache-control") or
         std.ascii.eqlIgnoreCase(name, "connection") or
         std.ascii.eqlIgnoreCase(name, "content-encoding") or
@@ -5490,6 +5504,98 @@ test "HTTP/1 response parsing honors request method body rules" {
     try std.testing.expectEqual(BodyFraming.none, connect_response.body_framing);
     try std.testing.expectEqual(@as(usize, "HTTP/1.1 200 Connection Established\r\nContent-Length: 9\r\n\r\n".len), connect_response.consumed);
     try std.testing.expectEqualStrings("", connect_response.body);
+}
+
+test "HTTP/1 enforces RFC 8470 Early-Data placement" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+
+    try writeRequest(
+        &encoded,
+        allocator,
+        .GET,
+        "/early",
+        .http_1_1,
+        &.{
+            .{ .name = "Host", .value = "example.com" },
+            .{ .name = "Early-Data", .value = "1" },
+        },
+        "",
+    );
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        encoded.items,
+        "Early-Data: 1\r\n",
+    ) != null);
+
+    inline for (.{
+        &.{Header{ .name = "early-data", .value = "0" }},
+        &.{
+            Header{ .name = "early-data", .value = "1" },
+            Header{ .name = "Early-Data", .value = "1" },
+        },
+    }) |invalid| {
+        try std.testing.expectError(
+            error.MalformedHeader,
+            writeRequest(
+                &encoded,
+                allocator,
+                .GET,
+                "/early",
+                .http_1_1,
+                invalid,
+                "",
+            ),
+        );
+    }
+
+    const forwarded =
+        "GET /forwarded HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Early-Data: invalid\r\n" ++
+        "Early-Data: 1\r\n\r\n";
+    var request = try parseRequest(allocator, forwarded, .{});
+    defer request.deinit(allocator);
+    try std.testing.expect(
+        early_data.requestMightHaveBeenEarly(request.headers),
+    );
+    try std.testing.expectEqual(
+        early_data.ForwardingAction.set,
+        early_data.forwardingAction(request.headers, false),
+    );
+
+    const forbidden_response =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Early-Data: 1\r\n" ++
+        "Content-Length: 0\r\n\r\n";
+    try std.testing.expectError(
+        error.InvalidResponse,
+        parseResponse(allocator, forbidden_response, .{}),
+    );
+    try std.testing.expectError(
+        error.InvalidResponse,
+        writeResponse(
+            &encoded,
+            allocator,
+            .http_1_1,
+            200,
+            "OK",
+            &.{.{ .name = "Early-Data", .value = "1" }},
+            "",
+        ),
+    );
+
+    const forbidden_trailer =
+        "POST / HTTP/1.1\r\n" ++
+        "Host: example.com\r\n" ++
+        "Transfer-Encoding: chunked\r\n" ++
+        "Trailer: Early-Data\r\n\r\n" ++
+        "0\r\nEarly-Data: 1\r\n\r\n";
+    try std.testing.expectError(
+        error.InvalidTrailer,
+        parseRequest(allocator, forbidden_trailer, .{}),
+    );
 }
 test {
     _ = runtime;

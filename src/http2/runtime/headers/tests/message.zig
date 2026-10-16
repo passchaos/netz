@@ -190,6 +190,38 @@ test "HTTP/2 message headers reject connection-specific fields and invalid trail
     );
 }
 
+test "HTTP/2 message headers enforce RFC 8470 Early-Data placement" {
+    // Recipients treat invalid or repeated request fields as equivalent to 1.
+    try headers.validateHeaderBlock(&.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/forwarded" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "early-data", .value = "invalid" },
+        .{ .name = "early-data", .value = "1" },
+    }, .request);
+
+    try std.testing.expectError(
+        error.InvalidHeader,
+        headers.validateHeaderBlock(&.{
+            .{ .name = ":status", .value = "200" },
+            .{ .name = "early-data", .value = "1" },
+        }, .response),
+    );
+    inline for (.{
+        headers.HeaderBlockKind.request_trailers,
+        headers.HeaderBlockKind.response_trailers,
+    }) |kind| {
+        try std.testing.expectError(
+            error.InvalidHeader,
+            headers.validateHeaderBlock(&.{.{
+                .name = "early-data",
+                .value = "1",
+            }}, kind),
+        );
+    }
+}
+
 test "HTTP/2 message headers validate methods request targets and authorities" {
     try std.testing.expectError(
         error.MissingPseudoHeader,

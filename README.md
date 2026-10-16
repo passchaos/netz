@@ -187,6 +187,15 @@ Current protocol coverage includes:
   `http.OwnedResponse` and redirected responses retain the same explicit
   allocating/caller-buffer decode surface without hiding a representation
   transform inside connection pooling,
+- Shared RFC 8470 `http.early_data` semantics for HTTP/1, HTTP/2, and HTTP/3:
+  any received `Early-Data` instance, including repeated or invalid values, is
+  classified as replay risk; origin-facing sends require one canonical value;
+  and a gateway receives an explicit preserve/set/none forwarding decision so
+  an HTTP/1 `Connection` nomination cannot silently erase the signal during
+  HTTP/2 conversion. Responses and request/response trailers reject the field
+  in every protocol. HTTP/3 aggregate and endpoint-handler requests expose
+  `mightHaveBeenEarly()`, combining accepted current-hop 0-RTT provenance with
+  a prior hop's header even when the current connection is ordinary 1-RTT,
 - An explicit, single-owner RFC 6265/RFC6265bis-22 `http.CookieJar` that
   deep-owns state from every repeated H1/H2/H3 `Set-Cookie` field; validates
   the lenient user-agent syntax with CTL and 4,096-byte bounds; applies

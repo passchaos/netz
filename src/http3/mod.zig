@@ -4,6 +4,7 @@ const priority_field = @import("../internal/priority.zig");
 const exact_range_set = @import("../internal/exact_range_set.zig");
 const http_method = @import("../internal/http_method.zig");
 const content_coding = @import("../http/content_coding.zig");
+const early_data = @import("../http/early_data.zig");
 const quic = @import("../quic/mod.zig");
 const header_fields = @import("codec/header_storage.zig");
 
@@ -2491,6 +2492,7 @@ pub const Request = struct {
             .direct, .proxy => {},
         }
         try validateHttpToken(self.method);
+        try early_data.validateOutboundRequestHeaders(self.headers);
 
         var saw_regular = false;
         var seen_protocol = false;
@@ -2579,7 +2581,22 @@ pub const Request = struct {
         );
     }
 
+    pub fn mightHaveBeenEarly(self: Request) bool {
+        return early_data.requestMightHaveBeenEarly(self.headers);
+    }
+
+    pub fn earlyDataForwardingAction(
+        self: Request,
+        current_hop_was_early_data: bool,
+    ) early_data.ForwardingAction {
+        return early_data.forwardingAction(
+            self.headers,
+            current_hop_was_early_data,
+        );
+    }
+
     pub fn headerFields(self: Request, out: []Qpack.HeaderField) Error![]Qpack.HeaderField {
+        try early_data.validateOutboundRequestHeaders(self.headers);
         var count: usize = 0;
         const extended_connect = std.mem.eql(u8, self.method, "CONNECT") and requestHasProtocolPseudo(self.headers);
         try appendHeaderField(out, &count, .{ .name = ":method", .value = self.method });
@@ -3582,6 +3599,10 @@ pub const DecodedRequest = struct {
     consumed: usize,
     qpack_section_acknowledgments: usize = 0,
 
+    pub fn mightHaveBeenEarly(self: DecodedRequest) bool {
+        return early_data.requestMightHaveBeenEarly(self.headers);
+    }
+
     /// Release arrays and body storage owned by `decodeRequest`. Header field
     /// names/values still borrow from the encoded stream bytes; callers must
     /// keep those bytes alive while reading `headers` or `trailers`.
@@ -3722,6 +3743,10 @@ pub const DecodedRequestHead = struct {
     body_allowed: bool,
     consumed: usize,
     qpack_section_acknowledgments: usize,
+
+    pub fn mightHaveBeenEarly(self: DecodedRequestHead) bool {
+        return early_data.requestMightHaveBeenEarly(self.headers);
+    }
 
     pub fn streamContentDecoder(
         self: DecodedRequestHead,
@@ -5217,6 +5242,9 @@ fn validateHeaderBlockImpl(
         saw_regular = true;
 
         if (kind == .trailers and forbiddenTrailerFieldName(header.name)) return error.InvalidHeader;
+        if (kind == .response and early_data.isHeaderName(header.name)) {
+            return error.InvalidHeader;
+        }
         if (std.mem.eql(u8, header.name, "host")) {
             if (host_value != null) return error.InvalidHeader;
             host_value = header.value;
@@ -5440,7 +5468,8 @@ fn markOnce(seen: *bool) Error!void {
 }
 
 fn forbiddenTrailerFieldName(name: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(name, "authorization") or
+    return early_data.isHeaderName(name) or
+        std.ascii.eqlIgnoreCase(name, "authorization") or
         std.ascii.eqlIgnoreCase(name, "cache-control") or
         std.ascii.eqlIgnoreCase(name, "content-encoding") or
         std.ascii.eqlIgnoreCase(name, "content-length") or
@@ -8342,6 +8371,127 @@ test "HTTP/3 validates pseudo headers and connection-specific fields" {
         .path = "/",
         .headers = &.{.{ .name = "Connection", .value = "close" }},
     }).write(&pseudo_trailer, allocator));
+
+    var early_request: std.ArrayList(u8) = .empty;
+    defer early_request.deinit(allocator);
+    try (Request{
+        .method = "GET",
+        .path = "/early",
+        .authority = "example.com",
+        .headers = &.{.{ .name = "early-data", .value = "1" }},
+    }).write(&early_request, allocator);
+    var early_decoded = try decodeRequest(allocator, early_request.items);
+    defer early_decoded.deinit(allocator);
+    try std.testing.expect(early_decoded.mightHaveBeenEarly());
+    try std.testing.expectEqual(
+        early_data.ForwardingAction.preserve,
+        (Request{
+            .method = "GET",
+            .path = "/early",
+            .authority = "example.com",
+            .headers = &.{.{ .name = "early-data", .value = "1" }},
+        }).earlyDataForwardingAction(false),
+    );
+
+    inline for (.{
+        &.{Qpack.HeaderField{ .name = "early-data", .value = "0" }},
+        &.{
+            Qpack.HeaderField{ .name = "early-data", .value = "1" },
+            Qpack.HeaderField{ .name = "early-data", .value = "1" },
+        },
+    }) |invalid_early| {
+        try std.testing.expectError(error.InvalidHeader, (Request{
+            .method = "GET",
+            .path = "/early",
+            .authority = "example.com",
+            .headers = invalid_early,
+        }).write(&early_request, allocator));
+    }
+
+    var forwarded_early: std.ArrayList(u8) = .empty;
+    defer forwarded_early.deinit(allocator);
+    try Helper.writeRequestBlock(&forwarded_early, allocator, &.{
+        .{ .name = ":method", .value = "GET" },
+        .{ .name = ":path", .value = "/forwarded" },
+        .{ .name = ":scheme", .value = "https" },
+        .{ .name = ":authority", .value = "example.com" },
+        .{ .name = "early-data", .value = "invalid" },
+        .{ .name = "early-data", .value = "1" },
+    });
+    var forwarded_decoded = try decodeRequest(
+        allocator,
+        forwarded_early.items,
+    );
+    defer forwarded_decoded.deinit(allocator);
+    try std.testing.expect(forwarded_decoded.mightHaveBeenEarly());
+
+    try std.testing.expectError(error.InvalidHeader, (Request{
+        .method = "GET",
+        .path = "/early-trailer",
+        .authority = "example.com",
+        .trailers = &.{.{ .name = "early-data", .value = "1" }},
+    }).write(&early_request, allocator));
+
+    var forwarded_early_trailer: std.ArrayList(u8) = .empty;
+    defer forwarded_early_trailer.deinit(allocator);
+    try Helper.writeRequestWithTrailers(
+        &forwarded_early_trailer,
+        allocator,
+        &valid_request,
+        &.{.{ .name = "early-data", .value = "1" }},
+    );
+    try std.testing.expectError(
+        error.InvalidHeader,
+        decodeRequest(allocator, forwarded_early_trailer.items),
+    );
+    try std.testing.expectError(error.InvalidHeader, (Response{
+        .status = 200,
+        .headers = &.{.{ .name = "early-data", .value = "1" }},
+    }).write(&early_request, allocator));
+
+    var early_response_block: std.ArrayList(u8) = .empty;
+    defer early_response_block.deinit(allocator);
+    try Qpack.encodeLiteralBlock(&early_response_block, allocator, &.{
+        .{ .name = ":status", .value = "200" },
+        .{ .name = "early-data", .value = "1" },
+    });
+    var early_response: std.ArrayList(u8) = .empty;
+    defer early_response.deinit(allocator);
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = early_response_block.items,
+        .consumed = 0,
+    }).write(&early_response, allocator);
+    try std.testing.expectError(
+        error.InvalidHeader,
+        decodeResponse(allocator, early_response.items),
+    );
+
+    early_response.clearRetainingCapacity();
+    early_response_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&early_response_block, allocator, &.{.{
+        .name = ":status",
+        .value = "200",
+    }});
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = early_response_block.items,
+        .consumed = 0,
+    }).write(&early_response, allocator);
+    early_response_block.clearRetainingCapacity();
+    try Qpack.encodeLiteralBlock(&early_response_block, allocator, &.{.{
+        .name = "early-data",
+        .value = "1",
+    }});
+    try (Frame{
+        .frame_type = FrameType.headers,
+        .payload = early_response_block.items,
+        .consumed = 0,
+    }).write(&early_response, allocator);
+    try std.testing.expectError(
+        error.InvalidHeader,
+        decodeResponse(allocator, early_response.items),
+    );
 }
 
 test "HTTP/3 response encode decode" {

@@ -7,6 +7,7 @@
 const std = @import("std");
 const http3 = @import("../mod.zig");
 const content_coding = @import("../../http/content_coding.zig");
+const early_data = @import("../../http/early_data.zig");
 const quic = @import("../../quic/mod.zig");
 
 pub const ErrorStage = enum { connection, handler, response };
@@ -65,6 +66,13 @@ pub const OwnedRequest = struct {
     body: []const u8,
     body_storage: ?[]u8 = null,
     trailers: []http3.Qpack.HeaderField = &.{},
+
+    /// Whether the current QUIC hop used accepted 0-RTT or an earlier gateway
+    /// marked this request with RFC 8470 Early-Data.
+    pub fn mightHaveBeenEarly(self: OwnedRequest) bool {
+        return self.was_early_data or
+            early_data.requestMightHaveBeenEarly(self.headers);
+    }
 
     pub fn deinit(self: *OwnedRequest, allocator: std.mem.Allocator) void {
         http3.Qpack.freeDecodedFields(allocator, self.headers);

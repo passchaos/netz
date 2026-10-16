@@ -1443,7 +1443,13 @@ The result distinguishes transport rejection from application 425. Timeout
 and absolute-deadline variants use one unchanged budget across the handshake,
 initial response, and retry; a zero budget fails before allocation, ticket
 consumption, packet-number use, or socket I/O. The lower-level early-request
-connect API exposes matching relative and absolute handshake bounds.
+connect API exposes matching relative and absolute handshake bounds. Shared
+RFC 8470 header semantics additionally combine current-hop QUIC provenance
+with a prior gateway's `Early-Data` signal. Any received instance, including
+invalid or repeated values, remains replay-sensitive; origin-facing sends are
+canonicalized by an explicit gateway action, and responses or trailers reject
+the field. Aggregate and endpoint-handler requests expose this combined result
+through `mightHaveBeenEarly()`, including ordinary 1-RTT current hops.
 Initial flight packet plans and datagram views now use stack storage for the
 default 64-packet bound, retaining a heap fallback for explicitly larger
 flights. In back-to-back 50-connection ReleaseFast runs with certificate

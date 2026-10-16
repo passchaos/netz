@@ -1,5 +1,6 @@
 const std = @import("std");
 const http2 = @import("../../mod.zig");
+const early_data = @import("../../../http/early_data.zig");
 
 pub const BlockKind = enum {
     request,
@@ -17,7 +18,13 @@ pub fn stripConnectionHeaders(
     allocator: std.mem.Allocator,
     headers: *std.ArrayList(http2.Hpack.HeaderField),
     kind: BlockKind,
-) std.mem.Allocator.Error!void {
+) (std.mem.Allocator.Error || early_data.Error)!void {
+    switch (kind) {
+        .request => try early_data.validateOutboundRequestHeaders(
+            headers.items,
+        ),
+        .response, .request_trailers, .response_trailers => try early_data.validateForbiddenFields(headers.items),
+    }
     var connection_count: usize = 0;
     for (headers.items) |header| {
         connection_count += @intFromBool(
@@ -55,6 +62,10 @@ fn stripHeader(
 ) bool {
     if (std.ascii.eqlIgnoreCase(header.name, "connection")) return true;
     if (connectionSpecificHeaderName(header.name)) return true;
+    // RFC 8470 makes this replay-risk signal end-to-end across gateways.
+    // Never let an HTTP/1 Connection token silently erase it during H2
+    // conversion; response/trailer placement is rejected after compaction.
+    if (early_data.isHeaderName(header.name)) return false;
     if (std.ascii.eqlIgnoreCase(header.name, "te") and
         (kind != .request or
             !std.ascii.eqlIgnoreCase(
@@ -159,4 +170,34 @@ test "HTTP/2 TE trailers is retained only for requests" {
     try response.append(allocator, .{ .name = "te", .value = "trailers" });
     try stripConnectionHeaders(allocator, &response, .response);
     try std.testing.expectEqual(@as(usize, 0), response.items.len);
+}
+
+test "HTTP/2 outbound conversion preserves canonical Early-Data" {
+    const allocator = std.testing.allocator;
+    var request: std.ArrayList(http2.Hpack.HeaderField) = .empty;
+    defer request.deinit(allocator);
+    try request.appendSlice(allocator, &.{
+        .{ .name = "connection", .value = "early-data, x-hop" },
+        .{ .name = "early-data", .value = "1" },
+        .{ .name = "x-hop", .value = "remove" },
+    });
+    try stripConnectionHeaders(allocator, &request, .request);
+    try std.testing.expectEqual(@as(usize, 1), request.items.len);
+    try std.testing.expectEqualStrings("early-data", request.items[0].name);
+
+    request.clearRetainingCapacity();
+    try request.append(allocator, .{
+        .name = "early-data",
+        .value = "invalid",
+    });
+    try std.testing.expectError(
+        error.InvalidHeader,
+        stripConnectionHeaders(allocator, &request, .request),
+    );
+    try std.testing.expectEqual(@as(usize, 1), request.items.len);
+    try std.testing.expectEqualStrings("invalid", request.items[0].value);
+    try std.testing.expectError(
+        error.InvalidHeader,
+        stripConnectionHeaders(allocator, &request, .response),
+    );
 }

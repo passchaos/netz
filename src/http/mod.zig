@@ -1,6 +1,7 @@
 //! Shared HTTP semantics independent of wire version.
 
 pub const content_coding = @import("content_coding.zig");
+pub const early_data = @import("early_data.zig");
 pub const alt_svc_cache = @import("alt_svc_cache.zig");
 pub const cookies = @import("cookies/mod.zig");
 pub const cookie_session = @import("cookie_session.zig");
@@ -9,6 +10,7 @@ pub const AltSvcCacheConfig = alt_svc_cache.Config;
 pub const AltSvcAlternative = alt_svc_cache.Alternative;
 pub const AltSvcCacheStats = alt_svc_cache.Stats;
 pub const ContentCoding = content_coding.Coding;
+pub const EarlyDataForwardingAction = early_data.ForwardingAction;
 pub const ContentCodingChain = content_coding.Chain;
 pub const DecodedContent = content_coding.DecodedBody;
 pub const ContentStreamDecoder = content_coding.StreamDecoder;
@@ -66,6 +68,7 @@ pub const PoolOperationError = client_pool.OperationError;
 
 test {
     _ = content_coding;
+    _ = early_data;
     _ = alt_svc_cache;
     _ = cookies;
     _ = cookie_session;

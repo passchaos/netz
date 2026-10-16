@@ -175,6 +175,14 @@ test "HTTP/3 endpoint handler supervisor runs owned requests concurrently" {
             request: *const runtime.OwnedEndpointRequest,
         ) runtime.Error!http3.Response {
             if (request.was_early_data) return error.InvalidHeader;
+            const forwarded_early = std.mem.eql(
+                u8,
+                request.path,
+                "/handler-one",
+            );
+            if (request.mightHaveBeenEarly() != forwarded_early) {
+                return error.InvalidHeader;
+            }
             if (request.body.len == 0 or request.trailers.len != 1) {
                 return error.InvalidHeader;
             }
@@ -204,6 +212,7 @@ test "HTTP/3 endpoint handler supervisor runs owned requests concurrently" {
         path: []const u8,
         body: []const u8,
         trailer: []const u8,
+        forwarded_early: bool,
         random: [32]u8,
         secret: [32]u8,
         completed: *std.atomic.Value(usize),
@@ -245,6 +254,10 @@ test "HTTP/3 endpoint handler supervisor runs owned requests concurrently" {
                 .method = "POST",
                 .path = self.path,
                 .authority = "localhost",
+                .headers = if (self.forwarded_early) &.{.{
+                    .name = "early-data",
+                    .value = "1",
+                }} else &.{},
                 .body = self.body,
                 .trailers = &.{.{
                     .name = "x-client-trailer",
@@ -336,6 +349,7 @@ test "HTTP/3 endpoint handler supervisor runs owned requests concurrently" {
             .path = "/handler-one",
             .body = "request-one",
             .trailer = "trailer-one",
+            .forwarded_early = true,
             .random = [_]u8{0xc3} ** 32,
             .secret = [_]u8{0xc4} ** 32,
             .completed = &completed,
@@ -350,6 +364,7 @@ test "HTTP/3 endpoint handler supervisor runs owned requests concurrently" {
             .path = "/handler-two",
             .body = "request-two",
             .trailer = "trailer-two",
+            .forwarded_early = false,
             .random = [_]u8{0xc5} ** 32,
             .secret = [_]u8{0xc6} ** 32,
             .completed = &completed,

@@ -264,6 +264,19 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz, "tls"));
     try std.testing.expect(@hasDecl(netz, "http"));
     try std.testing.expect(@hasDecl(netz.http, "ContentCoding"));
+    try std.testing.expect(@hasDecl(netz.http, "early_data"));
+    try std.testing.expect(@hasDecl(
+        netz.http,
+        "EarlyDataForwardingAction",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.early_data,
+        "requestMightHaveBeenEarly",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.early_data,
+        "forwardingAction",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "ContentCodingChain"));
     try std.testing.expect(@hasDecl(netz.http, "ContentStreamDecoder"));
     try std.testing.expect(@hasDecl(netz.http, "ContentStreamOptions"));
@@ -7120,12 +7133,20 @@ test "public modules are reachable" {
         "was_early_data",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.OwnedHandshakeRequest,
+        "mightHaveBeenEarly",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime,
         "OwnedEndpointRequest",
     ));
     try std.testing.expect(@hasField(
         netz.http3.runtime.OwnedEndpointRequest,
         "was_early_data",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.OwnedEndpointRequest,
+        "mightHaveBeenEarly",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,
