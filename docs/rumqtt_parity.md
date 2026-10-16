@@ -684,6 +684,15 @@ one replacement SUBSCRIBE, and an independent wildcard retained probe observe
 no PUBLISH. A second snapshot/restart repeats all three empty barriers, proving
 restore-time queue and retained cleanup is itself durable rather than only a
 lazy in-memory filter.
+The source-locked `15-persist-client-v5-0.py` companion deliberately treats
+Maximum Packet Size as MQTT 5 connection state rather than copying
+Mosquitto's persisted database field. A Session first advertises a 40-byte
+limit and queues a larger PUBLISH before snapshot. Reconnecting after restart
+with a 256-byte limit receives and acknowledges that message, proving the old
+connection's limit did not leak. A second oversized offline PUBLISH is then
+discarded under a new 40-byte reconnect; another snapshot and 256-byte
+reconnect remain empty, proving the current-connection decision was durably
+retired without poisoning Session Present or its subscription.
 The source-locked `15-persist-client-msg-out-clear-v3-1-1.py` production case
 now runs in MQTT 3.1.1 and MQTT 5. An initial broker snapshots three durable
 subscriptions plus offline QoS 1/2 deliveries; the restored broker emits both

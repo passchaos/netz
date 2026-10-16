@@ -22,6 +22,25 @@ class WireHelpersTests(unittest.TestCase):
                 "10 13 00 04 4d515454 05 00 003c 05 11 0000003c 0001 63"
             ),
         )
+        self.assertEqual(
+            support.connect_packet(
+                "c", clean_start=False, protocol=5, session_expiry=60,
+                maximum_packet_size=40,
+            ),
+            bytes.fromhex(
+                "10 18 0004 4d515454 05 00 003c "
+                "0a 11 0000003c 27 00000028 0001 63"
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "non-zero u32"):
+            support.connect_packet(
+                "c", clean_start=True, maximum_packet_size=0,
+            )
+        with self.assertRaisesRegex(ValueError, "pre-v5"):
+            support.connect_packet(
+                "c", clean_start=True, protocol=4,
+                maximum_packet_size=40,
+            )
 
     def test_subscription_and_publish_have_version_specific_properties(self) -> None:
         self.assertEqual(

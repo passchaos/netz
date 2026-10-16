@@ -42,6 +42,7 @@ def connect_packet(
     client_id: str, *, clean_start: bool,
     protocol: int = 5,
     session_expiry: int = 60,
+    maximum_packet_size: int | None = None,
     keep_alive: int = 60,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
@@ -49,9 +50,19 @@ def connect_packet(
 ) -> bytes:
     if protocol not in (3, 4, 5):
         raise ValueError("protocol must be MQTT 3.1 (3), 3.1.1 (4), or 5")
+    if maximum_packet_size is not None and not (
+        1 <= maximum_packet_size <= 0xFFFFFFFF
+    ):
+        raise ValueError("Maximum Packet Size must be a non-zero u32")
+    if protocol != 5 and maximum_packet_size is not None:
+        raise ValueError("pre-v5 MQTT has no Maximum Packet Size property")
     properties = b""
     if protocol == 5 and session_expiry:
         properties = b"\x11" + session_expiry.to_bytes(4, "big")
+    if protocol == 5 and maximum_packet_size is not None:
+        properties += (
+            b"\x27" + maximum_packet_size.to_bytes(4, "big")
+        )
     connect_flags = 2 if clean_start else 0
     payload = mqtt_string(client_id)
     if will_topic is not None:
@@ -192,6 +203,7 @@ def read_varint(data: bytes, offset: int) -> tuple[int, int]:
 def connect_client(
     port: int, client_id: str, *, clean_start: bool, session_present: bool,
     protocol: int = 5, session_expiry: int = 60,
+    maximum_packet_size: int | None = None,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
     will_properties: bytes = b"",
@@ -203,6 +215,7 @@ def connect_client(
         clean_start=clean_start,
         protocol=protocol,
         session_expiry=session_expiry,
+        maximum_packet_size=maximum_packet_size,
         will_topic=will_topic,
         will_payload=will_payload,
         will_delay=will_delay,
