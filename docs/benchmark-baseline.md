@@ -1735,6 +1735,36 @@ socket-traffic accounting, and a backend that accepts exactly one message
 before returning `NetworkDown`. The 1.14x sample is an internal socket-boundary
 measurement, not yet a QUIC connection throughput claim.
 
+An endpoint-server prototype then separated one protected packet per
+Connection from the shared socket flush, matching Quinn's `poll_transmit`
+ownership boundary. Prepared packets committed packet numbers, AEAD nonces,
+flow/congestion credit, pacing, and recovery before a heterogeneous addressed
+batch; socket-unsent suffixes deliberately remained recoverable network loss.
+Direct tests decrypted the deferred packet after flush, checked recovery was
+already populated, and sent two real TLS connections to different client ports
+with exact prepared/socket-visible masks. Duplicate handles were rejected
+before mutation. An initially unbounded driver also proved why the socket owner
+must retain a turn budget: it remained runnable beyond the benchmark deadline
+instead of returning to receive ACK/timer work. Limiting each receive turn to
+one batch restored liveness but reduced the four-connection server-sender smoke
+to 91.173 MiB/s; eight rounds raised that smoke to 182.537 MiB/s.
+
+The apparent small-shape win did not scale. A verified 64 x 1-MiB run measured
+only 86.137 MiB/s server-sender and 132.024 MiB/s client-sender, versus the
+retained 145.678 and 141.339 MiB/s medians. Baseline and candidate SHA-256
+values were
+`0e4ed798c8896590d664bcdbbd4dccb4a4d52f87d99ff6ea5614d0bb973e19d9`
+and
+`a1413c53408a4c0e394a4d3e84b99dd15ddecde425fc4fb209221a8d361f1a35`.
+Every completed arm preserved exact bytes, checksum, connection count, and wire
+datagram accounting. The prepared-Connection and Server batch APIs plus the
+benchmark state machine were fully removed before commit. zio already
+amortizes consecutive socket operations through its I/O submission path; an
+additional userspace cross-connection queue delayed packet visibility and
+changed burst/ACK scheduling enough to dominate the raw 1.14x socket-boundary
+gain. The general addressed UDP primitive remains useful, but it is not
+presented as a QUIC connection throughput improvement.
+
 ### HTTP/3 real-handshake paced transfer
 
 HTTP/3 server responses now use the same runtime-generated Date policy as
