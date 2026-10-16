@@ -802,6 +802,12 @@ restart therefore publishes the Will immediately, preserves all application
 properties while removing Will Delay, delivers RETAIN=false to an existing
 subscription, and stores a RETAIN=true replay. A third broker generation
 answers the original subscriber's PING without publishing the Will again.
+The matching negative branch sends a normal DISCONNECT from the same
+clean-Session, delayed retained QoS 1 shape, waits for its cancellation commit,
+and kills the broker immediately. After restart both the existing subscriber
+and a fresh retained replay subscription receive PINGRESP directly, proving
+that neither a live nor retained Will escaped and that cancellation did not
+depend on later socket cleanup.
 The complementary cancellation path is source-locked to Mosquitto's
 `07-will-delay-reconnect.py` and adds a process-crash boundary after
 cancellation. A persistent client schedules a three-second Will, reconnects

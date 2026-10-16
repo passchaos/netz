@@ -199,6 +199,124 @@ def verify_clean_session_will_recovery(executable: Path) -> None:
                 final.wait()
 
 
+def verify_clean_session_will_cancellation_recovery(
+    executable: Path,
+) -> None:
+    """Persist normal-DISCONNECT cancellation for a clean Session Will."""
+    observer_id = "journal-clean-will-cancel-observer"
+    with tempfile.TemporaryDirectory(
+        prefix="netz-mqtt-clean-will-cancel-journal-"
+    ) as raw:
+        journal = Path(raw) / "broker.log"
+        port = free_port()
+        broker = start_broker(executable, port, journal, 2)
+        observer = source = None
+        try:
+            observer = connect_client(
+                port,
+                observer_id,
+                clean_start=False,
+                session_present=False,
+            )
+            observer.sendall(subscribe_packet(
+                1,
+                CLEAN_WILL_TOPIC,
+                subscription_identifier=None,
+                qos=1,
+            ))
+            if read_packet(observer) != (0x90, b"\x00\x01\x00\x01"):
+                raise AssertionError(
+                    "unexpected clean Will cancellation observer SUBACK"
+                )
+
+            source = connect_client(
+                port,
+                "journal-clean-will-cancel-source",
+                clean_start=True,
+                session_present=False,
+                session_expiry=0,
+                will_topic=CLEAN_WILL_TOPIC,
+                will_payload=CLEAN_WILL_PAYLOAD,
+                will_delay=CLEAN_WILL_DELAY_SECONDS,
+                will_qos=1,
+                will_retain=True,
+                will_properties=CLEAN_WILL_PROPERTIES,
+            )
+            baseline_size = journal.stat().st_size
+            source.sendall(packet(0xE0, b""))
+            if source.recv(1) != b"":
+                raise AssertionError(
+                    "clean Will source remained open after DISCONNECT"
+                )
+            source.close()
+            source = None
+            wait_for_journal_growth(journal, baseline_size)
+            broker.kill()
+            broker.wait(timeout=5)
+        finally:
+            if observer is not None:
+                observer.close()
+            if source is not None:
+                source.close()
+            if broker.poll() is None:
+                broker.kill()
+                broker.wait()
+
+        restored_port = free_port()
+        restored = start_broker(executable, restored_port, journal, 2)
+        observer = replay = None
+        try:
+            observer = connect_client(
+                restored_port,
+                observer_id,
+                clean_start=False,
+                session_present=True,
+            )
+            observer.sendall(packet(0xC0, b""))
+            if read_packet(observer) != (0xD0, b""):
+                raise AssertionError(
+                    "normal DISCONNECT clean Will was published after recovery"
+                )
+            observer.sendall(packet(0xE0, b""))
+            observer.close()
+            observer = None
+
+            replay = connect_client(
+                restored_port,
+                "journal-clean-will-cancel-replay",
+                clean_start=True,
+                session_present=False,
+                session_expiry=0,
+            )
+            replay.sendall(subscribe_packet(
+                1,
+                CLEAN_WILL_TOPIC,
+                subscription_identifier=None,
+                qos=1,
+            ))
+            if read_packet(replay) != (0x90, b"\x00\x01\x00\x01"):
+                raise AssertionError(
+                    "unexpected canceled clean Will replay SUBACK"
+                )
+            replay.sendall(packet(0xC0, b""))
+            if read_packet(replay) != (0xD0, b""):
+                raise AssertionError(
+                    "normal DISCONNECT clean Will became retained"
+                )
+            replay.sendall(packet(0xE0, b""))
+            replay.close()
+            replay = None
+            stop_broker(restored)
+        finally:
+            if observer is not None:
+                observer.close()
+            if replay is not None:
+                replay.close()
+            if restored.poll() is None:
+                restored.kill()
+                restored.wait()
+
+
 def verify_scheduled_will_recovery(executable: Path) -> None:
     topic = "journal/will"
     payload = b"survives-crash"

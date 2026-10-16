@@ -18,6 +18,7 @@ from mqtt_commit_log_inflight import (
 from mqtt_commit_log_retained import verify_retained_delete_recovery
 from mqtt_commit_log_session import verify_active_session_expiry_recovery
 from mqtt_commit_log_will import (
+    verify_clean_session_will_cancellation_recovery,
     verify_clean_session_will_recovery,
     verify_scheduled_will_cancellation_recovery,
     verify_scheduled_will_recovery,
@@ -353,6 +354,11 @@ def main() -> None:
     verify_clean_session_will_recovery(args.broker)
     print(
         "MQTT clean Session retained Will survived commit-log SIGKILL recovery"
+    )
+    verify_clean_session_will_cancellation_recovery(args.broker)
+    print(
+        "MQTT clean Session normal DISCONNECT Will cancellation survived "
+        "commit-log SIGKILL recovery"
     )
 
 
