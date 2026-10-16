@@ -9,6 +9,7 @@ const http1_write = @import("../http1/runtime/write.zig");
 const http1_message_framing =
     @import("../http1/runtime/message/framing.zig");
 const http2_runtime = http2.runtime;
+const http_cookies = @import("../http/cookies/mod.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const tls_client_identity = @import(
     "runtime/tls_client_identity.zig",
@@ -46,6 +47,7 @@ const max_batched_payload_slices: usize = 64;
 const transport_read_scratch_len: usize = 16 * 1024;
 
 pub const Error = websocket.Error || http1_runtime.Error || redirect.Error ||
+    http_cookies.Error ||
     http2_runtime.Error || tls_stream.Error || error{
     HeadersTooLarge,
     ConnectionClosed,
@@ -63,6 +65,7 @@ pub const Error = websocket.Error || http1_runtime.Error || redirect.Error ||
     InvalidSocketOption,
     SocketOptionFailed,
     SocketOptionUnsupported,
+    CookieHeaderConflict,
 } || std.Io.RandomSecureError || net.HostName.ValidateError || net.HostName.ConnectError || net.Stream.Reader.Error || net.Stream.Writer.Error;
 
 pub const Limits = common.Limits;
@@ -2014,10 +2017,20 @@ pub const RedirectProxy = struct {
     options: HttpProxyOptions = .{},
 };
 
+pub const CookieRedirectOptions = struct {
+    jar: *http_cookies.Jar,
+    request_context: http_cookies.RequestContext = .{},
+    store_context: http_cookies.StoreContext = .{},
+    /// Cross-origin is a conservative cross-site approximation unless the
+    /// application has a registrable-domain policy proving otherwise.
+    cross_origin_is_cross_site: bool = true,
+};
+
 pub const RedirectOptions = struct {
     policy: RedirectPolicy = .{},
     tls: http1_runtime.TlsClientOptions = .{},
     proxy: ?RedirectProxy = null,
+    cookies: ?CookieRedirectOptions = null,
 };
 
 /// Result of an HTTP/1 Upgrade attempt before a non-101 response is mapped to
@@ -3462,8 +3475,56 @@ pub const Client = struct {
         var current_uri_owned = true;
         defer if (current_uri_owned) allocator.free(current_uri);
         var hop_options = options;
+        var crossed_origin = false;
+        if (redirect_options.cookies != null) {
+            for (options.extra_headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "cookie") or
+                    std.ascii.eqlIgnoreCase(header.name, "cookie2"))
+                {
+                    return error.CookieHeaderConflict;
+                }
+            }
+        }
 
         while (true) {
+            var effective_options = hop_options;
+            var cookie_value: ?[]u8 = null;
+            defer if (cookie_value) |value| allocator.free(value);
+            var cookie_headers: ?[]http1.Header = null;
+            defer if (cookie_headers) |headers| allocator.free(headers);
+            if (redirect_options.cookies) |cookie_options| {
+                var request_context = cookie_options.request_context;
+                request_context.method = "GET";
+                request_context.http_api = true;
+                if (crossed_origin and
+                    cookie_options.cross_origin_is_cross_site)
+                {
+                    request_context.site = .cross_site;
+                }
+                const value = try cookie_options.jar.cookieHeaderValueAlloc(
+                    allocator,
+                    current_uri,
+                    std.Io.Clock.real.now(io).toSeconds(),
+                    request_context,
+                );
+                cookie_value = value;
+                if (value.len != 0) {
+                    const headers = try allocator.alloc(
+                        http1.Header,
+                        hop_options.extra_headers.len + 1,
+                    );
+                    @memcpy(
+                        headers[0..hop_options.extra_headers.len],
+                        hop_options.extra_headers,
+                    );
+                    headers[hop_options.extra_headers.len] = .{
+                        .name = "cookie",
+                        .value = value,
+                    };
+                    cookie_headers = headers;
+                    effective_options.extra_headers = headers;
+                }
+            }
             var attempt = if (redirect_options.proxy) |proxy|
                 if (deadline) |absolute|
                     try connectUriViaProxyAttemptWithDeadline(
@@ -3471,7 +3532,7 @@ pub const Client = struct {
                         io,
                         proxy.uri,
                         current_uri,
-                        hop_options,
+                        effective_options,
                         proxy.options,
                         redirect_options.tls,
                         absolute,
@@ -3482,7 +3543,7 @@ pub const Client = struct {
                         io,
                         proxy.uri,
                         current_uri,
-                        hop_options,
+                        effective_options,
                         proxy.options,
                         redirect_options.tls,
                     )
@@ -3491,7 +3552,7 @@ pub const Client = struct {
                     allocator,
                     io,
                     current_uri,
-                    hop_options,
+                    effective_options,
                     redirect_options.tls,
                     absolute,
                 )
@@ -3500,10 +3561,31 @@ pub const Client = struct {
                     allocator,
                     io,
                     current_uri,
-                    hop_options,
+                    effective_options,
                     redirect_options.tls,
                 );
             errdefer attempt.deinit();
+            if (redirect_options.cookies) |cookie_options| {
+                var store_context = cookie_options.store_context;
+                store_context.http_api = true;
+                if (crossed_origin and
+                    cookie_options.cross_origin_is_cross_site)
+                {
+                    store_context.site = .cross_site;
+                }
+                for (attempt.headers()) |header| {
+                    if (!std.ascii.eqlIgnoreCase(
+                        header.name,
+                        "set-cookie",
+                    )) continue;
+                    _ = try cookie_options.jar.storeSetCookieWithContext(
+                        current_uri,
+                        header.value,
+                        std.Io.Clock.real.now(io).toSeconds(),
+                        store_context,
+                    );
+                }
+            }
             if (attempt.accepted() or
                 !redirect.isRedirectStatus(attempt.status()))
             {
@@ -3543,6 +3625,7 @@ pub const Client = struct {
                     hop_options.extra_headers = &.{};
                 }
                 clearRedirectTlsTickets(&hop_options);
+                crossed_origin = true;
             }
             if (!next.secure) {
                 // An explicitly permitted downgrade cannot carry TLS-only

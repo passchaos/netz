@@ -925,9 +925,11 @@ fn parseOrigin(
 ) Error!Origin {
     const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
     if (uri.user != null or uri.password != null) return error.InvalidUri;
-    const secure = if (std.ascii.eqlIgnoreCase(uri.scheme, "https"))
+    const secure = if (std.ascii.eqlIgnoreCase(uri.scheme, "https") or
+        std.ascii.eqlIgnoreCase(uri.scheme, "wss"))
         true
-    else if (std.ascii.eqlIgnoreCase(uri.scheme, "http"))
+    else if (std.ascii.eqlIgnoreCase(uri.scheme, "http") or
+        std.ascii.eqlIgnoreCase(uri.scheme, "ws"))
         false
     else
         return error.InvalidUri;

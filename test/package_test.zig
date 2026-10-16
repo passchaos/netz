@@ -2114,6 +2114,14 @@ test "public modules are reachable" {
         "ConnectAttempt",
     ));
     try std.testing.expect(@hasDecl(
+        netz.websocket.runtime,
+        "CookieRedirectOptions",
+    ));
+    try std.testing.expect(@hasField(
+        netz.websocket.runtime.RedirectOptions,
+        "cookies",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.websocket.runtime.Client,
         "connectAttempt",
     ));

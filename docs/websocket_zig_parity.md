@@ -225,6 +225,22 @@ independently to every WSS authority. A configured cleartext proxy is retained,
 but each hop gets a new authority-form CONNECT and proxy fields never enter the
 origin Upgrade. Missing Location leaves the final 3xx `ConnectAttempt`
 inspectable; duplicate or empty Location fails closed.
+The same redirect options can now attach `http.CookieJar`. Before every WS/WSS
+hop the client derives one Cookie field from that URI after applying Path,
+Domain, Secure, HttpOnly and SameSite; a caller-supplied Cookie/Cookie2 is
+rejected rather than ambiguously merged. Every intermediate 3xx, accepted 101,
+or final rejection commits its Set-Cookie fields before Location handling, so
+a same-origin redirect observes new state immediately. Cross-origin remains a
+conservative cross-site boundary unless the application explicitly proves
+otherwise, while host-only/domain matching still decides actual Cookie scope.
+Real WS tests cover an intermediate Cookie on the next hop, a 101 Cookie in the
+jar, and caller-header conflict before network I/O. A two-origin test proves
+Authorization and origin-A Cookie isolation while storing origin-B state only
+for B. WSS coverage sends `Secure; SameSite=None` across a same-host port
+redirect and proves the resulting cookie is unavailable to cleartext WS. The
+existing proxy path remains unchanged: proxy credentials stay on CONNECT and
+the derived Cookie is an origin Upgrade field under the original chain
+deadline.
 
 The reference has a richer callback-oriented standalone server surface and
 pooled-buffer/thread-pool configuration. Netz has broader protocol integration

@@ -17,6 +17,11 @@ test "WebSocket URI follows relative redirect under one deadline" {
         .{ .max_head_bytes = 4096 },
     );
     defer server.deinit();
+    var jar = try @import("../../http/cookies/mod.zig").Jar.init(
+        allocator,
+        .{},
+    );
+    defer jar.deinit();
 
     const Shared = struct {
         server: *runtime.Server,
@@ -38,10 +43,16 @@ test "WebSocket URI follows relative redirect under one deadline" {
             try first.reject(
                 307,
                 "Temporary Redirect",
-                &.{.{
-                    .name = "Location",
-                    .value = "../final?q=1#not-on-wire",
-                }},
+                &.{
+                    .{
+                        .name = "Location",
+                        .value = "../final?q=1#not-on-wire",
+                    },
+                    .{
+                        .name = "Set-Cookie",
+                        .value = "redirect=one; Path=/",
+                    },
+                },
                 "redirecting",
             );
 
@@ -51,7 +62,14 @@ test "WebSocket URI follows relative redirect under one deadline" {
                 "Bearer redirect-origin",
                 second.header("authorization").?,
             );
-            var connection = try second.accept();
+            try std.testing.expectEqualStrings(
+                "redirect=one",
+                second.header("cookie").?,
+            );
+            var connection = try second.acceptWithHeaders(&.{.{
+                .name = "Set-Cookie",
+                .value = "accepted=two; Path=/",
+            }});
             defer connection.close();
             var message = try connection.receiveMessage();
             defer message.deinit(allocator);
@@ -70,6 +88,19 @@ test "WebSocket URI follows relative redirect under one deadline" {
         .{server.address().getPort()},
     );
     defer allocator.free(uri);
+    try std.testing.expectError(
+        error.CookieHeaderConflict,
+        runtime.Client.connectUriFollowingRedirects(
+            allocator,
+            io,
+            uri,
+            .{ .extra_headers = &.{.{
+                .name = "Cookie",
+                .value = "caller=ambiguous",
+            }} },
+            .{ .cookies = .{ .jar = &jar } },
+        ),
+    );
     var connection = try runtime.Client.connectUriFollowingRedirectsWithTimeout(
         allocator,
         io,
@@ -78,7 +109,7 @@ test "WebSocket URI follows relative redirect under one deadline" {
             .name = "Authorization",
             .value = "Bearer redirect-origin",
         }} },
-        .{},
+        .{ .cookies = .{ .jar = &jar } },
         .fromSeconds(3),
     );
     defer connection.close();
@@ -86,6 +117,17 @@ test "WebSocket URI follows relative redirect under one deadline" {
     var response = try connection.receiveMessage();
     defer response.deinit(allocator);
     try std.testing.expectEqualStrings("accepted", response.payload);
+    const cookies = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .{},
+    );
+    defer allocator.free(cookies);
+    try std.testing.expectEqualStrings(
+        "redirect=one; accepted=two",
+        cookies,
+    );
 
     thread.join();
     joined = true;
@@ -111,6 +153,11 @@ test "WebSocket cross-origin redirect strips custom headers and Host override" {
         .{ .max_head_bytes = 4096 },
     );
     defer destination.deinit();
+    var jar = try @import("../../http/cookies/mod.zig").Jar.init(
+        allocator,
+        .{},
+    );
+    defer jar.deinit();
 
     const Shared = struct {
         redirector: *runtime.Server,
@@ -134,29 +181,39 @@ test "WebSocket cross-origin redirect strips custom headers and Host override" {
             try first.reject(
                 302,
                 "Found",
-                &.{.{ .name = "Location", .value = self.destination_uri }},
+                &.{
+                    .{ .name = "Location", .value = self.destination_uri },
+                    .{
+                        .name = "Set-Cookie",
+                        .value = "origin_a=one; Path=/",
+                    },
+                },
                 &.{},
             );
 
             var second = try self.destination.receiveUpgradeRequest(.{});
             try std.testing.expect(second.header("authorization") == null);
+            try std.testing.expect(second.header("cookie") == null);
             try std.testing.expectEqualStrings(
                 self.destination_host,
                 second.header("host").?,
             );
-            var connection = try second.accept();
+            var connection = try second.acceptWithHeaders(&.{.{
+                .name = "Set-Cookie",
+                .value = "origin_b=two; Path=/",
+            }});
             defer connection.close();
         }
     };
     const destination_uri = try std.fmt.allocPrint(
         allocator,
-        "ws://127.0.0.1:{d}/final",
+        "ws://localhost:{d}/final",
         .{destination.address().getPort()},
     );
     defer allocator.free(destination_uri);
     const destination_host = try std.fmt.allocPrint(
         allocator,
-        "127.0.0.1:{d}",
+        "localhost:{d}",
         .{destination.address().getPort()},
     );
     defer allocator.free(destination_host);
@@ -193,9 +250,30 @@ test "WebSocket cross-origin redirect strips custom headers and Host override" {
                 .value = "Bearer do-not-forward",
             }},
         },
-        .{},
+        .{ .cookies = .{
+            .jar = &jar,
+            .request_context = .{ .top_level_navigation = true },
+            .store_context = .{ .top_level_navigation = true },
+        } },
     );
     connection.close();
+
+    const first_cookie = try jar.cookieHeaderValueAlloc(
+        allocator,
+        initial_uri,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .{},
+    );
+    defer allocator.free(first_cookie);
+    try std.testing.expectEqualStrings("origin_a=one", first_cookie);
+    const second_cookie = try jar.cookieHeaderValueAlloc(
+        allocator,
+        destination_uri,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .{},
+    );
+    defer allocator.free(second_cookie);
+    try std.testing.expectEqualStrings("origin_b=two", second_cookie);
 
     thread.join();
     joined = true;
@@ -273,6 +351,11 @@ test "WebSocket WSS redirect authenticates every origin" {
         listen_options,
     );
     defer destination.deinit();
+    var jar = try @import("../../http/cookies/mod.zig").Jar.init(
+        allocator,
+        .{},
+    );
+    defer jar.deinit();
 
     const Shared = struct {
         redirector: *runtime.TlsServer,
@@ -291,11 +374,21 @@ test "WebSocket WSS redirect authenticates every origin" {
             try first.reject(
                 308,
                 "Permanent Redirect",
-                &.{.{ .name = "Location", .value = self.destination_uri }},
+                &.{
+                    .{ .name = "Location", .value = self.destination_uri },
+                    .{
+                        .name = "Set-Cookie",
+                        .value = "secure=one; Secure; SameSite=None; Path=/",
+                    },
+                },
                 &.{},
             );
             var second = try self.destination.receiveUpgradeRequest(.{});
             try std.testing.expectEqualStrings("/secure", second.target());
+            try std.testing.expectEqualStrings(
+                "secure=one",
+                second.header("cookie").?,
+            );
             var connection = try second.accept();
             defer connection.close();
         }
@@ -328,13 +421,39 @@ test "WebSocket WSS redirect authenticates every origin" {
         io,
         initial_uri,
         .{},
-        .{ .tls = .{ .ca_bundle = .{
-            .bundle = &ca_bundle,
-            .lock = &ca_lock,
-        } } },
+        .{
+            .tls = .{ .ca_bundle = .{
+                .bundle = &ca_bundle,
+                .lock = &ca_lock,
+            } },
+            .cookies = .{ .jar = &jar },
+        },
         .fromSeconds(5),
     );
     connection.close();
+
+    const secure_cookie = try jar.cookieHeaderValueAlloc(
+        allocator,
+        initial_uri,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .{},
+    );
+    defer allocator.free(secure_cookie);
+    try std.testing.expectEqualStrings("secure=one", secure_cookie);
+    const clear_uri = try std.fmt.allocPrint(
+        allocator,
+        "ws://localhost:{d}/start",
+        .{redirector.address().getPort()},
+    );
+    defer allocator.free(clear_uri);
+    const clear_cookie = try jar.cookieHeaderValueAlloc(
+        allocator,
+        clear_uri,
+        std.Io.Clock.real.now(io).toSeconds(),
+        .{},
+    );
+    defer allocator.free(clear_cookie);
+    try std.testing.expectEqualStrings("", clear_cookie);
 
     thread.join();
     joined = true;

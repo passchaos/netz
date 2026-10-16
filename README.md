@@ -1138,7 +1138,12 @@ Current protocol coverage includes:
   plus bounded HTTP redirect following with RFC 3986 relative-Location
   resolution, loop detection, one whole-chain deadline, proxy retention,
   authenticated WSS revalidation, default WSS-to-WS downgrade rejection, and
-  cross-origin Upgrade-header/client-certificate isolation,
+  cross-origin Upgrade-header/client-certificate isolation. Redirect options
+  can attach the shared HTTP CookieJar: every WS/WSS hop derives Cookie from
+  its actual URI, consumes intermediate/final Set-Cookie before Location,
+  rejects an ambiguous caller Cookie field, treats cross-origin as cross-site
+  unless explicitly proven otherwise, preserves proxy header isolation, and
+  prevents Secure WSS cookies from reaching WS,
   shared verified TLS client transport plus opt-in
   Ed25519/ECDSA/SM2 client identities, native TLS 1.3 WSS listeners with
   optional client authentication and concurrent serving, and RFC 8441
