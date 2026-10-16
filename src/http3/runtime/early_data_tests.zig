@@ -644,3 +644,101 @@ test "HTTP/3 early-data zero timeout preserves allocation and ticket state" {
     try std.testing.expectEqual(@as(usize, 1), stats.active_early_data_leases);
     try std.testing.expectEqual(@as(usize, 0), stats.consumed_early_data_tickets);
 }
+
+test "HTTP/3 malformed post-handshake ticket fail-closes response pump" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var cache = try quic.resumption.Cache.init(allocator, 1);
+    defer cache.deinit();
+    const server_cid = [_]u8{ 0xc1, 0xc2, 0xc3, 0xc4 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .random = [_]u8{0xc5} ** 32,
+            .x25519_secret_key = [_]u8{0xc6} ** 32,
+        } },
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.HandshakeServer,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var session = try self.server.acceptWithTimeout(.fromSeconds(5));
+            defer session.deinit();
+            var request = try session.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            );
+            defer request.deinit(self.server.allocator);
+            try session.established.connection.sendPostHandshakeCrypto(
+                &session.established.post_handshake_send_crypto_offset,
+                "bad!",
+            );
+            try session.sendResponse(request.stream_id, .{
+                .status = 204,
+                .request_method = request.request.method,
+            });
+        }
+    };
+    var shared = Shared{ .server = &server };
+    const thread = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    const original_dcid = [_]u8{
+        0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce,
+    };
+    const client_cid = [_]u8{ 0xcf, 0xd0, 0xd1, 0xd2 };
+    var client = try runtime.HandshakeClient.connect(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        server.address(),
+        .{ .quic = .{
+            .max_datagram_size = 4096,
+            .max_frames_per_datagram = 8,
+        } },
+        .{ .handshake = .{
+            .original_destination_connection_id = &original_dcid,
+            .local_connection_id = &client_cid,
+            .server_name = "localhost",
+            .random = [_]u8{0xd3} ** 32,
+            .x25519_secret_key = [_]u8{0xd4} ** 32,
+            .auto_resumption = .{
+                .cache = &cache,
+                .server_id = "localhost:443",
+                .now_ms = 1000,
+            },
+        } },
+    );
+    defer client.deinit();
+    try std.testing.expectError(
+        error.InvalidNewSessionTicket,
+        client.requestWithTimeout(.{
+            .method = "GET",
+            .path = "/malformed-ticket",
+            .authority = "localhost",
+        }, .fromSeconds(5)),
+    );
+    try std.testing.expect(client.established.connection.closed());
+
+    thread.join();
+    joined = true;
+    if (shared.err) |err| return err;
+}

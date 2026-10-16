@@ -320,6 +320,22 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeClient,
+        "configureSessionTicketCache",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "sessionTicketStats",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "SessionTicketStats",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.HandshakeSessionOptions,
+        "max_post_handshake_crypto_bytes",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
         "connectUriAltSvcWithEarlyRequest",
     ));
     try std.testing.expect(@hasDecl(netz.http, "CookieJar"));

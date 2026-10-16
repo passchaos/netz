@@ -908,7 +908,13 @@ allocation. Real handshakes cover accepted early data followed by a
 idle reuse despite an available ticket, safe-only suppression for POST, and a
 per-request opt-out. Unified responses expose disposition/retry metadata while
 one absolute deadline still covers admission, DNS, handshake, initial response,
-and replay.
+and replay. The H3 response pump also captures post-handshake tickets without
+an additional receive wait: authenticated CRYPTO passes through a bounded
+fragmented/out-of-order reassembler, complete messages populate the origin+
+ALPN cache, zero-lifetime tickets are discarded, and malformed tickets
+fail-close the connection. The real unified test obtains its resumption
+tickets from server-emitted NewSessionTicket messages rather than preloading
+the client cache.
 
 The four verified capture artifacts are
 `zig-out/http3-captures/run.0fFQq2` (v1 upload),

@@ -268,8 +268,6 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
         .max_datagram_size = 4096,
         .max_frames_per_datagram = 8,
     } };
-    const ticket = "unified-h3-early-ticket";
-    const psk = [_]u8{0xf1} ** 32;
     var replay_filter = try quic.zero_rtt.ReplayFilter.init(
         allocator,
         io,
@@ -278,6 +276,12 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
     defer replay_filter.deinit();
     var ticket_cache = try quic.resumption.Cache.init(allocator, 2);
     defer ticket_cache.deinit();
+    var ticket_store = try quic.resumption.ticket.ServerStore.init(
+        allocator,
+        io,
+        4,
+    );
+    defer ticket_store.deinit();
     const server_cid = [_]u8{
         0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9,
     };
@@ -292,12 +296,9 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
                 .certificate_chain = &.{&certificate_der},
                 .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
             },
-            .psk = .{
-                .identity = ticket,
-                .secret = psk,
-                .age_add = 41,
-                .issued_at_ms = 1000,
-                .lifetime_seconds = 3600,
+            .auto_resumption = .{
+                .allocator = allocator,
+                .store = &ticket_store,
                 .now_ms = 1500,
             },
             .early_data = .{
@@ -342,6 +343,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
     };
     const H3Worker = struct {
         server: *http3_runtime.HandshakeServer,
+        store: *quic.resumption.ticket.ServerStore,
         accepts: usize = 0,
         err: ?anyerror = null,
 
@@ -362,6 +364,18 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
             defer learned.deinit(self.server.allocator);
             try std.testing.expectEqualStrings("/learn-settings", learned.request.path);
             try std.testing.expect(!learned.was_early_data);
+            _ = try first.established.issueSessionTicket(
+                self.server.quic_server.endpoint.io,
+                .{
+                    .store = self.store,
+                    .now_ms = 1000,
+                    .lifetime_seconds = 3600,
+                    .allow_early_data = true,
+                    .nonce = [_]u8{0x11} ** 16,
+                    .identity = [_]u8{0x21} ** 32,
+                    .age_add = 41,
+                },
+            );
             try first.sendResponse(learned.stream_id, .{
                 .status = 200,
                 .body = "learned",
@@ -388,6 +402,18 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
             try std.testing.expectEqual(@as(u62, 4), retry.stream_id);
             try std.testing.expectEqualStrings("/early", retry.request.path);
             try std.testing.expect(!retry.was_early_data);
+            _ = try second.established.issueSessionTicket(
+                self.server.quic_server.endpoint.io,
+                .{
+                    .store = self.store,
+                    .now_ms = 1000,
+                    .lifetime_seconds = 3600,
+                    .allow_early_data = true,
+                    .nonce = [_]u8{0x12} ** 16,
+                    .identity = [_]u8{0x22} ** 32,
+                    .age_add = 42,
+                },
+            );
             try second.sendResponse(retry.stream_id, .{
                 .status = 200,
                 .body = "retried",
@@ -412,6 +438,18 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
                 replayed.request.path,
             );
             try std.testing.expect(!replayed.was_early_data);
+            _ = try third.established.issueSessionTicket(
+                self.server.quic_server.endpoint.io,
+                .{
+                    .store = self.store,
+                    .now_ms = 1000,
+                    .lifetime_seconds = 3600,
+                    .allow_early_data = true,
+                    .nonce = [_]u8{0x13} ** 16,
+                    .identity = [_]u8{0x23} ** 32,
+                    .age_add = 43,
+                },
+            );
             try third.sendResponse(replayed.stream_id, .{
                 .status = 200,
                 .body = "transport-replayed",
@@ -431,6 +469,18 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
             try std.testing.expectEqualStrings("POST", unsafe.request.method);
             try std.testing.expectEqualStrings("/unsafe", unsafe.request.path);
             try std.testing.expect(!unsafe.was_early_data);
+            _ = try fourth.established.issueSessionTicket(
+                self.server.quic_server.endpoint.io,
+                .{
+                    .store = self.store,
+                    .now_ms = 1000,
+                    .lifetime_seconds = 3600,
+                    .allow_early_data = true,
+                    .nonce = [_]u8{0x14} ** 16,
+                    .identity = [_]u8{0x24} ** 32,
+                    .age_add = 44,
+                },
+            );
             try fourth.sendResponse(unsafe.stream_id, .{
                 .status = 200,
                 .body = "ordinary-unsafe",
@@ -466,7 +516,10 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
         .alt_svc = alt_svc,
         .release = &release,
     };
-    var h3_worker = H3Worker{ .server = &h3_server };
+    var h3_worker = H3Worker{
+        .server = &h3_server,
+        .store = &ticket_store,
+    };
     const tcp_thread = try std.Thread.spawn(.{}, TcpWorker.run, .{&tcp_worker});
     var tcp_joined = false;
     defer if (!tcp_joined) {
@@ -542,25 +595,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
         pool.http3RememberedSettingsStats().?.entries,
     );
 
-    const authority = try std.fmt.allocPrint(
-        allocator,
-        "localhost:{d}",
-        .{tcp_server.address().ip4.port},
-    );
-    defer allocator.free(authority);
-    try ticket_cache.store(.{
-        .server_id = authority,
-        .alpn = "h3",
-        .ticket = ticket,
-        .psk = psk,
-        .issued_at_ms = 1000,
-        .lifetime_seconds = 3600,
-        .age_add = 41,
-        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
-        .transport_parameters = .fromTransportParameters(
-            quic.practical_transport_parameters,
-        ),
-    });
+    try std.testing.expectEqual(@as(usize, 1), ticket_cache.count());
 
     const early_uri = try std.fmt.allocPrint(
         allocator,
@@ -593,19 +628,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
     );
     response.deinit();
 
-    try ticket_cache.store(.{
-        .server_id = authority,
-        .alpn = "h3",
-        .ticket = ticket,
-        .psk = psk,
-        .issued_at_ms = 1000,
-        .lifetime_seconds = 3600,
-        .age_add = 41,
-        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
-        .transport_parameters = .fromTransportParameters(
-            quic.practical_transport_parameters,
-        ),
-    });
+    try std.testing.expectEqual(@as(usize, 1), ticket_cache.count());
     const rejected_uri = try std.fmt.allocPrint(
         allocator,
         "{s}/transport-rejected",
@@ -636,19 +659,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
     );
     rejected.deinit();
 
-    try ticket_cache.store(.{
-        .server_id = authority,
-        .alpn = "h3",
-        .ticket = ticket,
-        .psk = psk,
-        .issued_at_ms = 1000,
-        .lifetime_seconds = 3600,
-        .age_add = 41,
-        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
-        .transport_parameters = .fromTransportParameters(
-            quic.practical_transport_parameters,
-        ),
-    });
+    try std.testing.expectEqual(@as(usize, 1), ticket_cache.count());
     const unsafe_uri = try std.fmt.allocPrint(
         allocator,
         "{s}/unsafe",
@@ -664,19 +675,7 @@ test "unified HTTP pool sends 0-RTT only on a new H3 connection" {
     try std.testing.expectEqualStrings("ordinary-unsafe", unsafe.body());
     try std.testing.expect(unsafe.early_data == null);
 
-    try ticket_cache.store(.{
-        .server_id = authority,
-        .alpn = "h3",
-        .ticket = ticket,
-        .psk = psk,
-        .issued_at_ms = 1000,
-        .lifetime_seconds = 3600,
-        .age_add = 41,
-        .max_early_data_size = quic.resumption.cache.quic_early_data_size,
-        .transport_parameters = .fromTransportParameters(
-            quic.practical_transport_parameters,
-        ),
-    });
+    try std.testing.expectEqual(@as(usize, 1), ticket_cache.count());
     const opt_out_uri = try std.fmt.allocPrint(
         allocator,
         "{s}/opt-out",

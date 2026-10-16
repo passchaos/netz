@@ -293,7 +293,14 @@ Current protocol coverage includes:
   TLS rejection and the first 425 replay once over 1-RTT; a second 425 is final.
   Unsafe/unknown methods stay 1-RTT under the default safe-only policy, and
   `RequestOptions.allow_early_data=false` disables even an eligible request.
-  Cross-origin redirects never reuse this early-data path,
+  Cross-origin redirects never reuse this early-data path. When the configured
+  server emits a post-handshake NewSessionTicket, every H3 response/push/
+  detached-stream pump opportunistically feeds authenticated 1-RTT CRYPTO into
+  a bounded reassembler and writes each complete ticket to the origin+ALPN
+  cache; it never performs an extra socket wait merely to obtain a ticket.
+  Fragmented/out-of-order CRYPTO uses the transport reassembler, multiple
+  messages advance monotonically, zero-lifetime tickets are discarded, and a
+  malformed authenticated ticket fail-closes the connection,
 - HTTP/1.1 requests, responses, strict owned/borrowed Host and CONNECT-authority validation, preallocated request/response/header-block writes with version, exact non-empty Content-Length, and complete pre-encoded chunked-body validation, header field syntax validation, CONNECT framing rejection and bodyless TRACE enforcement, chunked transfer encoding that elides empty application slices before its sole terminator, chunked decoding with strict no-leading-OWS chunk-size grammar, exact-body allocation, empty-terminator encode/decode fast paths, extension newline rejection, and complete/incomplete chunk-size-line bounds, close-delimited and non-chunked-transfer-coded response bodies, runtime chunked
   transfer writing with preallocated chunks plus fully syntax-validated,
   declaration-matched and repeated-value-merged trailer fields, server response trailers gated by the

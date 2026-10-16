@@ -21,6 +21,7 @@ const development_server_peer =
 const handshake_client_pool = @import("runtime/handshake_client_pool.zig");
 const endpoint_handler_supervisor =
     @import("runtime/endpoint_handler_supervisor.zig");
+const ticket_receiver = @import("runtime/ticket_receiver.zig");
 const runtime_error = @import("runtime/error.zig");
 const uri_redirect = @import("../http1/runtime/redirect.zig");
 const server_response = @import("runtime/server/response.zig");
@@ -218,6 +219,7 @@ pub const StreamingMessageReader = stream_reader.Reader;
 pub const StreamingRequestEvent = stream_events.Request;
 pub const StreamingResponseEvent = stream_events.Response;
 pub const PeerResponseCancellation = stream_events.PeerResponseCancellation;
+pub const SessionTicketStats = ticket_receiver.Stats;
 const StreamingMessageSet = streaming_set.Set;
 const StreamingRequestSet = streaming_set.Set;
 const StreamingResponseSet = streaming_set.Set;
@@ -3640,6 +3642,9 @@ pub const HandshakeSessionOptions = struct {
     local_settings: http3.Settings = .{},
     max_frames_per_packet: usize = 8,
     max_stream_buffer: usize = 64 * 1024,
+    /// Maximum absolute 1-RTT CRYPTO offset retained while opportunistically
+    /// reassembling post-handshake NewSessionTicket messages.
+    max_post_handshake_crypto_bytes: usize = 256 * 1024,
     max_concurrent_request_streams: usize = 128,
     /// Maximum independent UDP datagrams retained by one zio/std.Io receive
     /// turn. One disables batching without changing the receive state machine.
@@ -11224,6 +11229,7 @@ pub const HandshakeClient = struct {
     outbound_bodies: OutboundBodySet,
     stream_send_scratch: StreamMessageSendScratch = .{},
     critical_stream_send_scratch: CriticalStreamSendScratch = .{},
+    ticket_receiver: ticket_receiver.Receiver,
     next_stream_id: u62 = 0,
 
     /// Reserve one client-initiated bidirectional stream ID.
@@ -11493,6 +11499,15 @@ pub const HandshakeClient = struct {
         const disposition = try client.adoptEarlyRequest(
             early_request,
         );
+        if (options.handshake.resumption_server_id) |server_id| {
+            if (options.handshake.resumption_now_ms) |now_ms| {
+                try client.configureSessionTicketCache(
+                    cache,
+                    server_id,
+                    now_ms,
+                );
+            }
+        }
         return .{ .client = client, .disposition = disposition };
     }
 
@@ -11745,7 +11760,7 @@ pub const HandshakeClient = struct {
         else
             try quic.handshake.connect(endpoint, server, options.handshake);
         errdefer established.deinit();
-        return initOwnedEstablished(
+        var client = try initOwnedEstablished(
             allocator,
             endpoint,
             server,
@@ -11753,6 +11768,15 @@ pub const HandshakeClient = struct {
             options.session,
             accepted_early_request,
         );
+        errdefer client.deinit();
+        if (options.handshake.auto_resumption) |automatic| {
+            try client.configureSessionTicketCache(
+                automatic.cache,
+                automatic.server_id,
+                automatic.now_ms,
+            );
+        }
+        return client;
     }
 
     /// Complete QUIC/TLS on a caller-owned endpoint while consuming only the
@@ -11839,7 +11863,7 @@ pub const HandshakeClient = struct {
                 options.handshake,
             );
         errdefer established.deinit();
-        return initEstablishedWithEndpointOwnership(
+        var client = try initEstablishedWithEndpointOwnership(
             endpoint.allocator,
             endpoint,
             false,
@@ -11848,6 +11872,15 @@ pub const HandshakeClient = struct {
             options.session,
             null,
         );
+        errdefer client.deinit();
+        if (options.handshake.auto_resumption) |automatic| {
+            try client.configureSessionTicketCache(
+                automatic.cache,
+                automatic.server_id,
+                automatic.now_ms,
+            );
+        }
+        return client;
     }
 
     /// Build an HTTP/3 client around an established connection on a
@@ -11995,6 +12028,10 @@ pub const HandshakeClient = struct {
             .outbound_bodies = .init(
                 allocator,
                 resolved_options.max_concurrent_request_streams,
+            ),
+            .ticket_receiver = .init(
+                allocator,
+                resolved_options.max_post_handshake_crypto_bytes,
             ),
             .next_stream_id = transport_next_stream_id,
         };
@@ -12991,6 +13028,7 @@ pub const HandshakeClient = struct {
     pub fn deinit(self: *HandshakeClient) void {
         self.critical_stream_send_scratch.deinit(self.allocator);
         self.stream_send_scratch.deinit(self.allocator);
+        self.ticket_receiver.deinit();
         self.outbound_bodies.deinit();
         self.receive_packets.deinit();
         self.connect_datagrams.deinit();
@@ -13012,6 +13050,21 @@ pub const HandshakeClient = struct {
 
     pub fn address(self: HandshakeClient) net.IpAddress {
         return self.endpoint.address();
+    }
+
+    pub fn configureSessionTicketCache(
+        self: *HandshakeClient,
+        cache: *quic.resumption.Cache,
+        server_id: []const u8,
+        now_ms: u64,
+    ) std.mem.Allocator.Error!void {
+        try self.ticket_receiver.configure(cache, server_id, now_ms);
+    }
+
+    pub fn sessionTicketStats(
+        self: *const HandshakeClient,
+    ) ticket_receiver.Stats {
+        return self.ticket_receiver.stats();
     }
 
     pub fn bindDispatcher(self: *HandshakeClient) Error!void {
@@ -14337,6 +14390,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
         );
         if (self.response_streams.firstReset()) |reset| {
             if (!self.request_lifecycle.contains(reset.stream_id)) return;
@@ -14372,6 +14427,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
             deadline,
         );
         try self.failIfAnyRequestResetForBatchSend();
@@ -14678,6 +14735,8 @@ pub const HandshakeClient = struct {
             &self.push_streams,
             &self.request_lifecycle,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
             deadline,
         ) catch |err| switch (err) {
             error.RequestCancelled, error.RequestRejected => {
@@ -14966,6 +15025,8 @@ pub const HandshakeClient = struct {
                 &self.request_lifecycle,
                 null,
                 &self.connect_datagrams,
+                &self.ticket_receiver,
+                &self.established,
                 deadline,
             );
         }
@@ -14996,6 +15057,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
             null,
         ) catch |err| switch (err) {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -15066,6 +15129,8 @@ pub const HandshakeClient = struct {
                 &self.request_lifecycle,
                 null,
                 &self.connect_datagrams,
+                &self.ticket_receiver,
+                &self.established,
                 deadline,
             );
             try self.flushResponsePacketFeedback();
@@ -15282,6 +15347,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
             deadline,
         );
         try self.flushResponsePacketFeedback();
@@ -15507,6 +15574,8 @@ pub const HandshakeClient = struct {
             .detached_stream_id = detached_stream_id,
             .detached_streams = &self.connect_datagrams,
             .datagram_target = datagram_target,
+            .ticket_receiver = &self.ticket_receiver,
+            .established = &self.established,
         };
         if (deadline) |absolute| {
             try self.receive_packets.visitWithDeadline(
@@ -16391,6 +16460,8 @@ pub const HandshakeClient = struct {
             .request_lifecycle = &self.request_lifecycle,
             .detached_stream_id = detached_stream_id,
             .detached_streams = &self.connect_datagrams,
+            .ticket_receiver = &self.ticket_receiver,
+            .established = &self.established,
         };
         try visitConnectionResponsePacket(&context, packetView(packet.*));
         if (single_attempt) {
@@ -16549,6 +16620,8 @@ pub const HandshakeClient = struct {
                 &self.request_lifecycle,
                 null,
                 &self.connect_datagrams,
+                &self.ticket_receiver,
+                &self.established,
                 deadline,
             );
             try self.flushResponsePacketFeedback();
@@ -17236,6 +17309,8 @@ pub const HandshakeClient = struct {
                 &self.request_lifecycle,
                 null,
                 &self.connect_datagrams,
+                &self.ticket_receiver,
+                &self.established,
                 deadline,
             );
             try self.flushResponsePacketFeedback();
@@ -17398,6 +17473,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
             deadline,
         );
         try self.flushResponsePacketFeedback();
@@ -18198,6 +18275,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
         );
         try self.failIfRequestResetForSend(stream_id);
     }
@@ -18222,6 +18301,8 @@ pub const HandshakeClient = struct {
             &self.request_lifecycle,
             null,
             &self.connect_datagrams,
+            &self.ticket_receiver,
+            &self.established,
             deadline,
         );
         try self.failIfRequestResetForSend(stream_id);
@@ -18419,6 +18500,8 @@ pub const HandshakeClient = struct {
             .request_lifecycle = &self.request_lifecycle,
             .detached_stream_id = null,
             .detached_streams = &self.connect_datagrams,
+            .ticket_receiver = &self.ticket_receiver,
+            .established = &self.established,
         };
         try visitConnectionResponsePacket(&context, packet);
         _ = try self.applyPendingPushCancellationOnce();
@@ -24635,7 +24718,11 @@ fn validateProtectedConfig(config: ProtectedConfig) Error!void {
 }
 
 fn validateHandshakeSessionOptions(options: HandshakeSessionOptions) Error!void {
-    if (options.max_priority_updates == 0) return error.InvalidSetting;
+    if (options.max_priority_updates == 0 or
+        options.max_post_handshake_crypto_bytes < 4)
+    {
+        return error.InvalidSetting;
+    }
     try validateBlockedStreamLimit(
         options.local_settings,
         options.max_concurrent_request_streams,
@@ -24698,6 +24785,13 @@ test "HTTP/3 handshake options reject invalid SETTINGS before I/O" {
     const invalid_settings = http3.Settings{
         .qpack_max_table_capacity = @as(u64, quic.varint.max_value) + 1,
     };
+
+    try std.testing.expectError(
+        error.InvalidSetting,
+        validateHandshakeSessionOptions(.{
+            .max_post_handshake_crypto_bytes = 3,
+        }),
+    );
 
     try std.testing.expectError(
         error.InvalidSetting,
@@ -25026,6 +25120,8 @@ fn receiveConnectionResponseStreamBytes(
         request_lifecycle,
         null,
         null,
+        null,
+        null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
         else => |other| return @errorCast(other),
@@ -25045,6 +25141,8 @@ fn receiveConnectionResponseStreamBytesUntil(
     push_streams: *PushStreamSet,
     request_lifecycle: *const ClientRequestLifecycle,
     detached_streams: ?*connect_datagram.Registry,
+    ticket_receiver_value: ?*ticket_receiver.Receiver,
+    established: ?*quic.handshake.EstablishedConnection,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!PreparedResponse {
     if (response_streams.takeReset(expected_stream_id)) |code| {
@@ -25074,6 +25172,8 @@ fn receiveConnectionResponseStreamBytesUntil(
             request_lifecycle,
             null,
             detached_streams,
+            ticket_receiver_value,
+            established,
             deadline,
         ) catch |err| {
             switch (err) {
@@ -25111,6 +25211,8 @@ fn receiveConnectionResponsePacket(
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
     detached_streams: ?*connect_datagram.Registry,
+    ticket_receiver_value: ?*ticket_receiver.Receiver,
+    established: ?*quic.handshake.EstablishedConnection,
 ) Error!void {
     return receiveConnectionResponsePacketUntil(
         connection,
@@ -25125,6 +25227,8 @@ fn receiveConnectionResponsePacket(
         request_lifecycle,
         detached_stream_id,
         detached_streams,
+        ticket_receiver_value,
+        established,
         null,
     ) catch |err| switch (err) {
         error.Timeout, error.ConcurrencyUnavailable => unreachable,
@@ -25145,6 +25249,8 @@ fn receiveConnectionResponsePacketUntil(
     request_lifecycle: ?*const ClientRequestLifecycle,
     detached_stream_id: ?u62,
     detached_streams: ?*connect_datagram.Registry,
+    ticket_receiver_value: ?*ticket_receiver.Receiver,
+    established: ?*quic.handshake.EstablishedConnection,
     deadline: ?std.Io.Clock.Timestamp,
 ) ReceiveTimeoutError!void {
     var context: ConnectionResponseReceiveContext = .{
@@ -25159,6 +25265,8 @@ fn receiveConnectionResponsePacketUntil(
         .request_lifecycle = request_lifecycle,
         .detached_stream_id = detached_stream_id,
         .detached_streams = detached_streams,
+        .ticket_receiver = ticket_receiver_value,
+        .established = established,
     };
     if (deadline) |absolute| {
         try receive_packets.visitWithDeadline(
@@ -25208,6 +25316,8 @@ const ConnectionResponseReceiveContext = struct {
     detached_stream_id: ?u62,
     detached_streams: ?*connect_datagram.Registry = null,
     datagram_target: ?*connect_datagram.ReceiveIntoTarget = null,
+    ticket_receiver: ?*ticket_receiver.Receiver = null,
+    established: ?*quic.handshake.EstablishedConnection = null,
 };
 
 fn visitConnectionResponsePacket(
@@ -25218,6 +25328,18 @@ fn visitConnectionResponsePacket(
         context.connection,
         err,
     ) catch {};
+    if (context.ticket_receiver) |receiver| {
+        receiver.ingest(
+            context.established orelse return error.Unexpected,
+            packet.frames,
+        ) catch |err| {
+            context.connection.failClosedApplication(
+                http3.ApplicationErrorCode.internal_error,
+                "invalid-post-handshake-ticket",
+            );
+            return @errorCast(err);
+        };
+    }
     var routing: response_routing.State = .{
         .allocator = context.connection.endpoint.allocator,
         .connection = context.connection,

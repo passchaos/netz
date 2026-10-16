@@ -1304,7 +1304,10 @@ optional early-data policy likewise stays above Hyper's scope: netz requires
 origin-scoped remembered H3 SETTINGS plus an origin+ALPN ticket, uses 0-RTT
 only for newly created safe-method connections, keeps idle reuse on 1-RTT,
 supports per-request opt-out, and reports TLS rejection or 425 retry through
-the common owned response. Cross-origin redirects are excluded. Its
+the common owned response. Cross-origin redirects are excluded. H3
+NewSessionTicket CRYPTO is collected opportunistically while response traffic
+is already being pumped, with bounded reassembly and no extra wait for servers
+that send no ticket. Its
 exclusive QUIC backend retains separate explicit total/idle caps from the TCP
 pool, while the unified owner now also supplies one move-stable cross-transport
 budget. Opt-in `max_total_connections` counts TCP and QUIC idle entries, leases,

@@ -57,6 +57,8 @@ pub const StatelessResume = struct {
     alpn: []const u8,
 };
 
+pub const CacheResult = enum { stored, discarded };
+
 pub const Issued = struct {
     nonce: [16]u8,
     identity: [keyring.sealed_len]u8,
@@ -183,17 +185,35 @@ pub fn receiveAndCache(
     if (crypto.offset != expected_crypto_offset.*) {
         return error.InvalidNewSessionTicket;
     }
-    const parsed = try codec.parse(crypto.data);
-    try codec.validateQuicEarlyDataSize(parsed.max_early_data_size);
     const next_crypto_offset = std.math.add(
         u64,
         expected_crypto_offset.*,
         crypto.data.len,
     ) catch return error.InvalidNewSessionTicket;
-    if (parsed.lifetime_seconds == 0) {
-        expected_crypto_offset.* = next_crypto_offset;
-        return;
-    }
+    _ = try cacheMessage(
+        connection,
+        config,
+        resumption_master_secret,
+        alpn,
+        peer_transport_parameters,
+        crypto.data,
+    );
+    expected_crypto_offset.* = next_crypto_offset;
+}
+
+/// Validate and cache one complete authenticated TLS NewSessionTicket message
+/// that was already reassembled by the caller. No socket read occurs.
+pub fn cacheMessage(
+    connection: *quic.one_rtt.Connection,
+    config: ClientConfig,
+    resumption_master_secret: quic.tls.secret.Secret,
+    alpn: []const u8,
+    peer_transport_parameters: quic.resumption.Snapshot,
+    message: []const u8,
+) Error!CacheResult {
+    const parsed = try codec.parse(message);
+    try codec.validateQuicEarlyDataSize(parsed.max_early_data_size);
+    if (parsed.lifetime_seconds == 0) return .discarded;
     const psk_secret = try quic.tls.key_schedule.deriveResumptionPskFor(
         resumption_master_secret,
         parsed.nonce,
@@ -215,7 +235,7 @@ pub fn receiveAndCache(
         .max_early_data_size = parsed.max_early_data_size,
         .transport_parameters = peer_transport_parameters,
     });
-    expected_crypto_offset.* = next_crypto_offset;
+    return .stored;
 }
 
 pub fn acquireFirst(
