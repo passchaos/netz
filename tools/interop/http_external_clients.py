@@ -12,6 +12,8 @@ import socket
 import subprocess
 import tempfile
 
+from http_libcurl_peer import LibcurlPeer, REQUEST_BODY as LIBCURL_REQUEST_BODY
+
 
 CERTIFICATE_PEM = """-----BEGIN CERTIFICATE-----
 MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAxMDAwMDAwWhcNMzYwMTAxMDAwMDAwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARawLjuCeZXZ7tsfTRAu+FcuRLUr+ELbhoX/6Hs0fLlSZe0NNZYPUqZa65oYGMMs9Ud19Qc/RZMzn4vZv5+EakUoxgwFjAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYIKoZIzj0EAwIDSQAwRgIhAJFAj+UlV/FOGaVRnB/9l7wXgSet0zn4CdgFIckqC1hEAiEApPR1fJT2M9PVNn3fwdZBboKEoWrUYLVy6sMvbrhNjKU=
@@ -215,6 +217,34 @@ def run_curl_case(
             f"{'tls' if tls else 'cleartext'} client=curl requests=2 "
             "connections=1",
         )
+    finally:
+        stop_server(process)
+
+
+def run_libcurl_case(
+    server: Path,
+    peer: LibcurlPeer,
+    directory: Path,
+    protocol: str,
+    tls: bool,
+) -> None:
+    process, port, initial = start_server(server, protocol, "libcurl", tls)
+    try:
+        result = peer.run_case(
+            port,
+            protocol,
+            tls,
+            directory / "localhost.pem",
+        )
+        expected_completion = (
+            f"completed protocol={protocol} transport="
+            f"{'tls' if tls else 'cleartext'} client=libcurl requests=2 "
+            f"connections=1 body_bytes={len(LIBCURL_REQUEST_BODY)} "
+            "request_trailers=1 "
+            "response_trailers=2"
+        )
+        finish_server(process, initial, expected_completion)
+        print(result)
     finally:
         stop_server(process)
 
@@ -430,27 +460,40 @@ def main() -> None:
     nghttpd_version = subprocess.run(
         [nghttpd, "--version"], capture_output=True, text=True, check=True
     ).stdout.strip()
+    libcurl = LibcurlPeer()
 
-    with tempfile.TemporaryDirectory(prefix="netz-http-clients-") as raw_dir:
-        directory = Path(raw_dir)
-        (directory / "localhost.pem").write_text(CERTIFICATE_PEM)
-        (directory / "localhost-key.pem").write_text(PRIVATE_KEY_PEM)
-        (directory / "after.txt").write_bytes(NGHTTPD_REUSE_BODY)
-        for protocol in ("http1", "http2"):
+    try:
+        with tempfile.TemporaryDirectory(prefix="netz-http-clients-") as raw_dir:
+            directory = Path(raw_dir)
+            (directory / "localhost.pem").write_text(CERTIFICATE_PEM)
+            (directory / "localhost-key.pem").write_text(PRIVATE_KEY_PEM)
+            (directory / "after.txt").write_bytes(NGHTTPD_REUSE_BODY)
+            for protocol in ("http1", "http2"):
+                for tls in (False, True):
+                    run_curl_case(args.server, curl, directory, protocol, tls)
             for tls in (False, True):
-                run_curl_case(args.server, curl, directory, protocol, tls)
-        for tls in (False, True):
-            run_nghttp_case(args.server, nghttp, directory, tls)
-        for tls in (False, True):
-            run_nghttpd_case(args.client, nghttpd, directory, tls)
+                run_libcurl_case(
+                    args.server,
+                    libcurl,
+                    directory,
+                    "http1",
+                    tls,
+                )
+            for tls in (False, True):
+                run_nghttp_case(args.server, nghttp, directory, tls)
+            for tls in (False, True):
+                run_nghttpd_case(args.client, nghttpd, directory, tls)
+    finally:
+        libcurl.close()
 
     print(
-        "External HTTP interop passed in both endpoint roles: curl HTTP/1.1+h2 "
-        "and nghttp2 h2 clients against Netz, plus Netz h2 against nghttpd; "
-        "cleartext+certificate-verified TLS, persistent multiplexed body/trailer "
-        "traffic verified; "
+        "External HTTP interop passed in both endpoint roles: curl HTTP/1.1+h2, "
+        "libcurl HTTP/1.1 trailers, and nghttp2 h2 clients against Netz, plus "
+        "Netz h2 against nghttpd; cleartext+certificate-verified TLS, persistent "
+        "H1 chunked and H2 multiplexed body/trailer traffic verified; "
         f"curl={curl_version[0]} nghttp={nghttp_version} "
-        f"nghttpd={nghttpd_version} netz_io=zio-std-io"
+        f"libcurl={libcurl.version} nghttpd={nghttpd_version} "
+        "netz_io=zio-std-io"
     )
 
 

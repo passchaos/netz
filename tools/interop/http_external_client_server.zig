@@ -4,13 +4,16 @@ const std = @import("std");
 const netz = @import("netz");
 
 const Protocol = enum { http1, http2 };
-const ClientKind = enum { curl, nghttp };
+const ClientKind = enum { curl, nghttp, libcurl };
 const Route = enum { first, second };
 
 const nghttp_request_body = "nghttp-request-body";
 const nghttp_request_trailer_name = "x-nghttp-request-complete";
 const nghttp_request_trailer_value = "yes";
 const nghttp_response_trailer_name = "x-netz-response-complete";
+const libcurl_request_body = "libcurl-request-body";
+const libcurl_request_trailer_name = "x-libcurl-request-complete";
+const libcurl_response_trailer_name = "x-netz-libcurl-response-complete";
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -27,11 +30,14 @@ pub fn main(init: std.process.Init) !void {
         .curl
     else if (std.mem.eql(u8, args[3], "nghttp"))
         .nghttp
+    else if (std.mem.eql(u8, args[3], "libcurl"))
+        .libcurl
     else
         return error.InvalidArgument;
     const use_tls = args.len == 5 and std.mem.eql(u8, args[4], "--tls");
     if (args.len == 5 and !use_tls) return error.InvalidArgument;
     if (protocol == .http1 and client == .nghttp) return error.InvalidArgument;
+    if (protocol == .http2 and client == .libcurl) return error.InvalidArgument;
 
     const allocator = std.heap.c_allocator;
     var backend = try netz.runtime.Backend.init(allocator);
@@ -123,13 +129,27 @@ fn serveHttp1(
                 .{ .name = "X-Netz-Sequence", .value = routeNumber(route) },
             },
             .body = responseBody(client, route),
+            .trailers = if (client == .libcurl)
+                &.{.{
+                    .name = libcurl_response_trailer_name,
+                    .value = @tagName(route),
+                }}
+            else
+                &.{},
+            .request_accepts_trailers = request.request.acceptsTrailers(),
             .request_method = request.request.method,
         });
     }
     if (seen != 0b11) return error.MissingRequest;
     std.debug.print(
-        "netz external HTTP client completed protocol=http1 transport={s} client={s} requests=2 connections=1 body_bytes={d} server_io=zio-std-io\n",
-        .{ transportName(use_tls), clientName(client), requestBodyBytes(client) },
+        "netz external HTTP client completed protocol=http1 transport={s} client={s} requests=2 connections=1 body_bytes={d} request_trailers={d} response_trailers={d} server_io=zio-std-io\n",
+        .{
+            transportName(use_tls),
+            clientName(client),
+            requestBodyBytes(client),
+            @as(usize, if (client == .libcurl) 1 else 0),
+            @as(usize, if (client == .libcurl) 2 else 0),
+        },
     );
 }
 
@@ -411,7 +431,36 @@ fn validateRequest(
             }
             break :blk .second;
         } else return error.InvalidRequest,
+        .libcurl => if (std.mem.eql(u8, target, "/upload?client=libcurl")) blk: {
+            if (!validLibcurlUpload(method, headers, body, trailers)) {
+                return error.InvalidRequest;
+            }
+            break :blk .first;
+        } else if (std.mem.eql(u8, target, "/reuse?client=libcurl")) blk: {
+            if (!std.mem.eql(u8, method, "GET") or
+                body.len != 0 or
+                trailers.len != 0 or
+                !headerEquals(headers, "te", "trailers"))
+            {
+                return error.InvalidRequest;
+            }
+            break :blk .second;
+        } else return error.InvalidRequest,
     };
+}
+
+fn validLibcurlUpload(
+    method: []const u8,
+    headers: anytype,
+    body: []const u8,
+    trailers: anytype,
+) bool {
+    if (!std.mem.eql(u8, method, "POST") or
+        !std.mem.eql(u8, body, libcurl_request_body) or
+        !headerEquals(headers, "te", "trailers")) return false;
+    return headerEquals(headers, "trailer", libcurl_request_trailer_name) and
+        trailers.len == 1 and
+        headerEquals(trailers, libcurl_request_trailer_name, "yes");
 }
 
 fn validNghttpRequest(
@@ -470,6 +519,10 @@ fn responseBody(client: ClientKind, route: Route) []const u8 {
             .first => "netz-nghttp-first",
             .second => "netz-nghttp-second",
         },
+        .libcurl => switch (route) {
+            .first => "netz-libcurl-upload",
+            .second => "netz-libcurl-reuse",
+        },
     };
 }
 
@@ -477,6 +530,7 @@ fn requestBodyBytes(client: ClientKind) usize {
     return switch (client) {
         .curl => "curl-request-body".len,
         .nghttp => nghttp_request_body.len * 2,
+        .libcurl => libcurl_request_body.len,
     };
 }
 

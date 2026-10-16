@@ -2118,7 +2118,19 @@ sibling reuse, and connection-error precedence.
    each, and require the two response bodies plus route-specific trailers in
    terminal HEADERS carrying END_STREAM. The server consumes that round-robin
    DATA through netz's batch-streaming request API rather than constraining the
-   external peer to serial requests. The same command now reverses the role
+   external peer to serial requests. Curl 8.5's command-line client has no
+   request-trailer option, so the same gate also drives the installed
+   libcurl 8.5.0 shared library through its stable C ABI. Over cleartext and
+   certificate-verified HTTP/1.1 it uses `CURLOPT_READFUNCTION` plus
+   `CURLOPT_TRAILERFUNCTION` to send one declared chunked request trailer;
+   netz validates the exact body/trailer, returns route-specific chunked
+   response trailers, and libcurl verifies their `CURLH_TRAILER` origin through
+   `curl_easy_header`. A second GET on the same easy handle observes its own
+   trailer and `CURLINFO_NUM_CONNECTS=0`, proving reuse. Libcurl 8.5 does not
+   invoke its trailer callback for HTTP/2 DATA and does not expose received H2
+   trailing HEADERS through that API, so the gate deliberately does not claim
+   libcurl H2 trailer coverage; the independent nghttp2 arms provide both
+   directions there. The same command now reverses the role
    against nghttpd 1.68.1 over h2c and certificate-verified TLS. Netz opens
    POST streams 1 and 3 together, round-robins their 47 aggregate body bytes in
    five-byte contributions, declares and sends a distinct terminal request
