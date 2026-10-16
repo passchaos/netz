@@ -502,6 +502,78 @@ test "QUIC imported 0-RTT DATAGRAM retains only a PING probe" {
     );
 }
 
+test "QUIC accepted 0-RTT receive provenance survives 1-RTT continuation" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 4096 },
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xcb} ** quic.protection.secret_len,
+    );
+    var connection = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "early-recv-server",
+        .peer_connection_id = "early-recv-client",
+        .local_endpoint = .server,
+        .enable_pacing = false,
+    });
+    defer connection.deinit();
+
+    try connection.applyEarlyDataFrames(0, &.{.{ .stream = .{
+        .stream_id = 0,
+        .data = "early-",
+    } }});
+    try std.testing.expect(connection.recvStreamReceivedEarlyData(0));
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        1,
+        &.{.{ .stream = .{
+            .stream_id = 0,
+            .offset = 6,
+            .data = "continued",
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(connection.recvStreamReceivedEarlyData(0));
+
+    try one_rtt.testing.applyReceivedFrames(
+        &connection,
+        2,
+        &.{.{ .stream = .{
+            .stream_id = 4,
+            .data = "ordinary",
+            .fin = true,
+        } }},
+        null,
+        .not_ect,
+    );
+    try std.testing.expect(!connection.recvStreamReceivedEarlyData(4));
+    try std.testing.expect(!connection.recvStreamReceivedEarlyData(8));
+
+    try connection.applyEarlyDataFrames(3, &.{.{ .stream = .{
+        .stream_id = 8,
+        .data = "",
+    } }});
+    try std.testing.expect(!connection.recvStreamReceivedEarlyData(8));
+    try connection.applyEarlyDataFrames(4, &.{.{ .stream = .{
+        .stream_id = 12,
+        .data = "",
+        .fin = true,
+    } }});
+    try std.testing.expect(connection.recvStreamReceivedEarlyData(12));
+}
+
 test "QUIC imported 0-RTT copies preserve application packet numbers" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

@@ -7107,6 +7107,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingMessageReader"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingRequestEvent"));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.StreamingRequestEvent.Message,
+        "was_early_data",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "OwnedHandshakeRequest",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.OwnedHandshakeRequest,
+        "was_early_data",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "OwnedEndpointRequest",
+    ));
+    try std.testing.expect(@hasField(
+        netz.http3.runtime.OwnedEndpointRequest,
+        "was_early_data",
+    ));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingResponseEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "StreamingPushEvent"));
     try std.testing.expect(@hasDecl(netz.http3.runtime, "PushedResponse"));

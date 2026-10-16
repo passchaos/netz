@@ -54,6 +54,9 @@ pub const OwnedRequest = struct {
     connection_handle: quic.endpoint_dispatcher.ConnectionHandle,
     from: std.Io.net.IpAddress,
     stream_id: u62,
+    /// True when accepted TLS 0-RTT STREAM data contributed to this request.
+    /// Handlers can return 425 or apply application-specific replay defenses.
+    was_early_data: bool = false,
     method: []const u8,
     path: []const u8,
     scheme: []const u8,
@@ -104,6 +107,7 @@ pub const OwnedRequest = struct {
 
 const Collector = struct {
     from: std.Io.net.IpAddress,
+    was_early_data: bool,
     head: http3.DecodedRequestHead,
     body: std.ArrayList(u8) = .empty,
     trailers: []http3.Qpack.HeaderField = &.{},
@@ -125,6 +129,7 @@ const Collector = struct {
         stream_id: u62,
     ) std.mem.Allocator.Error!OwnedRequest {
         const from = self.from;
+        const was_early_data = self.was_early_data;
         const body_storage: ?[]u8 = if (self.body.items.len == 0) blk: {
             self.body.deinit(allocator);
             break :blk null;
@@ -138,6 +143,7 @@ const Collector = struct {
             .connection_handle = connection_handle,
             .from = from,
             .stream_id = stream_id,
+            .was_early_data = was_early_data,
             .method = head.method,
             .path = head.path,
             .scheme = head.scheme,
@@ -593,6 +599,7 @@ fn State(
                         if (slot.found_existing) return error.UnexpectedFrame;
                         slot.value_ptr.* = .{
                             .from = message.from,
+                            .was_early_data = message.was_early_data,
                             .head = request_head,
                         };
                         message.value = .data_available;
@@ -1026,4 +1033,26 @@ fn State(
             return self.options.error_policy == .stop;
         }
     };
+}
+
+test "HTTP/3 endpoint handler collector preserves early-data provenance" {
+    var collector = Collector{
+        .from = .{ .ip4 = .loopback(443) },
+        .was_early_data = true,
+        .head = .{
+            .method = "GET",
+            .path = "/early",
+            .scheme = "https",
+            .authority = "localhost",
+            .headers = &.{},
+            .content_length = null,
+            .body_allowed = true,
+            .consumed = 0,
+            .qpack_section_acknowledgments = 0,
+        },
+    };
+    const request = try collector.takeRequest(std.testing.allocator, 7, 0);
+    try std.testing.expect(request.was_early_data);
+    try std.testing.expectEqual(@as(usize, 7), request.connection_handle);
+    try std.testing.expectEqual(@as(u62, 0), request.stream_id);
 }

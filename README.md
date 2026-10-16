@@ -609,7 +609,13 @@ Current protocol coverage includes:
   SETTINGS. RFC 8470 safety is enforced before allocation or ticket use:
   `PreparedEarlyRequest.init` accepts only registered safe methods, while
   `initWithOptions(... allow_unsafe_replay)` makes application acceptance of
-  POST/PUT/CONNECT/custom-method replay risk explicit. Both server paths retain
+  POST/PUT/CONNECT/custom-method replay risk explicit. Accepted server-side
+  request provenance remains visible as `was_early_data` on aggregate
+  `OwnedHandshakeRequest`, every streaming request message, and the final
+  `OwnedEndpointRequest`, so handlers can return 425 or apply application-level
+  anti-replay policy. The marker stays true when 1-RTT continues an early
+  stream, remains false for independent 1-RTT streams, and rejected 0-RTT never
+  enters request state. Both server paths retain
   indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, distinguish an ended request with no initial HEADERS as
@@ -921,7 +927,10 @@ Current protocol coverage includes:
   a typed complete-request helper that emits the mandatory HTTP/3
   control/QPACK stream prefixes, explicitly reports acceptance versus replay,
   restores response method semantics and stream cursors after acceptance, and
-  rejects reduced remembered peer SETTINGS before consuming a response,
+  rejects reduced remembered peer SETTINGS before consuming a response; the
+  server preserves accepted early STREAM provenance through aggregate,
+  incremental, and endpoint-handler request ownership so replay-sensitive work
+  can receive 425 without classifying requests from stream IDs,
   bounded thread-safe replay gating, remembered-parameter enforcement, and
   application packet-number/flow/recovery state continuity after key install,
   including sparse import that advances past every protected 0-RTT nonce while

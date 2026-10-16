@@ -6527,6 +6527,8 @@ pub const HandshakeServerSession = struct {
         try self.qpack_decode.prepareSectionAcknowledgments(
             request.qpack_section_acknowledgments,
         );
+        const was_early_data = self.established.connection
+            .recvStreamReceivedEarlyData(prepared.stream_id);
         try prepareServerRequestReceived(&self.request_lifecycle);
         _ = try self.established.connection
             .requestCompletedPeerStreamRelease(prepared.stream_id);
@@ -6547,6 +6549,7 @@ pub const HandshakeServerSession = struct {
         return .{
             .from = assembled.from,
             .stream_id = assembled.stream_id,
+            .was_early_data = was_early_data,
             .stream_bytes = assembled.bytes,
             .request = request,
         };
@@ -10979,6 +10982,10 @@ pub const HandshakeServerSession = struct {
     ) Error!StreamingRequestEvent {
         const stream_id = entry.reader.streamId();
         const from = entry.from orelse unreachable;
+        // Capture provenance before a finished event can release and compact
+        // a stream whose response send half is already acknowledged.
+        const was_early_data = self.established.connection
+            .recvStreamReceivedEarlyData(stream_id);
         if (try streamingRequestSectionAcknowledgments(event)) |count| {
             self.qpack_decode.acknowledgeSectionsAssumeCapacity(
                 stream_id,
@@ -11012,6 +11019,7 @@ pub const HandshakeServerSession = struct {
         return .{ .message = .{
             .from = from,
             .stream_id = stream_id,
+            .was_early_data = was_early_data,
             .value = event,
         } };
     }
@@ -17969,6 +17977,9 @@ pub const SharedHandshakeClientPoolError =
 pub const OwnedHandshakeRequest = struct {
     from: net.IpAddress,
     stream_id: u62,
+    /// True only when accepted TLS 0-RTT STREAM data contributed to this
+    /// request. Handlers can reject replay-sensitive work with status 425.
+    was_early_data: bool = false,
     stream_bytes: []u8,
     request: http3.DecodedRequest,
 
@@ -31596,6 +31607,11 @@ test "HTTP/3 handshake adopts accepted typed early request" {
                 session.established.connection.endpoint.allocator,
             );
             try std.testing.expectEqual(@as(u62, 0), early_request.stream_id);
+            try std.testing.expect(early_request.was_early_data);
+            try std.testing.expect(
+                session.established.connection
+                    .recvStreamReceivedEarlyData(early_request.stream_id),
+            );
             try std.testing.expectEqualStrings(
                 "/early-request",
                 early_request.request.path,
@@ -31613,6 +31629,11 @@ test "HTTP/3 handshake adopts accepted typed early request" {
                 session.established.connection.endpoint.allocator,
             );
             try std.testing.expectEqual(@as(u62, 4), next_request.stream_id);
+            try std.testing.expect(!next_request.was_early_data);
+            try std.testing.expect(
+                !session.established.connection
+                    .recvStreamReceivedEarlyData(next_request.stream_id),
+            );
             try session.sendResponse(next_request.stream_id, .{ .status = 204 });
         }
     };
@@ -33573,6 +33594,7 @@ test {
     _ = @import("runtime/endpoint_handler_supervisor_tests.zig");
     _ = @import("runtime/handshake_server_serve_tests.zig");
     _ = @import("runtime/cancellation_tests.zig");
+    _ = @import("runtime/early_data_tests.zig");
     _ = @import("runtime/informational_tests.zig");
     _ = @import("runtime/recovery_tests.zig");
     _ = @import("runtime/response_scheduler/tests/integration.zig");

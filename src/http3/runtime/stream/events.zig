@@ -16,6 +16,9 @@ pub const Request = union(enum) {
     pub const Message = struct {
         from: net.IpAddress,
         stream_id: u62,
+        /// True when accepted TLS 0-RTT STREAM data contributed to this
+        /// request, including events emitted after a 1-RTT continuation.
+        was_early_data: bool = false,
         value: reader.Event,
     };
 

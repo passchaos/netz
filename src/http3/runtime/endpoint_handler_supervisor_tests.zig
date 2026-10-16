@@ -174,6 +174,7 @@ test "HTTP/3 endpoint handler supervisor runs owned requests concurrently" {
             self: *@This(),
             request: *const runtime.OwnedEndpointRequest,
         ) runtime.Error!http3.Response {
+            if (request.was_early_data) return error.InvalidHeader;
             if (request.body.len == 0 or request.trailers.len != 1) {
                 return error.InvalidHeader;
             }

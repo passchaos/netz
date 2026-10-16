@@ -483,6 +483,9 @@ const StreamRecvFlowEntry = struct {
     reset_delivery_end: ?usize = null,
     reset_reported: bool = false,
     fin_reported: bool = false,
+    /// At least one accepted TLS 0-RTT STREAM frame contributed bytes or FIN
+    /// to this receive stream. Later 1-RTT continuation does not erase origin.
+    received_early_data: bool = false,
     stop_sending_sent: ?StopSendingInfo = null,
     /// The application has finished with this peer-initiated stream, but its
     /// local send-side terminal frame might still await acknowledgement.
@@ -4360,6 +4363,22 @@ pub const Connection = struct {
         stream_id: u64,
     ) ?RecvStreamStats {
         return self.recvStreamStats(stream_id);
+    }
+
+    /// Whether accepted TLS 0-RTT supplied bytes or FIN to this active receive
+    /// stream. A later 1-RTT continuation retains the provenance marker.
+    pub fn recvStreamReceivedEarlyData(
+        self: *const Connection,
+        stream_id: u64,
+    ) bool {
+        if (self.stream_recv_index.count() == 0) return false;
+        const index = self.stream_recv_index.get(stream_id) orelse return false;
+        if (index >= self.stream_recv_flows.items.len or
+            self.stream_recv_flows.items[index].stream_id != stream_id)
+        {
+            return false;
+        }
+        return self.stream_recv_flows.items[index].received_early_data;
     }
 
     pub fn keepAliveEnabled(self: *const Connection) bool {
@@ -10704,6 +10723,14 @@ pub const Connection = struct {
             null,
             .not_ect,
         );
+        for (frames) |frame| switch (frame) {
+            .stream => |stream| if (stream.data.len != 0 or stream.fin) {
+                if (self.findRecvStreamEntry(stream.stream_id)) |entry| {
+                    entry.received_early_data = true;
+                }
+            },
+            else => {},
+        };
     }
 
     /// Import a successfully transmitted 0-RTT packet into the shared
