@@ -9,6 +9,8 @@ const net = std.Io.net;
 test "WebTransport endpoint client exposes multi-Session core API" {
     try std.testing.expect(@hasDecl(runtime, "EndpointClient"));
     try std.testing.expect(@hasDecl(runtime, "EndpointClientError"));
+    try std.testing.expect(@hasDecl(runtime, "StableConnectionId"));
+    try std.testing.expect(@hasDecl(runtime.EndpointClient, "stableId"));
     try std.testing.expect(@hasDecl(runtime.EndpointClient, "openSession"));
     try std.testing.expect(@hasDecl(
         runtime.EndpointClient,
@@ -25,6 +27,10 @@ test "WebTransport endpoint client exposes multi-Session core API" {
     try std.testing.expect(@hasDecl(
         runtime.EndpointClientSession,
         "sendDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointClientSession,
+        "stableId",
     ));
 }
 
@@ -234,6 +240,16 @@ test "WebTransport endpoint client multiplexes two authenticated Sessions" {
                 .path = "/client-second",
                 .max_streams = 8,
             });
+            const stable_id = client.stableId();
+            try std.testing.expect(stable_id != 0);
+            try std.testing.expectEqual(
+                stable_id,
+                try first.stableId(&client),
+            );
+            try std.testing.expectEqual(
+                stable_id,
+                try second.stableId(&client),
+            );
             try std.testing.expect(client.rttNanos() != null);
             try std.testing.expectEqual(@as(u62, 4), first.id().value);
             try std.testing.expectEqual(@as(u62, 8), second.id().value);

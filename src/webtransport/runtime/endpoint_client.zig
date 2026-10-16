@@ -117,6 +117,14 @@ pub const Session = struct {
         return findHeader(self.response.headers, name);
     }
 
+    pub fn stableId(
+        self: *Session,
+        client: *Client,
+    ) Error!quic.one_rtt.StableConnectionId {
+        try self.validateOwner(client);
+        return client.stableId();
+    }
+
     fn deinit(self: *Session, client: *Client) void {
         client.h3.closeConnectDatagramAssociation(
             self.session_id.value,
@@ -447,6 +455,10 @@ pub const Client = struct {
 
     pub fn remoteAddress(self: Client) net.IpAddress {
         return self.h3.established.connection.peerAddress();
+    }
+
+    pub fn stableId(self: *const Client) quic.one_rtt.StableConnectionId {
+        return self.h3.established.connection.stableId();
     }
 
     pub fn remoteAddressValidated(self: Client) bool {

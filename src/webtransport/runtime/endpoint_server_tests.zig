@@ -37,6 +37,10 @@ test "WebTransport endpoint server exposes stable session API" {
     ));
     try std.testing.expect(@hasDecl(
         runtime.EndpointAcceptedSession,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
+        runtime.EndpointAcceptedSession,
         "rttNanos",
     ));
     try std.testing.expect(@hasDecl(
@@ -1722,6 +1726,15 @@ test "WebTransport endpoint multiplexes two Sessions on one HTTP3 connection" {
     try std.testing.expectEqual(
         @as(usize, 2),
         endpoint.sessionCountForConnection(handle),
+    );
+    const first_session = endpoint.sessionById(handle, .init(0)) orelse
+        return error.TestUnexpectedResult;
+    const second_session = endpoint.sessionById(handle, .init(4)) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(first_session.stableId() != 0);
+    try std.testing.expectEqual(
+        first_session.stableId(),
+        second_session.stableId(),
     );
     shared.done.set(io);
     client_thread.join();

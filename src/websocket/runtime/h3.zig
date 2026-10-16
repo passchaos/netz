@@ -5997,12 +5997,12 @@ test "WebSocket RFC 9220 connections keep resumable writes compact" {
         // ReleaseSafe. Keep exact baselines for both layouts so this remains
         // a useful per-connection memory regression guard in every mode.
         const client_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 18_456,
-            .ReleaseFast, .ReleaseSmall => 18_264,
+            .Debug, .ReleaseSafe => 18_464,
+            .ReleaseFast, .ReleaseSmall => 18_272,
         };
         const server_size: usize = switch (builtin.mode) {
-            .Debug, .ReleaseSafe => 17_856,
-            .ReleaseFast, .ReleaseSmall => 17_696,
+            .Debug, .ReleaseSafe => 17_864,
+            .ReleaseFast, .ReleaseSmall => 17_704,
         };
         try std.testing.expectEqual(@as(usize, 296), @sizeOf(PendingWrite));
         try std.testing.expectEqual(client_size, @sizeOf(ClientConnection));

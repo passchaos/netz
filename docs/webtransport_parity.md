@@ -808,6 +808,16 @@ bidirectional DATAGRAM and stream echoes, exact CLOSE metadata, then verifies
 route cleanup. Endpoint timer expiry also propagates as a typed `closed` event
 after pending/accepted/rejected protocol state has been removed.
 
+Authenticated endpoint, standalone handshake, and stateful protected
+WebTransport facades now expose a process-local `StableConnectionId`, matching
+wtransport's stable-connection observability without leaking a mutable QUIC
+CID or peer address. The value is allocated once by QUIC 1-RTT construction,
+survives connection/session moves, peer-CID rotation and path migration, and is
+shared by every WebTransport Session multiplexed on that connection. It is
+deliberately not serialized, persisted, or accepted as an authorization
+credential. QUIC lifecycle tests prove nonzero uniqueness plus move/migration
+stability, and both endpoint roles prove two Sessions share one ID.
+
 ## Session drain and close lifecycle
 
 Handshake sessions now keep their Extended CONNECT request/response stream open

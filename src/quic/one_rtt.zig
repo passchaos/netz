@@ -1073,7 +1073,21 @@ fn isDiscardedLongHeaderPacket(bytes: []const u8) bool {
     return bytes.len != 0 and (bytes[0] & 0x80) != 0;
 }
 
+pub const StableConnectionId = u64;
+
+var next_stable_connection_id: std.atomic.Value(StableConnectionId) = .init(1);
+
+fn reserveStableConnectionId() StableConnectionId {
+    // Wrap would require 2^64 successful connection constructions in one
+    // process. Skip zero so it remains available as an invalid/sentinel value.
+    while (true) {
+        const id = next_stable_connection_id.fetchAdd(1, .monotonic);
+        if (id != 0) return id;
+    }
+}
+
 pub const Connection = struct {
+    stable_id: StableConnectionId,
     endpoint: *quic.runtime.Endpoint,
     /// Socket used for the currently selected local path. Ownership and all
     /// allocations remain with `endpoint`; a multi-endpoint owner may switch
@@ -1377,6 +1391,7 @@ pub const Connection = struct {
         var scratch_owned = true;
         errdefer if (scratch_owned) scratch.deinit(endpoint.allocator);
         out.* = Connection{
+            .stable_id = reserveStableConnectionId(),
             .endpoint = endpoint,
             .send_endpoint = endpoint,
             .config = stable_config,
@@ -3979,6 +3994,12 @@ pub const Connection = struct {
 
     pub fn datagramsDroppedIncoming(self: Connection) u64 {
         return self.datagrams_dropped_incoming_count;
+    }
+
+    /// Process-local identifier that remains unchanged across structure moves,
+    /// QUIC connection-ID rotation, NAT rebinding, and active migration.
+    pub fn stableId(self: *const Connection) StableConnectionId {
+        return self.stable_id;
     }
 
     /// Return a stable, allocation-free observability snapshot.

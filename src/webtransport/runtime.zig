@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const webtransport = @import("mod.zig");
 const http3 = @import("../http3/mod.zig");
 const quic = @import("../quic/mod.zig");
@@ -28,9 +29,36 @@ pub const EndpointClientOpenResult = endpoint_client.OpenResult;
 pub const EndpointClientEvent = endpoint_client.Event;
 pub const EndpointClientAnyEvent = endpoint_client.AnyEvent;
 pub const EndpointClientRejection = endpoint_client.Rejection;
+pub const StableConnectionId = quic.one_rtt.StableConnectionId;
 
 test "WebTransport sessions keep inbound and outbound close storage compact" {
     if (@sizeOf(usize) == 8) {
+        const Layout = struct {
+            accepted: usize,
+            accepted_handshake: usize,
+            client: usize,
+            handshake_client: usize,
+            protected_client: usize,
+        };
+        // Debug and ReleaseSafe retain extra safety state in the HTTP/3 and
+        // compression members. Exact per-mode baselines keep this useful in
+        // every build instead of making optimized runs fail spuriously.
+        const expected: Layout = switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{
+                .accepted = 1_064,
+                .accepted_handshake = 17_352,
+                .client = 7_352,
+                .handshake_client = 17_896,
+                .protected_client = 8_960,
+            },
+            .ReleaseFast, .ReleaseSmall => .{
+                .accepted = 1_056,
+                .accepted_handshake = 17_184,
+                .client = 7_240,
+                .handshake_client = 17_696,
+                .protected_client = 8_824,
+            },
+        };
         try std.testing.expectEqual(
             @as(usize, 296),
             @sizeOf(session_control.Control),
@@ -43,22 +71,22 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
             @as(usize, 160),
             @sizeOf(PendingSessionClose),
         );
-        try std.testing.expectEqual(@as(usize, 1_064), @sizeOf(AcceptedSession));
+        try std.testing.expectEqual(expected.accepted, @sizeOf(AcceptedSession));
         try std.testing.expectEqual(
             @as(usize, 872),
             @sizeOf(AcceptedProtectedSession),
         );
         try std.testing.expectEqual(
-            @as(usize, 17_344),
+            expected.accepted_handshake,
             @sizeOf(AcceptedHandshakeSession),
         );
-        try std.testing.expectEqual(@as(usize, 7_352), @sizeOf(ClientSession));
+        try std.testing.expectEqual(expected.client, @sizeOf(ClientSession));
         try std.testing.expectEqual(
-            @as(usize, 17_888),
+            expected.handshake_client,
             @sizeOf(HandshakeClientSession),
         );
         try std.testing.expectEqual(
-            @as(usize, 8_960),
+            expected.protected_client,
             @sizeOf(ProtectedClientSession),
         );
     }
@@ -2275,6 +2303,10 @@ pub const EndpointAcceptedSession = struct {
 
     pub fn sessionId(self: EndpointAcceptedSession) webtransport.SessionId {
         return self.session_id;
+    }
+
+    pub fn stableId(self: *const EndpointAcceptedSession) StableConnectionId {
+        return self.h3.established.connection.stableId();
     }
 
     pub fn remoteAddress(self: EndpointAcceptedSession) net.IpAddress {
@@ -5282,6 +5314,10 @@ pub const AcceptedHandshakeSession = struct {
         self: AcceptedHandshakeSession,
     ) webtransport.SessionId {
         return self.session_id;
+    }
+
+    pub fn stableId(self: *const AcceptedHandshakeSession) StableConnectionId {
+        return self.h3.established.connection.stableId();
     }
 
     /// Return the currently selected QUIC peer path. This can change after an
@@ -8748,6 +8784,10 @@ pub const HandshakeClientSession = struct {
 
     pub fn sessionId(self: HandshakeClientSession) webtransport.SessionId {
         return self.session_id;
+    }
+
+    pub fn stableId(self: *const HandshakeClientSession) StableConnectionId {
+        return self.h3.established.connection.stableId();
     }
 
     /// Return the current QUIC peer path rather than the original connect
@@ -12914,6 +12954,12 @@ pub const StatefulProtectedClientSession = struct {
         self: StatefulProtectedClientSession,
     ) webtransport.SessionId {
         return self.session.sessionId();
+    }
+
+    pub fn stableId(
+        self: *const StatefulProtectedClientSession,
+    ) StableConnectionId {
+        return self.session.stableId();
     }
 
     pub fn remoteAddress(

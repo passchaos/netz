@@ -1082,6 +1082,8 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
         .local_stateless_reset_key = reset_key,
     });
     defer connection.deinit();
+    const stable_id = connection.stableId();
+    try std.testing.expect(stable_id != 0);
     var peer_connection = try one_rtt.Connection.init(&peer_endpoint, .{
         .peer = server_endpoint.address(),
         .receive_keys = keys,
@@ -1206,6 +1208,8 @@ test "QUIC endpoint dispatcher synchronizes local CID rotation" {
         @as(usize, 4),
         dispatcher.connections.getPtr(11).?.connection_id_sync_count,
     );
+    try std.testing.expectEqual(stable_id, connection.stableId());
+    try std.testing.expect(stable_id != peer_connection.stableId());
 }
 
 test "QUIC endpoint dispatcher rejects cross-connection CID collisions transactionally" {

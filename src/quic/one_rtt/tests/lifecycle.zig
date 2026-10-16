@@ -63,6 +63,54 @@ test "QUIC 1-RTT validates configured stream-count limits" {
     );
 }
 
+test "QUIC stable connection IDs survive moves and path migration" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    var endpoint = try quic.runtime.Endpoint.bind(
+        allocator,
+        threaded.io(),
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer endpoint.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xe9} ** quic.protection.secret_len,
+    );
+    var first = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "stable-local-a",
+        .peer_connection_id = "stable-peer-a",
+    });
+    const first_id = first.stableId();
+    try std.testing.expect(first_id != 0);
+
+    // WebTransport and endpoint promotion move established connection values.
+    // The identifier belongs to the logical connection, not its address.
+    var moved = first;
+    first = undefined;
+    defer moved.deinit();
+    try std.testing.expectEqual(first_id, moved.stableId());
+    try moved.beginPeerMigration(
+        .{ .ip4 = .loopback(9443) },
+        [_]u8{0x91} ** 8,
+    );
+    try std.testing.expectEqual(first_id, moved.stableId());
+
+    var second = try one_rtt.Connection.init(&endpoint, .{
+        .peer = endpoint.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "stable-local-b",
+        .peer_connection_id = "stable-peer-b",
+    });
+    defer second.deinit();
+    try std.testing.expect(second.stableId() != 0);
+    try std.testing.expect(first_id != second.stableId());
+}
+
 test "QUIC 1-RTT installs maximum pacing rate" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

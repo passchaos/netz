@@ -1433,7 +1433,12 @@ Current protocol coverage includes:
   before ownership transfer so short-lived servers can retire recovery state,
   and
   WebTransport-style `stats`/`getStats` access to the underlying QUIC 1-RTT
-  counters, plus an externally negotiated-key stateful runtime with the same
+  counters. Authenticated endpoint, standalone handshake, and stateful
+  protected facades also expose one process-local `StableConnectionId` that is
+  shared by Sessions on the same QUIC connection and survives value moves,
+  peer-CID rotation, NAT rebinding, and migration; it is an observability key,
+  not a wire identifier, persistent identity, or authorization credential.
+  An externally negotiated-key stateful runtime has the same
   recovery, congestion/flow-control, associated-stream, cancellation, and
   session-lifecycle facilities as the integrated TLS-handshake runtime
 - WebRTC signaling, media, security, data-channel codecs, and UDP peer runtime

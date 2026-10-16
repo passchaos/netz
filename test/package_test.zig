@@ -8441,6 +8441,18 @@ test "public modules are reachable" {
         "connectUriAttemptWithTimeout",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "StableConnectionId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.quic.one_rtt.Connection,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.HandshakeClientSession,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.HandshakeClientSession,
         "connectPreconfiguredWithDeadline",
     ));
@@ -8929,6 +8941,18 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.EndpointAcceptedSession,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointClient,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointClientSession,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.EndpointAcceptedSession,
         "sendDatagrams",
     ));
     try std.testing.expect(@hasDecl(
@@ -9170,6 +9194,14 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
         "receiveDatagramWithTimeout",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.StatefulProtectedClientSession,
+        "stableId",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime.AcceptedHandshakeSession,
+        "stableId",
     ));
     try std.testing.expect(@hasDecl(
         netz.webtransport.runtime.StatefulProtectedClientSession,
