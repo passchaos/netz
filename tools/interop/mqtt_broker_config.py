@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import os
 from pathlib import Path
 import select
@@ -73,12 +74,34 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
+MOSQUITTO_RELOAD_SOURCES = {
+    "broker/23-security-password-file-reload.py":
+        "de0ae7ebf17db99700bed5e12adf777a44f330a70b45196e3ff16147b2b70d42",
+    "broker/23-security-acl-file-reload.py":
+        "a8df20a7bab7b87ae79b83d81d3a44de29de03ea51f797e4933efb4e9dcd13e0",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("broker", type=Path)
+    parser.add_argument("--mosquitto-test-root", type=Path)
+    parser.add_argument("--only-security-reload", action="store_true")
     return parser.parse_args()
+
+
+def verify_mosquitto_reload_sources(test_root: Path) -> int:
+    for relative, expected in MOSQUITTO_RELOAD_SOURCES.items():
+        source = test_root / relative
+        if not source.is_file():
+            raise FileNotFoundError(f"missing Mosquitto reload source: {source}")
+        actual = hashlib.sha256(source.read_bytes()).hexdigest()
+        if actual != expected:
+            raise AssertionError(
+                f"Mosquitto reload source changed: {relative}: "
+                f"expected {expected}, found {actual}"
+            )
+    return len(MOSQUITTO_RELOAD_SOURCES)
 
 
 def free_port() -> int:
@@ -2463,7 +2486,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             f"acl_file {acl_path}\n"
             f"listener {port} 127.0.0.1\n"
             "allow_anonymous false\n"
-            "max_connections 7\n"
+            "max_connections 8\n"
         )
 
     write_config(password_file, acl_file)
@@ -2475,7 +2498,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
     )
     assert process.stdout is not None
     ready = process.stdout.readline().strip()
-    if "configured 1 listeners for 7 clients" not in ready:
+    if "configured 1 listeners for 8 clients" not in ready:
         raise RuntimeError(f"security reload broker failed to start: {ready}")
     listener = process.stdout.readline().strip()
     if not listener.startswith("mqtt "):
@@ -2664,6 +2687,35 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 "security reload did not update existing subscription ACL"
             )
 
+        # Mosquitto's source-locked password reload test terminates the
+        # process when a previously valid password file becomes malformed.
+        # Netz prepares the complete security generation before commit: the
+        # invalid file must leave both live clients and the parsed old policy
+        # usable without admitting credentials from the rejected file.
+        next_password_file.write_text("test:bad\n")
+        os.kill(process.pid, signal.SIGHUP)
+        wait_process_line(
+            process,
+            "security reload failed: error=UnsupportedHash",
+            "failed password reload",
+        )
+        mqtt_ping(new)
+        mqtt_ping(subscriber)
+        expect_publish_reason(new, "after/password-rollback", 5, 0x00)
+        expected_password_rollback_delivery = publish_packet(
+            "after/password-rollback", b"reload"
+        )
+        if read_mqtt_packet(subscriber) != expected_password_rollback_delivery:
+            raise AssertionError(
+                "failed password reload changed existing delivery policy"
+            )
+        rejected_invalid_user = connect(
+            "reload-invalid-password-rejected",
+            "test",
+            0x87,
+        )
+        rejected_invalid_user.close()
+
         password_file.write_text(f"third:{password_hash}\n")
         acl_file.write_text("unsupported directive\n")
         write_config(password_file, acl_file)
@@ -2675,7 +2727,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
         )
         mqtt_ping(new)
         mqtt_ping(subscriber)
-        expect_publish_reason(new, "after/still-allowed", 5, 0x00)
+        expect_publish_reason(new, "after/still-allowed", 6, 0x00)
         expected_rollback_delivery = publish_packet(
             "after/still-allowed", b"reload"
         )
@@ -6512,9 +6564,23 @@ def run_optional_client_certificate_case(
 
 def main() -> None:
     args = parse_args()
+    source_count = 0
+    if args.mosquitto_test_root is not None:
+        source_count = verify_mosquitto_reload_sources(
+            args.mosquitto_test_root,
+        )
     os.environ[FINITE_TEST_ENV] = "1"
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
+        if args.only_security_reload:
+            run_security_reload_case(args.broker, directory)
+            print(
+                "MQTT broker security reload integration passed: "
+                "password_invalid=rollback acl_invalid=rollback "
+                f"mosquitto_reload_sources={source_count} "
+                + RUNTIME
+            )
+            return
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
         run_default_dual_socket_domain_case(args.broker, directory)
@@ -6646,6 +6712,7 @@ def main() -> None:
         "downtime expiry, connection-scoped Maximum Packet Size, outgoing "
         "QoS2 DUP/PUBREL recovery, and restore "
         + RUNTIME
+        + f" mosquitto_reload_sources={source_count}"
     )
 
 

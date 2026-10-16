@@ -3396,7 +3396,17 @@ while new clients use the new trust roots, verify updated CertificateRequest CA
 names, and verify malformed replacements roll back. The password/ACL gate keeps
 an unchanged authenticated subscriber online, revokes a removed credential on
 the live connection without publishing its Will, and proves a failed later
-reload disconnects nobody. The same production gate source-locks Mosquitto
+reload disconnects nobody. It now source-locks Mosquitto revision `5cd25465`'s
+`23-security-password-file-reload.py` and
+`23-security-acl-file-reload.py` by exact file SHA-256. Those upstream tests
+terminate Mosquitto with exit code 3 after a valid security file becomes
+malformed. Netz instead prepares the complete replacement before commit: an
+unsupported password hash and an invalid ACL directive are exercised as
+separate live SIGHUP transactions, each leaves the old parsed credentials and
+ACL generation active, preserves existing PING/PUBLISH delivery, and rejects
+the uncommitted username. The process stays available, so this is an explicit
+stronger-availability divergence rather than relabeling Mosquitto's expected
+termination as identical behavior. The same production gate source-locks Mosquitto
 `09-acl-change.py`: an MQTT 3.1.1 durable Session queues two QoS 1 messages
 while offline, SIGHUP removes read access for one topic, and reconnect reports
 Session Present while delivering only the still-authorized message. PUBACK
@@ -4674,7 +4684,10 @@ proxy evidence for the entire suite.
 3. Expand the source-hash-locked process gate beyond its current 275 curated
    scenarios, and extend the strict broker configuration adapter toward the
    upstream harness's remaining listener-reload/general-CRL/persistence
-   semantics. The nineteen behavior-bearing broker packet JSON files are
+   semantics. The process gate now additionally locks the two upstream
+   password/ACL invalid-reload sources and verifies Netz's transactional
+   rollback divergence through a real SIGHUP broker process. The nineteen
+   behavior-bearing broker packet JSON files are
    already included completely; the only unselected JSON file is
    `ZZ-broker-check.json`, whose sole test is an empty end-of-suite sentinel.
    The remaining upstream Python process suite still contains portable

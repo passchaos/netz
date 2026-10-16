@@ -1679,6 +1679,10 @@ zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # key/CA/EKU/identity/CRL rejection, snapshot restore, and a two-broker inbound
 # bridge prefix/reconnect plus QoS 1/2 scenario through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
+# Source-lock Mosquitto's invalid password/ACL reload processes and verify that
+# netz atomically rolls both failures back instead of terminating the broker.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-security-reload --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Build the pinned Mosquitto checkout and bridge two independent broker
 # processes through netz across MQTT versions and QoS 0/1/2. QoS 2 covers the
 # complete MQTT 3.1.1/5 source-target protocol matrix. Its fault gate also

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import mqtt_broker_config as broker_config
 import mqtt_mosquitto_packet_sequences as sequences
 
 
@@ -24,6 +25,50 @@ class PacketDslTests(unittest.TestCase):
     def test_rejects_an_incomplete_quoted_string(self) -> None:
         with self.assertRaisesRegex(ValueError, "incomplete string"):
             sequences.parse_message("'unterminated value")
+
+
+class ReloadSourceIdentityTests(unittest.TestCase):
+    def test_accepts_exact_reload_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "password.py").write_bytes(b"password reload")
+            (root / "acl.py").write_bytes(b"acl reload")
+            sources = {
+                "password.py": hashlib.sha256(b"password reload").hexdigest(),
+                "acl.py": hashlib.sha256(b"acl reload").hexdigest(),
+            }
+            with mock.patch.object(
+                broker_config,
+                "MOSQUITTO_RELOAD_SOURCES",
+                sources,
+            ):
+                self.assertEqual(
+                    2,
+                    broker_config.verify_mosquitto_reload_sources(root),
+                )
+
+    def test_rejects_reload_source_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "password.py").write_bytes(b"changed")
+            with mock.patch.object(
+                broker_config,
+                "MOSQUITTO_RELOAD_SOURCES",
+                {"password.py": "0" * 64},
+            ):
+                with self.assertRaisesRegex(AssertionError, "source changed"):
+                    broker_config.verify_mosquitto_reload_sources(root)
+
+    def test_rejects_missing_reload_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                broker_config,
+                "MOSQUITTO_RELOAD_SOURCES",
+                {"missing.py": "0" * 64},
+            ):
+                with self.assertRaisesRegex(FileNotFoundError, "missing"):
+                    broker_config.verify_mosquitto_reload_sources(root)
 
 
 class SequenceLoadingTests(unittest.TestCase):

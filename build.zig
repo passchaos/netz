@@ -1531,6 +1531,7 @@ pub fn build(b: *std.Build) void {
         "tools/interop/mqtt_broker_config.py",
     });
     mqtt_broker_config.addArtifactArg(mqtt_vectors_broker);
+    if (b.args) |args| mqtt_broker_config.addArgs(args);
     const mqtt_broker_config_step = b.step(
         "interop-mqtt-broker-config",
         "Exercise strict broker config across TCP/TLS/WS/WSS listeners",
