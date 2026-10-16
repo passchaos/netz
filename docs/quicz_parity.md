@@ -1421,6 +1421,15 @@ If Version Negotiation restarts the connection, the original 0-RTT packet is
 never replayed under the replacement version and its old-key packet numbers do
 not advance the new application space; the client nevertheless retains an
 explicit rejected disposition so typed HTTP/3 leaves replay to the caller.
+Typed request construction now also enforces RFC 8470 before any allocation,
+lease mutation, packet-number consumption, or socket I/O. The ordinary
+`PreparedEarlyRequest.init` accepts only case-sensitive registered safe methods
+(GET, HEAD, OPTIONS, TRACE, and QUERY); POST, PUT, CONNECT, lowercase or unknown
+methods fail with `UnsafeEarlyDataMethod`. Applications with request-specific
+replay protections can use `initWithOptions` and the deliberately named
+`allow_unsafe_replay` policy. This opt-in changes only construction policy:
+accepted/rejected transport disposition and application-owned retry remain
+unchanged.
 Initial flight packet plans and datagram views now use stack storage for the
 default 64-packet bound, retaining a heap fallback for explicitly larger
 flights. In back-to-back 50-connection ReleaseFast runs with certificate

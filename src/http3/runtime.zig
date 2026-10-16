@@ -2,6 +2,7 @@ const std = @import("std");
 const RuntimeModule = @This();
 const round_robin = @import("../internal/round_robin.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const http_method = @import("../internal/http_method.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
 const body_batch = @import("runtime/body_batch.zig");
@@ -3698,6 +3699,18 @@ pub const HandshakeSessionOptions = struct {
 /// table state is connection-local and does not exist before the new HTTP/3
 /// session is constructed. The encoded bytes and frame slice are owned by
 /// this value and must outlive the QUIC handshake that borrows `offer.frames`.
+pub const EarlyRequestReplayPolicy = enum {
+    /// RFC 8470 default: only methods with registered safe semantics may be
+    /// sent before handshake authentication completes.
+    safe_methods_only,
+    /// The application explicitly accepts replay risk for this exact request.
+    allow_unsafe_replay,
+};
+
+pub const PreparedEarlyRequestOptions = struct {
+    replay_policy: EarlyRequestReplayPolicy = .safe_methods_only,
+};
+
 pub const PreparedEarlyRequest = struct {
     allocator: std.mem.Allocator,
     stream_id: u62,
@@ -3717,6 +3730,27 @@ pub const PreparedEarlyRequest = struct {
         local_settings: http3.Settings,
         remembered_peer_settings: http3.Settings,
     ) Error!PreparedEarlyRequest {
+        return initWithOptions(
+            allocator,
+            request,
+            local_settings,
+            remembered_peer_settings,
+            .{},
+        );
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        request: http3.Request,
+        local_settings: http3.Settings,
+        remembered_peer_settings: http3.Settings,
+        options: PreparedEarlyRequestOptions,
+    ) Error!PreparedEarlyRequest {
+        if (options.replay_policy == .safe_methods_only and
+            !http_method.isSafe(request.method))
+        {
+            return error.UnsafeEarlyDataMethod;
+        }
         const stream_id: u62 = 0;
         var control_bytes: std.ArrayList(u8) = .empty;
         defer control_bytes.deinit(allocator);
@@ -3869,6 +3903,58 @@ pub const PreparedEarlyRequest = struct {
         }
     }
 };
+
+test "HTTP/3 typed early requests require safe methods by default" {
+    var no_alloc = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    inline for (.{ "POST", "PUT", "CONNECT", "PURGE", "get" }) |method| {
+        try std.testing.expectError(
+            error.UnsafeEarlyDataMethod,
+            PreparedEarlyRequest.init(
+                no_alloc.allocator(),
+                .{
+                    .method = method,
+                    .path = "/early",
+                    .authority = "example.com",
+                },
+                .{},
+                .{},
+            ),
+        );
+    }
+
+    var replayable = try PreparedEarlyRequest.initWithOptions(
+        std.testing.allocator,
+        .{
+            .method = "POST",
+            .path = "/application-approved",
+            .authority = "example.com",
+            .body = "replayable",
+        },
+        .{},
+        .{},
+        .{ .replay_policy = .allow_unsafe_replay },
+    );
+    defer replayable.deinit();
+    try std.testing.expectEqualStrings("POST", replayable.method);
+    try std.testing.expect(replayable.request_bytes.len != 0);
+
+    inline for (.{ "GET", "HEAD", "OPTIONS", "TRACE", "QUERY" }) |method| {
+        var safe = try PreparedEarlyRequest.init(
+            std.testing.allocator,
+            .{
+                .method = method,
+                .path = "/safe",
+                .authority = "example.com",
+            },
+            .{},
+            .{},
+        );
+        safe.deinit();
+    }
+}
 
 pub const EarlyRequestDisposition = enum { accepted, rejected };
 

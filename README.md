@@ -606,7 +606,11 @@ Current protocol coverage includes:
   versus rejected without automatic application replay, restores the accepted
   request's response semantics and stream cursors, routes server-side early
   bytes before the first blocking read, and rejects reduced remembered peer
-  SETTINGS. Both server paths retain indexed bounded per-request-stream reassembly state
+  SETTINGS. RFC 8470 safety is enforced before allocation or ticket use:
+  `PreparedEarlyRequest.init` accepts only registered safe methods, while
+  `initWithOptions(... allow_unsafe_replay)` makes application acceptance of
+  POST/PUT/CONNECT/custom-method replay risk explicit. Both server paths retain
+  indexed bounded per-request-stream reassembly state
   so interleaved streams are not dropped, surface RESET_STREAM request
   cancellation, distinguish an ended request with no initial HEADERS as
   stream-local `H3_REQUEST_INCOMPLETE` while retaining sibling streams, and

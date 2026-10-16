@@ -22,6 +22,7 @@ pub const Error = http3.Error || quic.runtime.Error ||
     DatagramsNotNegotiated,
     InvalidDispatcherState,
     ConcurrentRead,
+    UnsafeEarlyDataMethod,
 };
 
 /// Failures produced by a handshake worker after admission has transferred

@@ -3321,6 +3321,26 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.runtime, "HandshakeClient"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,
+        "EarlyRequestReplayPolicy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "PreparedEarlyRequestOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "PreparedEarlyRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.PreparedEarlyRequest,
+        "initWithOptions",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "connectWithEarlyRequest",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
         "HandshakeClientPool",
     ));
     try std.testing.expect(@hasDecl(
