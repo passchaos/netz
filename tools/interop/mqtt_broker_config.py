@@ -49,6 +49,9 @@ from mqtt_broker_config_sys import run_system_interval_case
 from mqtt_broker_config_runtime_policy import (
     run_runtime_delivery_policy_reload_case,
 )
+from mqtt_broker_config_session_persistence import (
+    run_persistent_session_clean_start_case,
+)
 from mqtt_broker_config_topic_alias import run_topic_alias_policy_case
 from mqtt_broker_config_origin import run_websocket_origins_case
 
@@ -6551,6 +6554,7 @@ def main() -> None:
         run_persistence_case(args.broker, directory)
         run_persistence_acl_restart_case(args.broker, directory)
         run_retained_property_persistence_case(args.broker, directory)
+        run_persistent_session_clean_start_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_autosave_reload_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -6616,7 +6620,8 @@ def main() -> None:
         "dynamic persistence target enable/disable/path and time/change/disabled "
         "autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint "
         "routing, QoS2 journal guard, snapshot ACL reauthorization, retained "
-        "MQTT 5 property-bundle restore, and restore "
+        "MQTT 5 property-bundle restore, MQTT 3.1.1/5 Clean Start snapshot "
+        "cleanup, and restore "
         + RUNTIME
     )
 

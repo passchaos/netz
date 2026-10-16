@@ -666,6 +666,13 @@ and decreasing Message Expiry through two snapshot/restart generations. Exact
 PUBLISH comparison proves both property order and deep ownership across the
 restore-save-restore boundary, while an inbound Topic Alias is correctly
 removed as connection-scoped state before either snapshot replay.
+The source-locked `15-persist-client-msg-out-clear-v3-1-1.py` production case
+now runs in MQTT 3.1.1 and MQTT 5. An initial broker snapshots three durable
+subscriptions plus offline QoS 1/2 deliveries; the restored broker emits both
+messages without acknowledgement, then Clean Start atomically removes the
+subscriptions and restored outgoing inflight state. A third broker requires
+Session Present false, no stale delivery, and a no-subscriber publication
+result, proving the cleanup itself survived another snapshot/restart.
 Scheduled-Will tests cover downtime deadline reduction, canonical publisher
 restoration, reconnect cancellation, driver publication after an actual broker
 restart and retained-Will storage. This snapshot surface still has narrower
