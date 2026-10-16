@@ -18,9 +18,20 @@ MIIBMDCB1qADAgECAgISNDAKBggqhkjOPQQDAjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwHhcNMjYwMTAx
 -----END CERTIFICATE-----
 """
 
+PRIVATE_KEY_PEM = """-----BEGIN EC PRIVATE KEY-----
+MDECAQEEIBI0VniavN7xI0VniavN7xI0VniavN7xI0VniavN7xI0oAoGCCqGSM49AwEH
+-----END EC PRIVATE KEY-----
+"""
+
 NGHTTP_REQUEST_BODY = b"nghttp-request-body"
 NGHTTP_REQUEST_TRAILER = "x-nghttp-request-complete: yes"
 NGHTTP_RESPONSE_TRAILER = "x-netz-response-complete"
+NGHTTPD_REQUEST_BODIES = (
+    b"netz-nghttpd-first-body",
+    b"netz-nghttpd-second-body",
+)
+NGHTTPD_RESPONSE_TRAILER = "x-nghttpd-response-complete: yes"
+NGHTTPD_REUSE_BODY = b"nghttpd-after-reuse"
 
 
 def free_port() -> int:
@@ -288,12 +299,126 @@ def received_end_stream_trailer(transcript: str, trailer: str) -> bool:
     return False
 
 
+def stop_and_collect_server(
+    process: subprocess.Popen[str], initial_output: str
+) -> str:
+    if process.poll() is None:
+        process.terminate()
+    try:
+        suffix, _ = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        suffix, _ = process.communicate()
+    return initial_output + suffix
+
+
+def run_nghttpd_case(
+    client: Path, nghttpd: str, directory: Path, tls: bool
+) -> None:
+    port = free_port()
+    label = f"netz-nghttpd-{'tls' if tls else 'h2c'}"
+    command = [
+        nghttpd,
+        "--verbose",
+        "--echo-upload",
+        f"--trailer={NGHTTPD_RESPONSE_TRAILER}",
+        "--address=127.0.0.1",
+        f"--htdocs={directory}",
+    ]
+    if tls:
+        command += [
+            str(port),
+            str(directory / "localhost-key.pem"),
+            str(directory / "localhost.pem"),
+        ]
+    else:
+        command += ["--no-tls", str(port)]
+    server = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    initial = ""
+    result: subprocess.CompletedProcess[str] | None = None
+    client_error: BaseException | None = None
+    try:
+        initial = wait_for_line(server, f"IPv4: listen 127.0.0.1:{port}")
+        client_command = [str(client), str(port)]
+        if tls:
+            client_command.append(str(directory / "localhost.pem"))
+        result = subprocess.run(
+            client_command,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except BaseException as exc:
+        client_error = exc
+    server_output = stop_and_collect_server(server, initial)
+    if client_error is not None:
+        raise RuntimeError(
+            f"{label}: client execution failed: {client_error}; "
+            f"server={server_output!r}"
+        ) from client_error
+    assert result is not None
+    client_output = result.stdout + result.stderr
+    request_body_bytes = sum(len(body) for body in NGHTTPD_REQUEST_BODIES)
+    expected_client = (
+        "netz HTTP/2 client interoperated with nghttpd: "
+        f"transport={'tls' if tls else 'h2c'} requests=3 connections=1 "
+        f"streams=3 request_body_bytes={request_body_bytes} "
+        "request_trailers=2 response_trailers=3 reuse=true "
+        f"alpn={'h2' if tls else 'n/a'} "
+        "client_io=zio-std-io server_io=nghttp2"
+    )
+    if result.returncode != 0 or expected_client not in client_output:
+        raise RuntimeError(
+            f"{label} failed ({result.returncode}): "
+            f"client={client_output!r} server={server_output!r}"
+        )
+
+    scheme = "https" if tls else "http"
+    expected_server_fields = (
+        "[id=1]",
+        "recv (stream_id=1) :method: POST",
+        "recv (stream_id=1) :path: /first?client=netz",
+        f"recv (stream_id=1) :scheme: {scheme}",
+        "recv (stream_id=1) x-netz-request: first",
+        "recv (stream_id=1) trailer: x-netz-request-complete",
+        "recv (stream_id=3) :method: POST",
+        "recv (stream_id=3) :path: /second?client=netz",
+        f"recv (stream_id=3) :scheme: {scheme}",
+        "recv (stream_id=3) x-netz-request: second",
+        "recv (stream_id=3) trailer: x-netz-request-complete",
+        "recv (stream_id=5) :method: GET",
+        "recv (stream_id=5) :path: /after.txt?client=netz",
+        f"recv (stream_id=5) :scheme: {scheme}",
+    )
+    for field in expected_server_fields:
+        if field not in server_output:
+            raise AssertionError(
+                f"{label}: nghttpd transcript missing {field!r}: "
+                f"{server_output!r}"
+            )
+    for route in ("first", "second"):
+        trailer = f"x-netz-request-complete: {route}"
+        if not received_end_stream_trailer(server_output, trailer):
+            raise AssertionError(
+                f"{label}: terminal request trailer missing: {trailer}"
+            )
+    if "[id=2]" in server_output:
+        raise AssertionError(f"{label}: nghttpd observed more than one connection")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("server", type=Path)
+    parser.add_argument("client", type=Path)
     args = parser.parse_args()
     curl = required_tool("CURL", "curl")
     nghttp = required_tool("NGHTTP", "nghttp")
+    nghttpd = required_tool("NGHTTPD", "nghttpd")
     curl_version = subprocess.run(
         [curl, "--version"], capture_output=True, text=True, check=True
     ).stdout.splitlines()
@@ -302,21 +427,30 @@ def main() -> None:
     nghttp_version = subprocess.run(
         [nghttp, "--version"], capture_output=True, text=True, check=True
     ).stdout.strip()
+    nghttpd_version = subprocess.run(
+        [nghttpd, "--version"], capture_output=True, text=True, check=True
+    ).stdout.strip()
 
     with tempfile.TemporaryDirectory(prefix="netz-http-clients-") as raw_dir:
         directory = Path(raw_dir)
         (directory / "localhost.pem").write_text(CERTIFICATE_PEM)
+        (directory / "localhost-key.pem").write_text(PRIVATE_KEY_PEM)
+        (directory / "after.txt").write_bytes(NGHTTPD_REUSE_BODY)
         for protocol in ("http1", "http2"):
             for tls in (False, True):
                 run_curl_case(args.server, curl, directory, protocol, tls)
         for tls in (False, True):
             run_nghttp_case(args.server, nghttp, directory, tls)
+        for tls in (False, True):
+            run_nghttpd_case(args.client, nghttpd, directory, tls)
 
     print(
-        "External HTTP client interop passed: curl HTTP/1.1+h2 and nghttp2 h2, "
-        "cleartext+certificate-verified TLS, two requests over one connection; "
-        "nghttp2 request bodies+trailers and response trailers verified; "
-        f"curl={curl_version[0]} nghttp={nghttp_version} server_io=zio-std-io"
+        "External HTTP interop passed in both endpoint roles: curl HTTP/1.1+h2 "
+        "and nghttp2 h2 clients against Netz, plus Netz h2 against nghttpd; "
+        "cleartext+certificate-verified TLS, persistent multiplexed body/trailer "
+        "traffic verified; "
+        f"curl={curl_version[0]} nghttp={nghttp_version} "
+        f"nghttpd={nghttpd_version} netz_io=zio-std-io"
     )
 
 

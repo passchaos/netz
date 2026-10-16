@@ -1661,14 +1661,26 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "netz", .module = netz_mod }},
         }),
     });
+    const http2_nghttpd_client = b.addExecutable(.{
+        .name = "netz-http2-nghttpd-client",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http2_nghttpd_client.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
     const http_external_clients = b.addSystemCommand(&.{
         "python3",
         "tools/interop/http_external_clients.py",
     });
     http_external_clients.addArtifactArg(http_external_client_server);
+    http_external_clients.addArtifactArg(http2_nghttpd_client);
     const http_external_clients_step = b.step(
         "interop-http-external-clients",
-        "Run curl/nghttp2 against netz HTTP/1.1 and HTTP/2 servers",
+        "Run independent curl/nghttp2 peers against Netz HTTP endpoints",
     );
     http_external_clients_step.dependOn(&http_external_clients.step);
 

@@ -2108,8 +2108,16 @@ sibling reuse, and connection-error precedence.
    each, and require the two response bodies plus route-specific trailers in
    terminal HEADERS carrying END_STREAM. The server consumes that round-robin
    DATA through netz's batch-streaming request API rather than constraining the
-   external peer to serial requests. This broadens real client coverage beyond
-   Hyper without claiming exhaustive client behavior. The native
+   external peer to serial requests. The same command now reverses the role
+   against nghttpd 1.68.1 over h2c and certificate-verified TLS. Netz opens
+   POST streams 1 and 3 together, round-robins their 47 aggregate body bytes in
+   five-byte contributions, declares and sends a distinct terminal request
+   trailer on each, validates nghttpd's two echo bodies plus response trailers,
+   then completes a static-file GET on stream 5. Nghttpd's independent verbose
+   transcript verifies the exact method/path/scheme/header/trailer fields,
+   terminal END_STREAM HEADERS, and one connection; the TLS arm additionally
+   requires `h2` ALPN. This broadens real client and server coverage beyond
+   Hyper without claiming exhaustive peer behavior. The native
    TLS 1.3 HTTP/2 runtime separately has an end-to-end encrypted request test
    that verifies `h2` ALPN and the transport-derived `https` pseudo-header,
    plus no-common-ALPN rejection and required-client-certificate tests; verified

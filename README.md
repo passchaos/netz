@@ -1559,9 +1559,10 @@ zig build interop-http2-hyper-client -Doptimize=ReleaseFast
 # the same high-level authority pool, then prove one miss plus one reuse on each
 # selected transport.
 zig build interop-http-unified-hyper -Doptimize=ReleaseFast
-# Exercise netz HTTP/1.1 and HTTP/2 servers with installed curl and nghttp2:
-# cleartext plus certificate-verified TLS, exact request/response assertions,
-# and two requests over one connection in every matrix arm.
+# Exercise netz HTTP/1.1 and HTTP/2 servers with installed curl/nghttp, then
+# reverse the HTTP/2 role against nghttpd: cleartext plus certificate-verified
+# TLS, multiplexed request/response bodies and trailers, ALPN, and persistent
+# same-connection reuse in every applicable matrix arm.
 zig build interop-http-external-clients -Doptimize=ReleaseFast
 # All netz HTTP/2 interop endpoints obtain `std.Io` from the zio-backed runtime;
 # the Hyper and direct h2 peers identify their Tokio execution backend in the
