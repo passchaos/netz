@@ -101,6 +101,7 @@ def upgrade(
     use_tls: bool,
     extension_offer: str | None = None,
     expect_no_context_takeover: bool = False,
+    required_extension_tokens: tuple[bytes, ...] = (),
 ) -> socket.socket:
     peer = connect(port, use_tls)
     key = base64.b64encode(os.urandom(16)).decode("ascii")
@@ -141,7 +142,7 @@ def upgrade(
         if b"sec-websocket-extensions:" in lower_response:
             raise AssertionError("server selected an unsolicited extension")
     else:
-        required_tokens = [b"permessage-deflate"]
+        required_tokens = [b"permessage-deflate", *required_extension_tokens]
         if expect_no_context_takeover:
             required_tokens.extend((
                 b"client_no_context_takeover",
@@ -337,6 +338,34 @@ def exercise_compression_context_takeover(
             raise AssertionError("context-takeover Close mismatch")
 
 
+def exercise_compression_server_window(
+    port: int,
+    use_tls: bool,
+) -> None:
+    offer = (
+        "permessage-deflate; client_no_context_takeover; "
+        "server_no_context_takeover; server_max_window_bits=9"
+    )
+    with upgrade(
+        port,
+        use_tls,
+        offer,
+        expect_no_context_takeover=True,
+        required_extension_tokens=(b"server_max_window_bits=9",),
+    ) as peer:
+        plain = b"nine-bit-server-window-" * 256
+        send_frame(peer, 2, deflate_message(plain), rsv1=True)
+        fin, rsv1, opcode, payload = receive_frame_details(peer)
+        if not fin or not rsv1 or opcode != 2:
+            raise AssertionError("9-bit compressed echo flags mismatch")
+        if inflate_message(payload) != plain:
+            raise AssertionError("9-bit compressed echo payload mismatch")
+        close = struct.pack("!H", 1000) + b"window-nine-done"
+        send_frame(peer, 8, close)
+        if receive_frame(peer) != (8, close):
+            raise AssertionError("9-bit compressed connection Close mismatch")
+
+
 def run_mode(server: Path, use_tls: bool) -> None:
     port = free_port()
     command = [str(server), str(port)]
@@ -377,6 +406,7 @@ def run_mode(server: Path, use_tls: bool) -> None:
         exercise_fragmented_control(port, use_tls)
         exercise_compression_no_context(port, use_tls)
         exercise_compression_context_takeover(port, use_tls)
+        exercise_compression_server_window(port, use_tls)
         exercise_protocol_error(port, use_tls)
         # A connection-local protocol failure must not stop the listener or
         # poison the reusable supervisor worker.
@@ -390,7 +420,7 @@ def run_mode(server: Path, use_tls: bool) -> None:
             "Autobahn zio smoke passed: "
             f"transport={transport} concurrent={CONCURRENT_CLIENTS} "
             "fragmented_control=true compression_no_context=true "
-            "compression_context=true "
+            "compression_context=true compression_server_window=9 "
             "protocol_error=isolated "
             "utf8_error=1007 recovery_connections=2 "
             "workers=64 server_io=zio-std-io"

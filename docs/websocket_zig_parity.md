@@ -1442,6 +1442,11 @@ applying TCP-only socket options.
    emitted LZ77 distance bound. Small-window correctness remains covered by
    the direct codec/differential tests and historical Autobahn manifest, not
    overstated by this socket smoke.
+   The smoke still checks the independently useful transport boundary: it
+   requires the exact `server_max_window_bits=9` response parameter and a
+   compressed binary echo over both cleartext and WSS. That is negotiation and
+   roundtrip evidence only; it is deliberately combined with, rather than
+   substituted for, the direct distance-bound tests.
    On 2026-08-21, the full WSS run completed all 517 cases with the same result
    as cleartext: behavior counts `OK=514` and `INFORMATIONAL=3`, and close-behavior
    counts `OK=514` and `INFORMATIONAL=3`. The cleartext run likewise completed
