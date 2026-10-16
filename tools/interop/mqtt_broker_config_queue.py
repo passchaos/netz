@@ -90,7 +90,7 @@ def _run_limit(
         "max_inflight_messages 1\n"
         + directives
         + f"listener {port} 127.0.0.1\n"
-        + "allow_anonymous true\n"
+        + "listener_allow_anonymous true\n"
         + "max_connections 3\n"
     )
     with _configured_broker(

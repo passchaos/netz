@@ -171,7 +171,7 @@ def _run_clean_start_case(
         f"persistence_file {snapshot.name}\n"
         "autosave_interval 0\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_queued_messages 8\n"
         "max_connections 2\n"
     )

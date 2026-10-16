@@ -111,7 +111,7 @@ socket_domain ipv4
 bind_interface lo
 accept_protocol_versions 4,5
 enable_proxy_protocol 1
-allow_anonymous false
+listener_allow_anonymous false
 max_qos 1
 max_keepalive 60
 max_topic_alias 10
@@ -132,7 +132,7 @@ crlfile client-revocations.pem
 require_certificate true
 use_identity_as_username true
 mount_point tenant/
-allow_anonymous true
+listener_allow_anonymous true
 max_connections 16
 
 connection upstream
@@ -169,7 +169,8 @@ The accepted directives are exactly `listener`, `protocol`, `socket_domain`,
 `keyfile`, `keyfile_password_file`, `cafile`, `capath`, `crlfile`, `require_certificate`,
 `tls_version`, `ciphers`,
 `use_identity_as_username`, `use_subject_as_username`, `mount_point`,
-`allow_anonymous`, `auto_id_prefix`, `listener_auto_id_prefix`,
+`allow_anonymous`, `listener_allow_anonymous`, `auto_id_prefix`,
+`listener_auto_id_prefix`,
 `accept_protocol_versions`,
 `websockets_origin`,
 `enable_proxy_protocol`, `proxy_protocol_v2_require_tls`,
@@ -504,9 +505,15 @@ PBKDF2-SHA512 hashes, and legacy `$6$` salted SHA-512 hashes. Plaintext, unknown
 or malformed hashes, duplicate usernames, files over 1 MiB, more than 4,096
 users, and excessive KDF parameters fail closed before any listener is opened.
 Hash comparison is constant-time and concurrent KDF work is serialized to cap
-Argon2 memory amplification. A listener with `allow_anonymous false` requires a
-password file; an anonymous-capable listener accepts absent credentials but
-still rejects invalid credentials when a username is supplied. `certfile` and
+Argon2 memory amplification. Global `allow_anonymous` is order-independent and
+defaults to false. `listener_allow_anonymous` is the recommended listener-local
+override and takes precedence over the global value whether or not
+`per_listener_settings` is enabled. For Mosquitto compatibility,
+`allow_anonymous` remains listener-local when `per_listener_settings true`.
+A listener whose effective anonymous policy is false requires a password file
+or certificate-identity authentication; an anonymous-capable listener accepts
+absent credentials but still rejects invalid credentials when a username is
+supplied. `certfile` and
 `keyfile` are listener-local and must occur together. Their presence upgrades
 `protocol mqtt` to native MQTT/TLS and `protocol websockets` to WSS. Before any
 port is opened, every identity is loaded from a leaf-first PEM certificate
@@ -547,8 +554,9 @@ CN replaces any wire username and the wire password is ignored before password,
 ACL, Session, Client ID, or Will policy. The CN is converted from supported
 X.509 DirectoryString encodings, must satisfy MQTT UTF-8/u16 bounds, and is
 deeply owned; missing, duplicate, legacy-encoded, malformed, or NUL-containing
-CN values are Not Authorized. This mode is a valid authentication source for
-`allow_anonymous false` and does not use `password_file` on that listener. A
+CN values are Not Authorized. This mode is a valid authentication source when
+the effective anonymous policy is false and does not use `password_file` on
+that listener. A
 password file does not encrypt credentials on raw TCP/WS; use TLS/WSS, a
 trusted network, or a proxy.
 `acl_file` accepts Mosquitto `user NAME`,
@@ -576,7 +584,8 @@ later TLS/WSS handshakes without rebinding the listener. In-flight handshakes
 retain their complete TLS policy generation until completion, while established
 TLS connections retain traffic keys and authenticated peer metadata without
 depending on the old files. SIGHUP also updates each existing listener's
-`allow_anonymous`, `allow_zero_length_clientid`, resolved global/listener auto-ID
+resolved global/`listener_allow_anonymous` policy,
+`allow_zero_length_clientid`, resolved global/listener auto-ID
 prefix, accepted protocol versions, Maximum QoS/Keep Alive, and both Topic Alias
 ceilings under the same security generation lock. Existing clients retain their
 negotiated state, while later CONNECT attempts take one owned fixed-capacity

@@ -95,12 +95,12 @@ def run_accepted_protocol_versions_case(
     config.write_text(
         f"listener {tcp_port} 127.0.0.1\n"
         "accept_protocol_versions 5\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 3\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
         "accept_protocol_versions 3,4\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 3\n"
     )
     process = subprocess.Popen(

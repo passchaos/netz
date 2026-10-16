@@ -3287,9 +3287,14 @@ directive belongs to its preceding listener and is loaded into stable,
 listener-indexed storage before any socket is bound. Cross-listener process
 tests prove that credentials and write ACLs cannot leak between ports, and an
 invalid later listener file prevents every earlier listener from opening.
-`allow_anonymous false` requires a valid username/password, while an
-anonymous-capable listener permits absent credentials but rejects credentials
-that are supplied and invalid. `mqtt.password_file` recognizes current
+Global `allow_anonymous` is order-independent and defaults to false.
+Mosquitto's recommended `listener_allow_anonymous` always belongs to its
+preceding listener and overrides the global value; with
+`per_listener_settings true`, the legacy `allow_anonymous` spelling remains
+listener-local. A listener whose effective policy is false requires a valid
+username/password or certificate identity, while an anonymous-capable listener
+permits absent credentials but rejects credentials that are supplied and
+invalid. `mqtt.password_file` recognizes current
 Argon2id, `$7$` PBKDF2-SHA512, and legacy `$6$` salted SHA-512 records. It
 decodes and validates all entries before binding, rejects plaintext, duplicate
 users, invalid UTF-8/lengths and unbounded file/user/KDF inputs, wipes owned
@@ -3301,6 +3306,14 @@ libargon2 vector), wrong/unknown/missing credentials, mixed protected TCP plus
 anonymous WebSocket listeners, shared routing/mount policy, and snapshot
 restart. The same gate now verifies user/anonymous `topic` scopes, `%u`
 patterns, default deny and deny precedence over real TCP/WebSocket traffic.
+It additionally source-locks Mosquitto
+`01-connect-listener-allow-anonymous.py` at SHA-256
+`56b58590c474efa5f7bf1ad8dc7277d4ba42b7a69e7e7b8f16ac924813f9b214`
+and runs its nine global/listener precedence combinations through two real
+listeners under both MQTT 3.1.1 and MQTT 5. Three additional cases leave one
+listener unoverridden to exercise inherited default-false, explicit-false, and
+explicit-true global policy. The complete matrix checks 48 CONNECT/CONNACK
+outcomes.
 It also checks an exact 50-byte full-packet boundary, MQTT 5 Maximum Packet
 Size advertisement and 0x95 disconnect, MQTT 3.1.1 close behavior, WebSocket
 1009 translation, plus version-correct QoS 0/1 and Will payload-limit handling.
@@ -3434,8 +3447,9 @@ that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Bridge
 definitions are one exception: `bridge_reload_type lazy|immediate` selects
 per-bridge generation replacement on the same SIGHUP without rebinding
-listeners. Per-listener `allow_anonymous`, `allow_zero_length_clientid`, resolved
-global/listener auto-ID prefixes, accepted protocol versions, Maximum QoS,
+listeners. Per-listener resolved anonymous policy,
+`allow_zero_length_clientid`, resolved global/listener auto-ID prefixes,
+accepted protocol versions, Maximum QoS,
 Maximum Keep Alive, and inbound/outbound Topic Alias ceilings are committed
 under the same security generation lock. Existing connections retain their
 negotiated capabilities, while each later CONNECT takes one fixed-capacity stack

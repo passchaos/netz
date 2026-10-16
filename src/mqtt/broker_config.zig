@@ -137,6 +137,9 @@ pub const Config = struct {
     global_max_clients: usize = default_global_max_clients,
     global_max_connections: usize = default_global_max_connections,
     per_listener_settings: bool = false,
+    /// Global anonymous-admission default. An explicit
+    /// `listener_allow_anonymous` on a listener takes precedence.
+    allow_anonymous: bool = false,
     password_file: []u8 = &.{},
     acl_file: []u8 = &.{},
     queue_qos0_messages: bool = false,
@@ -320,6 +323,7 @@ const GlobalSeen = struct {
     per_listener_settings: bool = false,
     global_max_clients: bool = false,
     global_max_connections: bool = false,
+    allow_anonymous: bool = false,
     queue_qos0_messages: bool = false,
     upgrade_outgoing_qos: bool = false,
     password_file: bool = false,
@@ -497,6 +501,18 @@ fn parseSources(
             } else if (std.mem.eql(u8, directive, "upgrade_outgoing_qos")) {
                 try markOnce(&global_seen.upgrade_outgoing_qos);
                 config.upgrade_outgoing_qos = try parseOneBool(&words);
+            } else if (std.mem.eql(u8, directive, "allow_anonymous")) {
+                security_settings_seen = true;
+                if (config.per_listener_settings) {
+                    const index = current_listener[source.scope] orelse
+                        return error.DirectiveRequiresListener;
+                    try markOnce(&listener_seen.items[index].allow_anonymous);
+                    listeners.items[index].allow_anonymous =
+                        try parseOneBool(&words);
+                } else {
+                    try markOnce(&global_seen.allow_anonymous);
+                    config.allow_anonymous = try parseOneBool(&words);
+                }
             } else if (std.mem.eql(u8, directive, "password_file")) {
                 security_settings_seen = true;
                 if (config.per_listener_settings) {
@@ -803,7 +819,11 @@ fn parseSources(
                     const value = try parseOne(&words);
                     _ = try mqtt.listener_namespace.Namespace.init(value);
                     listener.mount_point = try allocator.dupe(u8, value);
-                } else if (std.mem.eql(u8, directive, "allow_anonymous")) {
+                } else if (std.mem.eql(
+                    u8,
+                    directive,
+                    "listener_allow_anonymous",
+                )) {
                     security_settings_seen = true;
                     try markOnce(&seen.allow_anonymous);
                     listener.allow_anonymous = try parseOneBool(&words);
@@ -924,7 +944,10 @@ fn parseSources(
             }
         }
     }
-    for (listeners.items, listener_seen.items) |listener, seen| {
+    for (listeners.items, listener_seen.items) |*listener, seen| {
+        if (!config.per_listener_settings and !seen.allow_anonymous) {
+            listener.allow_anonymous = config.allow_anonymous;
+        }
         if (listener.isUnix() and
             (listener.protocol != .mqtt or
                 listener.usesTls() or
@@ -1146,7 +1169,7 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "use_identity_as_username") or
         std.mem.eql(u8, value, "use_subject_as_username") or
         std.mem.eql(u8, value, "mount_point") or
-        std.mem.eql(u8, value, "allow_anonymous") or
+        std.mem.eql(u8, value, "listener_allow_anonymous") or
         std.mem.eql(u8, value, "listener_auto_id_prefix") or
         std.mem.eql(u8, value, "max_qos") or
         std.mem.eql(u8, value, "maximum_qos") or
@@ -1334,7 +1357,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\autosave_interval 17
         \\autosave_on_changes true
         \\listener 1883 127.0.0.1
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\enable_proxy_protocol 1
         \\maximum_qos 1
         \\max_keepalive 30
@@ -1356,7 +1379,7 @@ test "MQTT broker config parses owned multi-listener policy" {
         \\use_identity_as_username true
         \\use_subject_as_username true
         \\mount_point tenant/
-        \\allow_anonymous false
+        \\listener_allow_anonymous false
         \\use_username_as_clientid true
         \\max_connections 2
     );
@@ -1480,7 +1503,7 @@ test "MQTT broker config owns global Client Identifier prefix policy" {
     const source = try allocator.dupe(
         u8,
         "clientid_prefixes secure-\n" ++
-            "listener 1883\nallow_anonymous true",
+            "listener 1883\nlistener_allow_anonymous true",
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -1493,7 +1516,7 @@ test "MQTT broker config owns global Client Identifier prefix policy" {
         parse(
             allocator,
             "clientid_prefixes bad\x00prefix\n" ++
-                "listener 1883\nallow_anonymous true",
+                "listener 1883\nlistener_allow_anonymous true",
         ),
     );
     try std.testing.expectError(
@@ -1501,7 +1524,7 @@ test "MQTT broker config owns global Client Identifier prefix policy" {
         parse(
             allocator,
             "clientid_prefixes first-\nclientid_prefixes second-\n" ++
-                "listener 1883\nallow_anonymous true",
+                "listener 1883\nlistener_allow_anonymous true",
         ),
     );
     try std.testing.expectError(
@@ -1509,7 +1532,7 @@ test "MQTT broker config owns global Client Identifier prefix policy" {
         parse(
             allocator,
             "clientid_prefixes secure-\nlistener 1883\n" ++
-                "allow_anonymous true\nuse_username_as_clientid true",
+                "listener_allow_anonymous true\nuse_username_as_clientid true",
         ),
     );
 }
@@ -1518,7 +1541,7 @@ test "MQTT broker config owns Mosquitto Unix listener paths" {
     const allocator = std.testing.allocator;
     const source = try allocator.dupe(
         u8,
-        "listener 0 /tmp/netz-mqtt.sock\nallow_anonymous true",
+        "listener 0 /tmp/netz-mqtt.sock\nlistener_allow_anonymous true",
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -1542,15 +1565,15 @@ test "MQTT broker config validates Unix listener topology" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(
         error.InvalidDirective,
-        parse(allocator, "listener 0\nallow_anonymous true"),
+        parse(allocator, "listener 0\nlistener_allow_anonymous true"),
     );
     try std.testing.expectError(
         error.DuplicateListener,
         parse(allocator,
             \\listener 0 /tmp/duplicate.sock
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
             \\listener 0 /tmp/duplicate.sock
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1558,7 +1581,7 @@ test "MQTT broker config validates Unix listener topology" {
         parse(allocator,
             \\listener 0 /tmp/websocket.sock
             \\protocol websockets
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1566,7 +1589,7 @@ test "MQTT broker config validates Unix listener topology" {
         parse(allocator,
             \\listener 0 /tmp/domain.sock
             \\socket_domain ipv4
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1574,7 +1597,7 @@ test "MQTT broker config validates Unix listener topology" {
         parse(allocator,
             \\listener 0 /tmp/proxy.sock
             \\enable_proxy_protocol 1
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -1584,13 +1607,13 @@ test "MQTT broker config scopes socket domains to listeners" {
     var config = try parse(allocator,
         \\listener 1883
         \\socket_domain ipv4
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1883
         \\socket_domain ipv6
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1885 ::1
         \\socket_domain ipv6
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(allocator);
 
@@ -1618,9 +1641,9 @@ test "MQTT broker config scopes socket domains to listeners" {
 test "MQTT broker config keeps omitted socket domain dual-stack intent" {
     var config = try parse(std.testing.allocator,
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1884 127.0.0.1
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
 
@@ -1638,7 +1661,7 @@ test "MQTT broker config owns listener interface names" {
         \\listener 1883 192.0.2.1
         \\bind_interface lo
         \\socket_domain ipv6
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -1652,7 +1675,7 @@ test "MQTT broker config owns listener interface names" {
     var all_families = try parse(allocator,
         \\listener 1884 192.0.2.2
         \\bind_interface lo
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer all_families.deinit(allocator);
     try std.testing.expect(all_families.listeners[0].bind_all_socket_domains);
@@ -1660,10 +1683,10 @@ test "MQTT broker config owns listener interface names" {
     var interface_precedence = try parse(allocator,
         \\listener 1885
         \\bind_interface lo
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1885
         \\bind_interface eth0
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer interface_precedence.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 2), interface_precedence.listeners.len);
@@ -1684,7 +1707,7 @@ test "MQTT broker config rejects invalid socket domains" {
         parse(allocator,
             \\listener 1883
             \\socket_domain dual
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1693,7 +1716,7 @@ test "MQTT broker config rejects invalid socket domains" {
             \\listener 1883
             \\socket_domain ipv4
             \\socket_domain ipv4
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1702,7 +1725,7 @@ test "MQTT broker config rejects invalid socket domains" {
             \\listener 1883
             \\bind_interface lo
             \\bind_interface eth0
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1710,7 +1733,7 @@ test "MQTT broker config rejects invalid socket domains" {
         parse(allocator,
             \\listener 1883 127.0.0.1
             \\socket_domain ipv6
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1718,7 +1741,7 @@ test "MQTT broker config rejects invalid socket domains" {
         parse(allocator,
             \\listener 1883 ::1
             \\socket_domain ipv4
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -1726,10 +1749,10 @@ test "MQTT broker config rejects invalid socket domains" {
         parse(allocator,
             \\listener 1883 ::
             \\socket_domain ipv6
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
             \\listener 1883
             \\socket_domain ipv6
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -1739,7 +1762,7 @@ test "MQTT broker config parses owned inbound bridges" {
     const source = try allocator.dupe(u8,
         \\persistence true
         \\listener 1883 127.0.0.1
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection upstream
         \\address broker.example:2883 backup.example:3883
         \\topic sensors/# in 1 local/ remote/
@@ -1920,7 +1943,7 @@ test "MQTT broker config applies inbound bridge defaults" {
     var config = try parse(std.testing.allocator,
         \\max_inflight_messages 9
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection defaulted
         \\address localhost
         \\topic # in 0
@@ -1986,7 +2009,7 @@ test "MQTT broker config applies inbound bridge defaults" {
 
     var disabled = try parse(std.testing.allocator,
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection silent
         \\address localhost
         \\topic # in 0
@@ -1997,7 +2020,7 @@ test "MQTT broker config applies inbound bridge defaults" {
 
     var inherited_clean = try parse(std.testing.allocator,
         \\listener 1886
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection inherited-clean
         \\address localhost
         \\topic # out 0
@@ -2008,7 +2031,7 @@ test "MQTT broker config applies inbound bridge defaults" {
 
     var overridden_clean = try parse(std.testing.allocator,
         \\listener 1887
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection overridden-clean
         \\address localhost
         \\topic # out 0
@@ -2021,7 +2044,7 @@ test "MQTT broker config applies inbound bridge defaults" {
     var unlimited = try parse(std.testing.allocator,
         \\max_inflight_messages 0
         \\listener 1885
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection unlimited
         \\address localhost
         \\topic # in 0
@@ -2034,7 +2057,7 @@ test "MQTT broker config applies inbound bridge defaults" {
 
     var ipv6 = try parse(std.testing.allocator,
         \\listener 1886
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection ipv6-bind
         \\address [::1]:2883
         \\topic # out 0
@@ -2048,7 +2071,7 @@ test "MQTT broker config applies inbound bridge defaults" {
 
     var timeout_boundaries = try parse(std.testing.allocator,
         \\listener 1887
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection timeout-zero
         \\address localhost
         \\topic zero/# in 0
@@ -2080,7 +2103,7 @@ test "MQTT broker config applies inbound bridge defaults" {
 
 test "MQTT broker config enforces MQTT 3.1 bridge Client ID length" {
     const allocator = std.testing.allocator;
-    const listener = "listener 1883\nallow_anonymous true\n";
+    const listener = "listener 1883\nlistener_allow_anonymous true\n";
     var maximum = try parse(allocator, listener ++
         "connection maximum-v31-client\naddress localhost\n" ++
         "topic # in 0\nbridge_protocol_version mqttv31\n" ++
@@ -2102,7 +2125,7 @@ test "MQTT broker config enforces MQTT 3.1 bridge Client ID length" {
 
 test "MQTT broker config rejects incomplete or unsupported bridges" {
     const allocator = std.testing.allocator;
-    const listener = "listener 1883\nallow_anonymous true\n";
+    const listener = "listener 1883\nlistener_allow_anonymous true\n";
     try std.testing.expectError(
         error.DirectiveRequiresBridge,
         parse(allocator, listener ++ "address localhost\n"),
@@ -2500,7 +2523,7 @@ test "MQTT broker config rejects incomplete or unsupported bridges" {
 
 test "MQTT broker config accepts outbound and bidirectional mappings" {
     const allocator = std.testing.allocator;
-    const listener = "listener 1883\nallow_anonymous true\n";
+    const listener = "listener 1883\nlistener_allow_anonymous true\n";
     var config = try parse(allocator, listener ++
         "connection outgoing\naddress localhost\n" ++
         "topic sensors/# out 1 local/ remote/\n");
@@ -2547,7 +2570,7 @@ test "MQTT broker config accepts outbound and bidirectional mappings" {
 
 test "MQTT broker config validates lazy outbound lifecycle" {
     const allocator = std.testing.allocator;
-    const listener = "listener 1883\nallow_anonymous true\n";
+    const listener = "listener 1883\nlistener_allow_anonymous true\n";
     var config = try parse(allocator, "max_queued_messages 3\n" ++ listener ++
         "connection lazy-out\naddress localhost\n" ++
         "topic sensors/# out 1\nstart_type lazy\n" ++
@@ -2592,7 +2615,7 @@ test "MQTT broker config validates lazy outbound lifecycle" {
 
 test "MQTT broker config accepts decorrelated restart stable period" {
     const allocator = std.testing.allocator;
-    const listener = "listener 1883\nallow_anonymous true\n";
+    const listener = "listener 1883\nlistener_allow_anonymous true\n";
     var config = try parse(allocator, listener ++
         "connection jittered\naddress localhost\ntopic # in 0\n" ++
         "restart_timeout 3600 7200 0\n");
@@ -2630,7 +2653,7 @@ fn testBridgeConfigAllocationFailures(allocator: std.mem.Allocator) !void {
     var config = try parse(allocator,
         \\persistence true
         \\listener 1883 127.0.0.1
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\connection allocation-test
         \\address broker.example:2883 backup.example:3883
         \\round_robin true
@@ -2657,7 +2680,7 @@ test "MQTT broker config validates global client session limit" {
     var unlimited = try parse(allocator,
         \\global_max_clients -1
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer unlimited.deinit(allocator);
     try std.testing.expectEqual(
@@ -2668,7 +2691,7 @@ test "MQTT broker config validates global client session limit" {
     for ([_][]const u8{ "0", "-2", "2147483648", "invalid" }) |value| {
         const source = try std.fmt.allocPrint(
             allocator,
-            "global_max_clients {s}\nlistener 1883\nallow_anonymous true\n",
+            "global_max_clients {s}\nlistener 1883\nlistener_allow_anonymous true\n",
             .{value},
         );
         defer allocator.free(source);
@@ -2682,7 +2705,7 @@ test "MQTT broker config validates global client session limit" {
         parse(allocator,
             \\global_max_clients
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2691,7 +2714,7 @@ test "MQTT broker config validates global client session limit" {
             \\global_max_clients 1
             \\global_max_clients 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -2702,7 +2725,7 @@ test "MQTT broker config validates global connection limit" {
     var unlimited = try parse(allocator,
         \\global_max_connections -1
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer unlimited.deinit(allocator);
     try std.testing.expectEqual(
@@ -2716,7 +2739,7 @@ test "MQTT broker config validates global connection limit" {
 
     var omitted = try parse(allocator,
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer omitted.deinit(allocator);
     try std.testing.expectEqual(
@@ -2727,7 +2750,7 @@ test "MQTT broker config validates global connection limit" {
     for ([_][]const u8{ "0", "-2", "2147483648", "invalid" }) |value| {
         const source = try std.fmt.allocPrint(
             allocator,
-            "global_max_connections {s}\nlistener 1883\nallow_anonymous true\n",
+            "global_max_connections {s}\nlistener 1883\nlistener_allow_anonymous true\n",
             .{value},
         );
         defer allocator.free(source);
@@ -2741,7 +2764,7 @@ test "MQTT broker config validates global connection limit" {
         parse(allocator,
             \\global_max_connections
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2750,7 +2773,7 @@ test "MQTT broker config validates global connection limit" {
             \\global_max_connections 1
             \\global_max_connections 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -2764,12 +2787,12 @@ test "MQTT broker config owns per-listener security files" {
             "password_file first.pw\nacl_file first.acl\n" ++
             "auto_id_prefix first-\n" ++
             "allow_zero_length_clientid false\n" ++
-            "allow_anonymous false\n" ++
+            "listener_allow_anonymous false\n" ++
             "listener 8080 127.0.0.1\nprotocol websockets\n" ++
             "password_file second.pw\nacl_file second.acl\n" ++
             "listener_auto_id_prefix second-\n" ++
             "allow_zero_length_clientid true\n" ++
-            "allow_anonymous false\n",
+            "listener_allow_anonymous false\n",
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -2812,10 +2835,10 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
     var global = try parse(allocator,
         \\auto_id_prefix global-
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1884
         \\listener_auto_id_prefix local-
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer global.deinit(allocator);
     try std.testing.expectEqualStrings(
@@ -2831,10 +2854,10 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
         \\per_listener_settings true
         \\listener 1885
         \\auto_id_prefix first-
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1886
         \\listener_auto_id_prefix second-
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer isolated.deinit(allocator);
     try std.testing.expectEqualStrings(
@@ -2852,7 +2875,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
             \\per_listener_settings true
             \\auto_id_prefix missing-
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2860,7 +2883,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
         parse(allocator,
             \\listener_auto_id_prefix missing-
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2869,7 +2892,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
             \\listener 1883
             \\listener_auto_id_prefix first-
             \\listener_auto_id_prefix second-
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2879,7 +2902,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
             \\listener 1883
             \\auto_id_prefix first-
             \\listener_auto_id_prefix second-
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2888,7 +2911,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
             \\auto_id_prefix first-
             \\auto_id_prefix second-
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2896,7 +2919,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
         parse(allocator,
             \\auto_id_prefix 123456789012345678901234567890123456789012345678901
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2904,7 +2927,7 @@ test "MQTT broker config scopes assigned Client ID prefixes" {
         parse(
             allocator,
             "listener 1883\nlistener_auto_id_prefix bad\xc0\x80prefix\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
         ),
     );
 }
@@ -2925,7 +2948,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             allocator,
             "allow_zero_length_clientid false\n" ++
                 "per_listener_settings true\n" ++
-                "listener 1883\nallow_anonymous true",
+                "listener 1883\nlistener_allow_anonymous true",
         ),
     );
     try std.testing.expectError(
@@ -2934,7 +2957,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\allow_zero_length_clientid true
             \\listener 1883
             \\allow_zero_length_clientid false
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2943,7 +2966,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\max_inflight_bytes 1
             \\max_inflight_bytes 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2952,7 +2975,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\max_queued_messages 1
             \\max_queued_messages 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2961,7 +2984,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\max_queued_bytes 1
             \\max_queued_bytes 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2970,7 +2993,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\max_inflight_messages 1
             \\max_inflight_messages 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2979,7 +3002,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\check_retain_source true
             \\check_retain_source false
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -2988,7 +3011,7 @@ test "MQTT broker config scopes zero-length Client ID policy" {
             \\upgrade_outgoing_qos true
             \\upgrade_outgoing_qos false
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -2997,10 +3020,10 @@ test "MQTT broker config keeps retained source policy global" {
     var config = try parse(std.testing.allocator,
         \\per_listener_settings true
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\check_retain_source false
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
     try std.testing.expect(!config.check_retain_source);
@@ -3017,19 +3040,19 @@ test "MQTT broker config loads include directories in Mosquitto order" {
     defer one.close(io);
     try one.writeFile(io, .{
         .sub_path = "b.conf",
-        .data = "listener 1886\nallow_anonymous true\n",
+        .data = "listener 1886\nlistener_allow_anonymous true\n",
     });
     try one.writeFile(io, .{
         .sub_path = "A.conf",
-        .data = "listener 1883\nallow_anonymous true\n",
+        .data = "listener 1883\nlistener_allow_anonymous true\n",
     });
     try one.writeFile(io, .{
         .sub_path = "a.conf",
-        .data = "listener 1884\nallow_anonymous true\n",
+        .data = "listener 1884\nlistener_allow_anonymous true\n",
     });
     try one.writeFile(io, .{
         .sub_path = "B.conf",
-        .data = "listener 1885\nallow_anonymous true\n",
+        .data = "listener 1885\nlistener_allow_anonymous true\n",
     });
     try one.writeFile(io, .{
         .sub_path = "ignored.txt",
@@ -3040,11 +3063,11 @@ test "MQTT broker config loads include directories in Mosquitto order" {
     defer two.close(io);
     try two.writeFile(io, .{
         .sub_path = "00.conf",
-        .data = "listener 1887\nallow_anonymous true\n",
+        .data = "listener 1887\nlistener_allow_anonymous true\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "main.conf",
-        .data = "listener 1882\nallow_anonymous true\n" ++
+        .data = "listener 1882\nlistener_allow_anonymous true\n" ++
             "include_dir one.d\ninclude_dir two.d\n" ++
             "max_connections 7\n",
     });
@@ -3075,7 +3098,7 @@ test "MQTT broker config isolates included file listener scopes" {
     defer included.close(io);
     try included.writeFile(io, .{
         .sub_path = "10-listener.conf",
-        .data = "listener 1883\nallow_anonymous true\n",
+        .data = "listener 1883\nlistener_allow_anonymous true\n",
     });
     try included.writeFile(io, .{
         .sub_path = "20-policy.conf",
@@ -3109,7 +3132,7 @@ test "MQTT broker config isolates included file bridge scopes" {
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "main.conf",
-        .data = "listener 1883\nallow_anonymous true\n" ++
+        .data = "listener 1883\nlistener_allow_anonymous true\n" ++
             "include_dir bridges.d\n",
     });
     try std.testing.expectError(
@@ -3159,7 +3182,7 @@ test "MQTT broker config rejects duplicate globals across include files" {
     try tmp.dir.writeFile(io, .{
         .sub_path = "main.conf",
         .data = "include_dir settings.d\n" ++
-            "listener 1883\nallow_anonymous true\n",
+            "listener 1883\nlistener_allow_anonymous true\n",
     });
     try std.testing.expectError(
         error.DuplicateDirective,
@@ -3198,14 +3221,14 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(
             allocator,
             "password_file users.pw\nper_listener_settings true\n" ++
-                "listener 1883\nallow_anonymous true",
+                "listener 1883\nlistener_allow_anonymous true",
         ),
     );
     try std.testing.expectError(
         error.InvalidDirective,
         parse(
             allocator,
-            "listener 1883\nallow_anonymous true\n" ++
+            "listener 1883\nlistener_allow_anonymous true\n" ++
                 "per_listener_settings true",
         ),
     );
@@ -3214,7 +3237,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(
             allocator,
             "per_listener_settings true\nper_listener_settings true\n" ++
-                "listener 1883\nallow_anonymous true",
+                "listener 1883\nlistener_allow_anonymous true",
         ),
     );
     try std.testing.expectError(
@@ -3223,7 +3246,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             allocator,
             "per_listener_settings true\nlistener 1883\n" ++
                 "password_file first.pw\npassword_file second.pw\n" ++
-                "allow_anonymous false",
+                "listener_allow_anonymous false",
         ),
     );
     try std.testing.expectError(
@@ -3258,7 +3281,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\tls12_session_tickets true
         \\tls12_session_ticket_server_id mqtt.example
         \\tls12_session_ticket_lifetime 3600
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer tls12_listener.deinit(allocator);
     try std.testing.expectEqual(
@@ -3288,7 +3311,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\tls13_session_tickets true
         \\tls13_session_ticket_server_id mqtt.example
         \\tls13_session_ticket_lifetime 1800
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer tls13_listener.deinit(allocator);
     try std.testing.expectEqual(
@@ -3312,7 +3335,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
     var tickets_disabled = try parse(allocator,
         \\listener 1883
         \\tls12_session_tickets false
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer tickets_disabled.deinit(allocator);
     try std.testing.expect(
@@ -3325,7 +3348,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\tls12_session_tickets true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3335,7 +3358,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\tls13_session_tickets true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3347,7 +3370,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\cafile clients.pem
             \\tls13_session_tickets true
             \\tls13_session_ticket_server_id mqtt.example
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3359,7 +3382,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\tls13_session_tickets true
             \\tls13_session_ticket_server_id mqtt.example
             \\tls13_session_ticket_lifetime 604801
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3371,7 +3394,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\tls_version tlsv1.3
             \\tls12_session_tickets true
             \\tls12_session_ticket_server_id mqtt.example
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3383,7 +3406,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\cafile clients.pem
             \\tls12_session_tickets true
             \\tls12_session_ticket_server_id mqtt.example
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3395,7 +3418,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\tls12_session_tickets true
             \\tls12_session_ticket_server_id mqtt.example
             \\tls12_session_ticket_lifetime 604801
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3405,7 +3428,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\tls_version tlsv1.1
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3413,7 +3436,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\listener 1883
             \\ciphers_tls1.3 TLS_AES_128_GCM_SHA256
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3423,7 +3446,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\ciphers_tls1.3 DEFAULT
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3434,7 +3457,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\keyfile server.key
             \\ciphers_tls1.3 TLS_AES_128_GCM_SHA256
             \\ciphers_tls1.3 TLS_AES_256_GCM_SHA384
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3442,7 +3465,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\listener 8883
             \\certfile server.pem
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3450,7 +3473,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\listener 8883
             \\keyfile server.key
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3458,7 +3481,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\listener 8883
             \\keyfile_password_file server-key.password
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3468,7 +3491,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile first.pem
             \\certfile second.pem
             \\keyfile server.key
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3489,7 +3512,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\require_certificate true
             \\use_subject_as_username true
             \\use_subject_as_username true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3503,7 +3526,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\crlfile clients.crl
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3516,7 +3539,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\require_certificate true
             \\crlfile first.crl
             \\crlfile second.crl
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3526,7 +3549,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\use_identity_as_username true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3536,7 +3559,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\use_subject_as_username true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3549,7 +3572,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\require_certificate true
             \\use_identity_as_username true
             \\use_identity_as_username true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3564,7 +3587,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\capath clients
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     var capath_client_certificate = try parse(allocator,
@@ -3574,7 +3597,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\cafile common.pem
         \\capath clients
         \\require_certificate true
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer capath_client_certificate.deinit(allocator);
     try std.testing.expectEqualStrings(
@@ -3596,7 +3619,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\keyfile server.key
             \\capath first
             \\capath second
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3606,7 +3629,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\certfile server.pem
             \\keyfile server.key
             \\require_certificate true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     var optional_client_certificate = try parse(allocator,
@@ -3615,7 +3638,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\keyfile server.key
         \\cafile clients.pem
         \\require_certificate false
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer optional_client_certificate.deinit(allocator);
     try std.testing.expect(
@@ -3634,7 +3657,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\cafile first.pem
             \\cafile second.pem
             \\require_certificate true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3646,7 +3669,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\cafile clients.pem
             \\require_certificate true
             \\require_certificate true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     var implicit_optional_client_certificate = try parse(allocator,
@@ -3654,7 +3677,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\certfile server.pem
         \\keyfile server.key
         \\cafile clients.pem
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer implicit_optional_client_certificate.deinit(allocator);
     try std.testing.expect(
@@ -3666,15 +3689,15 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\listener 8883
             \\cafile clients.pem
             \\require_certificate true
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
         error.DuplicateDirective,
         parse(allocator,
             \\listener 1883
-            \\allow_anonymous true
-            \\allow_anonymous false
+            \\listener_allow_anonymous true
+            \\listener_allow_anonymous false
         ),
     );
     try std.testing.expectError(
@@ -3683,7 +3706,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\acl_file first.acl
             \\acl_file second.acl
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3705,7 +3728,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         \\autosave_interval 0
         \\autosave_on_changes true
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer disabled_autosave.deinit(allocator);
     try std.testing.expectEqual(
@@ -3729,7 +3752,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\check_retain_source maybe
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3737,7 +3760,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_inflight_messages 65536
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3745,7 +3768,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_inflight_bytes 2147483648
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3753,7 +3776,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_inflight_bytes -1
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3761,7 +3784,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_queued_messages 2147483648
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3769,7 +3792,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_queued_messages -1
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3777,7 +3800,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_queued_bytes 2147483648
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3785,7 +3808,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
         parse(allocator,
             \\max_queued_bytes -1
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3798,7 +3821,7 @@ test "MQTT broker config fails closed for unsupported and misplaced directives" 
             \\listener 1883
             \\max_qos 1
             \\maximum_qos 0
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -3886,7 +3909,7 @@ test "MQTT broker config owns strings independently of source" {
             "crlfile clients.crl\n" ++
             "use_identity_as_username true\n" ++
             "use_subject_as_username true\n" ++
-            "mount_point tenant/\nallow_anonymous true\n",
+            "mount_point tenant/\nlistener_allow_anonymous true\n",
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -3921,7 +3944,7 @@ test "MQTT broker config accepts certificate identity authentication" {
         \\cafile clients.pem
         \\require_certificate true
         \\use_identity_as_username true
-        \\allow_anonymous false
+        \\listener_allow_anonymous false
         \\max_connections 1
     );
     defer config.deinit(allocator);
@@ -3982,6 +4005,7 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
         config.websocket_headers_size,
     );
     try std.testing.expect(!config.set_tcp_nodelay);
+    try std.testing.expect(config.allow_anonymous);
     try std.testing.expect(config.listeners[0].allow_zero_length_client_id);
     try std.testing.expectEqual(
         default_max_topic_aliases,
@@ -4001,7 +4025,7 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     var minimum = try parse(
         std.testing.allocator,
         "max_packet_size 20\nmessage_size_limit 268435455\n" ++
-            "listener 1884\nallow_anonymous true\n",
+            "listener 1884\nlistener_allow_anonymous true\n",
     );
     defer minimum.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 20), minimum.max_packet_size);
@@ -4011,11 +4035,81 @@ test "MQTT broker config uses bounded packet and unlimited message defaults" {
     );
 }
 
+test "MQTT broker config resolves global and listener anonymous policy" {
+    const allocator = std.testing.allocator;
+
+    var default_deny = try parse(allocator,
+        \\password_file users.pw
+        \\listener 1882
+    );
+    defer default_deny.deinit(allocator);
+    try std.testing.expect(!default_deny.allow_anonymous);
+    try std.testing.expect(!default_deny.listeners[0].allow_anonymous);
+
+    var global_after_listeners = try parse(allocator,
+        \\password_file users.pw
+        \\listener 1883
+        \\listener_allow_anonymous false
+        \\listener 1884
+        \\allow_anonymous true
+    );
+    defer global_after_listeners.deinit(allocator);
+    try std.testing.expect(global_after_listeners.allow_anonymous);
+    try std.testing.expect(!global_after_listeners.listeners[0].allow_anonymous);
+    try std.testing.expect(global_after_listeners.listeners[1].allow_anonymous);
+
+    var local_override = try parse(allocator,
+        \\password_file users.pw
+        \\allow_anonymous false
+        \\listener 1883
+        \\listener_allow_anonymous true
+        \\listener 1884
+    );
+    defer local_override.deinit(allocator);
+    try std.testing.expect(!local_override.allow_anonymous);
+    try std.testing.expect(local_override.listeners[0].allow_anonymous);
+    try std.testing.expect(!local_override.listeners[1].allow_anonymous);
+
+    var legacy_per_listener = try parse(allocator,
+        \\per_listener_settings true
+        \\listener 1883
+        \\allow_anonymous true
+        \\listener 1884
+        \\password_file users.pw
+        \\listener_allow_anonymous false
+    );
+    defer legacy_per_listener.deinit(allocator);
+    try std.testing.expect(legacy_per_listener.listeners[0].allow_anonymous);
+    try std.testing.expect(!legacy_per_listener.listeners[1].allow_anonymous);
+
+    try std.testing.expectError(
+        error.DirectiveRequiresListener,
+        parse(allocator, "listener_allow_anonymous true\nlistener 1883"),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\allow_anonymous true
+            \\listener 1883
+            \\allow_anonymous false
+        ),
+    );
+    try std.testing.expectError(
+        error.DuplicateDirective,
+        parse(allocator,
+            \\per_listener_settings true
+            \\listener 1883
+            \\allow_anonymous true
+            \\listener_allow_anonymous false
+        ),
+    );
+}
+
 test "MQTT broker config maps zero inflight messages to protocol maximum" {
     var config = try parse(std.testing.allocator,
         \\max_inflight_messages 0
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u16, 0), config.max_inflight_messages);
@@ -4027,10 +4121,10 @@ test "MQTT broker config maps zero inflight messages to protocol maximum" {
     var maximum = try parse(std.testing.allocator,
         \\per_listener_settings true
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\max_inflight_messages 65535
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer maximum.deinit(std.testing.allocator);
     try std.testing.expectEqual(
@@ -4056,7 +4150,7 @@ test "MQTT broker config parses persistent client expiration units" {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
             "persistent_client_expiration {s}\nlistener 1883\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
             .{case.value},
         );
         defer std.testing.allocator.free(source);
@@ -4073,17 +4167,17 @@ test "MQTT broker config validates global system interval" {
     var disabled = try parse(std.testing.allocator,
         \\sys_interval 0
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer disabled.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u16, 0), disabled.sys_interval_seconds);
 
     var maximum = try parse(std.testing.allocator,
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\sys_interval 65535
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer maximum.deinit(std.testing.allocator);
     try std.testing.expectEqual(
@@ -4095,7 +4189,7 @@ test "MQTT broker config validates global system interval" {
         parse(std.testing.allocator,
             \\sys_interval -1
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4103,7 +4197,7 @@ test "MQTT broker config validates global system interval" {
         parse(std.testing.allocator,
             \\sys_interval 65536
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4112,7 +4206,7 @@ test "MQTT broker config validates global system interval" {
             \\sys_interval 1
             \\sys_interval 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4121,7 +4215,7 @@ test "MQTT broker config validates retained expiry scan interval" {
     var minimum = try parse(std.testing.allocator,
         \\retain_expiry_interval 1
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer minimum.deinit(std.testing.allocator);
     try std.testing.expectEqual(
@@ -4131,7 +4225,7 @@ test "MQTT broker config validates retained expiry scan interval" {
 
     var maximum = try parse(std.testing.allocator,
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\retain_expiry_interval 10000000
     );
     defer maximum.deinit(std.testing.allocator);
@@ -4145,7 +4239,7 @@ test "MQTT broker config validates retained expiry scan interval" {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
             "retain_expiry_interval {s}\nlistener 1883\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
             .{value},
         );
         defer std.testing.allocator.free(source);
@@ -4160,7 +4254,7 @@ test "MQTT broker config validates retained expiry scan interval" {
             \\retain_expiry_interval 1
             \\retain_expiry_interval 2
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4170,7 +4264,7 @@ test "MQTT broker config validates WebSocket header size" {
         \\websockets_headers_size 1
         \\listener 8080
         \\protocol websockets
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer minimum.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u16, 1), minimum.websocket_headers_size);
@@ -4178,7 +4272,7 @@ test "MQTT broker config validates WebSocket header size" {
     var maximum = try parse(std.testing.allocator,
         \\listener 8080
         \\protocol websockets
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\websockets_headers_size 65535
     );
     defer maximum.deinit(std.testing.allocator);
@@ -4190,7 +4284,7 @@ test "MQTT broker config validates WebSocket header size" {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
             "websockets_headers_size {s}\nlistener 8080\n" ++
-                "protocol websockets\nallow_anonymous true\n",
+                "protocol websockets\nlistener_allow_anonymous true\n",
             .{value},
         );
         defer std.testing.allocator.free(source);
@@ -4206,7 +4300,7 @@ test "MQTT broker config validates WebSocket header size" {
             \\websockets_headers_size 8192
             \\listener 8080
             \\protocol websockets
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4215,9 +4309,9 @@ test "MQTT broker config validates global TCP no-delay policy" {
     var enabled = try parse(std.testing.allocator,
         \\set_tcp_nodelay true
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer enabled.deinit(std.testing.allocator);
     try std.testing.expect(enabled.set_tcp_nodelay);
@@ -4228,7 +4322,7 @@ test "MQTT broker config validates global TCP no-delay policy" {
         parse(std.testing.allocator,
             \\set_tcp_nodelay yes
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4237,7 +4331,7 @@ test "MQTT broker config validates global TCP no-delay policy" {
             \\set_tcp_nodelay true
             \\set_tcp_nodelay false
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4246,7 +4340,7 @@ test "MQTT broker config maps zero maximum Keep Alive to unlimited" {
     var config = try parse(std.testing.allocator,
         \\listener 1883
         \\max_keepalive 0
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(
@@ -4258,7 +4352,7 @@ test "MQTT broker config maps zero maximum Keep Alive to unlimited" {
         parse(std.testing.allocator,
             \\listener 1883
             \\max_keepalive -1
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4266,7 +4360,7 @@ test "MQTT broker config maps zero maximum Keep Alive to unlimited" {
         parse(std.testing.allocator,
             \\listener 1883
             \\max_keepalive 65536
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4279,7 +4373,7 @@ test "MQTT broker config rejects invalid persistent client expiration" {
         const source = try std.fmt.allocPrint(
             std.testing.allocator,
             "persistent_client_expiration {s}\nlistener 1883\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
             .{value},
         );
         defer std.testing.allocator.free(source);
@@ -4297,7 +4391,7 @@ test "MQTT broker config rejects invalid persistent client expiration" {
             \\persistent_client_expiration 1h
             \\persistent_client_expiration 2h
             \\listener 1883
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4318,7 +4412,7 @@ test "MQTT broker config scopes full-range Topic Alias limits per listener" {
             \\listener 1883
             \\max_topic_alias 1
             \\max_topic_alias 2
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4327,18 +4421,18 @@ test "MQTT broker config scopes full-range Topic Alias limits per listener" {
             \\listener 1883
             \\max_topic_alias_broker 1
             \\max_topic_alias_broker 2
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     var config = try parse(std.testing.allocator,
         \\listener 1883
         \\max_topic_alias 0
         \\max_topic_alias_broker 65535
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1884
         \\max_topic_alias 65535
         \\max_topic_alias_broker 0
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u16, 0), config.listeners[0].max_topic_alias);
@@ -4361,13 +4455,13 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
     var config = try parse(allocator,
         \\listener 1883
         \\accept_protocol_versions 5
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1884
         \\accept_protocol_versions 3, 4, 5
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 1885
         \\accept_protocol_versions 4
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(allocator);
     try std.testing.expect(!config.listeners[0].accepted_protocol_versions.v3_1);
@@ -4392,7 +4486,7 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
         const source = try std.fmt.allocPrint(
             allocator,
             "listener 1883\naccept_protocol_versions {s}\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
             .{value},
         );
         defer allocator.free(source);
@@ -4410,7 +4504,7 @@ test "MQTT broker config scopes accepted protocol versions per listener" {
             \\listener 1883
             \\accept_protocol_versions 4
             \\accept_protocol_versions 5
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 }
@@ -4420,11 +4514,11 @@ test "MQTT broker config validates listener PROXY protocol versions" {
     var config = try parse(allocator,
         \\listener 1883
         \\enable_proxy_protocol 1
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\listener 8080
         \\protocol websockets
         \\enable_proxy_protocol 2
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(allocator);
     try std.testing.expectEqual(
@@ -4444,7 +4538,7 @@ test "MQTT broker config validates listener PROXY protocol versions" {
         const source = try std.fmt.allocPrint(
             allocator,
             "listener 1883\nenable_proxy_protocol {s}\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
             .{value},
         );
         defer allocator.free(source);
@@ -4459,7 +4553,7 @@ test "MQTT broker config validates listener PROXY protocol versions" {
             \\listener 1883
             \\enable_proxy_protocol 1
             \\enable_proxy_protocol 2
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4469,7 +4563,7 @@ test "MQTT broker config validates listener PROXY protocol versions" {
             \\enable_proxy_protocol 2
             \\certfile server.pem
             \\keyfile server.key
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
 
@@ -4479,7 +4573,7 @@ test "MQTT broker config validates listener PROXY protocol versions" {
         \\proxy_protocol_v2_require_tls true
         \\require_certificate true
         \\use_identity_as_username true
-        \\allow_anonymous false
+        \\listener_allow_anonymous false
     );
     defer proxy_tls.deinit(allocator);
     try std.testing.expect(
@@ -4502,24 +4596,24 @@ test "MQTT broker config validates listener PROXY protocol versions" {
             \\enable_proxy_protocol 2
             \\proxy_protocol_v2_require_tls true
             \\proxy_protocol_v2_require_tls false
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     for ([_][]const u8{
         \\listener 1883
         \\proxy_protocol_v2_require_tls true
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         ,
         \\listener 1883
         \\enable_proxy_protocol 1
         \\proxy_protocol_v2_require_tls true
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         ,
         \\listener 1883
         \\enable_proxy_protocol 2
         \\require_certificate true
         \\use_subject_as_username true
-        \\allow_anonymous false
+        \\listener_allow_anonymous false
         ,
     }) |source| {
         try std.testing.expectError(
@@ -4537,7 +4631,7 @@ test "MQTT broker config accumulates WebSocket Origin allowlists" {
             "websockets_origin https://first.example\n" ++
             "websockets_origin https://second.example:8443\n" ++
             "protocol websockets\n" ++
-            "allow_anonymous true\n",
+            "listener_allow_anonymous true\n",
     );
     defer allocator.free(source);
     var config = try parse(allocator, source);
@@ -4569,7 +4663,7 @@ test "MQTT broker config accumulates WebSocket Origin allowlists" {
         parse(allocator,
             \\listener 1883
             \\websockets_origin https://example.org
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4578,7 +4672,7 @@ test "MQTT broker config accumulates WebSocket Origin allowlists" {
             \\listener 8080
             \\protocol websockets
             \\websockets_origin
-            \\allow_anonymous true
+            \\listener_allow_anonymous true
         ),
     );
     try std.testing.expectError(
@@ -4587,7 +4681,7 @@ test "MQTT broker config accumulates WebSocket Origin allowlists" {
             allocator,
             "listener 8080\nprotocol websockets\n" ++
                 "websockets_origin bad\x7forigin\n" ++
-                "allow_anonymous true\n",
+                "listener_allow_anonymous true\n",
         ),
     );
 }
@@ -4597,7 +4691,7 @@ test "MQTT broker config maps zero queued messages to unlimited" {
         \\max_queued_messages 0
         \\max_queued_bytes 0
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), config.max_queued_messages);
@@ -4612,12 +4706,12 @@ test "MQTT broker config keeps queued limits global" {
     var config = try parse(std.testing.allocator,
         \\per_listener_settings true
         \\listener 1883
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
         \\max_queued_messages 11
         \\max_queued_bytes 4096
         \\max_inflight_bytes 2048
         \\listener 1884
-        \\allow_anonymous true
+        \\listener_allow_anonymous true
     );
     defer config.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 11), config.max_queued_messages);

@@ -108,7 +108,7 @@ def run_websocket_origins_case(broker: Path, directory: Path) -> None:
         "protocol websockets\n"
         "websockets_origin https://first.example\n"
         "websockets_origin https://second.example:8443\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
 
@@ -150,7 +150,7 @@ def run_websocket_origins_case(broker: Path, directory: Path) -> None:
         "websockets_headers_size 256\n"
         f"listener {bounded_port} 127.0.0.1\n"
         "protocol websockets\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(

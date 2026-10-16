@@ -32,6 +32,7 @@ class ProcessSourceIdentityTests(unittest.TestCase):
         self.assertEqual(
             set(broker_config.MOSQUITTO_PROCESS_SOURCES),
             {
+                "broker/01-connect-listener-allow-anonymous.py",
                 "broker/01-connect-unix-socket.py",
                 "broker/23-security-password-file-reload.py",
                 "broker/23-security-acl-file-reload.py",

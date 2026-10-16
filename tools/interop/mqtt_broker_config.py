@@ -75,6 +75,8 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
 MOSQUITTO_PROCESS_SOURCES = {
+    "broker/01-connect-listener-allow-anonymous.py":
+        "56b58590c474efa5f7bf1ad8dc7277d4ba42b7a69e7e7b8f16ac924813f9b214",
     "broker/01-connect-unix-socket.py":
         "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
     "broker/23-security-password-file-reload.py":
@@ -89,6 +91,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("broker", type=Path)
     parser.add_argument("--mosquitto-test-root", type=Path)
     selected = parser.add_mutually_exclusive_group()
+    selected.add_argument("--only-listener-anonymous", action="store_true")
     selected.add_argument("--only-security-reload", action="store_true")
     selected.add_argument("--only-unix-listener", action="store_true")
     return parser.parse_args()
@@ -98,11 +101,11 @@ def verify_mosquitto_process_sources(test_root: Path) -> int:
     for relative, expected in MOSQUITTO_PROCESS_SOURCES.items():
         source = test_root / relative
         if not source.is_file():
-            raise FileNotFoundError(f"missing Mosquitto reload source: {source}")
+            raise FileNotFoundError(f"missing Mosquitto process source: {source}")
         actual = hashlib.sha256(source.read_bytes()).hexdigest()
         if actual != expected:
             raise AssertionError(
-                f"Mosquitto reload source changed: {relative}: "
+                f"Mosquitto process source changed: {relative}: "
                 f"expected {expected}, found {actual}"
             )
     return len(MOSQUITTO_PROCESS_SOURCES)
@@ -594,7 +597,7 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
         f"listener {tcp_port} 127.0.0.1\n"
         "socket_domain ipv4\n"
         "bind_interface lo\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_qos 1\n"
         "max_keepalive 30\n"
         "max_connections 4\n"
@@ -603,7 +606,7 @@ def run_shared_listener_case(broker: Path, directory: Path) -> None:
         "bind_interface lo\n"
         "protocol websockets\n"
         "mount_point tenant/\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_qos 0\n"
         "max_connections 2\n"
     )
@@ -813,7 +816,7 @@ def run_ipv6_socket_domain_case(broker: Path, directory: Path) -> None:
         f"listener {port}\n"
         "socket_domain ipv6\n"
         "bind_interface lo\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -867,7 +870,7 @@ def run_default_dual_socket_domain_case(broker: Path, directory: Path) -> None:
     config = directory / "default-dual-socket-domain.conf"
     config.write_text(
         f"listener {port}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     process = subprocess.Popen(
@@ -938,12 +941,12 @@ def run_per_listener_security_case(broker: Path, directory: Path) -> None:
         f"listener {first_port} 127.0.0.1\n"
         f"password_file {first_passwords}\n"
         f"acl_file {first_acl}\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 3\n"
         f"listener {second_port} 127.0.0.1\n"
         f"password_file {second_passwords}\n"
         f"acl_file {second_acl}\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 2\n"
     )
     process = subprocess.Popen(
@@ -1028,10 +1031,10 @@ def run_per_listener_security_case(broker: Path, directory: Path) -> None:
         "per_listener_settings true\n"
         f"listener {invalid_port} 127.0.0.1\n"
         f"password_file {first_passwords}\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         f"listener {free_port()} 127.0.0.1\n"
         f"password_file {directory / 'missing.pwfile'}\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
     )
     result = subprocess.run(
         [str(broker), f"--config={invalid_config}"],
@@ -1061,12 +1064,12 @@ def run_include_directory_case(broker: Path, directory: Path) -> None:
     (include_directory / "ignored.txt").write_text("unsupported value\n")
     (include_directory / "a.conf").write_text(
         f"listener {second_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     (include_directory / "A.conf").write_text(
         f"listener {first_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     config = directory / "include-main.conf"
@@ -1121,7 +1124,7 @@ def run_include_directory_case(broker: Path, directory: Path) -> None:
     invalid_directory = directory / "invalid-listeners.d"
     invalid_directory.mkdir()
     (invalid_directory / "10-listener.conf").write_text(
-        f"listener {free_port()} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {free_port()} 127.0.0.1\nlistener_allow_anonymous true\n"
     )
     (invalid_directory / "20-invalid.conf").write_text(
         "unsupported_directive true\n"
@@ -1129,7 +1132,7 @@ def run_include_directory_case(broker: Path, directory: Path) -> None:
     invalid_config = directory / "invalid-include-main.conf"
     invalid_config.write_text(
         f"listener {invalid_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         f"include_dir {invalid_directory}\n"
     )
     result = subprocess.run(
@@ -1182,22 +1185,22 @@ def run_packet_and_message_size_case(broker: Path, directory: Path) -> None:
     packet_config.write_text(
         "max_packet_size 50\n"
         f"listener {packet_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {tls_port} 127.0.0.1\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
         "protocol websockets\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     packet_process = subprocess.Popen(
@@ -1320,7 +1323,7 @@ def run_packet_and_message_size_case(broker: Path, directory: Path) -> None:
     message_config.write_text(
         "message_size_limit 1\n"
         f"listener {message_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 6\n"
     )
     message_process = subprocess.Popen(
@@ -1450,11 +1453,11 @@ def run_retain_unavailable_case(broker: Path, directory: Path) -> None:
         config.write_text(
             f"retain_available {str(retain_available).lower()}\n"
             f"listener {tcp_port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 5\n"
             f"listener {websocket_port} 127.0.0.1\n"
             "protocol websockets\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
         )
 
@@ -1607,11 +1610,11 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         "allow_zero_length_clientid false\n"
         "auto_id_prefix global-\n"
         f"listener {global_tcp_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {global_websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     global_process = subprocess.Popen(
@@ -1656,7 +1659,7 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
     prefix_config.write_text(
         "auto_id_prefix global-\n"
         f"listener {prefix_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     prefix_process = subprocess.Popen(
@@ -1711,12 +1714,12 @@ def run_zero_length_client_id_case(broker: Path, directory: Path) -> None:
         f"listener {denied_port} 127.0.0.1\n"
         "allow_zero_length_clientid false\n"
         "auto_id_prefix denied-\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {allowed_port} 127.0.0.1\n"
         "protocol websockets\n"
         "listener_auto_id_prefix tenant-\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 4\n"
     )
     listener_process = subprocess.Popen(
@@ -1833,14 +1836,14 @@ def run_auto_client_id_prefix_matrix(broker: Path, directory: Path) -> None:
             lines.append(f"auto_id_prefix {global_prefix}")
         lines.extend((
             f"listener {port1} 127.0.0.1",
-            "allow_anonymous true",
+            "listener_allow_anonymous true",
             "max_connections 1",
         ))
         if prefix1 is not None:
             lines.append(f"listener_auto_id_prefix {prefix1}")
         lines.extend((
             f"listener {port2} 127.0.0.1",
-            "allow_anonymous true",
+            "listener_allow_anonymous true",
             "max_connections 1",
         ))
         if prefix2 is not None:
@@ -1918,7 +1921,7 @@ def run_required_client_id_prefix_case(
             f"auto_id_prefix {auto_prefix}\n"
             + extra_global
             + f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 7\n"
         )
 
@@ -2030,7 +2033,7 @@ def run_upgrade_outgoing_qos_case(broker: Path, directory: Path) -> None:
     config.write_text(
         "upgrade_outgoing_qos true\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 6\n"
     )
     process = subprocess.Popen(
@@ -2139,7 +2142,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     config = directory / "authentication-required.conf"
     config.write_text(
         f"listener {free_port()} 127.0.0.1\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -2155,7 +2158,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
         or "AuthenticationRequired" not in result.stdout
     ):
         raise AssertionError(
-            "allow_anonymous false did not fail closed without credentials: "
+            "listener_allow_anonymous false did not fail closed without credentials: "
             + result.stdout
         )
 
@@ -2163,7 +2166,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     missing_interface.write_text(
         f"listener {free_port()}\n"
         "bind_interface netz-interface-that-does-not-exist\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -2185,7 +2188,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
         invalid_expiry.write_text(
             f"retain_expiry_interval {value}\n"
             f"listener {free_port()} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
         )
         result = subprocess.run(
@@ -2206,7 +2209,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     unsupported_protocol.write_text(
         f"listener {free_port()} 127.0.0.1\n"
         "accept_protocol_versions 2\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -2226,7 +2229,7 @@ def run_fail_closed_case(broker: Path, directory: Path) -> None:
     overlong_v31_bridge = directory / "overlong-v31-bridge-client.conf"
     overlong_v31_bridge.write_text(
         f"listener {free_port()} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "connection overlong-v31-client\n"
         "address localhost\n"
         "topic # in 0\n"
@@ -2255,7 +2258,7 @@ def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
     config.write_text(
         f"password_file {password_file}\n"
         f"listener {free_port()} 127.0.0.1\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -2279,7 +2282,7 @@ def run_unix_listener_case(broker: Path, directory: Path) -> None:
     config = directory / "unix-listener.conf"
     config.write_text(
         f"listener 0 {socket_path}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -2324,6 +2327,125 @@ def run_unix_listener_case(broker: Path, directory: Path) -> None:
         raise AssertionError("Unix listener socket survived broker teardown")
 
 
+def run_listener_anonymous_policy_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    password_file = directory / "listener-anonymous.pwfile"
+    password_file.write_text(
+        "user:$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ==\n"
+    )
+    cases = (
+        # Three inheritance cases prove the global/default path itself.
+        (None, None, True, False, True),
+        (False, None, True, False, True),
+        (True, None, False, True, False),
+        # Mosquitto 01-connect-listener-allow-anonymous.py's nine cases.
+        (None, False, False, False, False),
+        (None, True, False, True, False),
+        (None, False, True, False, True),
+        (False, False, False, False, False),
+        (False, True, False, True, False),
+        (False, False, True, False, True),
+        (True, False, False, False, False),
+        (True, True, False, True, False),
+        (True, False, True, False, True),
+    )
+    for case_index, (
+        global_allow,
+        first_allow,
+        second_allow,
+        first_success,
+        second_success,
+    ) in enumerate(cases):
+        first_port = free_port()
+        second_port = free_port()
+        while second_port == first_port:
+            second_port = free_port()
+        config = directory / f"listener-anonymous-{case_index}.conf"
+        source = f"password_file {password_file}\n"
+        if global_allow is not None:
+            source += f"allow_anonymous {str(global_allow).lower()}\n"
+        source += f"listener {first_port} 127.0.0.1\n"
+        if first_allow is not None:
+            source += (
+                "listener_allow_anonymous "
+                f"{str(first_allow).lower()}\n"
+            )
+        source += "max_connections 2\n"
+        source += f"listener {second_port} 127.0.0.1\n"
+        if second_allow is not None:
+            source += (
+                "listener_allow_anonymous "
+                f"{str(second_allow).lower()}\n"
+            )
+        source += "max_connections 2\n"
+        config.write_text(source)
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        try:
+            ready = process.stdout.readline().strip()
+            if "configured 2 listeners for 4 clients" not in ready:
+                raise RuntimeError(
+                    f"listener anonymous case {case_index} failed: {ready}"
+                )
+            read_listener_lines(
+                process,
+                2,
+                f"listener anonymous case {case_index}",
+            )
+            for proto_ver in (4, 5):
+                for listener_index, (port, expected_success) in enumerate((
+                    (first_port, first_success),
+                    (second_port, second_success),
+                )):
+                    client = socket.create_connection(
+                        ("127.0.0.1", port),
+                        timeout=5,
+                    )
+                    client.settimeout(5)
+                    try:
+                        client.sendall(connect_packet(
+                            "listener-anonymous-"
+                            f"{case_index}-{proto_ver}-{listener_index}",
+                            proto_ver=proto_ver,
+                        ))
+                        reason = connack_reason(read_mqtt_packet(client))
+                        expected_reason = 0 if expected_success else (
+                            5 if proto_ver == 4 else 0x87
+                        )
+                        if reason != expected_reason:
+                            raise AssertionError(
+                                "listener anonymous policy mismatch: "
+                                f"case={case_index} protocol={proto_ver} "
+                                f"listener={listener_index} "
+                                f"expected={expected_reason:#x} "
+                                f"actual={reason:#x}"
+                            )
+                        if expected_success:
+                            client.sendall(bytes.fromhex("e000"))
+                    finally:
+                        client.close()
+            return_code = process.wait(timeout=5)
+        except BaseException:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise
+        if return_code != 0:
+            raise RuntimeError(
+                f"listener anonymous case {case_index} exited "
+                f"{return_code}: {process.stdout.read()}"
+            )
+
+
 def run_invalid_acl_file_case(broker: Path, directory: Path) -> None:
     acl_file = directory / "invalid.acl"
     acl_file.write_text("pattern read users/prefix-%u/#\n")
@@ -2331,7 +2453,7 @@ def run_invalid_acl_file_case(broker: Path, directory: Path) -> None:
     config.write_text(
         f"acl_file {acl_file}\n"
         f"listener {free_port()} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -2367,7 +2489,7 @@ def run_acl_v311_case(broker: Path, directory: Path) -> None:
         f"password_file {password_file}\n"
         f"acl_file {acl_file}\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -2450,7 +2572,7 @@ def run_authentication_case(broker: Path, directory: Path) -> None:
     config.write_text(
         f"password_file {password_file}\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 8\n"
     )
     process = subprocess.Popen(
@@ -2541,7 +2663,7 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             f"password_file {password_path}\n"
             f"acl_file {acl_path}\n"
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous false\n"
+            "listener_allow_anonymous false\n"
             "max_connections 8\n"
         )
 
@@ -3244,14 +3366,14 @@ def run_server_identity_reload_case(broker: Path, directory: Path) -> None:
             f"certfile {certificate}\n"
             f"keyfile {key}\n"
             f"keyfile_password_file {key_password_path}\n"
-            "allow_anonymous false\n"
+            "listener_allow_anonymous false\n"
             "max_connections 16\n"
             f"listener {websocket_port} 127.0.0.1\n"
             "protocol websockets\n"
             f"certfile {certificate}\n"
             f"keyfile {key}\n"
             f"keyfile_password_file {key_password_path}\n"
-            "allow_anonymous false\n"
+            "listener_allow_anonymous false\n"
             "max_connections 16\n"
         )
 
@@ -3501,14 +3623,14 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
             f"keyfile {server_key}\n"
             f"cafile {cafile}\n"
             f"require_certificate {str(require_certificate).lower()}\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 16\n"
             f"listener {capath_port} 127.0.0.1\n"
             f"certfile {server_certificate}\n"
             f"keyfile {server_key}\n"
             f"capath {capath}\n"
             f"require_certificate {str(require_certificate).lower()}\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 16\n"
             f"listener {websocket_port} 127.0.0.1\n"
             "protocol websockets\n"
@@ -3516,7 +3638,7 @@ def run_client_ca_reload_case(broker: Path, directory: Path) -> None:
             f"keyfile {server_key}\n"
             f"cafile {cafile}\n"
             f"require_certificate {str(require_certificate).lower()}\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 16\n"
         )
 
@@ -3788,7 +3910,7 @@ def run_crl_reload_case(broker: Path, directory: Path) -> None:
             f"cafile {client_ca}\n"
             f"crlfile {crl_file}\n"
             "require_certificate true\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 8\n"
         )
 
@@ -3876,7 +3998,7 @@ def run_persistence_case(broker: Path, directory: Path) -> None:
         "autosave_interval 3600\n"
         "autosave_on_changes false\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     for pass_number in (1, 2):
@@ -3960,7 +4082,7 @@ def run_persistence_acl_restart_case(
             f"password_file {password_file}\n"
             f"acl_file {acl_file}\n"
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous false\n"
+            "listener_allow_anonymous false\n"
             "max_queued_messages 4\n"
             f"max_connections {max_connections}\n"
         )
@@ -4104,7 +4226,7 @@ def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
             "autosave_interval 0\n"
             f"autosave_on_changes {str(autosave_on_changes).lower()}\n"
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
         )
 
@@ -4239,7 +4361,7 @@ def run_autosave_reload_case(broker: Path, directory: Path) -> None:
                 else "persistence false\n"
             )
             + f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             f"max_connections {max_connections}\n"
         )
 
@@ -4486,12 +4608,12 @@ def run_retain_source_scope_case(
             + f"persistence_file {snapshot.name}\n"
             + f"listener {source_port} 127.0.0.1\n"
             + (f"acl_file {source_acl}\n" if per_listener else "")
-            + "allow_anonymous true\n"
+            + "listener_allow_anonymous true\n"
             + "max_connections 1\n"
             + f"listener {reader_port} 127.0.0.1\n"
             + "protocol websockets\n"
             + (f"acl_file {reader_acl}\n" if per_listener else "")
-            + "allow_anonymous true\n"
+            + "listener_allow_anonymous true\n"
             + "max_connections 1\n"
         )
 
@@ -4743,7 +4865,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
         "ciphers_tls1.3 TLS_AES_256_GCM_SHA384\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
         "socket_domain ipv4\n"
@@ -4753,7 +4875,7 @@ def run_tls_listener_case(broker: Path, directory: Path) -> None:
         f"certfile {certificate}\n"
         f"keyfile {private_key}\n"
         "ciphers_tls1.3 TLS_AES_256_GCM_SHA384\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -4886,13 +5008,13 @@ def run_modern_tls_identity_case(broker: Path, directory: Path) -> None:
             f"listener {port} 127.0.0.1\n"
             f"certfile {certificate}\n"
             f"keyfile {private_key}\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
             f"listener {websocket_port} 127.0.0.1\n"
             "protocol websockets\n"
             f"certfile {certificate}\n"
             f"keyfile {websocket_private_key}\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
         )
         process = subprocess.Popen(
@@ -4941,7 +5063,7 @@ def run_modern_tls_identity_case(broker: Path, directory: Path) -> None:
         f"listener {mismatch_port} 127.0.0.1\n"
         f"certfile {directory / 'p384-server-cert.pem'}\n"
         f"keyfile {directory / 'ed25519-server-key.pem'}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
     )
     mismatch_result = subprocess.run(
         [str(broker), f"--config={mismatch_config}"],
@@ -5285,7 +5407,7 @@ def write_mtls_config(
         + f"cafile {client_ca}\n"
         + (f"crlfile {crlfile}\n" if crlfile is not None else "")
         + "require_certificate true\n"
-        + "allow_anonymous true\n"
+        + "listener_allow_anonymous true\n"
         + "max_connections 1\n"
     )
 
@@ -5465,7 +5587,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         "require_certificate true\n"
         "use_identity_as_username true\n"
         "use_username_as_clientid true\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 3\n"
         f"listener {wss_port} 127.0.0.1\n"
         "protocol websockets\n"
@@ -5476,7 +5598,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         "require_certificate true\n"
         "use_identity_as_username true\n"
         "use_username_as_clientid true\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -5680,14 +5802,14 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
     invalid_ca_config = directory / "invalid-client-ca.conf"
     invalid_ca_config.write_text(
         f"listener {cleartext_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {invalid_ca_port} 127.0.0.1\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"cafile {server_certificate}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     invalid_ca_result = subprocess.run(
@@ -5722,7 +5844,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
     invalid_crl_config = directory / "invalid-crl.conf"
     invalid_crl_config.write_text(
         f"listener {cleartext_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {invalid_crl_port} 127.0.0.1\n"
         f"certfile {server_certificate}\n"
@@ -5730,7 +5852,7 @@ def run_mtls_listener_case(broker: Path, directory: Path) -> None:
         f"cafile {client_ca}\n"
         f"crlfile {tampered_crl}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     invalid_crl_result = subprocess.run(
@@ -5824,7 +5946,7 @@ def run_capath_listener_case(broker: Path, directory: Path) -> None:
         f"keyfile {server_key}\n"
         f"capath {ca_directory}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 3\n"
     )
     process = subprocess.Popen(
@@ -5867,7 +5989,7 @@ def run_capath_listener_case(broker: Path, directory: Path) -> None:
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"capath {ca_directory}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
     )
     websocket_result = subprocess.run(
         [str(broker), f"--config={websocket_config}"],
@@ -5893,14 +6015,14 @@ def run_capath_listener_case(broker: Path, directory: Path) -> None:
     invalid_config = directory / "invalid-capath.conf"
     invalid_config.write_text(
         f"listener {first_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {free_port()} 127.0.0.1\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"capath {invalid_directory}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     invalid_result = subprocess.run(
@@ -6041,7 +6163,7 @@ def run_signed_crl_listener_case(
     invalid_config = directory / f"{fixture_name}-crl-invalid.conf"
     invalid_config.write_text(
         f"listener {cleartext_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {invalid_crl_port} 127.0.0.1\n"
         f"certfile {server_certificate}\n"
@@ -6049,7 +6171,7 @@ def run_signed_crl_listener_case(
         f"cafile {client_ca}\n"
         f"crlfile {tampered_crl}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     invalid_result = subprocess.run(
@@ -6168,26 +6290,26 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
         f"listener {tls_port} 127.0.0.1\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {rsa_key}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {encrypted_tls_port} 127.0.0.1\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {rsa_encrypted_aes256}\n"
         f"keyfile_password_file {key_password_file}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {encrypted_wss_port} 127.0.0.1\n"
         "protocol websockets\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {rsa_encrypted_aes128}\n"
         f"keyfile_password_file {key_password_file}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {websocket_port} 127.0.0.1\n"
         "protocol websockets\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {rsa_pkcs1_key}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -6262,12 +6384,12 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
     mismatch_config = directory / "rsa-tls-key-mismatch.conf"
     mismatch_config.write_text(
         f"listener {cleartext_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {mismatch_port} 127.0.0.1\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {mismatched_key}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -6299,13 +6421,13 @@ def run_rsa_tls_identity_case(broker: Path, directory: Path) -> None:
     password_config = directory / "rsa-tls-key-password-mismatch.conf"
     password_config.write_text(
         f"listener {password_cleartext_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {password_tls_port} 127.0.0.1\n"
         f"certfile {rsa_certificate}\n"
         f"keyfile {rsa_encrypted_aes256}\n"
         f"keyfile_password_file {wrong_password_file}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     result = subprocess.run(
@@ -6361,7 +6483,7 @@ def run_mtls_subject_username_broker(
         "require_certificate true\n"
         "use_subject_as_username true\n"
         "use_username_as_clientid true\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 1\n"
         f"listener {wss_port} 127.0.0.1\n"
         "protocol websockets\n"
@@ -6371,7 +6493,7 @@ def run_mtls_subject_username_broker(
         "require_certificate true\n"
         "use_identity_as_username true\n"
         "use_subject_as_username true\n"
-        "allow_anonymous false\n"
+        "listener_allow_anonymous false\n"
         "max_connections 1\n"
     )
     process = subprocess.Popen(
@@ -6518,14 +6640,14 @@ def run_optional_client_certificate_case(
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
         "require_certificate false\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
         f"listener {wss_port} 127.0.0.1\n"
         "protocol websockets\n"
         f"certfile {server_certificate}\n"
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     process = subprocess.Popen(
@@ -6604,7 +6726,7 @@ def run_optional_client_certificate_case(
         f"keyfile {server_key}\n"
         f"cafile {client_ca}\n"
         "require_certificate false\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     run_mtls_rejection_case(
@@ -6637,6 +6759,16 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        if args.only_listener_anonymous:
+            run_listener_anonymous_policy_case(args.broker, directory)
+            print(
+                "MQTT listener anonymous policy integration passed: "
+                "cases=12 upstream_cases=9 protocols=mqttv311+mqttv5 "
+                "global_default+listener_override=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
         if args.only_unix_listener:
             run_unix_listener_case(args.broker, directory)
             print(
@@ -6646,6 +6778,7 @@ def main() -> None:
                 + RUNTIME
             )
             return
+        run_listener_anonymous_policy_case(args.broker, directory)
         run_unix_listener_case(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
@@ -6724,6 +6857,7 @@ def main() -> None:
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
         "source-locked Unix listener lifecycle, "
+        "source-locked global/listener anonymous policy precedence, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "
         "TCP/TLS/WS/WSS listeners, "

@@ -83,7 +83,7 @@ def run_zero_maximum_keep_alive_case(
         "sys_interval 0\n"
         f"listener {port} 127.0.0.1\n"
         "max_keepalive 0\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     with _configured_broker(broker, config):

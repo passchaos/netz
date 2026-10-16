@@ -83,7 +83,7 @@ def run_runtime_delivery_policy_reload_case(
             "sys_interval 0\n"
             + extra_global
             + f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 5\n"
         )
 

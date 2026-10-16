@@ -24,6 +24,7 @@ const FieldClass = enum {
 fn fieldClass(comptime name: []const u8) FieldClass {
     if (std.mem.eql(u8, name, "listeners") or
         std.mem.eql(u8, name, "per_listener_settings") or
+        std.mem.eql(u8, name, "allow_anonymous") or
         std.mem.eql(u8, name, "password_file") or
         std.mem.eql(u8, name, "acl_file"))
     {

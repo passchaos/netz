@@ -164,7 +164,7 @@ def run_system_interval_case(broker: Path, directory: Path) -> None:
             + extra_global
             + f"listener {port} 127.0.0.1\n"
             + "max_topic_alias_broker 0\n"
-            + "allow_anonymous true\n"
+            + "listener_allow_anonymous true\n"
             + "max_connections 1\n"
         )
 

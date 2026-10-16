@@ -214,7 +214,7 @@ def run_bridge_ocsp_case(broker: Path, directory: Path) -> None:
         )
         config = directory / f"bridge-ocsp-{label}.conf"
         config.write_text(
-            f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+            f"listener {local_port} 127.0.0.1\nlistener_allow_anonymous true\n"
             "max_connections 1\n"
             f"connection ocsp-{label}\naddress localhost:{remote_port}\n"
             "topic # in 0\nbridge_protocol_version mqttv50\n"

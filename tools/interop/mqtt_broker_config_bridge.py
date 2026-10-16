@@ -523,7 +523,7 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
     upstream_config = directory / "bridge-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     local_config = directory / "bridge-local.conf"
@@ -532,7 +532,7 @@ def run_inbound_bridge_case(broker: Path, directory: Path) -> None:
         f"persistence_location {directory}\n"
         "persistence_file bridge-local.db\n"
         f"listener {local_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         "connection upstream\n"
         f"address 127.0.0.1:{unavailable_port} 127.0.0.1:{upstream_port}\n"
@@ -625,7 +625,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
     upstream_config = directory / "bridge-reload-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 4\n"
     )
     local_config = directory / "bridge-reload-local.conf"
@@ -642,7 +642,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         local_config.write_text(
             f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 4\n"
             f"connection {name}\n"
             f"address 127.0.0.1:{upstream_port}\n"
@@ -854,7 +854,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         local_config.write_text(
             f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 4\n"
             "connection reloadable\n"
             f"address localhost:{upstream_port}\n"
@@ -887,7 +887,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         local_config.write_text(
             f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 4\n"
             "connection reloadable\n"
             f"address 127.0.0.1:{upstream_port}\n"
@@ -919,7 +919,7 @@ def run_bridge_reload_case(broker: Path, directory: Path) -> None:
         local_config.write_text(
             f"acl_file {acl_file}\n"
             f"listener {local_port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 4\n"
         )
         os.kill(local.pid, signal.SIGHUP)
@@ -995,7 +995,7 @@ def run_outbound_bridge_reload_case(broker: Path, directory: Path) -> None:
     upstream_config = directory / "outbound-reload-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 3\n"
     )
     local_config = directory / "outbound-reload-local.conf"
@@ -1003,7 +1003,7 @@ def run_outbound_bridge_reload_case(broker: Path, directory: Path) -> None:
     def write_local(generation: str, reload_type: str) -> None:
         local_config.write_text(
             f"listener {local_port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 3\n"
             "connection outbound-reloadable\n"
             f"address 127.0.0.1:{upstream_port}\n"
@@ -1161,7 +1161,7 @@ def run_bidirectional_bridge_case(
     upstream_config = directory / f"bridge-bidirectional-{label}-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         # One bridge Session plus the observer and publisher below. A fake
         # two-connection bridge would exhaust this exact finite budget.
         "max_connections 3\n"
@@ -1169,7 +1169,7 @@ def run_bidirectional_bridge_case(
     local_config = directory / f"bridge-bidirectional-{label}-local.conf"
     local_config.write_text(
         f"listener {local_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
         "connection duplex\n"
         f"address 127.0.0.1:{upstream_port}\n"
@@ -1297,13 +1297,13 @@ def run_primary_failback_case(broker: Path, directory: Path) -> None:
     ):
         config.write_text(
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 2\n"
         )
     local_config = directory / "bridge-primary-failback-local.conf"
     local_config.write_text(
         f"listener {local_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         "connection primary-preferred\n"
         f"address 127.0.0.1:{primary_port} 127.0.0.1:{secondary_port}\n"
@@ -1388,19 +1388,19 @@ def run_once_bridge_case(broker: Path, directory: Path) -> None:
     upstream_config = directory / "bridge-once-upstream.conf"
     upstream_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     restart_config = directory / "bridge-once-upstream-restart.conf"
     restart_config.write_text(
         f"listener {upstream_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     local_config = directory / "bridge-once-local.conf"
     local_config.write_text(
         f"listener {local_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         "connection one-shot\n"
         f"address 127.0.0.1:{upstream_port}\n"
@@ -1528,13 +1528,13 @@ def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
         f"keyfile {server_key}\n"
         f"cafile {ca_certificate}\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     local_config = directory / "bridge-tls-local.conf"
     local_config.write_text(
         f"listener {local_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         "connection secure-upstream\n"
         f"address localhost:{upstream_port}\n"
@@ -1629,7 +1629,7 @@ def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
     invalid_ca_config = directory / "bridge-invalid-ca.conf"
     invalid_ca_config.write_text(
         f"listener {invalid_ca_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "connection invalid-ca\n"
         "address localhost:1\n"
         "topic # in 0\n"
@@ -1649,7 +1649,7 @@ def run_tls_inbound_bridge_case(broker: Path, directory: Path) -> None:
     invalid_key_config = directory / "bridge-invalid-key-password.conf"
     invalid_key_config.write_text(
         f"listener {invalid_key_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "connection invalid-key-password\n"
         "address localhost:1\n"
         "topic # in 0\n"

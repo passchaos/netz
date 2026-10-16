@@ -176,7 +176,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
     v1_config.write_text(
         f"listener {v1_port} 127.0.0.1\n"
         "enable_proxy_protocol 1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = _run_broker(broker, v1_config)
@@ -203,7 +203,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
         f"listener {v2_port} 127.0.0.1\n"
         "protocol websockets\n"
         "enable_proxy_protocol 2\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = _run_broker(broker, v2_config)
@@ -231,7 +231,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
         f"listener {tls_port} 127.0.0.1\n"
         "enable_proxy_protocol 2\n"
         "proxy_protocol_v2_require_tls true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = _run_broker(broker, tls_config)
@@ -262,7 +262,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
         f"listener {tls_rejection_port} 127.0.0.1\n"
         "enable_proxy_protocol 2\n"
         "proxy_protocol_v2_require_tls true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     _expect_transport_rejection(
@@ -286,7 +286,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
             f"listener {certificate_port} 127.0.0.1\n"
             "enable_proxy_protocol 2\n"
             "require_certificate true\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
         )
         _expect_transport_rejection(
@@ -302,7 +302,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
         f"listener {certificate_port} 127.0.0.1\n"
         "enable_proxy_protocol 2\n"
         "require_certificate true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = _run_broker(broker, certificate_config)
@@ -343,7 +343,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
         "enable_proxy_protocol 2\n"
         "require_certificate true\n"
         "use_identity_as_username true\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     process = _run_broker(broker, identity_config)
@@ -402,7 +402,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
             "enable_proxy_protocol 2\n"
             "require_certificate true\n"
             "use_identity_as_username true\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 1\n"
         )
         process = _run_broker(broker, identity_rejection_config)
@@ -458,7 +458,7 @@ def run_proxy_protocol_case(broker: Path, directory: Path) -> None:
         invalid_config.write_text(
             f"listener {free_port()} 127.0.0.1\n"
             + directives
-            + "allow_anonymous true\nmax_connections 1\n"
+            + "listener_allow_anonymous true\nmax_connections 1\n"
         )
         result = subprocess.run(
             [str(broker), f"--config={invalid_config}"],

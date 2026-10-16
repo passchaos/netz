@@ -155,7 +155,7 @@ def start_broker(
     log = directory / f"{label}.log"
     config.write_text(
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "persistence false\n"
         "log_type all\n"
         + extra_config,

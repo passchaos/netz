@@ -243,7 +243,7 @@ def _run_outgoing(broker: Path, directory: Path) -> None:
     config.write_text(
         "max_inflight_messages 1\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 4\n"
     )
     with _configured_broker(
@@ -343,7 +343,7 @@ def _run_incoming(broker: Path, directory: Path) -> None:
     config.write_text(
         "max_inflight_messages 1\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     with _configured_broker(
@@ -421,7 +421,7 @@ def _run_inflight_bytes(broker: Path, directory: Path) -> None:
             "max_inflight_messages 5\n"
             "max_inflight_bytes 10\n"
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 2\n"
         )
         with _configured_broker(
@@ -496,7 +496,7 @@ def _run_unlimited_mapping(broker: Path, directory: Path) -> None:
     config.write_text(
         "max_inflight_messages 0\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
     )
     with _configured_broker(

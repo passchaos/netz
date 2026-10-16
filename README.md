@@ -1682,6 +1682,10 @@ zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # key/CA/EKU/identity/CRL rejection, snapshot restore, and a two-broker inbound
 # bridge prefix/reconnect plus QoS 1/2 scenario through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
+# Source-lock Mosquitto's global/listener anonymous-admission matrix across
+# MQTT 3.1.1 and MQTT 5, including explicit per-listener precedence.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-listener-anonymous --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including
 # MQTT 3.1.1 admission and normal socket-file cleanup.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

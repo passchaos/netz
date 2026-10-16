@@ -5474,6 +5474,10 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Config,
+        "allow_anonymous",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Config,
         "max_packet_size",
     ));
     try std.testing.expect(@hasField(

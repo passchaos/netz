@@ -102,7 +102,7 @@ def run_outbound_bridge_persistent_queue_case(
         f"persistence_file {remote_snapshot.name}\n"
         "autosave_interval 0\n"
         f"listener {remote_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 8\n"
     )
     local_config = directory / "persistent-queue-local.conf"
@@ -113,7 +113,7 @@ def run_outbound_bridge_persistent_queue_case(
         f"persistence_file {local_snapshot.name}\n"
         "autosave_interval 0\n"
         f"listener {local_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 8\n"
         "max_queued_messages 32\n"
         "connection persistent-queue\n"

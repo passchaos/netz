@@ -273,7 +273,7 @@ def _run_persistent_subscription_case(
             f"persistence_file {snapshot.name}\n"
             "autosave_interval 0\n"
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             f"max_connections {connection_count}\n"
         )
 

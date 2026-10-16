@@ -175,7 +175,7 @@ def main() -> None:
             f"keyfile {key}\n"
             f"tls_version {configured_version}\n"
             f"{ticket_directives}"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 2\n"
             f"listener {websocket_port} 127.0.0.1\n"
             "protocol websockets\n"
@@ -183,7 +183,7 @@ def main() -> None:
             f"keyfile {key}\n"
             f"tls_version {configured_version}\n"
             f"{ticket_directives}"
-            "allow_anonymous true\n"
+            "listener_allow_anonymous true\n"
             "max_connections 2\n"
         )
         environment = os.environ.copy()

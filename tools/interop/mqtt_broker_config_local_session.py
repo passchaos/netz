@@ -27,14 +27,14 @@ def run_local_clean_session_case(broker: Path, directory: Path) -> None:
     remote_port, local_port = _distinct_ports(2)
     remote_config = directory / "local-clean-remote.conf"
     remote_config.write_text(
-        f"listener {remote_port} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {remote_port} 127.0.0.1\nlistener_allow_anonymous true\n"
         "max_connections 4\n"
     )
     local_config = directory / "local-clean.conf"
     local_config.write_text(
         f"persistence true\npersistence_location {directory}\n"
         "persistence_file local-clean.db\nqueue_qos0_messages true\n"
-        f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {local_port} 127.0.0.1\nlistener_allow_anonymous true\n"
         "max_connections 4\nconnection local-clean\n"
         f"address 127.0.0.1:{remote_port}\n"
         "topic session/# out 0 local/ remote/\n"

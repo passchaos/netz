@@ -153,7 +153,7 @@ def run_persistent_client_expiration_case(
     config.write_text(
         "persistent_client_expiration 1s\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 6\n"
     )
     with _configured_broker(broker, config):
@@ -183,7 +183,7 @@ def run_global_max_clients_case(
         "global_max_clients 1\n"
         "persistent_client_expiration 1s\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 5\n"
     )
     with _configured_broker(broker, config, connection_count=5):
@@ -250,10 +250,10 @@ def run_global_max_connections_case(
     config.write_text(
         "global_max_connections 1\n"
         f"listener {first_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {second_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     with _continuous_broker(
@@ -312,10 +312,10 @@ def run_listener_max_connections_case(
     config.write_text(
         "global_max_connections 2\n"
         f"listener {limited_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 1\n"
         f"listener {sibling_port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_connections 2\n"
     )
     with _continuous_broker(

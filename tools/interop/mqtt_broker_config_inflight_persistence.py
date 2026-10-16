@@ -39,7 +39,7 @@ def _write_config(
         f"persistence_file {snapshot.name}\n"
         "autosave_interval 0\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_inflight_messages 1\n"
         "max_queued_messages 4\n"
         f"max_connections {connection_count}\n"

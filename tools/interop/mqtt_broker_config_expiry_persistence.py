@@ -175,7 +175,7 @@ def run_expired_message_persistence_case(
         f"persistence_file {snapshot.name}\n"
         "autosave_interval 0\n"
         f"listener {port} 127.0.0.1\n"
-        "allow_anonymous true\n"
+        "listener_allow_anonymous true\n"
         "max_queued_messages 8\n"
         "max_connections 3\n"
     )

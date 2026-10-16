@@ -118,7 +118,7 @@ def run_private_bridge_server_case(broker: Path, directory: Path) -> None:
         config = directory / f"private-bridge-server-v{protocol_level}.conf"
         config.write_text(
             f"listener {port} 127.0.0.1\n"
-            "allow_anonymous true\nmax_connections 3\n"
+            "listener_allow_anonymous true\nmax_connections 3\n"
         )
         log = directory / f"private-bridge-server-v{protocol_level}.log"
         process, output = _start_broker(broker, config, log)
@@ -193,7 +193,7 @@ def run_bridge_cipher_suite_case(broker: Path, directory: Path) -> None:
     listener.settimeout(10)
     config = directory / "bridge-cipher-suite.conf"
     config.write_text(
-        f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {local_port} 127.0.0.1\nlistener_allow_anonymous true\n"
         "max_connections 1\nconnection cipher-suite\n"
         f"address localhost:{remote_port}\ntopic # in 0\n"
         "bridge_protocol_version mqttv50\nnotifications false\n"
@@ -254,7 +254,7 @@ def run_outbound_bridge_protocol_limits_case(
             config.write_text(
                 f"persistence true\npersistence_location {directory}\n"
                 f"persistence_file {case_name}.db\n"
-                f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+                f"listener {local_port} 127.0.0.1\nlistener_allow_anonymous true\n"
                 "max_connections 3\n"
                 f"connection {case_name}\naddress 127.0.0.1:{remote_port}\n"
                 "topic sensors/# out 2 local/ remote/\ncleansession false\n"
@@ -450,14 +450,14 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
                      "bridge_tls_version tlsv1.3\n")
     remote_config = directory / "outbound-remote.conf"
     remote_config.write_text(
-        f"listener {remote_port} 127.0.0.1\n{remote_tls}allow_anonymous true\n"
+        f"listener {remote_port} 127.0.0.1\n{remote_tls}listener_allow_anonymous true\n"
         "max_connections 4\n"
     )
     local_config = directory / "outbound-local.conf"
     local_config.write_text(
         f"persistence true\npersistence_location {directory}\n"
         "persistence_file outbound-local.db\n"
-        f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {local_port} 127.0.0.1\nlistener_allow_anonymous true\n"
         "max_connections 4\nconnection outbound\n"
         f"address localhost:{unavailable_port} localhost:{remote_port}\n"
         "round_robin true\n"
@@ -559,7 +559,7 @@ def run_outbound_bridge_case(broker: Path, directory: Path, *, tls: bool = False
         invalid_port = _distinct_ports(1)[0]
         invalid_config = directory / "empty-outbound-capath.conf"
         invalid_config.write_text(
-            f"listener {invalid_port} 127.0.0.1\nallow_anonymous true\n"
+            f"listener {invalid_port} 127.0.0.1\nlistener_allow_anonymous true\n"
             "connection empty-capath\naddress localhost:1\n"
             "topic # in 0\n"
             f"bridge_capath {empty_ca_path}\n"
@@ -576,14 +576,14 @@ def run_lazy_outbound_bridge_case(broker: Path, directory: Path) -> None:
     remote_port, local_port = _distinct_ports(2)
     remote_config = directory / "lazy-outbound-remote.conf"
     remote_config.write_text(
-        f"listener {remote_port} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {remote_port} 127.0.0.1\nlistener_allow_anonymous true\n"
         "max_connections 4\n"
     )
     local_config = directory / "lazy-outbound-local.conf"
     local_config.write_text(
         f"persistence true\npersistence_location {directory}\n"
         "persistence_file lazy-outbound.db\n"
-        f"listener {local_port} 127.0.0.1\nallow_anonymous true\n"
+        f"listener {local_port} 127.0.0.1\nlistener_allow_anonymous true\n"
         "max_connections 4\nconnection lazy-out\n"
         f"address 127.0.0.1:{remote_port}\n"
         "topic sensors/# out 2 local/ remote/\n"
