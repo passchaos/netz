@@ -885,6 +885,19 @@ and QPACK `:authority` remain the original origin while DNS/UDP uses the
 alternative host and port. A real handshake test sends two case-equivalent
 origin URIs through one advertised loopback service and requires one QUIC
 connection plus exact origin authority on both requests.
+The same exclusive and unified pools now turn RFC 9412 into a complete safe
+coalescing decision instead of exposing only a certificate-agnostic query.
+Cross-origin idle reuse requires an explicit peer Origin Set member and a
+retained authenticated leaf covering the requested DNS name or exact IP
+subjectAltName; public-key pins do not bypass that name check, and resumed
+connections without a retained chain are ineligible. Leases keep the initial
+connection origin distinct from the current request origin. A 421 response
+removes the request origin before release without poisoning the original
+origin, and a later ORIGIN frame can re-authorize it. Real handshakes prove one
+accepted cross-origin connection, certificate-mismatch isolation, 421
+exclusion, and ordinary 1-RTT behavior even through the early-capable
+acquisition path. A unified two-origin H2 Alt-Svc discovery test independently
+requires one H3/QUIC accept for both authorities.
 The unified HTTP pool now closes the next product boundary: after an
 authenticated H2 response advertises H3, two later URI requests select H3 and
 reuse one QUIC connection while returning the common owned response type. A

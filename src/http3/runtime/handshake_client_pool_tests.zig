@@ -663,6 +663,285 @@ test "HTTP/3 pool preserves origin over Alt-Svc routing and reuses QUIC" {
     try std.testing.expectEqual(@as(u64, 1), pool.stats().total_reused);
 }
 
+test "HTTP/3 pool coalesces only certificate-authorized ORIGIN entries and honors 421" {
+    const quic = @import("../../quic/mod.zig");
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var certificate_der: [tls_testing.certificate_der_len]u8 = undefined;
+    try std.base64.standard.Decoder.decode(
+        &certificate_der,
+        tls_testing.certificate_base64,
+    );
+    const key_pair = try tls_testing.serverKeyPair();
+    const public_key = key_pair.public_key.toUncompressedSec1();
+    const limits: runtime.Limits = .{ .quic = .{
+        .max_datagram_size = 4096,
+        .max_frames_per_datagram = 8,
+    } };
+    const server_cid = [_]u8{ 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98 };
+    var server = try runtime.HandshakeServer.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        limits,
+        .{ .handshake = .{
+            .local_connection_id = &server_cid,
+            .identity = .{
+                .certificate_chain = &.{&certificate_der},
+                .signer = .{ .ecdsa_p256_sha256 = .{ .key_pair = key_pair } },
+            },
+        } },
+    );
+    defer server.deinit();
+
+    const origin_b = "https://localhost:9444";
+    const origin_without_certificate = "https://other.example:9445";
+    const Worker = struct {
+        server: *runtime.HandshakeServer,
+        advertised_origins: []const []const u8,
+        accepts: usize = 0,
+        requests: usize = 0,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn receive(
+            self: *@This(),
+            session: *runtime.HandshakeServerSession,
+            expected_authority: []const u8,
+            expected_path: []const u8,
+        ) !runtime.OwnedHandshakeRequest {
+            var request = try session.receiveRequestWithTimeout(
+                .fromSeconds(5),
+            );
+            errdefer request.deinit(self.server.allocator);
+            try std.testing.expect(std.ascii.eqlIgnoreCase(
+                expected_authority,
+                request.request.authority.?,
+            ));
+            try std.testing.expectEqualStrings(
+                expected_path,
+                request.request.path,
+            );
+            try std.testing.expect(!request.was_early_data);
+            self.requests += 1;
+            return request;
+        }
+
+        fn reply(
+            _: *@This(),
+            session: *runtime.HandshakeServerSession,
+            request: runtime.OwnedHandshakeRequest,
+            status: u16,
+            body: []const u8,
+        ) !void {
+            try session.sendResponse(request.stream_id, .{
+                .status = status,
+                .request_method = request.request.method,
+                .body = body,
+            });
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var first = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            defer first.deinit();
+            try std.testing.expectEqual(
+                quic.zero_rtt.handshake.Status.not_offered,
+                first.established.early_data_status,
+            );
+
+            var initial = try self.receive(
+                &first,
+                "localhost:9443",
+                "/initial",
+            );
+            defer initial.deinit(self.server.allocator);
+            try first.sendOrigins(self.advertised_origins);
+            try self.reply(&first, initial, 200, "initial");
+
+            var coalesced = try self.receive(
+                &first,
+                "localhost:9444",
+                "/coalesced",
+            );
+            defer coalesced.deinit(self.server.allocator);
+            try self.reply(&first, coalesced, 421, "misdirected");
+
+            var original_again = try self.receive(
+                &first,
+                "localhost:9443",
+                "/original-again",
+            );
+            defer original_again.deinit(self.server.allocator);
+            try self.reply(&first, original_again, 200, "original-again");
+
+            var second = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            defer second.deinit();
+            var certificate_miss = try self.receive(
+                &second,
+                "other.example:9445",
+                "/certificate-miss",
+            );
+            defer certificate_miss.deinit(self.server.allocator);
+            try self.reply(&second, certificate_miss, 200, "new-for-certificate");
+
+            var third = try self.server.acceptWithTimeout(.fromSeconds(10));
+            self.accepts += 1;
+            defer third.deinit();
+            var excluded = try self.receive(
+                &third,
+                "localhost:9444",
+                "/after-421",
+            );
+            defer excluded.deinit(self.server.allocator);
+            try self.reply(&third, excluded, 200, "new-after-421");
+        }
+    };
+    const advertised = [_][]const u8{
+        origin_b,
+        origin_without_certificate,
+    };
+    var worker = Worker{
+        .server = &server,
+        .advertised_origins = &advertised,
+    };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    var joined = false;
+    defer if (!joined) thread.join();
+
+    var connector = runtime.HandshakeClientPoolDefaultConnector{
+        .options = .{
+            .handshake = .{
+                .original_destination_connection_id = &.{},
+                .local_connection_id = &.{},
+                // The pin authenticates possession but deliberately does not make
+                // every hostname valid. Coalescing separately checks the leaf SAN.
+                .server_auth = .{
+                    .pinned_ecdsa_p256_public_key = public_key,
+                },
+            },
+        },
+    };
+    var pool = try runtime.HandshakeClientPool.init(allocator, io, .{
+        .local_address = .{ .ip4 = .unspecified(0) },
+        .limits = limits,
+        .idle = .{
+            .max_idle_per_origin = 1,
+            .max_idle_total = 1,
+        },
+        .max_connections = 1,
+        .connector = connector.connector(),
+    });
+    defer pool.deinit();
+
+    const target_a: http3.AltSvcTarget = .{
+        .alpn = "h3",
+        .connect_host = "127.0.0.1",
+        .origin_host = "localhost",
+        .port = server.address().ip4.port,
+    };
+    const target_b = target_a;
+    const target_certificate_miss: http3.AltSvcTarget = .{
+        .alpn = "h3",
+        .connect_host = "127.0.0.1",
+        .origin_host = "other.example",
+        .port = server.address().ip4.port,
+    };
+    const NoReclaim = struct {
+        fn reclaim(_: *anyopaque) bool {
+            return false;
+        }
+    };
+    var no_reclaim_context: u8 = 0;
+
+    var initial = try pool.requestUriAltSvcWithTimeout(
+        "https://localhost:9443/initial",
+        target_a,
+        .{},
+        .fromSeconds(5),
+    );
+    defer initial.deinit(allocator);
+    var coalesced = try pool.requestUriAltSvcEarlyReclaiming(
+        "https://localhost:9444/coalesced",
+        target_b,
+        .{},
+        .{},
+        .{},
+        .{},
+        .fromNow(io, .{
+            .raw = .fromSeconds(5),
+            .clock = .awake,
+        }),
+        .{
+            .context = &no_reclaim_context,
+            .reclaim = NoReclaim.reclaim,
+        },
+    );
+    defer coalesced.response.deinit(allocator);
+    // Even though the caller supplied a complete early-request configuration,
+    // cross-origin idle reuse remains an ordinary 1-RTT request and does not
+    // construct or report a 0-RTT attempt.
+    try std.testing.expect(coalesced.early_data == null);
+    var original_again = try pool.requestUriAltSvcWithTimeout(
+        "https://LOCALHOST:9443/original-again",
+        target_a,
+        .{},
+        .fromSeconds(5),
+    );
+    defer original_again.deinit(allocator);
+    var certificate_miss = try pool.requestUriAltSvcWithTimeout(
+        "https://other.example:9445/certificate-miss",
+        target_certificate_miss,
+        .{},
+        .fromSeconds(5),
+    );
+    defer certificate_miss.deinit(allocator);
+    var after_421 = try pool.requestUriAltSvcWithTimeout(
+        "https://localhost:9444/after-421",
+        target_b,
+        .{},
+        .fromSeconds(5),
+    );
+    defer after_421.deinit(allocator);
+
+    thread.join();
+    joined = true;
+    if (worker.err) |err| return err;
+    try std.testing.expectEqualStrings("initial", initial.response.body);
+    try std.testing.expectEqualStrings(
+        "misdirected",
+        coalesced.response.response.body,
+    );
+    try std.testing.expectEqual(
+        @as(u16, 421),
+        coalesced.response.response.status,
+    );
+    try std.testing.expectEqualStrings(
+        "original-again",
+        original_again.response.body,
+    );
+    try std.testing.expectEqualStrings(
+        "new-for-certificate",
+        certificate_miss.response.body,
+    );
+    try std.testing.expectEqualStrings("new-after-421", after_421.response.body);
+    try std.testing.expectEqual(@as(usize, 3), worker.accepts);
+    try std.testing.expectEqual(@as(usize, 5), worker.requests);
+    try std.testing.expectEqual(@as(u64, 2), pool.stats().total_reused);
+    try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
+    try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
+}
+
 test "HTTP/3 handshake client pool replaces idle capacity across origins" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{

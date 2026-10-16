@@ -107,6 +107,25 @@ pub fn Pool(comptime Handle: type) type {
             origin_next: ?usize = null,
         };
 
+        /// One idle handle removed for reuse while preserving the origin that
+        /// authenticated and created the underlying connection. Cross-origin
+        /// HTTP reuse must not replace this key with the latest request origin.
+        pub const Acquired = struct {
+            key: http3.OriginKey,
+            handle: Handle,
+            exact_origin: bool,
+        };
+
+        pub const ReusePolicy = struct {
+            context: *const anyopaque,
+            allows: *const fn (
+                context: *const anyopaque,
+                connection_origin: http3.Origin,
+                requested_origin: http3.Origin,
+                handle: *const Handle,
+            ) bool,
+        };
+
         pub fn init(
             allocator: std.mem.Allocator,
             config: Config,
@@ -187,6 +206,85 @@ pub fn Pool(comptime Handle: type) type {
             pooled.key.deinit();
             self.total_reused +|= 1;
             return handle;
+        }
+
+        /// Acquire the oldest eligible idle handle, preferring the exact
+        /// origin's FIFO before considering cross-origin candidates.
+        ///
+        /// The policy runs while the owning pool is locked and therefore must
+        /// be bounded and nonblocking. On success, ownership of both the handle
+        /// and its original connection key transfers to the caller.
+        pub fn acquireMatching(
+            self: *Self,
+            requested_origin: http3.Origin,
+            now_ms: u64,
+            policy: ReusePolicy,
+        ) ?Acquired {
+            if (self.entries.items.len == 0) {
+                self.total_misses +|= 1;
+                return null;
+            }
+            _ = self.pruneExpired(now_ms);
+            if (self.entries.items.len == 0) {
+                self.total_misses +|= 1;
+                return null;
+            }
+
+            var selected: ?usize = null;
+            if (self.origin_index.get(originIndexKey(requested_origin))) |bucket| {
+                var candidate: ?usize = bucket.head;
+                while (candidate) |index| {
+                    const entry = &self.entries.items[index];
+                    const next = entry.origin_next;
+                    if (policy.allows(
+                        policy.context,
+                        entry.key.origin(),
+                        requested_origin,
+                        &entry.handle,
+                    )) {
+                        selected = index;
+                        break;
+                    }
+                    candidate = next;
+                }
+            }
+
+            if (selected == null) {
+                for (self.entries.items, 0..) |*entry, index| {
+                    if (http3.sameOrigin(
+                        entry.key.origin(),
+                        requested_origin,
+                    )) continue;
+                    if (!policy.allows(
+                        policy.context,
+                        entry.key.origin(),
+                        requested_origin,
+                        &entry.handle,
+                    )) continue;
+                    if (selected) |current| {
+                        if (!olderThan(entry.*, self.entries.items[current])) {
+                            continue;
+                        }
+                    }
+                    selected = index;
+                }
+            }
+
+            const index = selected orelse {
+                self.total_misses +|= 1;
+                return null;
+            };
+            const exact_origin = http3.sameOrigin(
+                self.entries.items[index].key.origin(),
+                requested_origin,
+            );
+            const pooled = self.removeEntryAt(index);
+            self.total_reused +|= 1;
+            return .{
+                .key = pooled.key,
+                .handle = pooled.handle,
+                .exact_origin = exact_origin,
+            };
         }
 
         /// Remove the globally least-recently-released idle handle. This is
@@ -339,14 +437,17 @@ pub fn Pool(comptime Handle: type) type {
             var oldest: usize = 0;
             for (self.entries.items[1..], 1..) |entry, index| {
                 const selected = self.entries.items[oldest];
-                if (entry.pooled_at_ms < selected.pooled_at_ms or
-                    (entry.pooled_at_ms == selected.pooled_at_ms and
-                        entry.release_sequence < selected.release_sequence))
-                {
+                if (olderThan(entry, selected)) {
                     oldest = index;
                 }
             }
             return oldest;
+        }
+
+        fn olderThan(candidate: Entry, selected: Entry) bool {
+            return candidate.pooled_at_ms < selected.pooled_at_ms or
+                (candidate.pooled_at_ms == selected.pooled_at_ms and
+                    candidate.release_sequence < selected.release_sequence);
         }
 
         fn dropHandle(self: *Self, handle: Handle) void {
@@ -479,6 +580,66 @@ test "HTTP/3 origin pool releases and acquires by normalized origin" {
     try std.testing.expectEqual(@as(u64, 1), stats.total_reused);
     try std.testing.expectEqual(@as(f64, 1.0), stats.hitRate());
     try std.testing.expectEqual(@as(f64, 1.0), pool.hitRate());
+}
+
+test "HTTP/3 origin pool matching prefers exact then oldest authorized origin" {
+    const allocator = std.testing.allocator;
+    const Drop = struct {
+        fn drop(_: std.mem.Allocator, _: usize) void {}
+    };
+    const HandlePool = Pool(usize);
+    var pool = HandlePool.init(allocator, .{
+        .max_idle_per_origin = 2,
+        .max_idle_total = 4,
+    }, Drop.drop);
+    defer pool.deinit();
+
+    const origin_a = try http3.requestOrigin("https", "a.example");
+    const origin_b = try http3.requestOrigin("https", "b.example");
+    const origin_c = try http3.requestOrigin("https", "c.example");
+    try pool.release(11, origin_b, 1);
+    try pool.release(22, origin_a, 2);
+
+    const Policy = struct {
+        fn allowAll(
+            _: *const anyopaque,
+            _: http3.Origin,
+            _: http3.Origin,
+            _: *const usize,
+        ) bool {
+            return true;
+        }
+
+        fn allowB(
+            context: *const anyopaque,
+            connection_origin: http3.Origin,
+            _: http3.Origin,
+            _: *const usize,
+        ) bool {
+            const allowed: *const http3.Origin = @ptrCast(@alignCast(context));
+            return http3.sameOrigin(connection_origin, allowed.*);
+        }
+    };
+    const context: u8 = 0;
+    var exact = pool.acquireMatching(origin_a, 3, .{
+        .context = &context,
+        .allows = Policy.allowAll,
+    }).?;
+    defer exact.key.deinit();
+    try std.testing.expect(exact.exact_origin);
+    try std.testing.expectEqual(@as(usize, 22), exact.handle);
+
+    var cross = pool.acquireMatching(origin_c, 4, .{
+        .context = &origin_b,
+        .allows = Policy.allowB,
+    }).?;
+    defer cross.key.deinit();
+    try std.testing.expect(!cross.exact_origin);
+    try std.testing.expectEqual(@as(usize, 11), cross.handle);
+    try std.testing.expect(http3.sameOrigin(
+        origin_b,
+        cross.key.origin(),
+    ));
 }
 
 test "HTTP/3 origin pool preserves global LRU across swap removal" {

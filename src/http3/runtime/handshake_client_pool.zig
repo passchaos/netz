@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const http3 = @import("../mod.zig");
+const quic = @import("../../quic/mod.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const fifo_admission = @import("../../internal/fifo_admission.zig");
 const connection_budget = @import("../../internal/connection_budget.zig");
@@ -452,11 +453,19 @@ pub fn Pool(comptime Runtime: type) type {
             request: http3.Request,
             config: EarlyRequestConfig,
         };
+        const ReuseContext = struct {
+            requested_origin: http3.Origin,
+        };
 
         pub const Lease = struct {
             pool: *Self,
             client_value: Client,
+            /// Origin that authenticated and created this QUIC connection.
+            /// It remains stable across RFC 9412 cross-origin reuse.
             origin_key: http3.OriginKey,
+            /// Present only when the current request is coalesced onto a
+            /// connection created for another origin.
+            request_origin_key: ?http3.OriginKey = null,
             was_reused: bool,
             early_disposition: ?Runtime.EarlyRequestDisposition = null,
             early_stream_id: ?u62 = null,
@@ -467,6 +476,17 @@ pub fn Pool(comptime Runtime: type) type {
                 return &self.client_value;
             }
 
+            pub fn requestOrigin(self: *const Lease) http3.Origin {
+                std.debug.assert(self.active);
+                if (self.request_origin_key) |key| return key.origin();
+                return self.origin_key.origin();
+            }
+
+            fn deinitRequestOrigin(self: *Lease) void {
+                if (self.request_origin_key) |*key| key.deinit();
+                self.request_origin_key = null;
+            }
+
             /// Return a quiescent client to the idle pool. Caching is
             /// best-effort: allocation failure closes the client instead of
             /// turning an already completed HTTP request into an application
@@ -474,6 +494,7 @@ pub fn Pool(comptime Runtime: type) type {
             pub fn release(self: *Lease) void {
                 if (!self.active) return;
                 self.active = false;
+                self.deinitRequestOrigin();
                 self.pool.release(
                     self.client_value,
                     self.origin_key,
@@ -485,6 +506,7 @@ pub fn Pool(comptime Runtime: type) type {
             pub fn discard(self: *Lease) void {
                 if (!self.active) return;
                 self.active = false;
+                self.deinitRequestOrigin();
                 self.pool.discard(self.client_value, self.origin_key);
                 self.client_value = undefined;
                 self.origin_key = undefined;
@@ -620,7 +642,7 @@ pub fn Pool(comptime Runtime: type) type {
                 uri.scheme,
                 endpoint.authority,
             );
-            const origin_key = try http3.originKeyFromOrigin(
+            var origin_key = try http3.originKeyFromOrigin(
                 self.allocator,
                 origin,
             );
@@ -649,7 +671,17 @@ pub fn Pool(comptime Runtime: type) type {
                 return error.ConnectionLimitReached;
             }
             _ = self.pruneExpiredLocked();
-            const reused = self.idle.acquire(origin, nowMillis(self.io));
+            const reuse_context: ReuseContext = .{
+                .requested_origin = origin,
+            };
+            const reused = self.idle.acquireMatching(
+                origin,
+                nowMillis(self.io),
+                .{
+                    .context = &reuse_context,
+                    .allows = idleClientAllowsOrigin,
+                },
+            );
             if (reused != null) {
                 self.cancelSharedWaiter(shared_waiter);
                 self.leased += 1;
@@ -737,11 +769,21 @@ pub fn Pool(comptime Runtime: type) type {
             }
             self.finishAdmissionLocked(waiter);
             self.mutex.unlock(self.io);
-            if (reused) |client| {
+            if (reused) |pooled| {
+                if (pooled.exact_origin) {
+                    origin_key.deinit();
+                    return .{
+                        .pool = self,
+                        .client_value = pooled.handle,
+                        .origin_key = pooled.key,
+                        .was_reused = true,
+                    };
+                }
                 const lease: Lease = .{
                     .pool = self,
-                    .client_value = client,
-                    .origin_key = origin_key,
+                    .client_value = pooled.handle,
+                    .origin_key = pooled.key,
+                    .request_origin_key = origin_key,
                     .was_reused = true,
                 };
                 return lease;
@@ -755,6 +797,34 @@ pub fn Pool(comptime Runtime: type) type {
                 route,
                 early_request,
             );
+        }
+
+        fn idleClientAllowsOrigin(
+            context: *const anyopaque,
+            connection_origin: http3.Origin,
+            requested_origin: http3.Origin,
+            client: *const Client,
+        ) bool {
+            const reuse: *const ReuseContext = @ptrCast(@alignCast(context));
+            std.debug.assert(http3.sameOrigin(
+                reuse.requested_origin,
+                requested_origin,
+            ));
+            const allowed = client.peerOriginSetAllows(
+                connection_origin,
+                requested_origin,
+            );
+            if (http3.sameOrigin(connection_origin, requested_origin)) {
+                return allowed != false;
+            }
+            if (allowed != true) return false;
+            const certificates = client.peerCertificates() orelse return false;
+            if (certificates.len == 0) return false;
+            quic.tls.trust.verifyServerCertificateIdentity(
+                certificates[0],
+                requested_origin.host,
+            ) catch return false;
+            return true;
         }
 
         pub fn acquireUriWithTimeout(
@@ -1512,8 +1582,10 @@ pub fn Pool(comptime Runtime: type) type {
                         .disposition = disposition,
                         .retry_reason = retry_reason,
                     };
-                    self.observePeerSettings(&lease);
-                    lease.release();
+                    self.releaseAfterResponse(
+                        &lease,
+                        response.response.status,
+                    );
                     return response;
                 }
                 if (deadline == null) {
@@ -1530,8 +1602,10 @@ pub fn Pool(comptime Runtime: type) type {
                         return err;
                     };
                     errdefer response.deinit(self.allocator);
-                    self.observePeerSettings(&lease);
-                    lease.release();
+                    self.releaseAfterResponse(
+                        &lease,
+                        response.response.status,
+                    );
                     return response;
                 }
                 const stream_id = lease.client().sendRequest(request) catch |err| {
@@ -1562,10 +1636,32 @@ pub fn Pool(comptime Runtime: type) type {
                     return err;
                 };
                 errdefer response.deinit(self.allocator);
-                self.observePeerSettings(&lease);
-                lease.release();
+                self.releaseAfterResponse(
+                    &lease,
+                    response.response.status,
+                );
                 return response;
             }
+        }
+
+        fn releaseAfterResponse(
+            self: *Self,
+            lease: *Lease,
+            status: u16,
+        ) void {
+            if (status == 421) {
+                lease.client().removePeerOriginAfterMisdirected(
+                    lease.requestOrigin(),
+                ) catch {
+                    // Forgetting the exclusion could route another request to
+                    // an authority the peer just rejected. Fail closed on this
+                    // connection while preserving the completed 421 response.
+                    lease.discard();
+                    return;
+                };
+            }
+            self.observePeerSettings(lease);
+            lease.release();
         }
 
         fn observePeerSettings(self: *Self, lease: *Lease) void {
@@ -1573,7 +1669,7 @@ pub fn Pool(comptime Runtime: type) type {
             const settings = lease.client().peerSettings() orelse return;
             observer.observe(
                 observer.context,
-                lease.origin_key.origin(),
+                lease.requestOrigin(),
                 settings,
             );
         }

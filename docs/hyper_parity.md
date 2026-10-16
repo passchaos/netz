@@ -1299,8 +1299,24 @@ separate silent-UDP regression proves one unchanged deadline spans the H3
 attempt and H1 fallback, repeated advertisements preserve failure backoff, and
 POST is never replayed after an ambiguous H3 failure while GET may safely
 fallback. H3 remains opt-in so the unified layer never invents a weaker
-certificate policy when the caller configured only the TCP TLS backend. Its
-optional early-data policy likewise stays above Hyper's scope: netz requires
+certificate policy when the caller configured only the TCP TLS backend. The
+exclusive and unified H3 pools now also consume RFC 9412 for safe idle
+connection coalescing: another HTTPS origin must be explicitly present in the
+peer Origin Set and the retained authenticated leaf must cover its DNS name or
+exact IP subjectAltName. A public-key pin alone is not treated as hostname
+authority, and resumed connections without a retained certificate fail closed
+for cross-origin reuse. The connection's initial origin key remains stable
+while a coalesced lease separately owns its request origin, so per-origin idle
+limits, SETTINGS observation, and later release do not silently rebind the
+authenticated connection. A 421 response removes the request origin before
+release; the original origin remains reusable, while another attempt to the
+excluded origin creates a new connection unless a later ORIGIN frame re-adds
+it. One real H3 matrix proves matching-certificate reuse, certificate-mismatch
+isolation, 421 exclusion, original-origin recovery, and an early-capable
+cross-origin idle hit that remains 1-RTT. A separate unified test performs H2
+Alt-Svc discovery for two different HTTPS origins and requires both H3 requests
+to complete through one QUIC accept. Its optional early-data policy likewise
+stays above Hyper's scope: netz requires
 origin-scoped remembered H3 SETTINGS plus an origin+ALPN ticket, uses 0-RTT
 only for newly created safe-method connections, keeps idle reuse on 1-RTT,
 supports per-request opt-out, and reports TLS rejection or 425 retry through

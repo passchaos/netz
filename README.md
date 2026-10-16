@@ -274,6 +274,16 @@ Current protocol coverage includes:
   require an H3 redirect-aware connector that removes QUIC resumption,
   address-validation, early-data, deterministic random/key material, and
   disallowed client identity before dialing the next authority.
+  Idle H3 connections can additionally serve another HTTPS origin only after
+  the peer explicitly adds that origin through RFC 9412 ORIGIN and the
+  authenticated leaf certificate independently covers its DNS name or exact IP
+  subjectAltName. The pool retains the connection's initial origin key across
+  coalesced requests, keeps the current request origin separately owned, and
+  applies a 421 response before returning the connection to idle state. A 421
+  excludes only that request origin; a later ORIGIN frame may re-authorize it.
+  Connections without a retained certificate chain and certificate-mismatched
+  advertisements remain ineligible rather than treating ORIGIN or a public-key
+  pin as sufficient authority.
   The exclusive H3 backend retains its own explicit total/idle limits in
   addition to the TCP pool's limits. An optional move-stable shared budget also
   caps the combined TCP/QUIC idle, leased, and connecting population, with
@@ -281,7 +291,7 @@ Current protocol coverage includes:
   close accounting, and aggregate connection/waiter counters. When an Alt-Svc
   H3 connection needs a full shared budget, it can retire the oldest idle TCP
   connection and transfer that capacity without exceeding the configured cap;
-  a later TCP origin can symmetrically retire the oldest idle H3 connection,
+  a later TCP origin can symmetrically retire the oldest idle H3 connection.
   The H3 backend can additionally opt into RFC 8470 0-RTT without bypassing
   the unified surface. Successful responses record peer SETTINGS in a bounded,
   origin-scoped LRU independent of Alt-Svc and TLS ticket ownership. A safe
@@ -559,7 +569,10 @@ Current protocol coverage includes:
   an incremental iterator for CONNECT stream data, borrowed and owning
   normalized HTTP/3 origin keys for conservative connection-reuse/coalescing
   policy decisions including direct owned-key construction from parsed origins,
-  plus an indexed generic origin-keyed idle pool with empty-pool miss fast paths, chunked case-folded hashing, and single-lookup release/new-origin append checks for runtime-specific
+  plus an indexed generic origin-keyed idle pool with empty-pool miss fast paths,
+  exact-origin preference, bounded policy-filtered cross-origin selection,
+  stable connection-origin ownership, chunked case-folded hashing, and
+  single-lookup release/new-origin append checks for runtime-specific
   client handles with explicit expiry pruning and targeted index repair,
   SETTINGS-first control-stream negotiation with unique peer control-stream tracking, bidirectional message-stream and non-critical extension-stream role-validation skips before preallocated control-state rollback cloning, forbidden frame rejection on control/request streams including misplaced WebTransport stream prefixes, client-initiated push-stream rejection, and prefix-driven peer-unidirectional stream classification that reassembles offset-zero type bytes before routing control/QPACK/push streams or draining unknown reserved types, without assuming fixed critical stream IDs; stateful routing returns consumed control/QPACK/unknown bytes to both QUIC receive windows, retires terminal unknown streams to restore MAX_STREAMS credit, while push streams return their fragmented association prefix exactly once before preserving application DATA backpressure, preserves reordered WebTransport 0x54 prefixes on both roles, and failed MAX_DATA/MAX_STREAM_DATA writes retry from the connection timer with fair MTU-bounded multi-stream credit coalescing; QPACK encoder/decoder critical stream registration with duplicate-stream `H3_STREAM_CREATION_ERROR` plus FIN/RESET_STREAM/STOP_SENDING closure rejection, RFC 9204 dynamic-table FIFO/absolute-relative indexing/eviction state, Required Insert Count wrapping, checked prefix-integer decoding through the maximum `usize` with bounded wider-value rejection, preallocated/assume-capacity varint writes plus transactional single-reservation field-section prefixes and Encoder Stream instructions, all relative/post-base dynamic field-line forms with blocking/eviction distinction and never-indexed preservation, Huffman-capable encoder with reused length prechecks/exact slice allocation and direct-to-target byte emission plus preallocated decoder with empty-input fast paths, instruction codecs with preallocated instruction and field-section literal-name writes, a connection-scoped decoder with out-of-order/split encoder-stream reassembly plus preallocated coalesced feedback, and a non-blocking encoder state with Known Received Count gating, decoder-stream reassembly, single-pass outstanding reference accounting with adjacent duplicate fast paths, empty-reference eviction checks, single-probe pending-section indexing with empty-index skips, tail-release fast paths, and prohibited-eviction prevention, GOAWAY and MAX_PUSH_ID monotonicity checks plus post-GOAWAY request suppression/rejection, cached multi-set drain-floor checks, and same-control-stream GOAWAY emission with persistent control-stream offsets,
   collision-verified hash indexes with single-lookup dynamic insert tracking for current QPACK exact/name matches with

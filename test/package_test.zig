@@ -3,6 +3,10 @@ const netz = @import("netz");
 
 test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
+        netz.quic.tls.trust,
+        "verifyServerCertificateIdentity",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.tls.stream,
         "Tls13TicketKeyring",
     ));
