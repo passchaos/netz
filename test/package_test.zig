@@ -293,6 +293,10 @@ test "public modules are reachable" {
         "max_partitioned_cookies_per_domain",
     ));
     try std.testing.expect(@hasField(
+        netz.http.CookieJarConfig,
+        "max_partitioned_cookie_bytes_per_domain",
+    ));
+    try std.testing.expect(@hasField(
         netz.http.CookieRequestContext,
         "partition_key",
     ));

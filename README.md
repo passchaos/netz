@@ -196,8 +196,8 @@ Current protocol coverage includes:
   Secure+HttpOnly constraints and unconditional value-only prefix rejection;
   CHIPS `Partitioned` cookies with Secure enforcement, explicit schemeful-site
   plus cross-site-ancestor keys, independent replacement/selection and a
-  separate 50-cookie per-domain/per-partition default; insecure secure-cookie
-  overlay protection, SameSite
+  separate per-domain/per-partition default of 50 cookies and 10 KiB of
+  name+value bytes; insecure secure-cookie overlay protection, SameSite
   Strict/Lax/None/Lax-by-default and the bounded unsafe-navigation window;
   preserves host-only and Domain cookies as distinct keys; and emits ordered
   Cookie values into caller or allocator storage. A dedicated redirected-

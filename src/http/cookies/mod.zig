@@ -91,6 +91,9 @@ pub const Config = struct {
     max_cookies: usize = 3_000,
     max_cookies_per_domain: usize = 180,
     max_partitioned_cookies_per_domain: usize = 50,
+    /// CHIPS recommends at most 10 KiB of cookie name+value bytes for one
+    /// embedded domain inside one top-level partition.
+    max_partitioned_cookie_bytes_per_domain: usize = 10 * 1024,
     max_cookie_bytes: usize = maximum_cookie_bytes,
     max_header_bytes: usize = 16 * 1024,
     max_lifetime_seconds: u32 = 400 * std.time.s_per_day,
@@ -166,6 +169,7 @@ pub const Jar = struct {
         if (config.max_cookies == 0 or
             config.max_cookies_per_domain == 0 or
             config.max_partitioned_cookies_per_domain == 0 or
+            config.max_partitioned_cookie_bytes_per_domain == 0 or
             config.max_cookie_bytes == 0 or
             config.max_cookie_bytes > maximum_cookie_bytes or
             config.max_header_bytes == 0 or
@@ -417,13 +421,18 @@ pub const Jar = struct {
             replacement.restoreRequestOrder(
                 replacement.cookies.items.len - 1,
             );
+            const domain_limit = if (record.partitioned)
+                self.config.max_partitioned_cookies_per_domain
+            else
+                self.config.max_cookies_per_domain;
             if (replacement.domainCount(
                 record.domain,
                 record_partition_key,
-            ) > if (record.partitioned)
-                self.config.max_partitioned_cookies_per_domain
-            else
-                self.config.max_cookies_per_domain)
+            ) > domain_limit or
+                (record.partitioned and replacement.domainBytes(
+                    record.domain,
+                    record_partition_key,
+                ) > self.config.max_partitioned_cookie_bytes_per_domain))
             {
                 return error.SnapshotLimitExceeded;
             }
@@ -733,6 +742,14 @@ pub const Jar = struct {
             candidate.creation_order = creation_order;
             candidate.created_at = created_at;
             self.cookies.items[index] = candidate;
+            self.enforceDomainLimit(
+                domain,
+                stored_partition_key,
+                if (stored_partition_key == null)
+                    self.config.max_cookies_per_domain
+                else
+                    self.config.max_partitioned_cookies_per_domain,
+            );
             return .replaced;
         }
 
@@ -869,7 +886,12 @@ pub const Jar = struct {
         partition_key: ?NormalizedPartitionKey,
         limit: usize,
     ) void {
-        while (self.domainCount(domain, partition_key) > limit) {
+        while (self.domainCount(domain, partition_key) > limit or
+            (partition_key != null and self.domainBytes(
+                domain,
+                partition_key,
+            ) > self.config.max_partitioned_cookie_bytes_per_domain))
+        {
             const index = self.oldestPartitionAccessIndex(
                 domain,
                 partition_key,
@@ -901,6 +923,20 @@ pub const Jar = struct {
                 std.ascii.eqlIgnoreCase(cookie.domain, domain) and
                     cookiePartitionEquals(cookie, partition_key),
             );
+        }
+        return result;
+    }
+
+    fn domainBytes(
+        self: *const Jar,
+        domain: []const u8,
+        partition_key: ?NormalizedPartitionKey,
+    ) usize {
+        var result: usize = 0;
+        for (self.cookies.items) |cookie| {
+            if (!std.ascii.eqlIgnoreCase(cookie.domain, domain) or
+                !cookiePartitionEquals(cookie, partition_key)) continue;
+            result +|= cookie.name.len +| cookie.value.len;
         }
         return result;
     }

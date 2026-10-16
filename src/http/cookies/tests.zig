@@ -616,6 +616,90 @@ test "CookieJar enforces independent per-partition domain limits" {
     );
 }
 
+test "CookieJar bounds bytes independently in each partition" {
+    const allocator = std.testing.allocator;
+    var jar = try cookies.Jar.init(allocator, .{
+        .max_cookies = 16,
+        .max_cookies_per_domain = 16,
+        .max_partitioned_cookies_per_domain = 16,
+        .max_partitioned_cookie_bytes_per_domain = 12,
+    });
+    defer jar.deinit();
+    const uri = "https://cdn.example/";
+    const site_a = cookies.PartitionKey{
+        .top_level_site = "https://site-a.example",
+    };
+    const site_b = cookies.PartitionKey{
+        .top_level_site = "https://site-b.example",
+    };
+    _ = try jar.storeSetCookieWithContext(
+        uri,
+        "aa=1111; Secure; Partitioned",
+        now,
+        .{ .partition_key = site_a },
+    );
+    _ = try jar.storeSetCookieWithContext(
+        uri,
+        "bb=2222; Secure; Partitioned",
+        now + 1,
+        .{ .partition_key = site_a },
+    );
+    _ = try jar.storeSetCookieWithContext(
+        uri,
+        "aa=aaaa; Secure; Partitioned",
+        now,
+        .{ .partition_key = site_b },
+    );
+    _ = try jar.storeSetCookieWithContext(
+        uri,
+        "bb=bbbb; Secure; Partitioned",
+        now + 1,
+        .{ .partition_key = site_b },
+    );
+    try std.testing.expectEqual(
+        cookies.StoreResult.replaced,
+        try jar.storeSetCookieWithContext(
+            uri,
+            "bb=0123456789; Secure; Partitioned",
+            now + 2,
+            .{ .partition_key = site_a },
+        ),
+    );
+    const a = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        now + 2,
+        .{ .partition_key = site_a },
+    );
+    defer allocator.free(a);
+    try std.testing.expectEqualStrings("bb=0123456789", a);
+    const b = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        now + 2,
+        .{ .partition_key = site_b },
+    );
+    defer allocator.free(b);
+    try std.testing.expectEqualStrings("aa=aaaa; bb=bbbb", b);
+
+    _ = try jar.storeSetCookie(
+        uri,
+        "unpartitioned=01234567890123456789",
+        now + 3,
+    );
+    const ordinary = try jar.cookieHeaderValueAlloc(
+        allocator,
+        uri,
+        now + 3,
+        .{},
+    );
+    defer allocator.free(ordinary);
+    try std.testing.expectEqualStrings(
+        "unpartitioned=01234567890123456789",
+        ordinary,
+    );
+}
+
 fn publicSuffix(_: ?*anyopaque, domain: []const u8) bool {
     return std.mem.eql(u8, domain, "com") or
         std.mem.eql(u8, domain, "co.uk");

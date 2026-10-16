@@ -1134,7 +1134,12 @@ name/domain/host-only/path coexist across keys, replacement/deletion and secure
 overlay checks remain inside one partition, and retrieval emits only the
 matching partition alongside ordinary unpartitioned cookies. A separate
 configurable per-domain/per-partition limit defaults to 50, while the global
-Jar bound still caps adversarial partition proliferation. Snapshot v2 retains
+Jar bound still caps adversarial partition proliferation. The independent
+CHIPS-recommended logical name+value budget defaults to 10 KiB per
+domain/partition; deterministic oldest-access eviction applies after both new
+stores and size-growing replacements, while other partitions and ordinary
+cookies remain untouched. Snapshot restore rejects an over-budget partition
+transactionally rather than silently evicting persisted state. Snapshot v2 retains
 the complete key and reads unpartitioned v1 files; Netscape/curl export omits
 partitioned state instead of unsafely flattening it. Tests cover key
 canonicalization, ancestor-bit isolation, same-name replacement/deletion,

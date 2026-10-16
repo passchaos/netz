@@ -182,6 +182,47 @@ test "CookieJar snapshot v2 restores legacy unpartitioned v1" {
     );
 }
 
+test "CookieJar snapshot restore enforces partition byte budget" {
+    const allocator = std.testing.allocator;
+    var source = try cookies.Jar.init(allocator, .{
+        .max_partitioned_cookie_bytes_per_domain = 64,
+    });
+    defer source.deinit();
+    const partition_key = cookies.PartitionKey{
+        .top_level_site = "https://top.example",
+    };
+    _ = try source.storeSetCookieWithContext(
+        "https://cdn.example/",
+        "first=1111; Max-Age=60; Secure; Partitioned",
+        now,
+        .{ .partition_key = partition_key },
+    );
+    _ = try source.storeSetCookieWithContext(
+        "https://cdn.example/",
+        "second=2222; Max-Age=60; Secure; Partitioned",
+        now,
+        .{ .partition_key = partition_key },
+    );
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try source.encodeSnapshot(now, &encoded);
+
+    var target = try cookies.Jar.init(allocator, .{
+        .max_partitioned_cookie_bytes_per_domain = 8,
+    });
+    defer target.deinit();
+    _ = try target.storeSetCookie(
+        "https://safe.example/",
+        "old=unchanged",
+        now,
+    );
+    try std.testing.expectError(
+        error.SnapshotLimitExceeded,
+        target.restoreSnapshot(encoded.items, now),
+    );
+    try expectCookie(&target, "https://safe.example/", "old=unchanged");
+}
+
 test "CookieJar snapshot file is atomic and excludes expired state" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
