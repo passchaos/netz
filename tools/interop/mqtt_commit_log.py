@@ -18,6 +18,7 @@ from mqtt_commit_log_inflight import (
 from mqtt_commit_log_retained import verify_retained_delete_recovery
 from mqtt_commit_log_session import verify_active_session_expiry_recovery
 from mqtt_commit_log_will import (
+    verify_clean_session_will_recovery,
     verify_scheduled_will_cancellation_recovery,
     verify_scheduled_will_recovery,
 )
@@ -48,6 +49,7 @@ MOSQUITTO_SOURCES = (
     "broker/15-persist-client-expired-session.py",
     "broker/15-persist-retain-clear.py",
     "broker/15-persist-client-will-persistent.py",
+    "broker/15-persist-client-will-clean.py",
     "broker/persist_client_will_core.py",
     "broker/persist_module_helper.py",
 )
@@ -347,6 +349,10 @@ def main() -> None:
     verify_scheduled_will_cancellation_recovery(args.broker)
     print(
         "MQTT delayed Will cancellation survived commit-log SIGKILL recovery"
+    )
+    verify_clean_session_will_recovery(args.broker)
+    print(
+        "MQTT clean Session retained Will survived commit-log SIGKILL recovery"
     )
 
 

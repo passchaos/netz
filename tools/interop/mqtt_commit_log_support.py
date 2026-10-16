@@ -45,6 +45,7 @@ def connect_packet(
     keep_alive: int = 60,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
+    will_properties: bytes = b"",
 ) -> bytes:
     if protocol not in (3, 4, 5):
         raise ValueError("protocol must be MQTT 3.1 (3), 3.1.1 (4), or 5")
@@ -57,15 +58,18 @@ def connect_packet(
         connect_flags |= 0x04 | (will_qos << 3)
         if will_retain:
             connect_flags |= 0x20
-        if protocol != 5 and will_delay:
-            raise ValueError("pre-v5 MQTT has no Will Delay property")
-        will_properties = (
+        if protocol != 5 and (will_delay or will_properties):
+            raise ValueError(
+                "pre-v5 MQTT has no Will properties or Will Delay"
+            )
+        encoded_will_properties = will_properties + (
             b"\x18" + will_delay.to_bytes(4, "big")
             if will_delay else b""
         )
         payload += (
             (
-                remaining_length(len(will_properties)) + will_properties
+                remaining_length(len(encoded_will_properties))
+                + encoded_will_properties
                 if protocol == 5 else b""
             )
             + mqtt_string(will_topic)
@@ -190,6 +194,7 @@ def connect_client(
     protocol: int = 5, session_expiry: int = 60,
     will_topic: str | None = None, will_payload: bytes = b"",
     will_delay: int = 0, will_qos: int = 0, will_retain: bool = False,
+    will_properties: bytes = b"",
 ) -> socket.socket:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
@@ -203,6 +208,7 @@ def connect_client(
         will_delay=will_delay,
         will_qos=will_qos,
         will_retain=will_retain,
+        will_properties=will_properties,
     ))
     first, body = read_packet(sock)
     if first != 0x20 or body[0] != int(session_present) or body[1] != 0:

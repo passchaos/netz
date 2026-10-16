@@ -794,6 +794,14 @@ schedules the retained QoS 1 Will is durably committed, the broker is killed
 before its deadline. On restart the restored observer receives the Will once
 at the remaining deadline, and a fresh subscriber then receives the retained
 copy with the correct RETAIN bit.
+A source-locked clean-Session companion ports the crash branch of Mosquitto's
+`15-persist-client-will-clean.py`. A QoS 1 retained Will carries Payload
+Format, Content Type, User Property and a 30-second Will Delay, but its Session
+Expiry is zero. SIGKILL leaves the CONNECT commit as the last durable boundary;
+restart therefore publishes the Will immediately, preserves all application
+properties while removing Will Delay, delivers RETAIN=false to an existing
+subscription, and stores a RETAIN=true replay. A third broker generation
+answers the original subscriber's PING without publishing the Will again.
 The complementary cancellation path is source-locked to Mosquitto's
 `07-will-delay-reconnect.py` and adds a process-crash boundary after
 cancellation. A persistent client schedules a three-second Will, reconnects

@@ -68,6 +68,17 @@ class WireHelpersTests(unittest.TestCase):
             )
         self.assertEqual(
             support.connect_packet(
+                "c", clean_start=True, protocol=5, session_expiry=0,
+                will_topic="w", will_payload=b"p", will_qos=1,
+                will_properties=b"\x01\x01", will_delay=1,
+            ),
+            bytes.fromhex(
+                "10 1c 0004 4d515454 05 0e 003c 00 0001 63 "
+                "07 0101 18 00000001 0001 77 0001 70"
+            ),
+        )
+        self.assertEqual(
+            support.connect_packet(
                 "c", clean_start=True, protocol=3, session_expiry=0,
             ),
             bytes.fromhex(
