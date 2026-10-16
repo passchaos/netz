@@ -4,13 +4,128 @@ const http1 = @import("../http1/mod.zig");
 const http1_runtime = @import("../http1/runtime.zig");
 const http2 = @import("../http2/mod.zig");
 const http2_runtime = @import("../http2/runtime.zig");
+const http3 = @import("../http3/mod.zig");
+const http3_runtime = @import("../http3/runtime.zig");
 const tls_testing = @import("../tls/testing.zig");
+const vort = @import("vort");
 
 fn findHeader(headers: anytype, name: []const u8) ?[]const u8 {
     for (headers) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, name)) return header.value;
     }
     return null;
+}
+
+test "unified HTTP responses preserve bounded content decoding across protocols" {
+    const allocator = std.testing.allocator;
+    const payload = "unified stacked response decoding " ** 16;
+    const deflate = try vort.encodeZlibStoredAlloc(allocator, payload);
+    defer allocator.free(deflate);
+    const encoded = try vort.encodeGzipStoredAlloc(allocator, deflate);
+    defer allocator.free(encoded);
+    const max_layer_bytes = @max(payload.len, deflate.len);
+
+    var h1_headers = [_]http1.Header{.{
+        .name = "Content-Encoding",
+        .value = "deflate, gzip",
+    }};
+    var empty_h1_bytes: [0]u8 = .{};
+    const h1 = http.OwnedResponse{
+        .allocator = allocator,
+        .value = .{ .http1 = .{
+            .bytes = &empty_h1_bytes,
+            .response = .{
+                .version = .http_1_1,
+                .status = 200,
+                .reason = "OK",
+                .headers = &h1_headers,
+                .body = encoded,
+                .consumed = 0,
+            },
+        } },
+    };
+    try expectUnifiedDecoded(h1, payload, max_layer_bytes);
+
+    var h2_headers = [_]http2.Hpack.HeaderField{.{
+        .name = "content-encoding",
+        .value = "deflate, gzip",
+    }};
+    const h2 = http.OwnedResponse{
+        .allocator = allocator,
+        .value = .{ .http2 = .{
+            .headers = &h2_headers,
+            .status = 200,
+            .body = encoded,
+        } },
+    };
+    try expectUnifiedDecoded(h2, payload, max_layer_bytes);
+
+    var h3_headers = [_]http3.Qpack.HeaderField{.{
+        .name = "content-encoding",
+        .value = "deflate, gzip",
+    }};
+    var empty_h3_bytes: [0]u8 = .{};
+    const h3 = http.OwnedResponse{
+        .allocator = allocator,
+        .value = .{ .http3 = http3_runtime.OwnedHandshakeResponse{
+            .stream_bytes = &empty_h3_bytes,
+            .response = .{
+                .status = 200,
+                .headers = &h3_headers,
+                .body = encoded,
+                .consumed = 0,
+            },
+        } },
+    };
+    try expectUnifiedDecoded(h3, payload, max_layer_bytes);
+
+    var empty_uri: [0]u8 = .{};
+    const redirected = http.RedirectedResponse{
+        .allocator = allocator,
+        .response = h3,
+        .final_uri = &empty_uri,
+        .redirect_count = 1,
+    };
+    var redirected_decoded = try redirected.decodeContentAlloc(
+        allocator,
+        max_layer_bytes,
+    );
+    defer redirected_decoded.deinit(allocator);
+    try std.testing.expectEqualStrings(payload, redirected_decoded.bytes);
+}
+
+fn expectUnifiedDecoded(
+    response: http.OwnedResponse,
+    expected: []const u8,
+    max_layer_bytes: usize,
+) !void {
+    const chain = try response.contentEncoding();
+    try std.testing.expectEqualSlices(
+        http.ContentCoding,
+        &.{ .deflate, .gzip },
+        chain.items(),
+    );
+
+    var decoded = try response.decodeContentAlloc(
+        std.testing.allocator,
+        max_layer_bytes,
+    );
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(expected, decoded.bytes);
+    try std.testing.expectError(
+        error.DecodedBodyTooLarge,
+        response.decodeContentAlloc(
+            std.testing.allocator,
+            max_layer_bytes - 1,
+        ),
+    );
+
+    var output: [4096]u8 = undefined;
+    var scratch: [4096]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        expected,
+        try response.decodeContentInto(&output, &scratch),
+    );
 }
 
 test "unified HTTP client follows redirect from negotiated h1 to h2" {

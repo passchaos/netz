@@ -1074,6 +1074,14 @@ Single-layer streaming decoders report exact consumed/produced prefixes under
 arbitrary input fragmentation and output backpressure, enforce independent
 encoded/decoded byte ceilings, and require explicit EOF finalization so
 truncation cannot be mistaken for a temporarily incomplete body.
+The unified H1/H2/H3 `http.OwnedResponse` and its redirected wrapper now
+forward `contentEncoding`, `decodeContentAlloc`, and `decodeContentInto`
+directly to the selected protocol response. Repeated/stacked field parsing,
+per-layer size limits, encoded response ownership, and caller-buffer scratch
+semantics therefore remain identical without requiring callers to switch on
+the negotiated protocol. Decoding stays explicit: pools still preserve exact
+wire headers and bodies instead of silently rewriting cache or validator
+semantics.
 
 ## Current feature comparison
 

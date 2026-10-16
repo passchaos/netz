@@ -267,6 +267,22 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http, "ContentCodingChain"));
     try std.testing.expect(@hasDecl(netz.http, "ContentStreamDecoder"));
     try std.testing.expect(@hasDecl(netz.http, "ContentStreamOptions"));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "contentEncoding",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "decodeContentAlloc",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.OwnedResponse,
+        "decodeContentInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.RedirectedResponse,
+        "decodeContentAlloc",
+    ));
     try std.testing.expect(@hasDecl(netz.tls, "stream"));
     try std.testing.expect(@hasDecl(netz.tls, "server_identity_file"));
     try std.testing.expect(@hasDecl(netz.tls, "client_ca_file"));

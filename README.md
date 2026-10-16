@@ -183,7 +183,10 @@ Current protocol coverage includes:
   exact input/output progress across arbitrary fragmentation and output
   backpressure, bound every intermediate layer through reusable fixed-capacity
   queues, require an explicit EOF finish, and expose constructors on each
-  protocol's streaming response-head type,
+  protocol's streaming response-head type. Unified H1/H2/H3
+  `http.OwnedResponse` and redirected responses retain the same explicit
+  allocating/caller-buffer decode surface without hiding a representation
+  transform inside connection pooling,
 - A unified `http.Client`/`http.Connection` surface for HTTP/1.1 and HTTP/2,
   plus an optional HTTP/3-capable `http.Pool`:
   HTTPS performs one certificate-verified vail TLS 1.2/1.3 handshake offering
@@ -192,7 +195,8 @@ Current protocol coverage includes:
   policies and legacy no-ALPN-to-H1 fallback are available. Cleartext uses an
   explicit HTTP/1 or H2 prior-knowledge policy. Common method/header/body/
   trailer request options use stack-first protocol mapping, responses expose
-  one owned status/body/header view plus the selected protocol, and relative or
+  one owned status/body/header view plus the selected protocol and the shared
+  bounded Content-Encoding decoder, and relative or
   absolute deadlines cover DNS/TCP, TLS, H2 SETTINGS, and the complete
   response. Bounded redirects may change negotiated protocol between origins
   while retaining method replay, credential/mTLS isolation, downgrade policy,

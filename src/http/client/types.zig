@@ -4,6 +4,7 @@ const std = @import("std");
 const http1_runtime = @import("../../http1/runtime.zig");
 const http2_runtime = @import("../../http2/runtime.zig");
 const http3_runtime = @import("../../http3/runtime.zig");
+const content_coding = @import("../content_coding.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
 
@@ -106,6 +107,61 @@ pub const OwnedResponse = struct {
             .http3 => |response| findHeader(response.response.headers, name),
         };
     }
+
+    /// Parse every Content-Encoding field without exposing the negotiated
+    /// protocol's concrete header representation.
+    pub fn contentEncoding(
+        self: OwnedResponse,
+    ) content_coding.Error!content_coding.Chain {
+        return switch (self.value) {
+            .http1 => |response| response.response.contentEncoding(),
+            .http2 => |response| response.contentEncoding(),
+            .http3 => |response| response.response.contentEncoding(),
+        };
+    }
+
+    /// Decode every Content-Encoding layer in reverse application order.
+    /// The encoded response and its headers remain owned and unchanged.
+    pub fn decodeContentAlloc(
+        self: OwnedResponse,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return switch (self.value) {
+            .http1 => |response| response.response.decodeContentAlloc(
+                allocator,
+                max_output_len,
+            ),
+            .http2 => |response| response.decodeContentAlloc(
+                allocator,
+                max_output_len,
+            ),
+            .http3 => |response| response.response.decodeContentAlloc(
+                allocator,
+                max_output_len,
+            ),
+        };
+    }
+
+    /// Caller-buffer counterpart to `decodeContentAlloc`. `scratch` is used
+    /// only when the response carries stacked non-identity encodings.
+    pub fn decodeContentInto(
+        self: OwnedResponse,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return switch (self.value) {
+            .http1 => |response| response.response.decodeContentInto(
+                out,
+                scratch,
+            ),
+            .http2 => |response| response.decodeContentInto(out, scratch),
+            .http3 => |response| response.response.decodeContentInto(
+                out,
+                scratch,
+            ),
+        };
+    }
 };
 
 pub const RedirectedResponse = struct {
@@ -126,6 +182,28 @@ pub const RedirectedResponse = struct {
         self.allocator.free(self.final_uri);
         self.* = undefined;
         return response;
+    }
+
+    pub fn contentEncoding(
+        self: RedirectedResponse,
+    ) content_coding.Error!content_coding.Chain {
+        return self.response.contentEncoding();
+    }
+
+    pub fn decodeContentAlloc(
+        self: RedirectedResponse,
+        allocator: std.mem.Allocator,
+        max_output_len: usize,
+    ) content_coding.Error!content_coding.DecodedBody {
+        return self.response.decodeContentAlloc(allocator, max_output_len);
+    }
+
+    pub fn decodeContentInto(
+        self: RedirectedResponse,
+        out: []u8,
+        scratch: []u8,
+    ) content_coding.Error![]u8 {
+        return self.response.decodeContentInto(out, scratch);
     }
 };
 
