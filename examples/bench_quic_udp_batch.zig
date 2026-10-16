@@ -81,6 +81,81 @@ pub fn main() !void {
         total_datagrams,
     });
 
+    var addressed_receivers: [batch_size]netz.quic.runtime.Endpoint = undefined;
+    var addressed_receiver_count: usize = 0;
+    defer for (addressed_receivers[0..addressed_receiver_count]) |*addressed_receiver| {
+        addressed_receiver.deinit();
+    };
+    var addressed: [batch_size]netz.quic.runtime.AddressedDatagram = undefined;
+    for (&addressed_receivers, &addressed, datagrams) |*addressed_receiver, *message, bytes| {
+        addressed_receiver.* = try netz.quic.runtime.Endpoint.bind(
+            allocator,
+            io,
+            .{ .ip4 = .loopback(0) },
+            .{ .max_datagram_size = datagram_size },
+        );
+        addressed_receiver_count += 1;
+        message.* = .{
+            .to = addressed_receiver.address(),
+            .bytes = bytes,
+        };
+    }
+    var individual_sender = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = datagram_size,
+            .enable_gso_send = false,
+        },
+    );
+    defer individual_sender.deinit();
+    var addressed_sender = try netz.quic.runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = datagram_size,
+            .enable_gso_send = false,
+        },
+    );
+    defer addressed_sender.deinit();
+    const addressed_individual_ns = try measureAddressedIndividual(
+        io,
+        &individual_sender,
+        &addressed,
+    );
+    const addressed_batch_ns = try measureAddressedBatch(
+        io,
+        &addressed_sender,
+        &addressed,
+    );
+    const addressed_ratio_x100 = ratioTimes100(
+        addressed_individual_ns,
+        addressed_batch_ns,
+    );
+    std.debug.print(
+        \\QUIC multi-destination UDP send benchmark
+        \\  io backend: zio-std-io
+        \\  send iterations: {d}, destinations/batch: {d}, bytes/packet: {d}
+        \\  individual: {d} ns/batch, {d} ns/packet
+        \\  sendmmsg:   {d} ns/batch, {d} ns/packet
+        \\  batch relative packet throughput: {d}.{d:0>2}x
+        \\  total datagrams/path: {d}
+        \\
+    , .{
+        send_iterations,
+        batch_size,
+        datagram_size,
+        addressed_individual_ns / send_iterations,
+        addressed_individual_ns / total_datagrams,
+        addressed_batch_ns / send_iterations,
+        addressed_batch_ns / total_datagrams,
+        addressed_ratio_x100 / 100,
+        addressed_ratio_x100 % 100,
+        total_datagrams,
+    });
+
     // Use fresh sockets so the sender-only phase cannot leave packets queued
     // for the receive benchmark.
     var gro_receiver = try netz.quic.runtime.Endpoint.bind(
@@ -187,6 +262,40 @@ fn measureReceive(
         total_ns +|= nowNs(io) -| started;
     }
     return total_ns;
+}
+
+fn measureAddressedIndividual(
+    io: std.Io,
+    sender: *netz.quic.runtime.Endpoint,
+    datagrams: []const netz.quic.runtime.AddressedDatagram,
+) !u64 {
+    const started = nowNs(io);
+    for (0..send_iterations) |_| {
+        for (datagrams) |datagram| {
+            try sender.sendBytes(datagram.to, datagram.bytes);
+        }
+    }
+    return nowNs(io) -| started;
+}
+
+fn measureAddressedBatch(
+    io: std.Io,
+    sender: *netz.quic.runtime.Endpoint,
+    datagrams: []const netz.quic.runtime.AddressedDatagram,
+) !u64 {
+    const started = nowNs(io);
+    for (0..send_iterations) |_| {
+        const progress = try sender.sendManyAddressedBytesProgressWithEcn(
+            datagrams,
+            .not_ect,
+        );
+        if (progress.send_error != null or
+            progress.sent_count != datagrams.len)
+        {
+            return error.IncompleteAddressedBatch;
+        }
+    }
+    return nowNs(io) -| started;
 }
 
 fn ratioTimes100(numerator: u64, denominator: u64) u64 {

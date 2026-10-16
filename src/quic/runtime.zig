@@ -140,6 +140,14 @@ pub const SendManyBytesResult = struct {
     send_error: ?net.Socket.SendError = null,
 };
 
+/// One UDP payload and its destination for heterogeneous endpoint batches.
+/// The payload and address storage must remain valid until the send call
+/// returns; the endpoint never retains either view.
+pub const AddressedDatagram = struct {
+    to: net.IpAddress,
+    bytes: []const u8,
+};
+
 /// Caller storage required to preserve the largest possible UDP_GRO receive.
 pub const max_gro_receive_bytes: usize = std.math.maxInt(u16);
 
@@ -497,22 +505,7 @@ pub const Endpoint = struct {
             var sent_count: usize = 0;
             for (datagrams) |bytes| {
                 self.sendBytesWithEcnLocked(to, bytes, ecn) catch |err| {
-                    const send_error: ?net.Socket.SendError = switch (err) {
-                        error.MessageOversize => error.MessageOversize,
-                        error.SystemResources => error.SystemResources,
-                        error.NetworkUnreachable => error.NetworkUnreachable,
-                        error.HostUnreachable => error.HostUnreachable,
-                        error.NetworkDown => error.NetworkDown,
-                        error.ConnectionRefused => error.ConnectionRefused,
-                        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
-                        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
-                        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
-                        error.SocketUnconnected => error.SocketUnconnected,
-                        error.AccessDenied => error.AccessDenied,
-                        error.Canceled => error.Canceled,
-                        error.Unexpected => error.Unexpected,
-                        else => null,
-                    };
+                    const send_error = endpointSocketSendError(err);
                     if (send_error) |value| {
                         return .{
                             .sent_count = sent_count,
@@ -556,6 +549,7 @@ pub const Endpoint = struct {
         // descriptors on the stack makes steady-state batch submission
         // allocation-free on every backend.
         var message_storage: [64]net.OutgoingMessage = undefined;
+        var expected_lengths: [64]usize = undefined;
         var offset: usize = 0;
         while (offset < datagrams.len) {
             const count = @min(message_storage.len, datagrams.len - offset);
@@ -568,40 +562,183 @@ pub const Endpoint = struct {
                     .data_len = bytes.len,
                 };
             }
-            const send_error, const sent_count = self.io.vtable.netSend(
-                self.io.userdata,
-                self.socket.handle,
+            for (expected_lengths[0..count], chunk) |*expected, bytes| {
+                expected.* = bytes.len;
+            }
+            const progress = self.sendMessageChunk(
                 messages,
-                .{},
+                expected_lengths[0..count],
             );
-            if (sent_count > count) {
-                // The backend violated its ABI, so the exact count is
-                // unknowable. Conservatively consume the entire submitted
-                // chunk: reusing any of its QUIC packet numbers would be worse
-                // than treating an unsent datagram as lost.
-                return .{ .sent_count = offset + count, .send_error = error.Unexpected };
-            }
-            self.recordSocketSentMessages(messages[0..sent_count]);
-            for (messages[0..sent_count], chunk[0..sent_count]) |message, bytes| {
-                if (message.data_len != bytes.len) {
-                    return .{
-                        .sent_count = offset + sent_count,
-                        .send_error = error.MessageOversize,
-                    };
-                }
-            }
-            offset += sent_count;
-            if (send_error) |err| {
+            offset += progress.sent_count;
+            if (progress.send_error) |err| {
                 return .{ .sent_count = offset, .send_error = err };
             }
-            // Socket.sendMany assumes the backend always supplies an error
-            // alongside a short count. Preserve that contract violation as an
-            // explicit result instead of spinning if a custom backend is bad.
-            if (sent_count != count) {
-                return .{ .sent_count = offset, .send_error = error.Unexpected };
-            }
+            std.debug.assert(progress.sent_count == count);
         }
         return .{ .sent_count = offset };
+    }
+
+    /// Batch UDP payloads for different peer addresses under one socket lock
+    /// and one backend submission per bounded chunk. This is the endpoint
+    /// counterpart to Quinn's separation between protocol `Transmit` objects
+    /// and the shared UDP socket owner. One ECN policy applies to the batch;
+    /// callers with different policies must group them separately.
+    pub fn sendManyAddressedBytes(
+        self: *Endpoint,
+        datagrams: []const AddressedDatagram,
+    ) Error!void {
+        const result = try self.sendManyAddressedBytesProgress(datagrams);
+        if (result.send_error) |err| return err;
+        std.debug.assert(result.sent_count == datagrams.len);
+    }
+
+    /// Not-ECT addressed batch with explicit socket-visible prefix progress.
+    pub fn sendManyAddressedBytesProgress(
+        self: *Endpoint,
+        datagrams: []const AddressedDatagram,
+    ) Error!SendManyBytesResult {
+        return self.sendManyAddressedBytesProgressWithEcn(
+            datagrams,
+            .not_ect,
+        );
+    }
+
+    /// Addressed prefix-progress batch with one explicit ECN policy.
+    pub fn sendManyAddressedBytesProgressWithEcn(
+        self: *Endpoint,
+        datagrams: []const AddressedDatagram,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!SendManyBytesResult {
+        self.send_mutex.lockUncancelable(self.io);
+        defer self.send_mutex.unlock(self.io);
+        return self.sendManyAddressedBytesProgressWithEcnLocked(
+            datagrams,
+            ecn,
+        );
+    }
+
+    fn sendManyAddressedBytesProgressWithEcnLocked(
+        self: *Endpoint,
+        datagrams: []const AddressedDatagram,
+        ecn: quic.packet_space.EcnCodepoint,
+    ) Error!SendManyBytesResult {
+        if (datagrams.len == 0) return .{ .sent_count = 0 };
+        for (datagrams) |datagram| {
+            if (datagram.bytes.len == 0) return error.EmptyDatagram;
+            if (datagram.bytes.len > self.limits.max_datagram_size) {
+                return error.DatagramTooLarge;
+            }
+        }
+        if (self.limits.send_interceptor != null) {
+            var sent_count: usize = 0;
+            for (datagrams) |datagram| {
+                self.sendBytesWithEcnLocked(
+                    datagram.to,
+                    datagram.bytes,
+                    ecn,
+                ) catch |err| {
+                    if (endpointSocketSendError(err)) |send_error| {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = send_error,
+                        };
+                    }
+                    if (sent_count != 0) {
+                        return .{
+                            .sent_count = sent_count,
+                            .send_error = error.Unexpected,
+                        };
+                    }
+                    return err;
+                };
+                sent_count += 1;
+            }
+            self.flushHeldSend() catch {};
+            return .{ .sent_count = datagrams.len };
+        }
+        try self.applyOutgoingEcnMark(ecn);
+
+        var message_storage: [64]net.OutgoingMessage = undefined;
+        var expected_lengths: [64]usize = undefined;
+        var offset: usize = 0;
+        while (offset < datagrams.len) {
+            const count = @min(
+                message_storage.len,
+                datagrams.len - offset,
+            );
+            const messages = message_storage[0..count];
+            const chunk = datagrams[offset..][0..count];
+            for (messages, chunk) |*message, *datagram| {
+                message.* = .{
+                    .address = &datagram.to,
+                    .data_ptr = datagram.bytes.ptr,
+                    .data_len = datagram.bytes.len,
+                };
+            }
+            for (expected_lengths[0..count], chunk) |*expected, datagram| {
+                expected.* = datagram.bytes.len;
+            }
+            const progress = self.sendMessageChunk(
+                messages,
+                expected_lengths[0..count],
+            );
+            offset += progress.sent_count;
+            if (progress.send_error) |err| {
+                return .{ .sent_count = offset, .send_error = err };
+            }
+            std.debug.assert(progress.sent_count == count);
+        }
+        return .{ .sent_count = offset };
+    }
+
+    /// Submit one already validated descriptor chunk and normalize every
+    /// backend outcome to the same prefix-progress contract used by both the
+    /// same- and heterogeneous-destination public batch APIs.
+    fn sendMessageChunk(
+        self: *Endpoint,
+        messages: []net.OutgoingMessage,
+        expected_lengths: []const usize,
+    ) SendManyBytesResult {
+        std.debug.assert(messages.len != 0);
+        std.debug.assert(messages.len == expected_lengths.len);
+        const send_error, const sent_count = self.io.vtable.netSend(
+            self.io.userdata,
+            self.socket.handle,
+            messages,
+            .{},
+        );
+        if (sent_count > messages.len) {
+            // The exact visible subset is unknowable. Consume the submitted
+            // chunk so stateful transports never reuse a protected nonce.
+            return .{
+                .sent_count = messages.len,
+                .send_error = error.Unexpected,
+            };
+        }
+        self.recordSocketSentMessages(messages[0..sent_count]);
+        for (
+            messages[0..sent_count],
+            expected_lengths[0..sent_count],
+        ) |message, expected_len| {
+            if (message.data_len != expected_len) {
+                return .{
+                    .sent_count = sent_count,
+                    .send_error = error.MessageOversize,
+                };
+            }
+        }
+        if (send_error) |err| {
+            return .{ .sent_count = sent_count, .send_error = err };
+        }
+        if (sent_count != messages.len) {
+            // A short count without an accompanying error violates std.Io's
+            // send-many contract; surface it instead of spinning.
+            return .{
+                .sent_count = sent_count,
+                .send_error = error.Unexpected,
+            };
+        }
+        return .{ .sent_count = sent_count };
     }
 
     /// Submit a Linux UDP GSO super-packet. Returning `null` means the kernel
@@ -2016,6 +2153,25 @@ fn encodeUdpGsoControl(storage: *[udp_gso_control_len]u8, segment_size: u16) []c
     return storage;
 }
 
+fn endpointSocketSendError(err: Error) ?net.Socket.SendError {
+    return switch (err) {
+        error.MessageOversize => error.MessageOversize,
+        error.SystemResources => error.SystemResources,
+        error.NetworkUnreachable => error.NetworkUnreachable,
+        error.HostUnreachable => error.HostUnreachable,
+        error.NetworkDown => error.NetworkDown,
+        error.ConnectionRefused => error.ConnectionRefused,
+        error.AddressFamilyUnsupported => error.AddressFamilyUnsupported,
+        error.FastOpenAlreadyInProgress => error.FastOpenAlreadyInProgress,
+        error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+        error.SocketUnconnected => error.SocketUnconnected,
+        error.AccessDenied => error.AccessDenied,
+        error.Canceled => error.Canceled,
+        error.Unexpected => error.Unexpected,
+        else => null,
+    };
+}
+
 fn gsoFallbackError(err: net.Socket.SendError) bool {
     // Linux uses EIO for a rejected UDP_SEGMENT operation. Zig's portable
     // socket error set has no EIO case, so std.Io normalizes it to Unexpected.
@@ -3341,6 +3497,87 @@ test "QUIC UDP endpoint sends many datagrams in one batch" {
     try std.testing.expectError(error.EmptyDatagram, sender.sendManyBytes(receiver.address(), &invalid));
 }
 
+test "QUIC UDP endpoint batches datagrams across destinations" {
+    const allocator = std.testing.allocator;
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_traffic: SocketTrafficCounters = .{};
+    var first = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer first.deinit();
+    var second = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 128 },
+    );
+    defer second.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 128,
+            .enable_gso_send = false,
+            .socket_traffic_counters = &sender_traffic,
+        },
+    );
+    defer sender.deinit();
+
+    const datagrams = [_]AddressedDatagram{
+        .{ .to = first.address(), .bytes = "a1" },
+        .{ .to = second.address(), .bytes = "b1" },
+        .{ .to = first.address(), .bytes = "a2" },
+        .{ .to = second.address(), .bytes = "b2" },
+    };
+    var no_alloc = std.testing.FailingAllocator.init(
+        allocator,
+        .{ .fail_index = 0 },
+    );
+    sender.allocator = no_alloc.allocator();
+    const progress = try sender.sendManyAddressedBytesProgress(&datagrams);
+    try std.testing.expectEqual(datagrams.len, progress.sent_count);
+    try std.testing.expectEqual(
+        @as(?net.Socket.SendError, null),
+        progress.send_error,
+    );
+    try std.testing.expect(!no_alloc.has_induced_failure);
+
+    for ([_][]const u8{ "a1", "a2" }) |expected| {
+        var received = try first.receiveBytes();
+        defer received.deinit(allocator);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
+    for ([_][]const u8{ "b1", "b2" }) |expected| {
+        var received = try second.receiveBytes();
+        defer received.deinit(allocator);
+        try std.testing.expectEqualStrings(expected, received.bytes);
+    }
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 4,
+        .sent_bytes = 8,
+    }, sender_traffic.stats());
+
+    const invalid = [_]AddressedDatagram{
+        .{ .to = first.address(), .bytes = "must-not-send" },
+        .{ .to = second.address(), .bytes = "" },
+    };
+    try std.testing.expectError(
+        error.EmptyDatagram,
+        sender.sendManyAddressedBytesProgress(&invalid),
+    );
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 4,
+        .sent_bytes = 8,
+    }, sender_traffic.stats());
+}
+
 test "QUIC UDP socket traffic counts successful single and batch I/O" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -4342,6 +4579,64 @@ test "QUIC UDP socket traffic commits only a partially sent batch prefix" {
         .received_datagrams = 1,
         .received_bytes = 5,
     }, receiver_traffic.stats());
+}
+
+test "QUIC addressed UDP batch reports a partially sent prefix" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var sender_traffic: SocketTrafficCounters = .{};
+    var first = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer first.deinit();
+    var second = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{ .max_datagram_size = 64 },
+    );
+    defer second.deinit();
+    var sender = try Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{
+            .max_datagram_size = 64,
+            .enable_gso_send = false,
+            .socket_traffic_counters = &sender_traffic,
+        },
+    );
+    defer sender.deinit();
+
+    var partial = AcceptFirstBatchDatagram{ .delegate = sender.io };
+    var partial_vtable = sender.io.vtable.*;
+    partial_vtable.netSend = AcceptFirstBatchDatagram.netSend;
+    sender.io = .{ .userdata = &partial, .vtable = &partial_vtable };
+    defer sender.io = partial.delegate;
+
+    const datagrams = [_]AddressedDatagram{
+        .{ .to = first.address(), .bytes = "first" },
+        .{ .to = second.address(), .bytes = "second" },
+    };
+    const progress = try sender.sendManyAddressedBytesProgressWithEcn(
+        &datagrams,
+        .not_ect,
+    );
+    try std.testing.expectEqual(@as(usize, 1), progress.sent_count);
+    try std.testing.expectEqual(error.NetworkDown, progress.send_error.?);
+    try std.testing.expectEqual(@as(usize, 1), partial.calls);
+    var received = try first.receiveBytes();
+    defer received.deinit(allocator);
+    try std.testing.expectEqualStrings("first", received.bytes);
+    try std.testing.expectEqual(SocketTrafficStats{
+        .sent_datagrams = 1,
+        .sent_bytes = 5,
+    }, sender_traffic.stats());
 }
 
 test "QUIC endpoint send interceptor drops selected single and batch datagrams" {

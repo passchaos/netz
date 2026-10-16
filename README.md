@@ -984,8 +984,10 @@ Current protocol coverage includes:
   single-allocation batch wrappers, and stateful connection batches that
   transactionally commit flow control, congestion, recovery, pacing, stream
   offsets, AEAD key phases, and socket-visible prefixes. Portable UDP batch
-  submission maps to Linux `sendmmsg` through Zig `std.Io`, including paced
-  two-probe PTO batches and nonce-safe partial-send recovery, plus zero-copy
+  submission maps same- or heterogeneous-destination messages to Linux
+  `sendmmsg` through Zig `std.Io`, with allocation-free address descriptors,
+  exact prefix progress, paced two-probe PTO batches, and nonce-safe
+  partial-send recovery, plus zero-copy
   Linux `UDP_SEGMENT` offload for
   contiguous equal-sized packet batches with one-shot capability fallback and
   opt-in Linux `UDP_GRO` receive coalescing with shared zero-copy segment
@@ -2102,8 +2104,9 @@ The aggregate `bench` step runs the current protocol microbenchmarks:
   bytes, one or multiple streams, iteration count, and userspace packet batch
   size, including ACK-driven packet-threshold retransmission and
   allocation-free receive consumption,
-- QUIC Linux `UDP_SEGMENT` batching versus `sendmmsg`, plus `UDP_GRO`
-  coalesced receive versus plain per-datagram receive,
+- QUIC Linux `UDP_SEGMENT` batching versus same- and multi-destination
+  `sendmmsg`, plus `UDP_GRO` coalesced receive versus plain per-datagram
+  receive,
 - QUIC 1-RTT stateful sequential send versus stateful batched protection with
   reusable scratch, full recovery/flow accounting, and UDP GSO/sendmmsg
   submission, with shared `one_rtt/frame_traits.zig` classification for

@@ -1710,6 +1710,12 @@ QUIC UDP batch benchmark
   sendmmsg:    95034 ns/batch, 1759 ns/packet
   GSO relative packet throughput: 6.58x
   total datagrams/path: 270000
+QUIC multi-destination UDP send benchmark
+  send iterations: 5000, destinations/batch: 54, bytes/packet: 1200
+  individual: 115672 ns/batch, 2142 ns/packet
+  sendmmsg:   100644 ns/batch, 1863 ns/packet
+  batch relative packet throughput: 1.14x
+  total datagrams/path: 270000
 QUIC UDP receive benchmark
   receive iterations: 5000, packets/batch: 54, bytes/packet: 1200
   GRO available after run: true
@@ -1718,6 +1724,16 @@ QUIC UDP receive benchmark
   GRO relative packet throughput: 1.51x
   total datagrams/path: 270000
 ```
+
+The multi-destination arm binds 54 independent loopback receivers and submits
+one datagram per destination. The addressed endpoint API validates the complete
+batch before its first socket operation, retains exact prefix progress after a
+partial `sendmmsg`, applies one explicit ECN policy, and uses caller-owned
+address/payload views without allocation. Direct tests cover allocation-free
+delivery order to two destinations, transactional invalid-input rejection,
+socket-traffic accounting, and a backend that accepts exactly one message
+before returning `NetworkDown`. The 1.14x sample is an internal socket-boundary
+measurement, not yet a QUIC connection throughput claim.
 
 ### HTTP/3 real-handshake paced transfer
 
