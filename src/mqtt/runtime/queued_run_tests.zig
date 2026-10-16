@@ -1,8 +1,16 @@
 const std = @import("std");
 const reconnect = @import("../reconnect.zig");
 const runtime = @import("../runtime.zig");
+const netz_runtime = @import("../../runtime.zig");
 
-test "MQTT queued run wait reports terminal handler failure" {
+const WorkerMode = enum { thread, io_task };
+
+test "MQTT queued run workers report terminal handler failure" {
+    try runQueuedWaitFailure(.thread);
+    try runQueuedWaitFailure(.io_task);
+}
+
+fn runQueuedWaitFailure(worker_mode: WorkerMode) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -60,17 +68,26 @@ test "MQTT queued run wait reports terminal handler failure" {
     );
     defer client.deinit();
     var handler: Handler = .{};
-    var run = try client.runQueued(
-        Handler,
-        &handler,
-        Handler.handle,
-        .{
-            .queue_capacity = 1,
-            .serve = .{
-                .poll = .{ .timeout = .fromSeconds(1) },
-            },
+    const run_options: reconnect.RunQueuedOptions = .{
+        .queue_capacity = 1,
+        .serve = .{
+            .poll = .{ .timeout = .fromSeconds(1) },
         },
-    );
+    };
+    var run = switch (worker_mode) {
+        .thread => try client.runQueued(
+            Handler,
+            &handler,
+            Handler.handle,
+            run_options,
+        ),
+        .io_task => try client.runQueuedAsync(
+            Handler,
+            &handler,
+            Handler.handle,
+            run_options,
+        ),
+    };
     var run_deinitialized = false;
     defer {
         if (!run_deinitialized) _ = run.deinit();
@@ -105,7 +122,12 @@ test "MQTT queued run wait reports terminal handler failure" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT queued event run wait preserves timeout budget and clean result" {
+test "MQTT queued event workers preserve timeout budget and clean result" {
+    try runQueuedEventWait(.thread);
+    try runQueuedEventWait(.io_task);
+}
+
+fn runQueuedEventWait(worker_mode: WorkerMode) !void {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -154,7 +176,7 @@ test "MQTT queued event run wait preserves timeout budget and clean result" {
     defer client.deinit();
     var events = try reconnect.ClientEventQueue.init(allocator, io, 1);
     defer events.deinit();
-    var run = try client.runQueuedEvents(&events, .{
+    const run_options: reconnect.RunQueuedOptions = .{
         .queue_capacity = 1,
         .serve = .{
             .poll = .{
@@ -162,7 +184,11 @@ test "MQTT queued event run wait preserves timeout budget and clean result" {
                 .cancellation_check_interval = .fromMilliseconds(5),
             },
         },
-    });
+    };
+    var run = switch (worker_mode) {
+        .thread => try client.runQueuedEvents(&events, run_options),
+        .io_task => try client.runQueuedEventsAsync(&events, run_options),
+    };
     var run_deinitialized = false;
     defer {
         if (!run_deinitialized) _ = run.deinit();
@@ -195,5 +221,126 @@ test "MQTT queued event run wait preserves timeout budget and clean result" {
     run_deinitialized = true;
     server_thread.join();
     server_joined = true;
+    if (shared.err) |err| return err;
+}
+
+test "MQTT queued async worker runs on zio std.Io" {
+    const allocator = std.testing.allocator;
+    var backend = try netz_runtime.Backend.init(allocator);
+    defer backend.deinit();
+    const io = backend.io();
+    var server = try runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer server.deinit();
+
+    const Shared = struct {
+        server: *runtime.Server,
+        err: ?anyerror = null,
+
+        fn run(self: *@This()) void {
+            self.runFallible() catch |err| {
+                self.err = err;
+            };
+        }
+
+        fn runFallible(self: *@This()) !void {
+            var accepted = try self.server.accept(.{ .protocol = .v5 });
+            defer accepted.deinit(self.server.allocator);
+            var publish = try accepted.connection.readPublish();
+            defer publish.deinit(self.server.allocator);
+            try std.testing.expectEqualStrings(
+                "async/zio",
+                publish.publish.topic,
+            );
+            try std.testing.expectEqualStrings(
+                "executor",
+                publish.publish.payload,
+            );
+            var disconnect = try accepted.connection.readDisconnect();
+            defer disconnect.deinit(self.server.allocator);
+            try std.testing.expectEqual(
+                @as(u8, 0),
+                disconnect.disconnect.reason_code,
+            );
+        }
+    };
+    const Handler = struct {
+        fn handle(
+            _: *@This(),
+            _: *reconnect.Client,
+            _: *reconnect.ClientEvent,
+        ) !void {}
+    };
+
+    var shared = Shared{ .server = &server };
+    var server_task = io.async(Shared.run, .{&shared});
+    defer server_task.cancel(io);
+    var shutdown: std.Io.Event = .unset;
+    var client = try reconnect.Client.init(
+        allocator,
+        io,
+        server.address(),
+        .{ .protocol = .v5, .client_id = "queued-async-zio" },
+        .{},
+        &shutdown,
+    );
+    defer client.deinit();
+    var handler: Handler = .{};
+    var run = try client.runQueuedAsync(
+        Handler,
+        &handler,
+        Handler.handle,
+        .{
+            .queue_capacity = 2,
+            .serve = .{
+                .poll = .{ .timeout = .fromSeconds(1) },
+            },
+        },
+    );
+    var run_deinitialized = false;
+    defer if (!run_deinitialized) {
+        _ = run.deinit();
+    };
+    var completions = try reconnect.CompletionQueue.init(allocator, io, 2);
+    defer completions.deinit();
+
+    const publish_id = try run.publishQueued(
+        &completions,
+        "async/zio",
+        "executor",
+        .{},
+    );
+    var publish_completion = try completions.receive();
+    defer publish_completion.deinit();
+    try std.testing.expectEqual(
+        publish_id,
+        publish_completion.command_id,
+    );
+    switch (try publish_completion.result) {
+        .publish => |packet_id| try std.testing.expect(packet_id == null),
+        else => return error.UnexpectedPacket,
+    }
+
+    const disconnect_id = try run.disconnectQueued(
+        &completions,
+        0,
+        &.{},
+    );
+    var disconnect_completion = try completions.receive();
+    defer disconnect_completion.deinit();
+    try std.testing.expectEqual(
+        disconnect_id,
+        disconnect_completion.command_id,
+    );
+    try std.testing.expect(try disconnect_completion.result == .disconnect);
+    try std.testing.expect((try run.waitTimeout(.fromSeconds(1))) == null);
+    try std.testing.expect(run.deinit() == null);
+    run_deinitialized = true;
+
+    server_task.await(io);
     if (shared.err) |err| return err;
 }

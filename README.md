@@ -1314,7 +1314,10 @@ Current protocol coverage includes:
   conditional Response Information, Request Problem Information filtering for server ACK/AUTH diagnostics, Receive Maximum capped by local inflight limits, Maximum Packet Size, negotiated-or-configured Maximum QoS and Retain Available enforcement for incoming/outgoing publishes, and Topic Alias negotiation/resolution capped to local alias storage with outgoing alias registration checks, QoS publish inflight limiting, and
   adaptive connection-local Packet Identifier tracking with independent
   incoming/outgoing sparse maps and bounded dense fallback for unusually large
-  inflight windows, plus reconnecting one-attempt publishes whose returned
+  inflight windows, plus a single-owner reconnect command/event driver whose
+  managed network worker can run on a dedicated OS thread or the caller's
+  existing `std.Io` executor with the same stop, bounded-wait, terminal-error,
+  and deinit contract, plus reconnecting one-attempt publishes whose returned
   Packet Identifier is transactionally bound to the submitted message without
   hidden queue insertion when Receive Maximum is exhausted, and
   MQTT 5 Server Reference validation plus opt-in bounded, loop-detecting

@@ -225,7 +225,43 @@ pub const RunQueuedOptions = struct {
 const QueuedRunState = struct {
     finished: std.Io.Event = .unset,
     result: ?anyerror = null,
+    io_task: std.Io.Future(void) = undefined,
 };
+
+const QueuedRunWorker = union(enum) {
+    thread: std.Thread,
+    io_task,
+};
+
+fn QueuedRunWorkerFn(
+    comptime Context: type,
+    comptime handler: *const fn (
+        *Context,
+        *Client,
+        *ClientEvent,
+    ) anyerror!void,
+) type {
+    return struct {
+        fn run(
+            client: *Client,
+            command_channel: *CommandQueue,
+            handler_context: *Context,
+            run_state: *QueuedRunState,
+            serve_options: QueuedServeOptions,
+        ) void {
+            defer run_state.finished.set(client.io);
+            client.serveQueuedUntil(
+                command_channel,
+                Context,
+                handler_context,
+                handler,
+                serve_options,
+            ) catch |err| {
+                run_state.result = err;
+            };
+        }
+    };
+}
 
 pub const QueuedRunWaitError = std.Io.Cancelable;
 pub const QueuedRunWaitTimeoutError = std.Io.Event.WaitTimeoutError;
@@ -234,7 +270,7 @@ pub const QueuedRun = struct {
     io: std.Io,
     shutdown: *std.Io.Event,
     queue: *CommandQueue,
-    worker: std.Thread,
+    worker: QueuedRunWorker,
     state: *QueuedRunState,
 
     pub fn publish(
@@ -934,7 +970,10 @@ pub const QueuedRun = struct {
     /// Deinitialization requests shutdown, so joining an idle worker is safe.
     pub fn deinit(self: *QueuedRun) ?anyerror {
         self.stop();
-        self.worker.join();
+        switch (self.worker) {
+            .thread => |worker| worker.join(),
+            .io_task => self.state.io_task.await(self.io),
+        }
         const result = self.state.result;
         const allocator = self.queue.allocator;
         allocator.destroy(self.state);
@@ -979,6 +1018,25 @@ pub const OwnedClientEvent = ClientEventQueue.OwnedEvent;
 pub const ClientEventQueueError = ClientEventQueue.Error;
 pub const ClientEventQueueReceiveTimeoutError =
     ClientEventQueue.ReceiveTimeoutError;
+
+const QueuedEventAdapter = struct {
+    fn handle(
+        queue: *ClientEventQueue,
+        client: *Client,
+        event: *ClientEvent,
+    ) !void {
+        queue.send(event.*, client.allocator) catch |err| switch (err) {
+            error.EventQueueClosed => if (client.shutdown.isSet())
+                return
+            else
+                return err,
+            error.Canceled => return error.Canceled,
+        };
+        // `serveQueuedUntil` releases its local event after callback return.
+        // Replace it with a non-owning variant after transfer.
+        event.* = .{ .pingresp = {} };
+    }
+};
 
 /// Managed reconnect worker paired with its event sink. Closing the sink
 /// before joining ensures bounded-queue backpressure cannot deadlock shutdown.
@@ -2832,31 +2890,55 @@ pub const Client = struct {
             options.queue_capacity,
         );
         errdefer queue.deinit();
-        const worker = try std.Thread.spawn(.{}, struct {
-            fn run(
-                client: *Client,
-                command_channel: *CommandQueue,
-                handler_context: *Context,
-                run_state: *QueuedRunState,
-                serve_options: QueuedServeOptions,
-            ) void {
-                defer run_state.finished.set(client.io);
-                client.serveQueuedUntil(
-                    command_channel,
-                    Context,
-                    handler_context,
-                    handler,
-                    serve_options,
-                ) catch |err| {
-                    run_state.result = err;
-                };
-            }
-        }.run, .{ self, queue, context, state, options.serve });
+        const worker = try std.Thread.spawn(
+            .{},
+            QueuedRunWorkerFn(Context, handler).run,
+            .{ self, queue, context, state, options.serve },
+        );
         return .{
             .io = self.io,
             .shutdown = self.shutdown,
             .queue = queue,
-            .worker = worker,
+            .worker = .{ .thread = worker },
+            .state = state,
+        };
+    }
+
+    /// Schedule the managed reconnect worker on this Client's existing
+    /// `std.Io` executor instead of creating an OS thread. The returned handle
+    /// has the same producer, stop, wait, and deinit contract as `runQueued`;
+    /// deinit awaits the task after requesting graceful shutdown.
+    pub fn runQueuedAsync(
+        self: *Client,
+        comptime Context: type,
+        context: *Context,
+        comptime handler: *const fn (
+            *Context,
+            *Client,
+            *ClientEvent,
+        ) anyerror!void,
+        options: RunQueuedOptions,
+    ) std.mem.Allocator.Error!QueuedRun {
+        const state = try self.allocator.create(QueuedRunState);
+        errdefer self.allocator.destroy(state);
+        state.* = .{};
+        const queue = try self.allocator.create(CommandQueue);
+        errdefer self.allocator.destroy(queue);
+        queue.* = try CommandQueue.init(
+            self.allocator,
+            self.io,
+            options.queue_capacity,
+        );
+        errdefer queue.deinit();
+        state.io_task = self.io.async(
+            QueuedRunWorkerFn(Context, handler).run,
+            .{ self, queue, context, state, options.serve },
+        );
+        return .{
+            .io = self.io,
+            .shutdown = self.shutdown,
+            .queue = queue,
+            .worker = .io_task,
             .state = state,
         };
     }
@@ -2870,29 +2952,29 @@ pub const Client = struct {
         events: *ClientEventQueue,
         options: RunQueuedOptions,
     ) (std.mem.Allocator.Error || std.Thread.SpawnError)!QueuedEventRun {
-        const Adapter = struct {
-            fn handle(
-                queue: *ClientEventQueue,
-                client: *Client,
-                event: *ClientEvent,
-            ) !void {
-                queue.send(event.*, client.allocator) catch |err| switch (err) {
-                    error.EventQueueClosed => if (client.shutdown.isSet())
-                        return
-                    else
-                        return err,
-                    error.Canceled => return error.Canceled,
-                };
-                // `serveQueuedUntil` releases its local event after callback
-                // return. Replace it with a non-owning variant after transfer.
-                event.* = .{ .pingresp = {} };
-            }
-        };
         return .{
             .commands = try self.runQueued(
                 ClientEventQueue,
                 events,
-                Adapter.handle,
+                QueuedEventAdapter.handle,
+                options,
+            ),
+            .events = events,
+        };
+    }
+
+    /// `runQueuedEvents` using the Client's existing `std.Io` executor rather
+    /// than a dedicated OS thread.
+    pub fn runQueuedEventsAsync(
+        self: *Client,
+        events: *ClientEventQueue,
+        options: RunQueuedOptions,
+    ) std.mem.Allocator.Error!QueuedEventRun {
+        return .{
+            .commands = try self.runQueuedAsync(
+                ClientEventQueue,
+                events,
+                QueuedEventAdapter.handle,
                 options,
             ),
             .events = events,

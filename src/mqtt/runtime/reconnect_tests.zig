@@ -2978,7 +2978,7 @@ test "MQTT queued run owns async subscription commands and results" {
     if (shared.err) |err| return err;
 }
 
-test "MQTT queued run exposes awaitable owned command completions" {
+test "MQTT queued async run exposes awaitable owned command completions" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{
         .async_limit = .unlimited,
@@ -3057,7 +3057,7 @@ test "MQTT queued run exposes awaitable owned command completions" {
     );
     defer client.deinit();
     var handler: Handler = .{};
-    var run = try client.runQueued(
+    var run = try client.runQueuedAsync(
         Handler,
         &handler,
         Handler.handle,

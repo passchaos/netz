@@ -3070,8 +3070,14 @@ injection below the filesystem syscall
 boundary remains the responsibility of the commit-log and atomic-file fault
 tests rather than the socket fuzzers.
 
-The reconnect layer's network owner remains synchronous internally. The public
-managed worker accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
+The reconnect layer retains one synchronous network owner internally, but its
+public managed worker can run either on a dedicated OS thread or as a task on
+the Client's existing `std.Io` executor. `runQueuedAsync` and
+`runQueuedEventsAsync` return the same `QueuedRun`/`QueuedEventRun` handles as
+the thread-backed forms, so producers retain identical stop, wait,
+timeout/deadline, terminal-error, and deinit contracts; deinit joins the thread
+or awaits the I/O task only after requesting graceful shutdown. The worker
+accepts owned PUBLISH, SUBSCRIBE, UNSUBSCRIBE, manual ACK,
 graceful DISCONNECT, pending-PUBLISH flush and re-authentication commands with
 typed, correlated completion callbacks. A bounded `CompletionQueue` adapter
 additionally provides blocking, relative-timeout, absolute-deadline, and
@@ -3083,12 +3089,11 @@ second socket reader. The owned `PublishDeliveryQueue` now provides the same
 four receive modes for terminal outbound PUBLISH results, including a caller-
 owned awake-clock deadline that composes with earlier stages. All three queues
 expose their timeout-capable error sets at the reconnect module boundary.
-Further parity work is ergonomic integration with
-application-specific async executors rather than missing operations, event
-delivery, or completion storage. Re-authentication properties are deep-owned
+Re-authentication properties are deep-owned
 until the initiating AUTH write completes. The single-owner bounded poll path,
 callback
-driver, managed background-thread wrapper, optional application-controlled QoS
+driver, thread- or `std.Io`-task-backed managed wrapper, optional
+application-controlled QoS
 1/2 acknowledgements, an owned bounded terminal-delivery queue, and the bounded
 command queue already support explicit
 client-initiated re-authentication and drive both directions of
@@ -3183,9 +3188,15 @@ Managed `QueuedRun` and `QueuedEventRun` workers additionally expose
 `isFinished`, cancelable `wait`, and relative/absolute bounded waits. Their
 move-stable completion state publishes the exact terminal poll or handler error
 before waking every waiter; waiting never joins or frees the worker, while
-`deinit` remains the single resource-reclamation boundary. This lets supervisors
-compose multiple reconnect loops without hanging on an event queue after one
-side has already failed.
+`deinit` remains the single resource-reclamation boundary. Real loopback tests
+run both worker modes through terminal handler failure, concurrent waiters,
+bounded wait expiry, owned event-queue transfer, and clean shutdown. This lets
+supervisors compose multiple reconnect loops without hanging on an event queue
+after one side has already failed or reserving a dedicated thread per client.
+A separate zio-backed test schedules both the broker and reconnect owner on one
+`std.Io` executor, then completes an owned PUBLISH command, graceful DISCONNECT,
+terminal wait, and teardown. The task Future lives in the existing move-stable
+run state, so choosing the executor path does not add a third heap allocation.
 `Client.publishOneAttempt` exposes the complementary low-level boundary for
 coordinators: on a retryable QoS 1/2 write failure it returns immediately with
 the retained Packet Identifier and leaves reconnect/replay to later `pollWith*`
