@@ -8318,6 +8318,30 @@ was reverted by `9d9bbc3`; Netz retains its already allocation-free,
 per-thread/per-second formatted-value cache and fresh real-clock check, matching
 Hyper's freshness model without weakening deadline or timer semantics.
 
+A 2026-10-16 current-source audit deliberately stopped before changing the
+QUIC receive path. Five CPU-0 ReleaseFast runs of
+`bench-quic-one-rtt-receive --mode=visitor --frame=stream` used 500 warmups and
+5,000 iterations (270,000 packets) and measured 2,146-2,166 ns/packet with a
+2,155 ns median. A separate 30,000-iteration profile measured 2,161 ns/packet,
+captured about 24,000 cycle samples, and lost zero samples. Self shares were
+34.39% AES CTR, 15.01% GHASH update, 5.36% PMULL GHASH blocks, 2.63% traffic-key
+protect, 2.15% current-key packet open, 1.96% GHASH block-count setup, and
+1.91% header-protection masking. The benchmark seals and opens every packet,
+so both directions intentionally contribute to those crypto totals.
+
+The remaining visible Netz receive work was individually small:
+`applyReceivedFramesForDestinationOrClose` 0.86%, service-frame parsing 0.72%,
+QUIC varint decode 0.69%, receive-stream lookup 0.53%, tracked STREAM insertion
+0.46%, and STREAM precondition validation 0.39%. `clock_gettime` accounted for
+7.80% below zio polling and waiting; it is not a reason to retry the rejected
+cached-send-time experiment, because a continuously runnable shared endpoint
+can bypass the poll that would advance such a snapshot. The current dominant
+optimization boundary is therefore Vail's prepared AES/GHASH implementation
+or a materially different crypto backend, followed by runtime scheduling.
+No production candidate was retained: removing validation, recovery,
+ownership, exact clock, or cancellation work to chase sub-1% self symbols
+would not meet the repository's end-to-end evidence threshold.
+
 ## Gaps before a completion audit can pass
 
 - Capture the raw QUIC process matrix at the kernel/interface boundary on a
