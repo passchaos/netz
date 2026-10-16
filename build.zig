@@ -1690,6 +1690,28 @@ pub fn build(b: *std.Build) void {
     );
     http_external_clients_step.dependOn(&http_external_clients.step);
 
+    const http_cookie_jar_peer = b.addExecutable(.{
+        .name = "netz-http-cookie-jar-peer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/http_cookie_jar_peer.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const http_cookie_curl = b.addSystemCommand(&.{
+        "python3",
+        "tools/interop/http_cookie_curl.py",
+    });
+    http_cookie_curl.addArtifactArg(http_cookie_jar_peer);
+    const http_cookie_curl_step = b.step(
+        "interop-http-cookie-curl",
+        "Compare Netz CookieJar path/order behavior with curl",
+    );
+    http_cookie_curl_step.dependOn(&http_cookie_curl.step);
+
     const http2_hyper_client = b.addExecutable(.{
         .name = "netz-http2-hyper-client",
         .root_module = b.createModule(.{

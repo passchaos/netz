@@ -1092,6 +1092,28 @@ borrowed field slices—not a copied owned response—and become invalid at the
 response's existing deinit boundary. This closes the unified equivalent of
 Hyper/http's `HeaderMap::iter`, `get_all`, and body-trailer access without a
 temporary allocation or comma-joining fields whose grammar forbids it.
+That complete repeated-field surface now feeds a protocol-neutral, explicit
+`http.CookieJar`. It implements the December 2025 RFC6265bis-22 user-agent
+algorithm rather than the stricter server grammar: CTLs and the 4,096-byte
+name/value ceiling fail closed while legacy non-token values remain
+interoperable; Max-Age overrides Expires and both are capped at the recommended
+400 days. Deep-owned cookies retain host-only versus Domain identity, default
+and explicit Path, Secure/HttpOnly, SameSite Strict/Lax/None/Default (including
+the bounded Lax-allowing-unsafe window), case-insensitive prefix enforcement,
+secure-cookie overlay protection, creation/access order, persistent/session
+state, and deterministic bounded eviction. Domain cookies are disabled by the
+secure default until an application explicitly accepts unchecked matching or
+installs an up-to-date Public Suffix callback. The jar renders one ordered
+Cookie value into caller or allocator storage without changing the underlying
+pooled response. Its redirected-response entry point uses the owned
+`final_uri`, preventing a cross-origin chain from storing state against the
+initiating URI. `zig build interop-http-cookie-curl -Doptimize=ReleaseFast`
+independently matches curl 8.5/libcurl's repeated Set-Cookie, default/explicit
+Path, and ordinary/deep request ordering.
+The shared `fuzz-parsers` target also sends every bounded arbitrary input
+through Set-Cookie parsing, deep-owned storage, URI matching, caller-buffer
+Cookie rendering, and teardown; its structured corpus includes persistent,
+Secure, HttpOnly, SameSite, and Path attributes.
 
 ## Current feature comparison
 

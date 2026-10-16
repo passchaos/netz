@@ -46,6 +46,9 @@ const qpack_encoder_seed = smithSliceSeed(&.{
     0x3f, 0xbd, 0x01, 0xc0, 0x03, 'n', 'e', 't',
 });
 const qpack_decoder_seed = smithSliceSeed(&.{ 0x81, 0x41, 0x01 });
+const cookie_seed = smithSliceSeed(
+    "sid=abc; Path=/docs; Secure; HttpOnly; SameSite=Lax; Max-Age=60",
+);
 
 test "fuzz bounded cross-protocol parsers" {
     try std.testing.fuzz({}, fuzzAllParsers, .{ .corpus = &.{
@@ -59,6 +62,7 @@ test "fuzz bounded cross-protocol parsers" {
         &http3_headers_seed,
         &qpack_encoder_seed,
         &qpack_decoder_seed,
+        &cookie_seed,
         &websocket_text_seed,
         &websocket_close_seed,
         &websocket_extended_seed,
@@ -85,6 +89,7 @@ test "bounded deterministic parser mutation smoke" {
         http3_headers_seed[4..],
         qpack_encoder_seed[4..],
         qpack_decoder_seed[4..],
+        cookie_seed[4..],
         websocket_text_seed[4..],
         websocket_close_seed[4..],
         websocket_extended_seed[4..],
@@ -138,6 +143,29 @@ fn exerciseHttp(bytes: []const u8) !void {
     try exerciseHttp1(bytes);
     try exerciseHttp2(bytes);
     try exerciseHttp3(bytes);
+    try exerciseCookies(bytes);
+}
+
+fn exerciseCookies(bytes: []const u8) !void {
+    var jar = try netz.http.CookieJar.init(std.testing.allocator, .{
+        .max_cookies = 2,
+        .max_cookies_per_domain = 2,
+    });
+    defer jar.deinit();
+    _ = try jar.storeSetCookie(
+        "https://example.test/docs/item",
+        bytes,
+        1_700_000_000,
+    );
+    try std.testing.expect(jar.count() <= 1);
+    var out: [netz.http.CookieMaximumBytes]u8 = undefined;
+    const value = try jar.cookieHeaderValueInto(
+        "https://example.test/docs/next",
+        1_700_000_001,
+        .{},
+        &out,
+    );
+    try std.testing.expect(value.len <= out.len);
 }
 
 fn exerciseHttp1(bytes: []const u8) !void {

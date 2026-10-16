@@ -187,6 +187,24 @@ Current protocol coverage includes:
   `http.OwnedResponse` and redirected responses retain the same explicit
   allocating/caller-buffer decode surface without hiding a representation
   transform inside connection pooling,
+- An explicit, single-owner RFC 6265/RFC6265bis-22 `http.CookieJar` that
+  deep-owns state from every repeated H1/H2/H3 `Set-Cookie` field; validates
+  the lenient user-agent syntax with CTL and 4,096-byte bounds; applies
+  Max-Age-over-Expires precedence, the recommended 400-day lifetime cap,
+  host/default paths, Secure/HttpOnly, case-insensitive `__Secure-`/`__Host-`
+  rules, insecure secure-cookie overlay protection, SameSite
+  Strict/Lax/None/Lax-by-default and the bounded unsafe-navigation window;
+  preserves host-only and Domain cookies as distinct keys; and emits ordered
+  Cookie values into caller or allocator storage. A dedicated redirected-
+  response entry point binds new state to `final_uri`, never the initiating
+  origin. Domain cookies fail closed
+  by default until the caller explicitly selects unchecked matching or
+  supplies a current Public Suffix checker; internationalized domains use
+  caller-provided IDNA A-labels. A separate outgoing header ceiling prevents
+  aggregate state from creating an unbounded request field. Bounded
+  per-domain/global eviction
+  prefers non-Secure excess state then oldest access, and `endSession` removes
+  non-persistent cookies,
 - A unified `http.Client`/`http.Connection` surface for HTTP/1.1 and HTTP/2,
   plus an optional HTTP/3-capable `http.Pool`:
   HTTPS performs one certificate-verified vail TLS 1.2/1.3 handshake offering
@@ -1576,6 +1594,9 @@ zig build interop-http-unified-hyper -Doptimize=ReleaseFast
 # verified TLS, H1 chunked and H2 multiplexed bodies/trailers, ALPN, and
 # persistent same-connection reuse in every applicable matrix arm.
 zig build interop-http-external-clients -Doptimize=ReleaseFast
+# Compare repeated Set-Cookie ingestion, default/explicit Path matching, and
+# Cookie ordering directly with the installed curl/libcurl cookie engine.
+zig build interop-http-cookie-curl -Doptimize=ReleaseFast
 # All netz HTTP/2 interop endpoints obtain `std.Io` from the zio-backed runtime;
 # the Hyper and direct h2 peers identify their Tokio execution backend in the
 # success records, and the h2spec server schedules accepted sockets with zio.

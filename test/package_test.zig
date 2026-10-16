@@ -280,6 +280,33 @@ test "public modules are reachable" {
         "decodeContentInto",
     ));
     try std.testing.expect(@hasDecl(netz.http, "HeaderIterator"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieJar"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieMaximumBytes"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieJarConfig"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieDomainPolicy"));
+    try std.testing.expect(@hasDecl(netz.http, "CookiePublicSuffixChecker"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSiteContext"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieRequestContext"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieStoreContext"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieStoreSummary"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieStoreResult"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSameSite"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieJarError"));
+    try std.testing.expect(@hasDecl(netz.http.CookieJar, "storeSetCookie"));
+    try std.testing.expect(@hasDecl(netz.http.CookieJar, "storeResponse"));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "storeRedirectedResponse",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "cookieHeaderValueInto",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "cookieHeaderValueAlloc",
+    ));
+    try std.testing.expect(@hasDecl(netz.http.CookieJar, "endSession"));
     try std.testing.expect(@hasDecl(
         netz.http.OwnedResponse,
         "headers",

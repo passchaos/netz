@@ -2,6 +2,7 @@
 
 pub const content_coding = @import("content_coding.zig");
 pub const alt_svc_cache = @import("alt_svc_cache.zig");
+pub const cookies = @import("cookies/mod.zig");
 pub const AltSvcCache = alt_svc_cache.Cache;
 pub const AltSvcCacheConfig = alt_svc_cache.Config;
 pub const AltSvcAlternative = alt_svc_cache.Alternative;
@@ -13,6 +14,18 @@ pub const ContentStreamDecoder = content_coding.StreamDecoder;
 pub const ContentStreamOptions = content_coding.StreamOptions;
 pub const ContentStreamResult = content_coding.StreamResult;
 pub const ContentStreamStatus = content_coding.StreamStatus;
+pub const CookieJar = cookies.Jar;
+pub const CookieMaximumBytes = cookies.maximum_cookie_bytes;
+pub const CookieJarConfig = cookies.Config;
+pub const CookieDomainPolicy = cookies.DomainPolicy;
+pub const CookiePublicSuffixChecker = cookies.PublicSuffixChecker;
+pub const CookieSiteContext = cookies.SiteContext;
+pub const CookieRequestContext = cookies.RequestContext;
+pub const CookieStoreContext = cookies.StoreContext;
+pub const CookieStoreResult = cookies.StoreResult;
+pub const CookieStoreSummary = cookies.StoreSummary;
+pub const CookieSameSite = cookies.SameSite;
+pub const CookieJarError = cookies.Error;
 pub const client = @import("client.zig");
 pub const client_pool = @import("client_pool.zig");
 pub const Client = client.Client;
@@ -40,6 +53,7 @@ pub const PoolOperationError = client_pool.OperationError;
 test {
     _ = content_coding;
     _ = alt_svc_cache;
+    _ = cookies;
     _ = client;
     _ = client_pool;
     _ = @import("content_coding/tests.zig");
