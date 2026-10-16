@@ -3320,8 +3320,14 @@ reload disconnects nobody. The same production gate source-locks Mosquitto
 while offline, SIGHUP removes read access for one topic, and reconnect reports
 Session Present while delivering only the still-authorized message. PUBACK
 followed by an immediate PINGRESP proves the denied queued entry was removed
-rather than delivered or left blocking the Session head. Another starts with
-client A accepted and client B
+rather than delivered or left blocking the Session head. A companion
+source-locks Mosquitto `15-persist-client-msg-modify-acl.py` across three
+production broker generations. The first snapshots two offline QoS 1 entries;
+the second starts with a narrower ACL, restores Session Present, delivers only
+the authorized entry and persists that cleanup; the third restores the same
+Session and answers PING with no stale delivery. This proves restart-time
+snapshot restore cannot preserve pre-restart authorization or resurrect a
+denied queue tombstone. Another starts with client A accepted and client B
 revoked, swaps the CRL through SIGHUP and proves
 that outcome reverses, then supplies a signature-mutated CRL and proves the
 failed reload retains the prior policy on the same live listener. Bridge

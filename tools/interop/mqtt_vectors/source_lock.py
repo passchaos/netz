@@ -185,6 +185,8 @@ MOSQUITTO_SOURCE_SHA256 = {
         "87221b66d976bb842569f258ecb7d50e5edc3eab7eeb448b9eec3d4296df03a5",
     "broker/15-persist-client-msg-in-v5-0.py":
         "54c3878816bfa0b5a8e25138c72ed2a95384052db640bd5226f4f8a1f9e1617b",
+    "broker/15-persist-client-msg-modify-acl.py":
+        "c865bd2e87ed6f17f28c89d07006cd628e7ef3c3fa8669d75ee1ed1db425fc30",
     "broker/15-persist-client-msg-out-v5-0.py":
         "2612901cb197a0c602ae6dc34b46d80a742f6b35cdc3757a81ddf10d77093b97",
     "broker/15-persist-client-expired-session.py":

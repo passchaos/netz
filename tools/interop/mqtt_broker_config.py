@@ -285,6 +285,44 @@ def puback_reason(packet: bytes, packet_id: int) -> int:
     return acknowledgment_reason(packet, 0x40, packet_id)
 
 
+def expect_v311_qos1_delivery(
+    client: socket.socket,
+    expected_topic: str,
+    expected_payload: bytes,
+    label: str,
+) -> None:
+    packet = read_mqtt_packet(client)
+    if packet[0] != 0x32:
+        raise AssertionError(
+            f"{label}: expected QoS 1 PUBLISH, received {packet.hex()}"
+        )
+    offset = 1
+    multiplier = 1
+    remaining = 0
+    while True:
+        byte = packet[offset]
+        offset += 1
+        remaining += (byte & 0x7F) * multiplier
+        if byte & 0x80 == 0:
+            break
+        multiplier *= 128
+    if offset + remaining != len(packet):
+        raise AssertionError(f"{label}: malformed queued PUBLISH")
+    topic_len = int.from_bytes(packet[offset : offset + 2], "big")
+    offset += 2
+    topic = packet[offset : offset + topic_len].decode()
+    offset += topic_len
+    packet_id = int.from_bytes(packet[offset : offset + 2], "big")
+    offset += 2
+    payload = packet[offset:]
+    if topic != expected_topic or payload != expected_payload:
+        raise AssertionError(
+            f"{label}: queued PUBLISH mismatch: "
+            f"topic={topic!r} payload={payload!r}"
+        )
+    client.sendall(b"\x40\x02" + packet_id.to_bytes(2, "big"))
+
+
 def expect_no_packet(sock: socket.socket, label: str) -> None:
     previous_timeout = sock.gettimeout()
     sock.settimeout(0.15)
@@ -2478,43 +2516,6 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
                 f"{expected_reason:#x}, received {reason:#x}"
             )
 
-    def expect_qos1_delivery(
-        client: socket.socket,
-        expected_topic: str,
-        expected_payload: bytes,
-    ) -> None:
-        packet = read_mqtt_packet(client)
-        if packet[0] != 0x32:
-            raise AssertionError(
-                "security reload expected QoS 1 PUBLISH, received "
-                + packet.hex()
-            )
-        offset = 1
-        multiplier = 1
-        remaining = 0
-        while True:
-            byte = packet[offset]
-            offset += 1
-            remaining += (byte & 0x7F) * multiplier
-            if byte & 0x80 == 0:
-                break
-            multiplier *= 128
-        if offset + remaining != len(packet):
-            raise AssertionError("security reload malformed queued PUBLISH")
-        topic_len = int.from_bytes(packet[offset : offset + 2], "big")
-        offset += 2
-        topic = packet[offset : offset + topic_len].decode()
-        offset += topic_len
-        packet_id = int.from_bytes(packet[offset : offset + 2], "big")
-        offset += 2
-        payload = packet[offset:]
-        if topic != expected_topic or payload != expected_payload:
-            raise AssertionError(
-                "security reload queued PUBLISH mismatch: "
-                f"topic={topic!r} payload={payload!r}"
-            )
-        client.sendall(b"\x40\x02" + packet_id.to_bytes(2, "big"))
-
     clients: list[socket.socket] = []
     try:
         old = connect(
@@ -2590,10 +2591,11 @@ def run_security_reload_case(broker: Path, directory: Path) -> None:
             expected_session_present=True,
         )
         clients.append(durable)
-        expect_qos1_delivery(
+        expect_v311_qos1_delivery(
             durable,
             "queued/allowed",
             b"reload",
+            "security reload",
         )
         # The now-denied queued message must be removed rather than left at
         # the Session head or delivered from pre-reload authorization state.
@@ -3792,6 +3794,172 @@ def run_persistence_case(broker: Path, directory: Path) -> None:
             raise AssertionError(
                 f"persistent config pass {pass_number} did not save snapshot"
             )
+
+
+def run_persistence_acl_restart_case(
+    broker: Path,
+    directory: Path,
+) -> None:
+    port = free_port()
+    snapshot = directory / "persistence-acl-restart.db"
+    config = directory / "persistence-acl-restart.conf"
+    password_file = directory / "persistence-acl-restart.pwfile"
+    acl_file = directory / "persistence-acl-restart.acl"
+    username = "persist-acl-user"
+    password_hash = (
+        "$7$1000$"
+        "h0tqVxBwkB9rKAXukTtffzdbBQtNy1q5FBTDwSW4hucfjpqunBbxW10NVnRk7Cfh0lQndnOv2+k4wJavgz1JNw==$"
+        "02ujkUXlKkJGFzlQHNjUgXwG3XRB1mr3vs8NX5teGCJGbN4hdgSpHNHuj47j8r5SHXsO7GeHpmkpPNhLraVVcQ=="
+    )
+    password_file.write_text(f"{username}:{password_hash}\n")
+
+    def write_acl(restricted: bool) -> None:
+        acl_file.write_text(
+            f"user {username}\n"
+            "topic write persist/acl/#\n"
+            + (
+                "topic read persist/acl/allowed\n"
+                if restricted
+                else "topic read persist/acl/#\n"
+            )
+        )
+
+    def write_config(max_connections: int) -> None:
+        config.write_text(
+            "persistence true\n"
+            f"persistence_location {directory}\n"
+            f"persistence_file {snapshot.name}\n"
+            "autosave_interval 0\n"
+            f"password_file {password_file}\n"
+            f"acl_file {acl_file}\n"
+            f"listener {port} 127.0.0.1\n"
+            "allow_anonymous false\n"
+            "max_queued_messages 4\n"
+            f"max_connections {max_connections}\n"
+        )
+
+    def start(label: str, max_connections: int) -> subprocess.Popen[str]:
+        write_config(max_connections)
+        process = subprocess.Popen(
+            [str(broker), f"--config={config}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert process.stdout is not None
+        ready = process.stdout.readline().strip()
+        expected = f"configured 1 listeners for {max_connections} clients"
+        if expected not in ready:
+            raise RuntimeError(f"{label} failed to start: {ready}")
+        listener = process.stdout.readline().strip()
+        if not listener.startswith("mqtt "):
+            raise RuntimeError(f"{label} listener missing: {listener}")
+        return process
+
+    def connect(
+        client_id: str,
+        clean_start: bool,
+        expected_session_present: bool,
+    ) -> socket.socket:
+        client = socket.create_connection(("127.0.0.1", port), timeout=5)
+        client.settimeout(5)
+        client.sendall(connect_packet(
+            client_id,
+            username=username,
+            password="password",
+            proto_ver=4,
+            clean_start=clean_start,
+        ))
+        connack = read_mqtt_packet(client)
+        if connack_reason(connack) != 0 or (
+            (connack[2] & 0x01) != int(expected_session_present)
+        ):
+            client.close()
+            raise AssertionError(
+                "persistence ACL restart CONNACK mismatch: "
+                + connack.hex()
+            )
+        return client
+
+    def finish(process: subprocess.Popen[str], label: str) -> None:
+        try:
+            return_code = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise RuntimeError(f"{label} did not finish")
+        if return_code != 0:
+            raise RuntimeError(
+                f"{label} exited {return_code}: {process.stdout.read()}"
+            )
+
+    write_acl(False)
+    first = start("initial persistence ACL broker", 2)
+    subscriber = connect("persist-acl-subscriber", False, False)
+    try:
+        subscriber.sendall(subscribe_packet(
+            1,
+            "persist/acl/#",
+            proto_ver=4,
+            qos=1,
+        ))
+        if read_mqtt_packet(subscriber) != bytes.fromhex("9003000101"):
+            raise AssertionError("persistence ACL initial SUBACK mismatch")
+        subscriber.sendall(bytes.fromhex("e000"))
+    finally:
+        subscriber.close()
+
+    publisher = connect("persist-acl-publisher", True, False)
+    try:
+        for packet_id, topic, payload in (
+            (10, "persist/acl/allowed", b"allowed"),
+            (11, "persist/acl/revoked", b"revoked"),
+        ):
+            publisher.sendall(publish_packet(
+                topic,
+                payload,
+                qos=1,
+                packet_id=packet_id,
+                proto_ver=4,
+            ))
+            if puback_reason(
+                read_mqtt_packet(publisher),
+                packet_id,
+            ) != 0:
+                raise AssertionError(
+                    "persistence ACL publisher PUBACK mismatch"
+                )
+        publisher.sendall(bytes.fromhex("e000"))
+    finally:
+        publisher.close()
+    finish(first, "initial persistence ACL broker")
+    if not snapshot.is_file() or snapshot.stat().st_size == 0:
+        raise AssertionError("persistence ACL snapshot was not written")
+
+    write_acl(True)
+    second = start("restricted persistence ACL broker", 1)
+    resumed = connect("persist-acl-subscriber", False, True)
+    try:
+        expect_v311_qos1_delivery(
+            resumed,
+            "persist/acl/allowed",
+            b"allowed",
+            "persistence ACL restart",
+        )
+        mqtt_ping(resumed)
+        resumed.sendall(bytes.fromhex("e000"))
+    finally:
+        resumed.close()
+    finish(second, "restricted persistence ACL broker")
+
+    third = start("cleaned persistence ACL broker", 1)
+    cleaned = connect("persist-acl-subscriber", False, True)
+    try:
+        mqtt_ping(cleaned)
+        cleaned.sendall(bytes.fromhex("e000"))
+    finally:
+        cleaned.close()
+    finish(third, "cleaned persistence ACL broker")
 
 
 def run_disabled_autosave_case(broker: Path, directory: Path) -> None:
@@ -6380,6 +6548,7 @@ def main() -> None:
         run_client_ca_reload_case(args.broker, directory)
         run_crl_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
+        run_persistence_acl_restart_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_autosave_reload_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -6444,7 +6613,7 @@ def main() -> None:
         "reload with topology rollback, "
         "dynamic persistence target enable/disable/path and time/change/disabled "
         "autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint "
-        "routing, QoS2 journal guard, and snapshot restore "
+        "routing, QoS2 journal guard, snapshot ACL reauthorization, and restore "
         + RUNTIME
     )
 
