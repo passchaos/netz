@@ -49,6 +49,11 @@ const qpack_decoder_seed = smithSliceSeed(&.{ 0x81, 0x41, 0x01 });
 const cookie_seed = smithSliceSeed(
     "sid=abc; Path=/docs; Secure; HttpOnly; SameSite=Lax; Max-Age=60",
 );
+const cookie_snapshot_seed = smithSliceSeed("netz-http-cookie-jar\x00");
+const cookie_netscape_seed = smithSliceSeed(
+    "# Netscape HTTP Cookie File\n" ++
+        "example.test\tFALSE\t/\tFALSE\t0\tsid\tabc\n",
+);
 
 test "fuzz bounded cross-protocol parsers" {
     try std.testing.fuzz({}, fuzzAllParsers, .{ .corpus = &.{
@@ -63,6 +68,8 @@ test "fuzz bounded cross-protocol parsers" {
         &qpack_encoder_seed,
         &qpack_decoder_seed,
         &cookie_seed,
+        &cookie_snapshot_seed,
+        &cookie_netscape_seed,
         &websocket_text_seed,
         &websocket_close_seed,
         &websocket_extended_seed,
@@ -90,6 +97,8 @@ test "bounded deterministic parser mutation smoke" {
         qpack_encoder_seed[4..],
         qpack_decoder_seed[4..],
         cookie_seed[4..],
+        cookie_snapshot_seed[4..],
+        cookie_netscape_seed[4..],
         websocket_text_seed[4..],
         websocket_close_seed[4..],
         websocket_extended_seed[4..],
@@ -157,6 +166,11 @@ fn exerciseCookies(bytes: []const u8) !void {
         bytes,
         1_700_000_000,
     );
+    _ = jar.restoreSnapshot(bytes, 1_700_000_000) catch {};
+    _ = jar.restoreNetscapeLossy(bytes, 1_700_000_000, .{
+        .acknowledge_metadata_loss = true,
+        .include_session = true,
+    }) catch {};
     try std.testing.expect(jar.count() <= 1);
     var out: [netz.http.CookieMaximumBytes]u8 = undefined;
     const value = try jar.cookieHeaderValueInto(

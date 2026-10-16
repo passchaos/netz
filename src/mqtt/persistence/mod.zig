@@ -11,7 +11,7 @@ const bridge_qos2 = @import("../broker/bridge_qos2.zig");
 const retained = @import("../retained/mod.zig");
 const session = @import("../session/mod.zig");
 const will = @import("../will/mod.zig");
-const durability = @import("durability.zig");
+const durability = @import("../../internal/durability.zig");
 pub const codec = @import("codec.zig");
 pub const commit_log = @import("commit_log.zig");
 

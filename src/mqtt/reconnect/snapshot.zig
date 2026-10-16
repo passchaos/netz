@@ -8,7 +8,7 @@
 const std = @import("std");
 const mqtt = @import("../mod.zig");
 const persistence = @import("../persistence/codec.zig");
-const durability = @import("../persistence/durability.zig");
+const durability = @import("../../internal/durability.zig");
 const session = @import("../session/mod.zig");
 
 const magic = "netz-mqtt-reconnect\x00";

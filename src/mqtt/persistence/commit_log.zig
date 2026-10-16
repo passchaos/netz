@@ -8,7 +8,7 @@
 //! changing the torn-tail and sequence guarantees implemented here.
 
 const std = @import("std");
-const durability = @import("durability.zig");
+const durability = @import("../../internal/durability.zig");
 
 const file_magic = "netz-mqtt-journal\x00\x01";
 const version: u32 = 1;

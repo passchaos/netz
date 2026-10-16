@@ -204,7 +204,16 @@ Current protocol coverage includes:
   aggregate state from creating an unbounded request field. Bounded
   per-domain/global eviction
   prefers non-Secure excess state then oldest access, and `endSession` removes
-  non-persistent cookies,
+  non-persistent cookies. Its full-fidelity persistent snapshot is versioned,
+  CRC-checked, capacity/policy validated, transactionally restored, excludes
+  expired/session state, and uses file fsync, atomic replacement, plus parent-
+  directory fsync with mode 0600. CRC detects corruption, not malicious
+  tampering, and neither format encrypts Cookie secrets; applications needing
+  confidentiality at rest must supply it below this API. Separate
+  `*NetscapeLossy` APIs preserve curl-compatible
+  domain/path/Secure/HttpOnly/expiry/name/value fields but require an explicit
+  metadata-loss acknowledgement because SameSite and original timestamps
+  cannot be represented,
 - A single-owner `http.CookieSession` composition that owns the unified
   H1/H2/optional-H3 Pool plus CookieJar. It rejects ambiguous caller Cookie
   fields, appends derived Cookie as HPACK/QPACK Never Indexed, commits every
@@ -1605,8 +1614,9 @@ zig build interop-http-unified-hyper -Doptimize=ReleaseFast
 # verified TLS, H1 chunked and H2 multiplexed bodies/trailers, ALPN, and
 # persistent same-connection reuse in every applicable matrix arm.
 zig build interop-http-external-clients -Doptimize=ReleaseFast
-# Compare repeated Set-Cookie ingestion, default/explicit Path matching, and
-# Cookie ordering directly with the installed curl/libcurl cookie engine.
+# Compare repeated Set-Cookie ingestion, default/explicit Path matching,
+# Cookie ordering, and both directions of Netscape cookies.txt exchange with
+# the installed curl/libcurl cookie engine.
 zig build interop-http-cookie-curl -Doptimize=ReleaseFast
 # All netz HTTP/2 interop endpoints obtain `std.Io` from the zio-backed runtime;
 # the Hyper and direct h2 peers identify their Tokio execution backend in the

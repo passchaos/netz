@@ -292,6 +292,12 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http, "CookieStoreResult"));
     try std.testing.expect(@hasDecl(netz.http, "CookieSameSite"));
     try std.testing.expect(@hasDecl(netz.http, "CookieJarError"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSnapshotError"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieSnapshotFileError"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieMaxSnapshotBytes"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieNetscapeOptions"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieNetscapeError"));
+    try std.testing.expect(@hasDecl(netz.http, "CookieNetscapeFileError"));
     try std.testing.expect(@hasDecl(netz.http.CookieJar, "storeSetCookie"));
     try std.testing.expect(@hasDecl(netz.http.CookieJar, "storeResponse"));
     try std.testing.expect(@hasDecl(
@@ -307,6 +313,35 @@ test "public modules are reachable" {
         "cookieHeaderValueAlloc",
     ));
     try std.testing.expect(@hasDecl(netz.http.CookieJar, "endSession"));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "encodeSnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "restoreSnapshot",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "saveSnapshotAtomic",
+    ));
+    try std.testing.expect(@hasDecl(netz.http.CookieJar, "loadSnapshot"));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "encodeNetscapeLossy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "restoreNetscapeLossy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "saveNetscapeAtomicLossy",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http.CookieJar,
+        "loadNetscapeLossy",
+    ));
     try std.testing.expect(@hasDecl(netz.http, "CookieSession"));
     try std.testing.expect(@hasDecl(netz.http, "CookieSessionOptions"));
     try std.testing.expect(@hasDecl(netz.http, "CookieSessionError"));

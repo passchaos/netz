@@ -1,4 +1,4 @@
-//! Filesystem durability helpers shared by MQTT snapshots and commit logs.
+//! Filesystem durability helpers shared by protocol snapshots and commit logs.
 //!
 //! Syncing a temporary file before an atomic rename protects its contents, but
 //! POSIX filesystems do not promise that the new directory entry survives a
@@ -55,7 +55,7 @@ fn supportsDirectorySync() bool {
     };
 }
 
-test "MQTT atomic replace syncs the parent directory and propagates failure" {
+test "atomic replace syncs the parent directory and propagates failure" {
     if (comptime !supportsDirectorySync()) return error.SkipZigTest;
 
     const Probe = struct {

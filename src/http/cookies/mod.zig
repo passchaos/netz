@@ -8,7 +8,9 @@
 const std = @import("std");
 const client_types = @import("../client/types.zig");
 const http_method = @import("../../internal/http_method.zig");
+const netscape = @import("netscape.zig");
 const syntax = @import("syntax.zig");
+const snapshot = @import("snapshot.zig");
 
 const net = std.Io.net;
 
@@ -20,6 +22,12 @@ pub const Error = std.mem.Allocator.Error || error{
     BufferTooShort,
     HeaderTooLarge,
 };
+pub const SnapshotError = Error || snapshot.Error;
+pub const SnapshotFileError = SnapshotError || snapshot.FileError;
+pub const max_snapshot_bytes = snapshot.max_snapshot_bytes;
+pub const NetscapeOptions = netscape.Options;
+pub const NetscapeError = SnapshotError || netscape.Error;
+pub const NetscapeFileError = NetscapeError || snapshot.FileError;
 
 /// RFC6265bis Lax-by-default uses `.default`, including the bounded unsafe-
 /// navigation compatibility window configured on the jar.
@@ -177,6 +185,202 @@ pub const Jar = struct {
             removed += 1;
         }
         return removed;
+    }
+
+    /// Encode persistent, non-expired cookies with full SameSite, host-only,
+    /// creation, and access metadata. Session cookies are intentionally absent.
+    pub fn encodeSnapshot(
+        self: *const Jar,
+        now_unix_seconds: i64,
+        out: *std.ArrayList(u8),
+    ) SnapshotError!void {
+        return snapshot.encode(
+            self.cookies.items,
+            self.sequence,
+            now_unix_seconds,
+            out,
+            self.allocator,
+        );
+    }
+
+    /// Transactionally replace the jar from a complete validated snapshot.
+    /// Any parse, policy, capacity, duplicate, or allocation failure leaves
+    /// the active jar byte-for-byte unchanged.
+    pub fn restoreSnapshot(
+        self: *Jar,
+        bytes: []const u8,
+        now_unix_seconds: i64,
+    ) SnapshotError!void {
+        var decoded = try snapshot.decode(
+            self.allocator,
+            bytes,
+            self.config.max_cookies,
+        );
+        defer decoded.deinit();
+        try self.installDecoded(&decoded, now_unix_seconds);
+    }
+
+    pub fn saveSnapshotAtomic(
+        self: *const Jar,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        now_unix_seconds: i64,
+    ) SnapshotFileError!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try self.encodeSnapshot(now_unix_seconds, &encoded);
+        try snapshot.saveAtomic(io, dir, sub_path, encoded.items);
+    }
+
+    pub fn loadSnapshot(
+        self: *Jar,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        now_unix_seconds: i64,
+    ) SnapshotFileError!void {
+        const encoded = try snapshot.loadAlloc(
+            self.allocator,
+            io,
+            dir,
+            sub_path,
+        );
+        defer self.allocator.free(encoded);
+        try self.restoreSnapshot(encoded, now_unix_seconds);
+    }
+
+    /// Export curl/Netscape cookies.txt after an explicit acknowledgement that
+    /// SameSite and original creation/access metadata cannot be represented.
+    pub fn encodeNetscapeLossy(
+        self: *const Jar,
+        now_unix_seconds: i64,
+        options: NetscapeOptions,
+        out: *std.ArrayList(u8),
+    ) NetscapeError!void {
+        return netscape.encode(
+            self.cookies.items,
+            now_unix_seconds,
+            options,
+            out,
+            self.allocator,
+        );
+    }
+
+    /// Transactionally replace the jar from curl/Netscape cookies.txt. Every
+    /// imported SameSite value becomes Default and times are regenerated.
+    pub fn restoreNetscapeLossy(
+        self: *Jar,
+        bytes: []const u8,
+        now_unix_seconds: i64,
+        options: NetscapeOptions,
+    ) NetscapeError!void {
+        var decoded = try netscape.decode(
+            self.allocator,
+            bytes,
+            self.config.max_cookies,
+            now_unix_seconds,
+            options,
+        );
+        defer decoded.deinit();
+        try self.installDecoded(&decoded, now_unix_seconds);
+    }
+
+    pub fn saveNetscapeAtomicLossy(
+        self: *const Jar,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        now_unix_seconds: i64,
+        options: NetscapeOptions,
+    ) NetscapeFileError!void {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(self.allocator);
+        try self.encodeNetscapeLossy(now_unix_seconds, options, &encoded);
+        try snapshot.saveAtomic(io, dir, sub_path, encoded.items);
+    }
+
+    pub fn loadNetscapeLossy(
+        self: *Jar,
+        io: std.Io,
+        dir: std.Io.Dir,
+        sub_path: []const u8,
+        now_unix_seconds: i64,
+        options: NetscapeOptions,
+    ) NetscapeFileError!void {
+        const encoded = try snapshot.loadAlloc(
+            self.allocator,
+            io,
+            dir,
+            sub_path,
+        );
+        defer self.allocator.free(encoded);
+        try self.restoreNetscapeLossy(encoded, now_unix_seconds, options);
+    }
+
+    fn installDecoded(
+        self: *Jar,
+        decoded: *snapshot.Decoded,
+        now_unix_seconds: i64,
+    ) SnapshotError!void {
+        var replacement = try Jar.init(self.allocator, self.config);
+        errdefer replacement.deinit();
+        try replacement.cookies.ensureTotalCapacity(
+            self.allocator,
+            decoded.records.len,
+        );
+        var maximum_sequence = decoded.sequence;
+        for (decoded.records) |*record| {
+            if (record.expires_at) |deadline| {
+                if (deadline <= now_unix_seconds) continue;
+            }
+            try validateSnapshotRecord(record.*, self.config);
+            if (replacement.find(
+                record.name,
+                record.domain,
+                record.path,
+                record.host_only,
+            ) != null) return error.CorruptSnapshot;
+            const maximum_expiry = std.math.add(
+                i64,
+                now_unix_seconds,
+                @as(i64, self.config.max_lifetime_seconds),
+            ) catch std.math.maxInt(i64);
+            replacement.cookies.appendAssumeCapacity(.{
+                .name = record.name,
+                .value = record.value,
+                .domain = record.domain,
+                .path = record.path,
+                .expires_at = if (record.expires_at) |deadline|
+                    @min(deadline, maximum_expiry)
+                else
+                    null,
+                .secure = record.secure,
+                .http_only = record.http_only,
+                .host_only = record.host_only,
+                .same_site = @enumFromInt(record.same_site),
+                .created_at = record.created_at,
+                .creation_order = record.creation_order,
+                .last_access_order = record.last_access_order,
+            });
+            record.transferred = true;
+            maximum_sequence = @max(
+                maximum_sequence,
+                @max(record.creation_order, record.last_access_order),
+            );
+            replacement.restoreRequestOrder(
+                replacement.cookies.items.len - 1,
+            );
+            if (replacement.domainCount(record.domain) >
+                self.config.max_cookies_per_domain)
+            {
+                return error.SnapshotLimitExceeded;
+            }
+        }
+        replacement.sequence = maximum_sequence;
+        var retired = self.*;
+        self.* = replacement;
+        retired.deinit();
     }
 
     pub fn storeSetCookie(
@@ -651,6 +855,63 @@ fn initCookie(
     };
 }
 
+fn validateSnapshotRecord(
+    record: snapshot.Record,
+    config: Config,
+) SnapshotError!void {
+    if (record.domain.len == 0 or record.path.len == 0 or
+        record.path[0] != '/' or
+        record.name.len > config.max_cookie_bytes or
+        record.value.len > config.max_cookie_bytes - record.name.len or
+        containsForbiddenStoredOctet(record.name) or
+        containsForbiddenStoredOctet(record.value) or
+        record.creation_order == 0 or record.last_access_order == 0)
+    {
+        return error.CorruptSnapshot;
+    }
+    if (!record.host_only and isIpLiteral(record.domain)) {
+        return error.CorruptSnapshot;
+    }
+    if (!validStoredDomain(record.domain)) return error.CorruptSnapshot;
+    if (!record.host_only) switch (config.domain_policy) {
+        .host_only => return error.SnapshotPolicyMismatch,
+        .unchecked => {},
+        .checked => |checker| if (checker.matches(record.domain)) {
+            return error.SnapshotPolicyMismatch;
+        },
+    };
+    const prefix_source = if (record.name.len == 0)
+        record.value
+    else
+        record.name;
+    if (std.ascii.startsWithIgnoreCase(prefix_source, "__Secure-") and
+        !record.secure) return error.CorruptSnapshot;
+    if (std.ascii.startsWithIgnoreCase(prefix_source, "__Host-") and
+        (!record.secure or !record.host_only or
+            !std.mem.eql(u8, record.path, "/")))
+    {
+        return error.CorruptSnapshot;
+    }
+    if (record.same_site == @intFromEnum(SameSite.none) and !record.secure) {
+        return error.CorruptSnapshot;
+    }
+}
+
+fn containsForbiddenStoredOctet(value: []const u8) bool {
+    for (value) |byte| {
+        if (byte <= 0x08 or (byte >= 0x0a and byte <= 0x1f) or
+            byte == 0x7f or byte == ';') return true;
+    }
+    return false;
+}
+
+fn validStoredDomain(domain: []const u8) bool {
+    if (isIpLiteral(domain)) return true;
+    var buffer: [net.HostName.max_len]u8 = undefined;
+    const normalized = normalizedDomain(domain, &buffer) orelse return false;
+    return std.mem.eql(u8, normalized, domain);
+}
+
 const Origin = struct {
     host: []const u8,
     path: []const u8,
@@ -802,6 +1063,8 @@ fn trim(value: []const u8) []const u8 {
 }
 
 test {
+    _ = netscape;
     _ = syntax;
     _ = @import("tests.zig");
+    _ = @import("persistence_tests.zig");
 }

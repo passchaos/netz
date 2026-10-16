@@ -1109,11 +1109,29 @@ pooled response. Its redirected-response entry point uses the owned
 `final_uri`, preventing a cross-origin chain from storing state against the
 initiating URI. `zig build interop-http-cookie-curl -Doptimize=ReleaseFast`
 independently matches curl 8.5/libcurl's repeated Set-Cookie, default/explicit
-Path, and ordinary/deep request ordering.
+Path, and ordinary/deep request ordering. It now also imports curl's generated
+Netscape file into Netz and exports Netz state back through curl, requiring
+identical Cookie values in both directions.
+Persistent state has two deliberately separate contracts. The full binary
+snapshot preserves SameSite, host-only identity, creation/access order,
+HttpOnly/Secure, absolute expiry and path/domain bytes; it excludes session and
+already-expired cookies, carries a version plus CRC32, rejects duplicates and
+current capacity/domain-policy violations transactionally, and caps restored
+lifetime under the active policy. File helpers write mode 0600, fsync the
+temporary inode, atomically replace the destination, and sync the parent
+directory through the same internal durability primitive used by MQTT. CRC32
+is corruption detection rather than authentication, and neither binary nor
+text persistence encrypts Cookie secrets; at-rest confidentiality remains an
+application/filesystem responsibility.
+Netscape/curl text cannot represent SameSite or original timing, so every
+`*NetscapeLossy` call requires `acknowledge_metadata_loss=true`; HttpOnly's
+`#HttpOnly_` convention, host-only/Domain, Path, Secure, expiry, empty names,
+and optional session cookies remain interoperable.
 The shared `fuzz-parsers` target also sends every bounded arbitrary input
 through Set-Cookie parsing, deep-owned storage, URI matching, caller-buffer
-Cookie rendering, and teardown; its structured corpus includes persistent,
-Secure, HttpOnly, SameSite, and Path attributes.
+Cookie rendering, binary snapshot restore, lossy Netscape restore, and
+teardown; its structured corpus includes persistent, Secure, HttpOnly,
+SameSite, Path, binary-magic, and cookies.txt inputs.
 `http.CookieSession` then composes that jar with the existing unified Pool
 without copying its redirect implementation. Its adapter derives one
 Never-Indexed Cookie field immediately before each hop, commits that hop's

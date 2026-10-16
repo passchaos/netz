@@ -71,9 +71,14 @@ def run_curl(url: str, jar: Path, seed: bool = False) -> None:
         raise RuntimeError("curl cookie arm failed: " + result.stdout)
 
 
-def parse_peer(peer: Path) -> dict[str, str]:
+def parse_peer(
+    peer: Path,
+    *arguments: str,
+    cwd: Path | None = None,
+) -> dict[str, str]:
     result = subprocess.run(
-        [str(peer)],
+        [str(peer), *arguments],
+        cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -94,32 +99,67 @@ def parse_peer(peer: Path) -> dict[str, str]:
 
 def main() -> None:
     args = parse_args()
+    args.peer = args.peer.resolve()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         port = server.server_address[1]
         with tempfile.TemporaryDirectory() as directory:
-            jar = Path(directory) / "curl-cookies.txt"
+            root = Path(directory)
+            jar = root / "curl-cookies.txt"
             run_curl(f"http://127.0.0.1:{port}/docs/seed", jar, seed=True)
             run_curl(f"http://127.0.0.1:{port}/docs/deep/item", jar)
-        curl_values = {
-            "ordinary": Handler.observed.get("/docs/item", ""),
-            "deep": Handler.observed.get("/docs/deep/item", ""),
-        }
-        netz_values = parse_peer(args.peer)
-        if netz_values.get("ordinary") != curl_values["ordinary"]:
-            raise AssertionError(
-                f"ordinary cookie mismatch: netz={netz_values.get('ordinary')!r} "
-                f"curl={curl_values['ordinary']!r}"
+            curl_values = {
+                "ordinary": Handler.observed.get("/docs/item", ""),
+                "deep": Handler.observed.get("/docs/deep/item", ""),
+            }
+            netz_values = parse_peer(args.peer)
+            imported = parse_peer(
+                args.peer,
+                "--import",
+                jar.name,
+                cwd=root,
             )
-        if netz_values.get("deep") != curl_values["deep"]:
-            raise AssertionError(
-                f"deep cookie mismatch: netz={netz_values.get('deep')!r} "
-                f"curl={curl_values['deep']!r}"
+            exported_path = root / "netz-cookies.txt"
+            exported = parse_peer(
+                args.peer,
+                "--export",
+                exported_path.name,
+                cwd=root,
             )
+            Handler.observed.clear()
+            run_curl(
+                f"http://127.0.0.1:{port}/docs/item",
+                exported_path,
+            )
+            run_curl(
+                f"http://127.0.0.1:{port}/docs/deep/item",
+                exported_path,
+            )
+            exported_curl = {
+                "ordinary": Handler.observed.get("/docs/item", ""),
+                "deep": Handler.observed.get("/docs/deep/item", ""),
+            }
+        for label, observed in (
+            ("curl-live", curl_values),
+            ("curl-imported-by-netz", imported),
+            ("netz-exported-to-curl", exported_curl),
+            ("netz-export-source", exported),
+        ):
+            if observed.get("ordinary") != netz_values["ordinary"]:
+                raise AssertionError(
+                    f"{label} ordinary mismatch: "
+                    f"netz={netz_values['ordinary']!r} "
+                    f"observed={observed.get('ordinary')!r}"
+                )
+            if observed.get("deep") != netz_values["deep"]:
+                raise AssertionError(
+                    f"{label} deep mismatch: netz={netz_values['deep']!r} "
+                    f"observed={observed.get('deep')!r}"
+                )
         print(
-            "HTTP CookieJar curl parity passed: "
+            "HTTP CookieJar curl live/import/export parity passed: "
             f"ordinary={curl_values['ordinary']!r} "
             f"deep={curl_values['deep']!r} "
             "client_io=netz-cookie-jar reference_io=libcurl-cookie-engine"
