@@ -3526,6 +3526,26 @@ test "public modules are reachable" {
         "sendRequestBodyPartsPacedWithDeadline",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestBatchWithPerStreamDeadlines",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "requestBatchWithPerStreamDeadlinesAndCancellation",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "BatchOwnedHandshakeResponseResult",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "BatchOwnedHandshakeResponseObserver",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "BatchHandshakeCancellationObserver",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.SharedHandshakeClientPool.Lease,
         "trySendRequestBodyParts",
     ));

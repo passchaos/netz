@@ -701,7 +701,15 @@ Current protocol coverage includes:
   provide an indexed cursor-backed FIFO event-style response/reset queue with
   empty-reset insert/take fast paths, tail-targeted reset removals, single-probe reset recording, and explicit stream IDs, while
   outstanding request tracking uses single-probe client opens/server activation, empty-index lookup/finish skips on both roles, and rejects unknown or duplicate completion and
-  enforces the configured concurrency bound. Protected clients and servers also
+  enforces the configured concurrency bound. Authenticated clients also expose
+  an owned-response batch with per-request absolute deadlines and optional
+  cross-task cancellation. Terminal results retain caller indices despite
+  reversed completion; an expired or actively canceled member sends only its
+  own H3_REQUEST_CANCELLED while siblings continue under their original
+  budgets. The cancellation event races the sole response read and preserves a
+  response that completes on the same handoff. Successful response ownership
+  transfers through the observer, while a connection failure is reported to
+  every unfinished member. Protected clients and servers also
   expose `startRequest`/`sendRequestBody` and
   `startResponse`/`sendResponseBody`, preserving per-stream QUIC offsets across
   multiple DATA chunks with empty-open/finish lookup skips, single-lookup chunk accounting plus cached FIN cleanup and enforcing declared Content-Length at FIN.

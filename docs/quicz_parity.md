@@ -1610,6 +1610,16 @@ request origin separate from the stable connection origin and expose a
 fail-closed 421 removal hook. A real protected-QUIC test verifies correct ticket
 scope, same-handle coalescing, certificate-mismatch isolation, original-origin
 reuse after 421, and a fresh connection for the excluded origin.
+The underlying authenticated client now exposes an owned-response batch with
+per-stream absolute deadlines and an optional producer cancellation event.
+Requests remain correlated by input index under reversed response order;
+deadline or active cancellation sends H3_REQUEST_CANCELLED only for the target
+stream, preserves each sibling's original budget, and keeps the connection
+reusable. The cancellation event races the sole response receive and gives a
+simultaneously completed response precedence, matching the driver/sender split
+used by mature H3 stacks without adding another socket reader. Real protected
+QUIC coverage includes POST body/trailers, reversed completion, both cancel
+sources, exact peer-visible codes, sibling progress, and reuse.
 `beginUriFollowingRedirects*` adds the matching event-driven redirect boundary
 without introducing a competing UDP reader. Its transaction replays borrowed
 bodies through bounded one-packet DATA attempts, consumes only events matching

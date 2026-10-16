@@ -13293,6 +13293,349 @@ pub const HandshakeClient = struct {
         );
     }
 
+    /// Execute independent requests concurrently on this HTTP/3 connection.
+    ///
+    /// Requests are opened in input order, but responses are reported as soon
+    /// as their streams complete. Each member owns its absolute deadline: an
+    /// expired member is canceled with H3_REQUEST_CANCELLED without consuming
+    /// a sibling response or renewing any other budget. Successful response
+    /// ownership transfers to `observer`.
+    ///
+    /// The observer runs on the sole connection owner and must not re-enter
+    /// this client. No other request may already be active when the batch
+    /// begins; this invariant lets every reset/response map to exactly one
+    /// input index.
+    pub fn requestBatchWithPerStreamDeadlines(
+        self: *HandshakeClient,
+        requests: []const http3.Request,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedHandshakeResponseObserver,
+    ) ReceiveTimeoutError!void {
+        return self.requestBatchWithPerStreamDeadlinesInternal(
+            requests,
+            deadlines,
+            observer,
+            null,
+        );
+    }
+
+    /// Cancellation-aware counterpart used by multi-producer drivers. The
+    /// event interrupts the sole response wait; racing response completion is
+    /// consumed first so cancellation cannot drop a peer packet.
+    pub fn requestBatchWithPerStreamDeadlinesAndCancellation(
+        self: *HandshakeClient,
+        requests: []const http3.Request,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedHandshakeResponseObserver,
+        cancellation: BatchHandshakeCancellationObserver,
+    ) ReceiveTimeoutError!void {
+        return self.requestBatchWithPerStreamDeadlinesInternal(
+            requests,
+            deadlines,
+            observer,
+            cancellation,
+        );
+    }
+
+    fn requestBatchWithPerStreamDeadlinesInternal(
+        self: *HandshakeClient,
+        requests: []const http3.Request,
+        deadlines: []const ?std.Io.Clock.Timestamp,
+        observer: BatchOwnedHandshakeResponseObserver,
+        cancellation: ?BatchHandshakeCancellationObserver,
+    ) ReceiveTimeoutError!void {
+        if (self.dispatcher_bound) return error.InvalidDispatcherState;
+        if (self.callback_reader_active or
+            !self.request_lifecycle.isEmpty())
+        {
+            return error.ConcurrentRead;
+        }
+        if (requests.len != deadlines.len) return error.InvalidSetting;
+        if (requests.len == 0) return;
+        if (requests.len > self.options.max_concurrent_request_streams) {
+            return error.ExcessiveLoad;
+        }
+
+        const Slot = struct {
+            stream_id: ?u62 = null,
+            active: bool = false,
+        };
+        var stack_slots: [16]Slot = undefined;
+        const slots = if (requests.len <= stack_slots.len)
+            stack_slots[0..requests.len]
+        else
+            try self.allocator.alloc(Slot, requests.len);
+        defer if (requests.len > stack_slots.len) self.allocator.free(slots);
+        for (slots) |*slot| slot.* = .{};
+
+        var fail_unfinished: ?anyerror = null;
+        defer if (fail_unfinished) |err| {
+            for (slots, 0..) |*slot, index| {
+                if (!slot.active) continue;
+                if (slot.stream_id) |stream_id| {
+                    self.cancelRequest(
+                        stream_id,
+                        http3.ApplicationErrorCode.request_cancelled,
+                    ) catch {};
+                }
+                slot.active = false;
+                observer.on_result(
+                    observer.context,
+                    index,
+                    .{ .err = err },
+                );
+            }
+        };
+
+        var active_count: usize = 0;
+        for (requests, deadlines, slots, 0..) |request_value, deadline, *slot, index| {
+            if (cancellation) |cancel| {
+                if (cancel.take_canceled(cancel.context, index)) {
+                    observer.on_result(
+                        observer.context,
+                        index,
+                        .{ .err = error.Canceled },
+                    );
+                    continue;
+                }
+            }
+            if (deadline) |absolute| {
+                _ = deadline_policy.usableAwake(
+                    self.connectionIo(),
+                    absolute,
+                ) catch |err| {
+                    observer.on_result(
+                        observer.context,
+                        index,
+                        .{ .err = err },
+                    );
+                    continue;
+                };
+            }
+            const expected_stream_id = self.next_stream_id;
+            const stream_id = self.sendRequestUntil(
+                request_value,
+                deadline,
+            ) catch |err| {
+                if (self.request_lifecycle.contains(expected_stream_id)) {
+                    self.cancelRequest(
+                        expected_stream_id,
+                        http3.ApplicationErrorCode.request_cancelled,
+                    ) catch |cancel_err| {
+                        fail_unfinished = cancel_err;
+                        return cancel_err;
+                    };
+                }
+                if (self.established.connection.closed() or
+                    self.established.connection.closing() or
+                    self.established.connection.draining())
+                {
+                    fail_unfinished = err;
+                    return err;
+                }
+                observer.on_result(
+                    observer.context,
+                    index,
+                    .{ .err = err },
+                );
+                continue;
+            };
+            slot.* = .{ .stream_id = stream_id, .active = true };
+            active_count += 1;
+        }
+        if (cancellation) |cancel| cancel.acknowledge(cancel.context);
+
+        while (active_count != 0) {
+            var earliest: ?std.Io.Clock.Timestamp = null;
+            for (slots, deadlines, 0..) |*slot, deadline, index| {
+                if (!slot.active) continue;
+                if (cancellation) |cancel| {
+                    if (cancel.take_canceled(cancel.context, index)) {
+                        self.cancelRequest(
+                            slot.stream_id.?,
+                            http3.ApplicationErrorCode.request_cancelled,
+                        ) catch |err| {
+                            fail_unfinished = err;
+                            return err;
+                        };
+                        slot.active = false;
+                        active_count -= 1;
+                        observer.on_result(
+                            observer.context,
+                            index,
+                            .{ .err = error.Canceled },
+                        );
+                        continue;
+                    }
+                }
+                if (deadline) |absolute| {
+                    if (absolute.durationFromNow(
+                        self.connectionIo(),
+                    ).raw.nanoseconds <= 0) {
+                        self.cancelRequest(
+                            slot.stream_id.?,
+                            http3.ApplicationErrorCode.request_cancelled,
+                        ) catch |err| {
+                            fail_unfinished = err;
+                            return err;
+                        };
+                        slot.active = false;
+                        active_count -= 1;
+                        observer.on_result(
+                            observer.context,
+                            index,
+                            .{ .err = error.Timeout },
+                        );
+                        continue;
+                    }
+                    earliest = deadline_policy.earlier(
+                        earliest,
+                        absolute,
+                    );
+                }
+            }
+            if (cancellation) |cancel| cancel.acknowledge(cancel.context);
+            if (active_count == 0) break;
+
+            const maybe_event = self.receiveNextBatchResponse(
+                earliest,
+                cancellation,
+            ) catch |err| switch (err) {
+                error.Timeout => continue,
+                else => {
+                    fail_unfinished = err;
+                    return err;
+                },
+            };
+            if (maybe_event == null) continue;
+            var event = maybe_event.?;
+            var event_owned = true;
+            defer if (event_owned) event.deinit(self.allocator);
+            const stream_id = switch (event) {
+                .response => |response| response.stream_id,
+                .reset => |reset| reset.stream_id,
+            };
+            var request_index: ?usize = null;
+            for (slots, 0..) |slot, index| {
+                if (slot.active and slot.stream_id == stream_id) {
+                    request_index = index;
+                    break;
+                }
+            }
+            const index = request_index orelse {
+                fail_unfinished = error.UnexpectedStream;
+                return error.UnexpectedStream;
+            };
+            slots[index].active = false;
+            active_count -= 1;
+            switch (event) {
+                .response => |response| {
+                    observer.on_result(
+                        observer.context,
+                        index,
+                        .{ .response = response.value },
+                    );
+                    event_owned = false;
+                },
+                .reset => |reset| observer.on_result(
+                    observer.context,
+                    index,
+                    .{ .err = responseResetError(
+                        reset.application_error_code,
+                    ) },
+                ),
+            }
+        }
+    }
+
+    fn receiveNextBatchResponse(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+        cancellation: ?BatchHandshakeCancellationObserver,
+    ) ReceiveTimeoutError!?OwnedHandshakeResponseEvent {
+        const cancel = cancellation orelse return if (deadline) |absolute|
+            try self.receiveNextResponseWithDeadline(absolute)
+        else
+            try self.receiveNextResponse();
+
+        const Wake = union(enum) {
+            response: ReceiveTimeoutError!OwnedHandshakeResponseEvent,
+            canceled: std.Io.Cancelable!void,
+        };
+        const Task = struct {
+            fn receive(
+                client: *HandshakeClient,
+                absolute: ?std.Io.Clock.Timestamp,
+            ) ReceiveTimeoutError!OwnedHandshakeResponseEvent {
+                return if (absolute) |bounded|
+                    client.receiveNextResponseWithDeadline(bounded)
+                else
+                    client.receiveNextResponse();
+            }
+
+            fn wait(
+                event: *std.Io.Event,
+                io: std.Io,
+            ) std.Io.Cancelable!void {
+                return event.wait(io);
+            }
+        };
+        var storage: [2]Wake = undefined;
+        var select: std.Io.Select(Wake) = .init(self.connectionIo(), &storage);
+        defer while (select.cancel()) |late| switch (late) {
+            .response => |result| if (result) |response| {
+                var dropped = response;
+                dropped.deinit(self.allocator);
+            } else |_| {},
+            .canceled => {},
+        };
+        try select.concurrent(
+            .response,
+            Task.receive,
+            .{ self, deadline },
+        );
+        try select.concurrent(
+            .canceled,
+            Task.wait,
+            .{ cancel.event, self.connectionIo() },
+        );
+
+        var response: ?OwnedHandshakeResponseEvent = null;
+        var response_err: ?anyerror = null;
+        var woke = false;
+        const first = select.await() catch |err| return err;
+        switch (first) {
+            .response => |result| if (result) |value| {
+                response = value;
+            } else |err| {
+                response_err = err;
+            },
+            .canceled => |result| {
+                try result;
+                woke = true;
+            },
+        }
+        while (select.cancel()) |late| switch (late) {
+            .response => |result| if (result) |value| {
+                if (response == null) {
+                    response = value;
+                } else {
+                    var dropped = value;
+                    dropped.deinit(self.allocator);
+                }
+            } else |err| {
+                if (err != error.Canceled) response_err = err;
+            },
+            .canceled => |result| result catch |err| {
+                if (err != error.Canceled) return err;
+            },
+        };
+        if (response) |value| return value;
+        if (response_err) |err| return @errorCast(err);
+        std.debug.assert(woke);
+        return null;
+    }
+
     /// Send a request and observe ordered 1xx heads before the final response.
     pub fn requestWithInformational(
         self: *HandshakeClient,
@@ -18564,6 +18907,38 @@ pub const OwnedHandshakeResponse = struct {
         allocator.free(self.stream_bytes);
         self.* = undefined;
     }
+};
+
+/// One terminal result from an independently-deadlined HTTP/3 request batch.
+/// Successful response ownership transfers to the observer. A stream-local
+/// error affects only its request; a connection error is reported to every
+/// unfinished member before the batch call returns it.
+pub const BatchOwnedHandshakeResponseResult = union(enum) {
+    response: OwnedHandshakeResponse,
+    err: anyerror,
+};
+
+pub const BatchOwnedHandshakeResponseObserver = struct {
+    context: *anyopaque,
+    on_result: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+        result: BatchOwnedHandshakeResponseResult,
+    ) void,
+};
+
+/// Cross-task cancellation source for an independently-deadlined HTTP/3
+/// request batch. The sole connection reader consumes cancellation bits, then
+/// calls `acknowledge` to reset `event` only after accounting for racing
+/// producer updates.
+pub const BatchHandshakeCancellationObserver = struct {
+    event: *std.Io.Event,
+    context: *anyopaque,
+    take_canceled: *const fn (
+        context: *anyopaque,
+        request_index: usize,
+    ) bool,
+    acknowledge: *const fn (context: *anyopaque) void,
 };
 
 pub const RedirectedHandshakeResponse = struct {
@@ -34184,6 +34559,7 @@ test {
     _ = @import("runtime/server/tests/receive.zig");
     _ = @import("runtime/client/tests/protected.zig");
     _ = @import("runtime/client/tests/deadline.zig");
+    _ = @import("runtime/client/batch_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");
     _ = @import("runtime/handshake_client_pool_tests.zig");

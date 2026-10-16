@@ -1563,6 +1563,17 @@ applies 421 before release, discarding the connection if that exclusion cannot
 be recorded. A real shared-endpoint matrix verifies origin-keyed ticket capture,
 same-handle coalescing, certificate-mismatch isolation, original-origin reuse
 after 421, and a fresh connection for the excluded origin.
+The authenticated H3 client now also provides the execution primitive needed
+by a cloneable request sender: one connection accepts an owned-response batch
+whose members retain independent awake-clock deadlines and optional active
+cancellation. Responses map back to original request indices even when the
+server completes them in reverse order. Deadline expiry or producer
+cancellation emits H3_REQUEST_CANCELLED only for that stream; a longer-deadline
+sibling continues and the connection remains reusable. The cancellation event
+races the sole response wait and preserves a response that completes on the
+same handoff. A real TLS/QUIC regression combines POST body/trailers, reversed
+responses, a deadline cancel, an actively woken cancel, exact server-observed
+codes, sibling completion, and final reuse.
 
 Both protocol `Limits` now also expose a TCP connect timeout used by literal-IP,
 hostname, URI, Unix-socket and pooled connection paths. Host resolution and all
