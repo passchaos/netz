@@ -1410,7 +1410,15 @@ applying TCP-only socket options.
    Explicit case selections remain a non-empty manifest subset and each
    selected case must match the same status baseline. The 517-case results
    below predate that migration and remain historical Threaded evidence until
-   the container suite is rerun on zio. The separate
+   the container suite is rerun on zio. The runner defaults to Docker but
+   accepts `AUTOBAHN_CONTAINER_RUNTIME=podman` or an absolute compatible
+   runtime path; digest-locked image inspection, host-network execution,
+   mounted reports, and strict manifest verification remain identical. On
+   2026-10-16 this host had no Docker/Podman-compatible runtime, so the full
+   result was deliberately not relabeled. The zio real-socket smoke and report
+   checker were refreshed instead: cleartext and TLS each passed eight
+   concurrent peers, protocol-error isolation and recovery, while the checker
+   passed 14/14 tests. The separate
    `interop-websocket-autobahn-smoke` gate uses real cleartext and TLS sockets
    without Docker: eight simultaneous peers verify masked text/binary echo,
    Ping/Pong and Close, then an unmasked frame requires Close(1002), and a new

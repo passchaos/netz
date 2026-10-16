@@ -4,18 +4,21 @@ set -euo pipefail
 server=${1:?server executable path}
 shift
 image=${AUTOBAHN_IMAGE:-crossbario/autobahn-testsuite:25.10.1@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074}
+container_runtime=${AUTOBAHN_CONTAINER_RUNTIME:-docker}
 use_tls=false
 if [[ ${1:-} == "--tls" ]]; then
   use_tls=true
   shift
 fi
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker not found; install it or run the Autobahn container manually" >&2
+if ! command -v "$container_runtime" >/dev/null 2>&1; then
+  echo "Autobahn container runtime not found: $container_runtime" >&2
+  echo "install Docker/Podman or set AUTOBAHN_CONTAINER_RUNTIME" >&2
   exit 127
 fi
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-  echo "Autobahn image not found; run: docker pull $image" >&2
+container_runtime=$(command -v "$container_runtime")
+if ! "$container_runtime" image inspect "$image" >/dev/null 2>&1; then
+  echo "Autobahn image not found; run: $container_runtime pull $image" >&2
   exit 127
 fi
 
@@ -89,7 +92,7 @@ cat >"$work/config.json" <<EOF
 }
 EOF
 
-docker run --rm --network host \
+"$container_runtime" run --rm --network host \
   -v "$work:/work" \
   "$image" \
   /opt/pypy/bin/wstest --mode fuzzingclient --spec /work/config.json \
