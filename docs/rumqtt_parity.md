@@ -675,6 +675,15 @@ and decreasing Message Expiry through two snapshot/restart generations. Exact
 PUBLISH comparison proves both property order and deep ownership across the
 restore-save-restore boundary, while an inbound Topic Alias is correctly
 removed as connection-scoped state before either snapshot replay.
+The source-locked bounded port of Mosquitto
+`15-persist-client-drop-expired-messages.py` gives two durable Sessions four
+shared QoS 1 publications, with the final two also retained, then lets every
+Message Expiry interval elapse while the broker is stopped. Both Sessions
+retain Session Present and their subscriptions, but reconnect PING barriers,
+one replacement SUBSCRIBE, and an independent wildcard retained probe observe
+no PUBLISH. A second snapshot/restart repeats all three empty barriers, proving
+restore-time queue and retained cleanup is itself durable rather than only a
+lazy in-memory filter.
 The source-locked `15-persist-client-msg-out-clear-v3-1-1.py` production case
 now runs in MQTT 3.1.1 and MQTT 5. An initial broker snapshots three durable
 subscriptions plus offline QoS 1/2 deliveries; the restored broker emits both

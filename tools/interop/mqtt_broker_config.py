@@ -48,6 +48,9 @@ from mqtt_broker_config_session import (
     run_listener_max_connections_case,
     run_persistent_client_expiration_case,
 )
+from mqtt_broker_config_expiry_persistence import (
+    run_expired_message_persistence_case,
+)
 from mqtt_broker_config_sys import run_system_interval_case
 from mqtt_broker_config_runtime_policy import (
     run_runtime_delivery_policy_reload_case,
@@ -6563,6 +6566,7 @@ def main() -> None:
         run_retained_property_persistence_case(args.broker, directory)
         run_persistent_session_clean_start_case(args.broker, directory)
         run_persistent_subscription_snapshot_case(args.broker, directory)
+        run_expired_message_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_autosave_reload_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -6630,7 +6634,8 @@ def main() -> None:
         "autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint "
         "routing, QoS2 journal guard, snapshot ACL reauthorization, retained "
         "MQTT 5 property-bundle restore, MQTT 3.1.1/5 Clean Start snapshot "
-        "cleanup and subscription/UNSUBSCRIBE restore, and restore "
+        "cleanup, subscription/UNSUBSCRIBE restore, shared queued/retained "
+        "downtime expiry, and restore "
         + RUNTIME
     )
 
