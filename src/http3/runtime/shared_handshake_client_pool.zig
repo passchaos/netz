@@ -85,6 +85,10 @@ pub fn Pool(comptime Runtime: type) type {
         const Self = @This();
         const Client = Runtime.HandshakeClient;
         const Handle = quic.endpoint_dispatcher.ConnectionHandle;
+        const ConnectRoute = union(enum) {
+            origin,
+            alt_svc: http3.AltSvcTarget,
+        };
 
         const Entry = struct {
             handle: Handle,
@@ -107,6 +111,11 @@ pub fn Pool(comptime Runtime: type) type {
             client: *Client,
         };
 
+        const IdleReuse = struct {
+            entry: *Entry,
+            exact_origin: bool,
+        };
+
         const ConnectWorker = struct {
             pool: *Self,
             source: quic.runtime.DatagramSource,
@@ -120,7 +129,19 @@ pub fn Pool(comptime Runtime: type) type {
             fn connect(self: *@This()) ConnectCompletion {
                 var options = self.pool.options.client;
                 if (self.redirect) |redirect| {
-                    applyRedirectConnectionSecurity(&options, redirect);
+                    if (redirect.cross_origin) {
+                        applyRedirectConnectionSecurity(&options, redirect);
+                    } else {
+                        scopeAutoResumption(
+                            &options,
+                            self.uri_endpoint.authority,
+                        );
+                    }
+                } else {
+                    scopeAutoResumption(
+                        &options,
+                        self.uri_endpoint.authority,
+                    );
                 }
                 options.handshake.original_destination_connection_id =
                     self.original_dcid;
@@ -154,6 +175,9 @@ pub fn Pool(comptime Runtime: type) type {
             pool: *Self,
             handle: Handle,
             was_reused: bool,
+            /// Present only when this lease uses a connection authenticated for
+            /// another origin through RFC 9412 coalescing.
+            request_origin_key: ?http3.OriginKey = null,
             active: bool = true,
 
             pub fn connectionHandle(self: Lease) Handle {
@@ -163,6 +187,34 @@ pub fn Pool(comptime Runtime: type) type {
             pub fn client(self: *Lease) *Client {
                 std.debug.assert(self.active);
                 return self.pool.entries.get(self.handle).?.client;
+            }
+
+            pub fn requestOrigin(self: *const Lease) http3.Origin {
+                std.debug.assert(self.active);
+                if (self.request_origin_key) |key| return key.origin();
+                return self.pool.entries.get(self.handle).?.origin_key.origin();
+            }
+
+            /// Apply RFC 8336's 421 removal before returning this connection to
+            /// the pool. Failure discards the connection so an unrecorded
+            /// exclusion can never authorize a later request.
+            pub fn observeResponseStatus(
+                self: *Lease,
+                status: u16,
+            ) !void {
+                if (!self.active) return error.InvalidLease;
+                if (status != 421) return;
+                self.client().removePeerOriginAfterMisdirected(
+                    self.requestOrigin(),
+                ) catch |err| {
+                    self.discard();
+                    return err;
+                };
+            }
+
+            fn deinitRequestOrigin(self: *Lease) void {
+                if (self.request_origin_key) |*key| key.deinit();
+                self.request_origin_key = null;
             }
 
             /// Refresh dispatcher timers after direct client mutation.
@@ -290,12 +342,14 @@ pub fn Pool(comptime Runtime: type) type {
             pub fn release(self: *Lease) void {
                 if (!self.active) return;
                 self.active = false;
+                self.deinitRequestOrigin();
                 self.pool.release(self.handle);
             }
 
             pub fn discard(self: *Lease) void {
                 if (!self.active) return;
                 self.active = false;
+                self.deinitRequestOrigin();
                 self.pool.dropEntry(self.handle);
             }
         };
@@ -374,6 +428,7 @@ pub fn Pool(comptime Runtime: type) type {
                     uri_text,
                     absolute,
                     redirect,
+                    .origin,
                 ) catch |err| return @errorCast(err);
             }
         };
@@ -560,7 +615,7 @@ pub fn Pool(comptime Runtime: type) type {
                 self.io,
                 self.options.client.connect_timeout,
             ) catch return error.HandshakeTimeout;
-            return self.acquireUriBefore(uri_text, deadline, null);
+            return self.acquireUriBefore(uri_text, deadline, null, .origin);
         }
 
         pub fn acquireUriWithTimeout(
@@ -587,7 +642,62 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 self.options.client.connect_timeout,
             );
-            return self.acquireUriBefore(uri_text, absolute, null);
+            return self.acquireUriBefore(uri_text, absolute, null, .origin);
+        }
+
+        /// Acquire a connection for the original URI authority while dialing
+        /// an authenticated Alt-Svc host/port. Pool keys, SNI, certificate
+        /// policy, resumption scope, and request authority remain origin-bound.
+        pub fn acquireUriAltSvc(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+        ) !Lease {
+            if (self.closed) return error.PoolClosed;
+            const deadline = deadline_policy.fromTimeout(
+                self.io,
+                self.options.client.connect_timeout,
+            ) catch return error.HandshakeTimeout;
+            return self.acquireUriBefore(
+                uri_text,
+                deadline,
+                null,
+                .{ .alt_svc = target },
+            );
+        }
+
+        pub fn acquireUriAltSvcWithTimeout(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            timeout: std.Io.Duration,
+        ) !Lease {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.acquireUriAltSvcWithDeadline(
+                uri_text,
+                target,
+                .fromNow(self.io, .{ .raw = timeout, .clock = .awake }),
+            );
+        }
+
+        pub fn acquireUriAltSvcWithDeadline(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            deadline: std.Io.Clock.Timestamp,
+        ) !Lease {
+            if (self.closed) return error.PoolClosed;
+            const absolute = try deadline_policy.capTimeout(
+                self.io,
+                deadline,
+                self.options.client.connect_timeout,
+            );
+            return self.acquireUriBefore(
+                uri_text,
+                absolute,
+                null,
+                .{ .alt_svc = target },
+            );
         }
 
         fn acquireUriBefore(
@@ -595,22 +705,36 @@ pub fn Pool(comptime Runtime: type) type {
             uri_text: []const u8,
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?owning_pool.RedirectConnectContext,
+            route: ConnectRoute,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
             defer endpoint.deinit();
+            try validateConnectRoute(endpoint, route);
             const origin = try http3.requestOrigin(
                 uri.scheme,
                 endpoint.authority,
             );
             self.pruneExpired();
-            if (self.takeIdle(origin)) |entry| {
+            if (self.takeIdle(origin)) |reused| {
+                const request_origin_key: ?http3.OriginKey =
+                    if (reused.exact_origin)
+                        null
+                    else
+                        http3.originKeyFromOrigin(
+                            self.allocator,
+                            origin,
+                        ) catch |err| {
+                            reused.entry.leased = false;
+                            return err;
+                        };
                 self.total_reused +|= 1;
                 return .{
                     .pool = self,
-                    .handle = entry.handle,
+                    .handle = reused.entry.handle,
                     .was_reused = true,
+                    .request_origin_key = request_origin_key,
                 };
             }
             self.total_misses +|= 1;
@@ -626,12 +750,22 @@ pub fn Pool(comptime Runtime: type) type {
             // dispatcher promotion from tearing down a live route.
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
 
-            const addresses = try Runtime.resolveEndpointBefore(
-                endpoint,
-                self.allocator,
-                self.io,
-                deadline,
-            );
+            const addresses = switch (route) {
+                .origin => try Runtime.resolveEndpointBefore(
+                    endpoint,
+                    self.allocator,
+                    self.io,
+                    deadline,
+                ),
+                .alt_svc => |target| try Runtime
+                    .resolveHostPortAddressesBefore(
+                    self.allocator,
+                    self.io,
+                    target.connect_host,
+                    target.port,
+                    deadline,
+                ),
+            };
             defer self.allocator.free(addresses);
             var last_error: ?anyerror = null;
             for (addresses) |peer| {
@@ -681,6 +815,26 @@ pub fn Pool(comptime Runtime: type) type {
                 };
             }
             return last_error orelse error.AddressFamilyUnsupported;
+        }
+
+        fn validateConnectRoute(
+            endpoint: Runtime.UriEndpoint,
+            route: ConnectRoute,
+        ) !void {
+            switch (route) {
+                .origin => {},
+                .alt_svc => |target| {
+                    if (!http3.isHttp3Alpn(target.alpn) or
+                        target.connect_host.len == 0 or target.port == 0 or
+                        !std.ascii.eqlIgnoreCase(
+                            target.origin_host,
+                            endpoint.tls_host,
+                        ))
+                    {
+                        return error.InvalidHeader;
+                    }
+                },
+            }
         }
 
         fn connectOne(
@@ -1546,23 +1700,48 @@ pub fn Pool(comptime Runtime: type) type {
             self.release_sequence +%= 1;
         }
 
-        fn takeIdle(self: *Self, origin: http3.Origin) ?*Entry {
-            var selected: ?*Entry = null;
+        fn takeIdle(self: *Self, origin: http3.Origin) ?IdleReuse {
+            var exact: ?*Entry = null;
+            var coalesced: ?*Entry = null;
             var iterator = self.entries.valueIterator();
             while (iterator.next()) |value| {
                 const entry = value.*;
-                if (entry.leased or !sameOrigin(entry.origin_key.origin(), origin)) {
+                if (entry.leased) continue;
+                if (!entry.client.isReusable()) continue;
+                const connection_origin = entry.origin_key.origin();
+                const allowed = entry.client.peerOriginSetAllows(
+                    connection_origin,
+                    origin,
+                );
+                if (sameOrigin(connection_origin, origin)) {
+                    if (allowed == false) continue;
+                    if (exact == null or entry.release_sequence <
+                        exact.?.release_sequence)
+                    {
+                        exact = entry;
+                    }
                     continue;
                 }
-                if (!entry.client.isReusable()) continue;
-                if (selected == null or
-                    entry.release_sequence < selected.?.release_sequence)
+                if (allowed != true) continue;
+                const certificates = entry.client.peerCertificates() orelse
+                    continue;
+                if (certificates.len == 0) continue;
+                quic.tls.trust.verifyServerCertificateIdentity(
+                    certificates[0],
+                    origin.host,
+                ) catch continue;
+                if (coalesced == null or entry.release_sequence <
+                    coalesced.?.release_sequence)
                 {
-                    selected = entry;
+                    coalesced = entry;
                 }
             }
-            if (selected) |entry| entry.leased = true;
-            return selected;
+            const entry = exact orelse coalesced orelse return null;
+            entry.leased = true;
+            return .{
+                .entry = entry,
+                .exact_origin = exact != null,
+            };
         }
 
         fn pruneExpired(self: *Self) void {
@@ -1874,6 +2053,12 @@ fn applyRedirectConnectionSecurity(
     options.handshake.nist_hybrid_key_material = .{};
     if (!redirect.forward_client_identity) {
         options.handshake.client_identity = null;
+    }
+}
+
+fn scopeAutoResumption(options: anytype, server_id: []const u8) void {
+    if (options.handshake.auto_resumption) |*automatic| {
+        automatic.server_id = server_id;
     }
 }
 

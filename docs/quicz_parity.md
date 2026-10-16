@@ -1600,6 +1600,16 @@ turn for established pool connections: its dispatcher applies borrowed packet
 views synchronously, while returned response/push events own all header state
 needed after the receive storage is reused. The existing owning
 `processResponsePacket` entry point remains source-compatible.
+Explicit Alt-Svc acquisition now preserves the same single-reader topology:
+the dispatcher resolves and dials only the alternative host/port while the URI
+origin continues to own SNI, certificate policy, origin+ALPN resumption/ticket
+state, pool identity, and `:authority`. Idle selection prefers exact matches
+and permits a different origin only after both RFC 9412 authorization and
+retained leaf-certificate DNS/IP validation. Coalesced leases keep their
+request origin separate from the stable connection origin and expose a
+fail-closed 421 removal hook. A real protected-QUIC test verifies correct ticket
+scope, same-handle coalescing, certificate-mismatch isolation, original-origin
+reuse after 421, and a fresh connection for the excluded origin.
 `beginUriFollowingRedirects*` adds the matching event-driven redirect boundary
 without introducing a competing UDP reader. Its transaction replays borrowed
 bodies through bounded one-packet DATA attempts, consumes only events matching

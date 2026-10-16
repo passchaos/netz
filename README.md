@@ -640,7 +640,15 @@ Current protocol coverage includes:
   The single-UDP-owner shared pool provides matching
   `beginUriFollowingRedirects*` transactions: they replay multi-packet bodies,
   consume only their current connection/stream events, and leave unrelated
-  response, push, and unrouted events caller-owned. `PreparedEarlyRequest` plus
+  response, push, and unrouted events caller-owned. The same shared pool now
+  accepts explicit Alt-Svc acquisition with relative or absolute deadlines:
+  DNS/UDP uses the advertised target while SNI, certificate validation,
+  origin+ALPN ticket collection, pool identity, and request authority remain
+  bound to the original URI. Idle reuse prefers the exact origin, then permits
+  cross-origin selection only with both RFC 9412 authorization and retained
+  leaf-certificate DNS/IP coverage. Coalesced leases retain a separate request
+  origin, expose a fail-closed 421 observation hook, and keep the authenticated
+  connection origin stable across release. `PreparedEarlyRequest` plus
   `HandshakeClient.connectWithEarlyRequest` provide a typed one-request 0-RTT
   path: the owned offer carries a complete literal/static-QPACK request and
   the mandatory SETTINGS/QPACK critical-stream prefixes, reports accepted

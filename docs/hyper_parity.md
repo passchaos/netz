@@ -1553,6 +1553,16 @@ intermediate response, and leaves unrelated response/push/unrouted events
 untouched. Same- and cross-origin TLS tests cover lease release/reacquisition,
 credential isolation and final idle routing; the same quic-go gate requires
 this third two-request redirect to use one shared-endpoint connection.
+It now also exposes explicit Alt-Svc acquisition without changing that reader
+ownership: only the advertised DNS/UDP target changes, while SNI, certificate
+policy, request authority, pool key, and automatic resumption/ticket collection
+stay scoped to the URI origin. Exact-origin idle hits remain preferred;
+cross-origin candidates require both peer ORIGIN authorization and retained
+leaf DNS/IP coverage. A coalesced lease separately owns its request origin and
+applies 421 before release, discarding the connection if that exclusion cannot
+be recorded. A real shared-endpoint matrix verifies origin-keyed ticket capture,
+same-handle coalescing, certificate-mismatch isolation, original-origin reuse
+after 421, and a fresh connection for the excluded origin.
 
 Both protocol `Limits` now also expose a TCP connect timeout used by literal-IP,
 hostname, URI, Unix-socket and pooled connection paths. Host resolution and all

@@ -645,7 +645,7 @@ pub const uriRequestTargetAlloc = client_uri.requestTargetAlloc;
 const connectDeadline = client_uri.connectDeadline;
 const cappedConnectDeadline = client_uri.cappedConnectDeadline;
 pub const resolveEndpointBefore = client_uri.resolveEndpointBefore;
-const resolveHostPortAddressesBefore =
+pub const resolveHostPortAddressesBefore =
     client_uri.resolveHostPortAddressesBefore;
 const handshakeRecoveryBefore = client_uri.handshakeRecoveryBefore;
 
@@ -34189,6 +34189,7 @@ test {
     _ = @import("runtime/handshake_client_pool_tests.zig");
     _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
+    _ = @import("runtime/shared_handshake_client_pool/alt_svc_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/development_streaming_tests.zig");
     _ = @import("runtime/development_server_tests.zig");
