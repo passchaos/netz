@@ -659,10 +659,17 @@ idempotent PUBCOMP without a second delivery.
 Tests cover atomic replacement, CRC corruption rollback, downtime expiry,
 retained state, subscriptions, offline queue, outgoing inflight retransmission,
 and a real new-broker reconnect with Session Present plus restored live
-routing. Scheduled-Will tests cover downtime deadline reduction, canonical
-publisher restoration, reconnect cancellation, driver publication after an
-actual broker restart and retained-Will storage. This snapshot surface still
-has narrower persistence-plugin integration than Mosquitto, but supports both
+routing. A source-hash-locked production-process port of Mosquitto
+`15-persist-publish-properties-v5-0.py` now preserves Payload Format, Content
+Type, Response Topic, binary Correlation Data, four ordered User Properties,
+and decreasing Message Expiry through two snapshot/restart generations. Exact
+PUBLISH comparison proves both property order and deep ownership across the
+restore-save-restore boundary, while an inbound Topic Alias is correctly
+removed as connection-scoped state before either snapshot replay.
+Scheduled-Will tests cover downtime deadline reduction, canonical publisher
+restoration, reconnect cancellation, driver publication after an actual broker
+restart and retained-Will storage. This snapshot surface still has narrower
+persistence-plugin integration than Mosquitto, but supports both
 elapsed-time and persistent-change-count live autosave. An
 `autosave_interval` of zero disables either runtime trigger, matching
 Mosquitto, without disabling startup restore or the final shutdown snapshot.

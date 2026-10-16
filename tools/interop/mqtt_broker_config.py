@@ -38,6 +38,7 @@ from mqtt_broker_config_ocsp import run_bridge_ocsp_case
 from mqtt_broker_config_protocol import run_accepted_protocol_versions_case
 from mqtt_broker_config_proxy import run_proxy_protocol_case
 from mqtt_broker_config_queue import run_queued_limits_case
+from mqtt_broker_config_retained import run_retained_property_persistence_case
 from mqtt_broker_config_session import (
     run_global_max_clients_case,
     run_global_max_connections_case,
@@ -6549,6 +6550,7 @@ def main() -> None:
         run_crl_reload_case(args.broker, directory)
         run_persistence_case(args.broker, directory)
         run_persistence_acl_restart_case(args.broker, directory)
+        run_retained_property_persistence_case(args.broker, directory)
         run_disabled_autosave_case(args.broker, directory)
         run_autosave_reload_case(args.broker, directory)
         run_retain_source_case(args.broker, directory)
@@ -6613,7 +6615,8 @@ def main() -> None:
         "reload with topology rollback, "
         "dynamic persistence target enable/disable/path and time/change/disabled "
         "autosave SIGHUP reload with failed-target rollback, SIGUSR1 checkpoint "
-        "routing, QoS2 journal guard, snapshot ACL reauthorization, and restore "
+        "routing, QoS2 journal guard, snapshot ACL reauthorization, retained "
+        "MQTT 5 property-bundle restore, and restore "
         + RUNTIME
     )
 
