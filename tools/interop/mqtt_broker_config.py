@@ -74,7 +74,9 @@ from mqtt_broker_config_origin import run_websocket_origins_case
 
 RUNTIME = "client_io=python-socket server_io=zio-std-io"
 FINITE_TEST_ENV = "NETZ_MQTT_CONFIG_FINITE_TEST"
-MOSQUITTO_RELOAD_SOURCES = {
+MOSQUITTO_PROCESS_SOURCES = {
+    "broker/01-connect-unix-socket.py":
+        "cda178fa53e3f5a0e9abe8325e449d625a5d9e3992250c7101bc6cf6aec6baf5",
     "broker/23-security-password-file-reload.py":
         "de0ae7ebf17db99700bed5e12adf777a44f330a70b45196e3ff16147b2b70d42",
     "broker/23-security-acl-file-reload.py":
@@ -86,12 +88,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("broker", type=Path)
     parser.add_argument("--mosquitto-test-root", type=Path)
-    parser.add_argument("--only-security-reload", action="store_true")
+    selected = parser.add_mutually_exclusive_group()
+    selected.add_argument("--only-security-reload", action="store_true")
+    selected.add_argument("--only-unix-listener", action="store_true")
     return parser.parse_args()
 
 
-def verify_mosquitto_reload_sources(test_root: Path) -> int:
-    for relative, expected in MOSQUITTO_RELOAD_SOURCES.items():
+def verify_mosquitto_process_sources(test_root: Path) -> int:
+    for relative, expected in MOSQUITTO_PROCESS_SOURCES.items():
         source = test_root / relative
         if not source.is_file():
             raise FileNotFoundError(f"missing Mosquitto reload source: {source}")
@@ -101,7 +105,7 @@ def verify_mosquitto_reload_sources(test_root: Path) -> int:
                 f"Mosquitto reload source changed: {relative}: "
                 f"expected {expected}, found {actual}"
             )
-    return len(MOSQUITTO_RELOAD_SOURCES)
+    return len(MOSQUITTO_PROCESS_SOURCES)
 
 
 def free_port() -> int:
@@ -2266,6 +2270,58 @@ def run_invalid_password_file_case(broker: Path, directory: Path) -> None:
         raise AssertionError(
             "plaintext password file did not fail closed: " + result.stdout
         )
+
+
+def run_unix_listener_case(broker: Path, directory: Path) -> None:
+    if not hasattr(socket, "AF_UNIX"):
+        raise RuntimeError("Unix-domain sockets are unavailable")
+    socket_path = directory / "configured-mqtt.sock"
+    config = directory / "unix-listener.conf"
+    config.write_text(
+        f"listener 0 {socket_path}\n"
+        "allow_anonymous true\n"
+        "max_connections 1\n"
+    )
+    process = subprocess.Popen(
+        [str(broker), f"--config={config}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready = process.stdout.readline().strip()
+    if "configured 1 listeners for 1 clients" not in ready:
+        raise RuntimeError(f"Unix listener broker failed to start: {ready}")
+    listener = process.stdout.readline().strip()
+    if not listener.startswith(f"mqtt-unix {socket_path} "):
+        raise RuntimeError(f"Unix listener address missing: {listener}")
+
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5)
+    try:
+        client.connect(str(socket_path))
+        client.sendall(connect_packet(
+            "unix-socket",
+            proto_ver=4,
+        ))
+        if read_mqtt_packet(client) != bytes.fromhex("20020000"):
+            raise AssertionError("Unix listener CONNACK mismatch")
+        client.sendall(bytes.fromhex("e000"))
+    finally:
+        client.close()
+    try:
+        return_code = process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        raise RuntimeError("Unix listener broker did not finish")
+    if return_code != 0:
+        raise RuntimeError(
+            f"Unix listener broker exited {return_code}: "
+            + process.stdout.read()
+        )
+    if socket_path.exists():
+        raise AssertionError("Unix listener socket survived broker teardown")
 
 
 def run_invalid_acl_file_case(broker: Path, directory: Path) -> None:
@@ -6566,7 +6622,7 @@ def main() -> None:
     args = parse_args()
     source_count = 0
     if args.mosquitto_test_root is not None:
-        source_count = verify_mosquitto_reload_sources(
+        source_count = verify_mosquitto_process_sources(
             args.mosquitto_test_root,
         )
     os.environ[FINITE_TEST_ENV] = "1"
@@ -6577,10 +6633,20 @@ def main() -> None:
             print(
                 "MQTT broker security reload integration passed: "
                 "password_invalid=rollback acl_invalid=rollback "
-                f"mosquitto_reload_sources={source_count} "
+                f"mosquitto_process_sources={source_count} "
                 + RUNTIME
             )
             return
+        if args.only_unix_listener:
+            run_unix_listener_case(args.broker, directory)
+            print(
+                "MQTT configured Unix listener integration passed: "
+                "protocol=mqttv311 connections=1 socket_cleanup=true "
+                f"mosquitto_process_sources={source_count} "
+                + RUNTIME
+            )
+            return
+        run_unix_listener_case(args.broker, directory)
         run_shared_listener_case(args.broker, directory)
         run_ipv6_socket_domain_case(args.broker, directory)
         run_default_dual_socket_domain_case(args.broker, directory)
@@ -6657,6 +6723,7 @@ def main() -> None:
     print(
         "MQTT broker config integration passed: strict authentication, "
         "Mosquitto hashes, packet/message/retain/inflight/queue limits, "
+        "source-locked Unix listener lifecycle, "
         "listener protocol/PROXY/Topic Alias/Origin and WebSocket header limits, "
         "default dual-family, named-interface, and IPv4/IPv6-only "
         "TCP/TLS/WS/WSS listeners, "
@@ -6712,7 +6779,7 @@ def main() -> None:
         "downtime expiry, connection-scoped Maximum Packet Size, outgoing "
         "QoS2 DUP/PUBREL recovery, and restore "
         + RUNTIME
-        + f" mosquitto_reload_sources={source_count}"
+        + f" mosquitto_process_sources={source_count}"
     )
 
 

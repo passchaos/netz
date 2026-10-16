@@ -264,7 +264,7 @@ pub const Security = struct {
     io: std.Io,
     dir: std.Io.Dir,
     paths: []Paths,
-    listener_ids: []const u16,
+    listener_ids: []const u64,
     per_listener_settings: bool,
     /// Per-listener eligibility for password authentication. The active file
     /// may appear or disappear across reload generations.
@@ -283,7 +283,7 @@ pub const Security = struct {
         io: std.Io,
         dir: std.Io.Dir,
         paths: []const Paths,
-        listener_ids: []const u16,
+        listener_ids: []const u64,
         per_listener_settings: bool,
     ) !Security {
         if (paths.len == 0 or listener_ids.len == 0 or
@@ -824,7 +824,7 @@ test "reloadable MQTT security swaps atomically and rolls back failure" {
         .password_file = "passwords",
         .acl_file = "acl",
     }};
-    const listener_ids = [_]u16{1883};
+    const listener_ids = [_]u64{1883};
     var security = try Security.init(
         allocator,
         io,
@@ -1042,7 +1042,7 @@ test "reloadable MQTT security adds and swaps per-listener file paths" {
         .data = "user second\ntopic write second/#\n",
     });
     const initial_paths = [_]Paths{ .{}, .{} };
-    const listener_ids = [_]u16{ 1883, 1884 };
+    const listener_ids = [_]u64{ 1883, 1884 };
     var security = try Security.init(
         allocator,
         io,
@@ -1149,7 +1149,7 @@ test "reloadable MQTT security reauthorizes credentials per listener" {
             "removed:" ++ password_hash ++ "\n",
     });
     const paths = [_]Paths{.{ .password_file = "passwords" }};
-    const listener_ids = [_]u16{1883};
+    const listener_ids = [_]u64{1883};
     var security = try Security.init(
         allocator,
         io,
@@ -1216,7 +1216,7 @@ test "reloadable MQTT security selects unique retained source listener" {
         .{ .acl_file = "first.acl" },
         .{ .acl_file = "second.acl" },
     };
-    const listener_ids = [_]u16{ 1883, 1884 };
+    const listener_ids = [_]u64{ 1883, 1884 };
     var security = try Security.init(
         allocator,
         io,
@@ -1245,7 +1245,7 @@ test "reloadable MQTT security rejects ambiguous retained source listener" {
         .{ .acl_file = "first.acl" },
         .{},
     };
-    const listener_ids = [_]u16{ 1883, 1883 };
+    const listener_ids = [_]u64{ 1883, 1883 };
     var security = try Security.init(
         allocator,
         io,

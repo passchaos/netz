@@ -1189,7 +1189,7 @@ Current protocol coverage includes:
   identity context plus pre-mutation
   PUBLISH/SUBSCRIBE/UNSUBSCRIBE, per-recipient outgoing-delivery, and
   publication-time Will access-control hooks, a strict Mosquitto-style broker
-  configuration subset for shared TCP/TLS/WebSocket/WSS listeners, including
+  configuration subset for shared TCP/Unix/TLS/WebSocket/WSS listeners, including
   separate IPv4/IPv6 wildcard sockets by default plus listener-local
   single-family socket domains and named-interface address binding enforced
   before bind,
@@ -1673,7 +1673,7 @@ zig build interop-mqtt-rumqttc -Doptimize=ReleaseFast
 # broker's fsynced commit log without another SUBSCRIBE, including stable
 # Packet Identifiers, DUP retransmission, and durable ACK handshake removal.
 zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
-# Exercise strict config parsing, shared TCP/TLS/WebSocket/WSS broker state,
+# Exercise strict config parsing, shared TCP/Unix/TLS/WebSocket/WSS broker state,
 # policy, global/per-listener Mosquitto password hashes, authentication
 # rejection, isolated ACL read/write/deny/pattern behavior, OpenSSL-verified
 # optional/required TLS client authentication, acceptable CA names and
@@ -1682,6 +1682,10 @@ zig build interop-mqtt-rumqttc-crash -Doptimize=ReleaseFast
 # key/CA/EKU/identity/CRL rejection, snapshot restore, and a two-broker inbound
 # bridge prefix/reconnect plus QoS 1/2 scenario through the production example.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast
+# Source-lock Mosquitto's `listener 0 PATH` Unix-domain process case, including
+# MQTT 3.1.1 admission and normal socket-file cleanup.
+zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \
+  --only-unix-listener --mosquitto-test-root=/nav_env/Work/mosquitto/test
 # Source-lock Mosquitto's invalid password/ACL reload processes and verify that
 # netz atomically rolls both failures back instead of terminating the broker.
 zig build interop-mqtt-broker-config -Doptimize=ReleaseFast -- \

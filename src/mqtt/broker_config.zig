@@ -43,7 +43,10 @@ pub const BridgeReloadType = bridge_config.ReloadType;
 pub const BridgeDirection = bridge_config.Direction;
 
 pub const Listener = struct {
-    address: net.IpAddress,
+    address: net.IpAddress = .{ .ip4 = .loopback(0) },
+    /// Non-empty only for Mosquitto's `listener 0 PATH` Unix-domain form.
+    /// `address` then carries a zero-port placeholder and must not be bound.
+    unix_path: []u8 = &.{},
     /// An omitted bind address without `socket_domain` requests separate
     /// IPv4 and IPv6 wildcard sockets when both families are available.
     bind_all_socket_domains: bool = false,
@@ -88,6 +91,7 @@ pub const Listener = struct {
     max_connections: usize = default_max_connections,
 
     fn deinit(self: *Listener, allocator: std.mem.Allocator) void {
+        if (self.unix_path.len != 0) allocator.free(self.unix_path);
         if (self.password_file.len != 0) allocator.free(self.password_file);
         if (self.acl_file.len != 0) allocator.free(self.acl_file);
         if (self.bind_interface.len != 0) allocator.free(self.bind_interface);
@@ -120,6 +124,10 @@ pub const Listener = struct {
 
     pub fn usesTls(self: Listener) bool {
         return self.certfile.len != 0;
+    }
+
+    pub fn isUnix(self: Listener) bool {
+        return self.unix_path.len != 0;
     }
 };
 
@@ -407,10 +415,26 @@ fn parseSources(
 
             if (std.mem.eql(u8, directive, "listener")) {
                 const port_text = words.next() orelse return error.InvalidDirective;
-                const port = parsePort(port_text) catch return error.InvalidInteger;
+                const port = std.fmt.parseInt(u16, port_text, 10) catch
+                    return error.InvalidInteger;
                 const explicit_host = words.next();
-                const host = explicit_host orelse "0.0.0.0";
                 if (words.next() != null) return error.InvalidDirective;
+                if (port == 0) {
+                    const unix_path = explicit_host orelse
+                        return error.InvalidDirective;
+                    _ = net.UnixAddress.init(unix_path) catch
+                        return error.InvalidDirective;
+                    try listeners.append(allocator, .{
+                        .address = .{ .ip4 = .loopback(0) },
+                        .unix_path = try allocator.dupe(u8, unix_path),
+                    });
+                    try listener_seen.append(allocator, .{
+                        .address_explicit = true,
+                    });
+                    current_listener[source.scope] = listeners.items.len - 1;
+                    continue;
+                }
+                const host = explicit_host orelse "0.0.0.0";
                 const address = net.IpAddress.parse(host, port) catch
                     return error.InvalidDirective;
                 try listeners.append(allocator, .{
@@ -639,6 +663,7 @@ fn parseSources(
                     else
                         return error.InvalidDirective;
                 } else if (std.mem.eql(u8, directive, "socket_domain")) {
+                    if (listener.isUnix()) return error.InvalidDirective;
                     try markOnce(&seen.socket_domain);
                     const value = try parseOne(&words);
                     listener.socket_domain = if (std.mem.eql(u8, value, "ipv4"))
@@ -656,6 +681,7 @@ fn parseSources(
                         };
                     }
                 } else if (std.mem.eql(u8, directive, "bind_interface")) {
+                    if (listener.isUnix()) return error.InvalidDirective;
                     try markOnce(&seen.bind_interface);
                     listener.bind_interface = try parseOneOwned(
                         allocator,
@@ -884,7 +910,13 @@ fn parseSources(
     }
     for (listeners.items, 0..) |listener, index| {
         for (listeners.items[0..index]) |previous| {
-            if (previous.bind_interface.len == 0 and
+            if (listener.isUnix() or previous.isUnix()) {
+                if (listener.isUnix() and previous.isUnix() and
+                    std.mem.eql(u8, previous.unix_path, listener.unix_path))
+                {
+                    return error.DuplicateListener;
+                }
+            } else if (previous.bind_interface.len == 0 and
                 listener.bind_interface.len == 0 and
                 previous.address.eql(&listener.address))
             {
@@ -893,6 +925,25 @@ fn parseSources(
         }
     }
     for (listeners.items, listener_seen.items) |listener, seen| {
+        if (listener.isUnix() and
+            (listener.protocol != .mqtt or
+                listener.usesTls() or
+                listener.socket_domain != null or
+                listener.bind_interface.len != 0 or
+                listener.websocket_origins.items.len != 0 or
+                listener.proxy_protocol != null or
+                seen.proxy_protocol_v2_require_tls or
+                listener.require_certificate or
+                listener.use_identity_as_username or
+                listener.use_subject_as_username or
+                listener.cafile.len != 0 or
+                listener.capath.len != 0 or
+                listener.crlfile.len != 0 or
+                listener.tls12_session_tickets or
+                listener.tls13_session_tickets))
+        {
+            return error.InvalidDirective;
+        }
         if (listener.bind_interface.len == 0 and
             seen.address_explicit and
             listener.socket_domain != null)
@@ -1108,13 +1159,6 @@ fn isListenerDirective(value: []const u8) bool {
         std.mem.eql(u8, value, "proxy_protocol_v2_require_tls") or
         std.mem.eql(u8, value, "use_username_as_clientid") or
         std.mem.eql(u8, value, "max_connections");
-}
-
-fn parsePort(value: []const u8) error{InvalidInteger}!u16 {
-    const port = std.fmt.parseInt(u16, value, 10) catch
-        return error.InvalidInteger;
-    if (port == 0) return error.InvalidInteger;
-    return port;
 }
 
 fn parseOne(words: anytype) error{InvalidDirective}![]const u8 {
@@ -1466,6 +1510,71 @@ test "MQTT broker config owns global Client Identifier prefix policy" {
             allocator,
             "clientid_prefixes secure-\nlistener 1883\n" ++
                 "allow_anonymous true\nuse_username_as_clientid true",
+        ),
+    );
+}
+
+test "MQTT broker config owns Mosquitto Unix listener paths" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.dupe(
+        u8,
+        "listener 0 /tmp/netz-mqtt.sock\nallow_anonymous true",
+    );
+    defer allocator.free(source);
+    var config = try parse(allocator, source);
+    defer config.deinit(allocator);
+    @memset(source, 'x');
+
+    try std.testing.expectEqual(@as(usize, 1), config.listeners.len);
+    try std.testing.expect(config.listeners[0].isUnix());
+    try std.testing.expectEqualStrings(
+        "/tmp/netz-mqtt.sock",
+        config.listeners[0].unix_path,
+    );
+    try std.testing.expectEqual(
+        @as(u16, 0),
+        config.listeners[0].address.getPort(),
+    );
+    try std.testing.expect(!config.listeners[0].bind_all_socket_domains);
+}
+
+test "MQTT broker config validates Unix listener topology" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator, "listener 0\nallow_anonymous true"),
+    );
+    try std.testing.expectError(
+        error.DuplicateListener,
+        parse(allocator,
+            \\listener 0 /tmp/duplicate.sock
+            \\allow_anonymous true
+            \\listener 0 /tmp/duplicate.sock
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 0 /tmp/websocket.sock
+            \\protocol websockets
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 0 /tmp/domain.sock
+            \\socket_domain ipv4
+            \\allow_anonymous true
+        ),
+    );
+    try std.testing.expectError(
+        error.InvalidDirective,
+        parse(allocator,
+            \\listener 0 /tmp/proxy.sock
+            \\enable_proxy_protocol 1
+            \\allow_anonymous true
         ),
     );
 }

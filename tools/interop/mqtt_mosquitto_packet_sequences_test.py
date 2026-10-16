@@ -27,8 +27,18 @@ class PacketDslTests(unittest.TestCase):
             sequences.parse_message("'unterminated value")
 
 
-class ReloadSourceIdentityTests(unittest.TestCase):
-    def test_accepts_exact_reload_sources(self) -> None:
+class ProcessSourceIdentityTests(unittest.TestCase):
+    def test_default_process_sources_are_pinned(self) -> None:
+        self.assertEqual(
+            set(broker_config.MOSQUITTO_PROCESS_SOURCES),
+            {
+                "broker/01-connect-unix-socket.py",
+                "broker/23-security-password-file-reload.py",
+                "broker/23-security-acl-file-reload.py",
+            },
+        )
+
+    def test_accepts_exact_process_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "password.py").write_bytes(b"password reload")
@@ -39,36 +49,36 @@ class ReloadSourceIdentityTests(unittest.TestCase):
             }
             with mock.patch.object(
                 broker_config,
-                "MOSQUITTO_RELOAD_SOURCES",
+                "MOSQUITTO_PROCESS_SOURCES",
                 sources,
             ):
                 self.assertEqual(
                     2,
-                    broker_config.verify_mosquitto_reload_sources(root),
+                    broker_config.verify_mosquitto_process_sources(root),
                 )
 
-    def test_rejects_reload_source_drift(self) -> None:
+    def test_rejects_process_source_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "password.py").write_bytes(b"changed")
             with mock.patch.object(
                 broker_config,
-                "MOSQUITTO_RELOAD_SOURCES",
+                "MOSQUITTO_PROCESS_SOURCES",
                 {"password.py": "0" * 64},
             ):
                 with self.assertRaisesRegex(AssertionError, "source changed"):
-                    broker_config.verify_mosquitto_reload_sources(root)
+                    broker_config.verify_mosquitto_process_sources(root)
 
-    def test_rejects_missing_reload_source(self) -> None:
+    def test_rejects_missing_process_source(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with mock.patch.object(
                 broker_config,
-                "MOSQUITTO_RELOAD_SOURCES",
+                "MOSQUITTO_PROCESS_SOURCES",
                 {"missing.py": "0" * 64},
             ):
                 with self.assertRaisesRegex(FileNotFoundError, "missing"):
-                    broker_config.verify_mosquitto_reload_sources(root)
+                    broker_config.verify_mosquitto_process_sources(root)
 
 
 class SequenceLoadingTests(unittest.TestCase):

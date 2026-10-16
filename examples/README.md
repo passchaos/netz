@@ -207,11 +207,17 @@ The repository's process gate sets `NETZ_MQTT_CONFIG_FINITE_TEST=1` to use the
 sum of those values solely as a deterministic test-exit budget; applications
 must not use that test-only switch. Global `max_packet_size` defaults to
 Mosquitto's 2,000,000-byte
-full MQTT Control Packet limit, applies to TCP/TLS/WS/WSS, and is advertised to
+full MQTT Control Packet limit, applies to TCP/Unix/TLS/WS/WSS, and is advertised to
 MQTT 5 clients. Global `message_size_limit` independently bounds PUBLISH and
 Will payload bytes; zero keeps the Mosquitto unlimited default. Oversized
 payloads are rejected while representable QoS flows complete. Each listener
 accepts MQTT 3.1, MQTT 3.1.1 and MQTT 5 by default. Listener-local
+`listener 0 PATH` selects a raw MQTT Unix-domain stream listener and deep-owns
+the path until teardown, when the socket file is removed. Unix listeners share
+the same Broker, authentication, ACL, mount-point, admission, and capacity
+policy as IP listeners, but reject WebSocket, TLS/client-certificate, PROXY,
+`socket_domain`, and `bind_interface` settings before any endpoint is opened.
+Listener-local
 `socket_domain ipv4|ipv6` constrains TCP, TLS, WebSocket, and WSS sockets to one
 address family. When the `listener` line omits its bind address, the directive
 selects `0.0.0.0` or `::`; an explicit address from the other family is

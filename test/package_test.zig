@@ -5438,6 +5438,14 @@ test "public modules are reachable" {
     ));
     try std.testing.expect(@hasField(
         netz.mqtt.broker_config.Listener,
+        "unix_path",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.mqtt.broker_config.Listener,
+        "isUnix",
+    ));
+    try std.testing.expect(@hasField(
+        netz.mqtt.broker_config.Listener,
         "password_file",
     ));
     try std.testing.expect(@hasField(

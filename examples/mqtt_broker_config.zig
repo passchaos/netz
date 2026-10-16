@@ -343,8 +343,25 @@ const AutosaveController = struct {
     }
 };
 
+const ConfiguredUnixServer = struct {
+    server: mqtt.runtime.UnixServer,
+    io: std.Io,
+    path: []const u8,
+
+    fn deinit(self: *ConfiguredUnixServer) void {
+        self.server.deinit();
+        if (std.Io.Dir.path.isAbsolute(self.path)) {
+            std.Io.Dir.deleteFileAbsolute(self.io, self.path) catch {};
+        } else {
+            std.Io.Dir.cwd().deleteFile(self.io, self.path) catch {};
+        }
+        self.* = undefined;
+    }
+};
+
 const ConfiguredServer = union(enum) {
     mqtt: mqtt.runtime.Server,
+    mqtt_unix: ConfiguredUnixServer,
     mqtt_tls: mqtt.tls_runtime.Server,
     websockets: mqtt.websocket_runtime.Server,
     secure_websockets: mqtt.websocket_runtime.TlsServer,
@@ -352,6 +369,7 @@ const ConfiguredServer = union(enum) {
     fn deinit(self: *ConfiguredServer) void {
         switch (self.*) {
             .mqtt => |*server| server.deinit(),
+            .mqtt_unix => |*server| server.deinit(),
             .mqtt_tls => |*server| server.deinit(),
             .websockets => |*server| server.deinit(),
             .secure_websockets => |*server| server.deinit(),
@@ -362,15 +380,17 @@ const ConfiguredServer = union(enum) {
     fn pendingSource(self: *ConfiguredServer) mqtt.runtime.PendingSource {
         return switch (self.*) {
             .mqtt => |*server| server.pendingSource(),
+            .mqtt_unix => |*server| server.server.pendingSource(),
             .mqtt_tls => |*server| server.pendingSource(),
             .websockets => |*server| server.pendingSource(),
             .secure_websockets => |*server| server.pendingSource(),
         };
     }
 
-    fn address(self: ConfiguredServer) std.Io.net.IpAddress {
+    fn address(self: ConfiguredServer) ?std.Io.net.IpAddress {
         return switch (self) {
             .mqtt => |server| server.address(),
+            .mqtt_unix => null,
             .mqtt_tls => |server| server.address(),
             .websockets => |server| server.address(),
             .secure_websockets => |server| server.address(),
@@ -380,12 +400,39 @@ const ConfiguredServer = union(enum) {
     fn transportName(self: ConfiguredServer) []const u8 {
         return switch (self) {
             .mqtt => "mqtt",
+            .mqtt_unix => "mqtt-unix",
             .mqtt_tls => "mqtts",
             .websockets => "websockets",
             .secure_websockets => "wss",
         };
     }
+
+    fn unixPath(self: ConfiguredServer) ?[]const u8 {
+        return switch (self) {
+            .mqtt_unix => |server| server.path,
+            else => null,
+        };
+    }
 };
+
+fn openConfiguredUnixServer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: mqtt.broker_config.Config,
+    configured: mqtt.broker_config.Listener,
+) !ConfiguredServer {
+    const address = try std.Io.net.UnixAddress.init(configured.unix_path);
+    return .{ .mqtt_unix = .{
+        .server = try mqtt.runtime.UnixServer.listen(
+            allocator,
+            io,
+            address,
+            listenerLimits(config, configured),
+        ),
+        .io = io,
+        .path = configured.unix_path,
+    } };
+}
 
 fn openConfiguredServer(
     allocator: std.mem.Allocator,
@@ -495,6 +542,7 @@ fn listenerBindAddresses(
     configured: mqtt.broker_config.Listener,
     storage: *[2]std.Io.net.IpAddress,
 ) ![]const std.Io.net.IpAddress {
+    std.debug.assert(!configured.isUnix());
     if (configured.bind_interface.len != 0) {
         const resolved = try netz.runtime.resolveInterfaceAddresses(
             configured.bind_interface,
@@ -543,6 +591,16 @@ fn listenerLimits(
         .proxy_v2_require_tls = listener.proxy_protocol_v2_require_tls,
         .proxy_v2_require_client_certificate = listener.proxy_protocol == .v2 and listener.require_certificate,
     };
+}
+
+fn listenerStableId(
+    listener: mqtt.broker_config.Listener,
+    listener_index: usize,
+) u64 {
+    return if (listener.isUnix())
+        (@as(u64, 1) << 63) | @as(u64, @intCast(listener_index))
+    else
+        listener.address.getPort();
 }
 
 fn securityPathsForConfig(
@@ -612,7 +670,7 @@ pub fn run(
 
     const security_paths = try securityPathsForConfig(allocator, &config);
     defer allocator.free(security_paths);
-    const listener_ids = try allocator.alloc(u16, config.listeners.len);
+    const listener_ids = try allocator.alloc(u64, config.listeners.len);
     defer allocator.free(listener_ids);
     const password_authentication = try allocator.alloc(
         bool,
@@ -632,8 +690,9 @@ pub fn run(
         password_authentication,
         allow_anonymous,
         admission_policies,
-    ) |listener, *id, *uses_password, *anonymous, *admission| {
-        id.* = listener.address.getPort();
+        0..,
+    ) |listener, *id, *uses_password, *anonymous, *admission, listener_index| {
+        id.* = listenerStableId(listener, listener_index);
         uses_password.* = !listener.use_identity_as_username and
             !listener.use_subject_as_username;
         anonymous.* = listener.allow_anonymous;
@@ -839,7 +898,10 @@ pub fn run(
             .use_username_as_client_id = configured.use_username_as_client_id,
             .use_identity_as_username = configured.use_identity_as_username,
             .use_subject_as_username = configured.use_subject_as_username,
-            .retained_source_id = configured.address.getPort(),
+            .retained_source_id = listenerStableId(
+                configured,
+                config_index,
+            ),
         };
         const accept_concurrency = std.math.add(
             usize,
@@ -856,36 +918,46 @@ pub fn run(
             config_index,
             configured,
         );
-        var bind_address_storage: [2]std.Io.net.IpAddress = undefined;
-        const bind_addresses = try listenerBindAddresses(
-            configured,
-            &bind_address_storage,
-        );
-
         const group_start = initialized_servers;
         var last_unavailable_error: ?anyerror = null;
-        for (bind_addresses) |bind_address| {
-            servers[initialized_servers] = openConfiguredServer(
+        if (configured.isUnix()) {
+            servers[initialized_servers] = try openConfiguredUnixServer(
                 allocator,
                 io,
                 config,
                 configured,
-                identity,
-                identity_provider,
-                client_auth,
-                session_tickets,
-                bind_address,
-            ) catch |err| {
-                if (bind_addresses.len > 1 and
-                    unavailableSocketFamily(err))
-                {
-                    last_unavailable_error = err;
-                    continue;
-                }
-                return err;
-            };
+            );
             server_config_indices[initialized_servers] = config_index;
             initialized_servers += 1;
+        } else {
+            var bind_address_storage: [2]std.Io.net.IpAddress = undefined;
+            const bind_addresses = try listenerBindAddresses(
+                configured,
+                &bind_address_storage,
+            );
+            for (bind_addresses) |bind_address| {
+                servers[initialized_servers] = openConfiguredServer(
+                    allocator,
+                    io,
+                    config,
+                    configured,
+                    identity,
+                    identity_provider,
+                    client_auth,
+                    session_tickets,
+                    bind_address,
+                ) catch |err| {
+                    if (bind_addresses.len > 1 and
+                        unavailableSocketFamily(err))
+                    {
+                        last_unavailable_error = err;
+                        continue;
+                    }
+                    return err;
+                };
+                server_config_indices[initialized_servers] = config_index;
+                initialized_servers += 1;
+            }
         }
         const group_count = initialized_servers - group_start;
         if (group_count == 0) {
@@ -949,18 +1021,31 @@ pub fn run(
         config_index,
     | {
         const configured = config.listeners[config_index];
-        std.debug.print(
-            "  {s} {f} mount_point={s} max_connections={d}\n",
-            .{
-                server.transportName(),
-                server.address(),
-                if (configured.mount_point.len == 0)
-                    "<global>"
-                else
-                    configured.mount_point,
-                configured.max_connections,
-            },
-        );
+        const mount_point = if (configured.mount_point.len == 0)
+            "<global>"
+        else
+            configured.mount_point;
+        if (server.unixPath()) |path| {
+            std.debug.print(
+                "  {s} {s} mount_point={s} max_connections={d}\n",
+                .{
+                    server.transportName(),
+                    path,
+                    mount_point,
+                    configured.max_connections,
+                },
+            );
+        } else {
+            std.debug.print(
+                "  {s} {f} mount_point={s} max_connections={d}\n",
+                .{
+                    server.transportName(),
+                    server.address().?,
+                    mount_point,
+                    configured.max_connections,
+                },
+            );
+        }
     }
     for (config.bridges) |bridge| {
         std.debug.print(
@@ -1531,6 +1616,7 @@ fn listenerReloadCompatible(
     after: mqtt.broker_config.Listener,
 ) bool {
     return std.meta.eql(before.address, after.address) and
+        std.mem.eql(u8, before.unix_path, after.unix_path) and
         before.bind_all_socket_domains == after.bind_all_socket_domains and
         before.socket_domain == after.socket_domain and
         std.mem.eql(u8, before.bind_interface, after.bind_interface) and
