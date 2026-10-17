@@ -428,7 +428,48 @@ test "unified HTTP client follows redirect from negotiated h1 to h2" {
         h2_thread.join();
     };
 
+    const Resolver = struct {
+        h1_address: std.Io.net.IpAddress,
+        h2_address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) http.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "localhost") or deadline == null) {
+                return error.UnknownHostName;
+            }
+            const address = if (self.h1_address.getPort() == port)
+                self.h1_address
+            else if (self.h2_address.getPort() == port)
+                self.h2_address
+            else
+                return error.UnknownHostName;
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{
+        .h1_address = h1_server.address(),
+        .h2_address = h2_server.address(),
+    };
+
     var client = try http.Client.init(allocator, io, .{
+        .address_resolver = .{
+            .context = &resolver,
+            .resolve = Resolver.resolve,
+        },
         .tls = .{ .server_verifier = .{
             .pinned_ecdsa_p256_public_key = public_key,
         } },
@@ -462,6 +503,7 @@ test "unified HTTP client follows redirect from negotiated h1 to h2" {
         result.response.header("x-selected-protocol").?,
     );
     try std.testing.expectEqual(@as(usize, 1), result.redirect_count);
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
 
     release.set(io);
     h1_thread.join();
@@ -672,7 +714,29 @@ test "unified HTTP client selects explicit cleartext protocol" {
         .{h2_server.address().getPort()},
     );
     defer allocator.free(h2_uri);
-    var h1_client = try http.Client.init(allocator, io, .{});
+    const BypassResolver = struct {
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) http.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return error.UnknownHostName;
+        }
+    };
+    var bypass_resolver = BypassResolver{};
+    var h1_client = try http.Client.init(allocator, io, .{
+        .address_resolver = .{
+            .context = &bypass_resolver,
+            .resolve = BypassResolver.resolve,
+        },
+    });
     defer h1_client.deinit();
     var h1_response = try h1_client.requestUriWithTimeout(
         h1_uri,
@@ -685,6 +749,10 @@ test "unified HTTP client selects explicit cleartext protocol" {
 
     var h2_client = try http.Client.init(allocator, io, .{
         .cleartext_protocol = .http2_prior_knowledge,
+        .address_resolver = .{
+            .context = &bypass_resolver,
+            .resolve = BypassResolver.resolve,
+        },
     });
     defer h2_client.deinit();
     var h2_response = try h2_client.requestUriWithTimeout(
@@ -695,6 +763,10 @@ test "unified HTTP client selects explicit cleartext protocol" {
     defer h2_response.deinit();
     try std.testing.expectEqual(http.Protocol.http2, h2_response.protocol());
     try std.testing.expectEqualStrings("cleartext-h2", h2_response.body());
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        bypass_resolver.calls.load(.acquire),
+    );
 
     release.set(io);
     h1_thread.join();
@@ -703,6 +775,169 @@ test "unified HTTP client selects explicit cleartext protocol" {
     h2_joined = true;
     if (h1_worker.err) |err| return err;
     if (h2_worker.err) |err| return err;
+}
+
+test "unified HTTP client uses one resolver contract for h1 and h2" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .async_limit = .unlimited,
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    var h1_server = try http1_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer h1_server.deinit();
+    var h2_server = try http2_runtime.Server.listen(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer h2_server.deinit();
+
+    const Worker = struct {
+        h1: *http1_runtime.Server,
+        h2: *http2_runtime.Server,
+        h1_err: ?anyerror = null,
+        h2_err: ?anyerror = null,
+
+        fn runH1(self: *@This()) void {
+            self.runH1Fallible() catch |err| {
+                self.h1_err = err;
+            };
+        }
+
+        fn runH1Fallible(self: *@This()) !void {
+            var connection = try self.h1.accept();
+            defer connection.close();
+            var request = try connection.readRequest(.{});
+            defer request.deinit(self.h1.allocator);
+            try std.testing.expectEqualStrings("/resolved-h1", request.request.target);
+            try connection.writeResponse(.{
+                .body = "resolved-h1",
+                .request_method = request.request.method,
+            });
+        }
+
+        fn runH2(self: *@This()) void {
+            self.runH2Fallible() catch |err| {
+                self.h2_err = err;
+            };
+        }
+
+        fn runH2Fallible(self: *@This()) !void {
+            var connection = try self.h2.accept();
+            defer connection.close();
+            var request = try connection.readRequest();
+            defer request.deinit(self.h2.allocator);
+            try std.testing.expectEqualStrings("/resolved-h2", request.path);
+            try connection.writeResponse(request.stream_id, .{
+                .body = "resolved-h2",
+                .request_method = request.method,
+            });
+        }
+    };
+    var worker = Worker{ .h1 = &h1_server, .h2 = &h2_server };
+    const h1_thread = try std.Thread.spawn(.{}, Worker.runH1, .{&worker});
+    var h1_joined = false;
+    defer if (!h1_joined) h1_thread.join();
+    const h2_thread = try std.Thread.spawn(.{}, Worker.runH2, .{&worker});
+    var h2_joined = false;
+    defer if (!h2_joined) h2_thread.join();
+
+    const Resolver = struct {
+        h1_address: std.Io.net.IpAddress,
+        h2_address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) http.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (deadline == null) return error.Timeout;
+            const expected = if (std.mem.eql(u8, host, "h1.resolver.test"))
+                self.h1_address
+            else if (std.mem.eql(u8, host, "h2.resolver.test"))
+                self.h2_address
+            else
+                return error.UnknownHostName;
+            if (expected.getPort() != port) return error.UnknownHostName;
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                2,
+            );
+            addresses[0] = .{ .ip4 = .loopback(0) };
+            addresses[1] = expected;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{
+        .h1_address = h1_server.address(),
+        .h2_address = h2_server.address(),
+    };
+    const h1_uri = try std.fmt.allocPrint(
+        allocator,
+        "http://h1.resolver.test:{d}/resolved-h1",
+        .{h1_server.address().getPort()},
+    );
+    defer allocator.free(h1_uri);
+    const h2_uri = try std.fmt.allocPrint(
+        allocator,
+        "http://h2.resolver.test:{d}/resolved-h2",
+        .{h2_server.address().getPort()},
+    );
+    defer allocator.free(h2_uri);
+
+    var h1_client = try http.Client.init(allocator, io, .{
+        .address_resolver = .{
+            .context = &resolver,
+            .resolve = Resolver.resolve,
+        },
+    });
+    defer h1_client.deinit();
+    var h1_response = try h1_client.requestUriWithTimeout(
+        h1_uri,
+        .{},
+        .fromSeconds(3),
+    );
+    defer h1_response.deinit();
+    try std.testing.expectEqual(http.Protocol.http1, h1_response.protocol());
+    try std.testing.expectEqualStrings("resolved-h1", h1_response.body());
+
+    var h2_client = try http.Client.init(allocator, io, .{
+        .cleartext_protocol = .http2_prior_knowledge,
+        .address_resolver = .{
+            .context = &resolver,
+            .resolve = Resolver.resolve,
+        },
+    });
+    defer h2_client.deinit();
+    var h2_response = try h2_client.requestUriWithTimeout(
+        h2_uri,
+        .{},
+        .fromSeconds(3),
+    );
+    defer h2_response.deinit();
+    try std.testing.expectEqual(http.Protocol.http2, h2_response.protocol());
+    try std.testing.expectEqualStrings("resolved-h2", h2_response.body());
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
+
+    h1_thread.join();
+    h1_joined = true;
+    h2_thread.join();
+    h2_joined = true;
+    if (worker.h1_err) |err| return err;
+    if (worker.h2_err) |err| return err;
 }
 
 test "unified HTTP client rejects zero timeout before I/O" {
@@ -718,5 +953,59 @@ test "unified HTTP client rejects zero timeout before I/O" {
             .{},
             .zero,
         ),
+    );
+}
+
+test "unified HTTP resolver inherits the caller deadline" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const Resolver = struct {
+        never: std.Io.Event = .unset,
+        saw_deadline: std.atomic.Value(bool) = .init(false),
+
+        fn resolve(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            resolve_io: std.Io,
+            host: []const u8,
+            _: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) http.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "deadline.resolver.test")) {
+                return error.UnknownHostName;
+            }
+            const absolute = deadline orelse return error.Timeout;
+            self.saw_deadline.store(true, .release);
+            self.never.waitTimeout(
+                resolve_io,
+                .{ .deadline = absolute },
+            ) catch |err| return err;
+            return error.UnknownHostName;
+        }
+    };
+    var resolver = Resolver{};
+    var client = try http.Client.init(allocator, io, .{
+        .address_resolver = .{
+            .context = &resolver,
+            .resolve = Resolver.resolve,
+        },
+    });
+    defer client.deinit();
+    const started = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(
+        error.Timeout,
+        client.requestUriWithTimeout(
+            "http://deadline.resolver.test/",
+            .{},
+            .fromMilliseconds(50),
+        ),
+    );
+    try std.testing.expect(resolver.saw_deadline.load(.acquire));
+    try std.testing.expect(
+        started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+            500 * std.time.ns_per_ms,
     );
 }

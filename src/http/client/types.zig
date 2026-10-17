@@ -10,6 +10,7 @@ const http3_runtime = @import("../../http3/runtime.zig");
 const content_coding = @import("../content_coding.zig");
 const tls_stream = @import("../../tls/mod.zig").stream;
 const uri_redirect = @import("../../http1/runtime/redirect.zig");
+const address_resolver = @import("../../internal/address_resolver.zig");
 
 pub const Protocol = enum {
     http1,
@@ -32,6 +33,8 @@ pub const CleartextProtocol = enum {
     http1,
     http2_prior_knowledge,
 };
+
+pub const AddressResolver = address_resolver.Resolver;
 
 pub const Header = struct {
     name: []const u8,
@@ -60,6 +63,10 @@ pub const Options = struct {
     /// This is ignored by `.http2_only`.
     allow_http1_without_alpn: bool = true,
     connect_timeout: ?std.Io.Duration = null,
+    /// Optional resolver shared by standalone and pooled TCP connections.
+    /// Literal IP URI hosts bypass it. Returned addresses are attempted under
+    /// one connect deadline while TLS identity remains bound to the URI host.
+    address_resolver: ?AddressResolver = null,
     tcp_nodelay: bool = true,
     http1_limits: http1_runtime.Limits = .{},
     http2_limits: http2_runtime.Limits = .{},

@@ -191,10 +191,52 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
     var h3_joined_b = false;
     defer if (!h3_joined_b) h3_thread_b.join();
 
+    const Resolver = struct {
+        addresses: [4]std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) http.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "localhost") or deadline == null) {
+                return error.UnknownHostName;
+            }
+            for (self.addresses) |address| {
+                if (address.getPort() != port) continue;
+                const result = try resolve_allocator.alloc(
+                    std.Io.net.IpAddress,
+                    1,
+                );
+                result[0] = address;
+                _ = self.calls.fetchAdd(1, .acq_rel);
+                return result;
+            }
+            return error.UnknownHostName;
+        }
+    };
+    var resolver = Resolver{ .addresses = .{
+        tcp_a.address(),
+        tcp_b.address(),
+        h3_a.address(),
+        h3_b.address(),
+    } };
+
     var pool = try http.Pool.init(allocator, io, .{
-        .client = .{ .tls = .{ .server_verifier = .{
-            .pinned_ecdsa_p256_public_key = public_key,
-        } } },
+        .client = .{
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
+            },
+            .tls = .{ .server_verifier = .{
+                .pinned_ecdsa_p256_public_key = public_key,
+            } },
+        },
         .http3 = .{
             .limits = limits,
             .handshake = .{ .handshake = .{
@@ -315,4 +357,5 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
     try std.testing.expectEqual(@as(usize, 2), pool.http3ConnectionCount());
     try std.testing.expectEqual(@as(usize, 2), pool.http3IdleCount());
     try std.testing.expectEqual(@as(usize, 4), pool.totalConnectionCount());
+    try std.testing.expectEqual(@as(u8, 4), resolver.calls.load(.acquire));
 }

@@ -11,6 +11,7 @@ const http1_runtime = @import("../http1/runtime.zig");
 const http2 = @import("../http2/mod.zig");
 const http2_runtime = @import("../http2/runtime.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const tcp_connect = @import("../internal/tcp_connect.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const uri_redirect = @import("../http1/runtime/redirect.zig");
@@ -25,6 +26,7 @@ pub const ResponseTimeoutError = Error || std.Io.Timeout.Error ||
 pub const Protocol = types.Protocol;
 pub const ProtocolPolicy = types.ProtocolPolicy;
 pub const CleartextProtocol = types.CleartextProtocol;
+pub const AddressResolver = types.AddressResolver;
 pub const Header = types.Header;
 pub const HeaderIterator = types.HeaderIterator;
 pub const RequestOptions = types.RequestOptions;
@@ -307,19 +309,21 @@ pub const Client = struct {
             if (secure) 443 else 80,
         );
         defer endpoint.deinit();
-        const stream = if (deadline) |absolute|
-            try endpoint.connectWithDeadline(
+        const connect_deadline = if (deadline) |absolute|
+            try deadline_policy.capTimeout(
                 self.io,
-                try deadline_policy.capTimeout(
-                    self.io,
-                    absolute,
-                    self.options.connect_timeout,
-                ),
+                absolute,
+                self.options.connect_timeout,
             )
-        else if (self.options.connect_timeout) |timeout|
-            try endpoint.connectWithTimeout(self.io, timeout)
         else
-            try endpoint.connect(self.io);
+            try deadline_policy.fromTimeout(
+                self.io,
+                self.options.connect_timeout,
+            );
+        const stream = try self.connectEndpointBefore(
+            endpoint,
+            connect_deadline,
+        );
         if (self.options.tcp_nodelay) {
             socket_options.setTcpNoDelay(stream) catch {
                 stream.close(self.io);
@@ -424,6 +428,43 @@ pub const Client = struct {
                     ) },
             },
         };
+    }
+
+    fn connectEndpointBefore(
+        self: *Client,
+        endpoint: http1_runtime.UriEndpoint,
+        deadline: ?std.Io.Clock.Timestamp,
+    ) ResponseTimeoutError!std.Io.net.Stream {
+        switch (endpoint.target) {
+            .ip => |address| return if (deadline) |absolute|
+                tcp_connect.ipWithDeadline(self.io, address, absolute)
+            else
+                tcp_connect.ip(self.io, address, null),
+            .host => {},
+        }
+        const resolver = self.options.address_resolver orelse {
+            return if (deadline) |absolute|
+                endpoint.connectWithDeadline(self.io, absolute)
+            else
+                endpoint.connect(self.io);
+        };
+        const addresses = try resolver.resolve(
+            resolver.context,
+            self.allocator,
+            self.io,
+            endpoint.tls_host,
+            endpoint.port,
+            deadline,
+        );
+        defer self.allocator.free(addresses);
+        return if (deadline) |absolute|
+            tcp_connect.resolvedWithDeadline(
+                self.io,
+                addresses,
+                absolute,
+            )
+        else
+            tcp_connect.resolved(self.io, addresses, null);
     }
 
     pub fn requestUri(

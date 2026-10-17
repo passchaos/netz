@@ -58,6 +58,7 @@ pub const PoolHttp3RememberedSettingsStats =
 pub const Protocol = client.Protocol;
 pub const ProtocolPolicy = client.ProtocolPolicy;
 pub const CleartextProtocol = client.CleartextProtocol;
+pub const AddressResolver = client.AddressResolver;
 pub const Header = client.Header;
 pub const HeaderIterator = client.HeaderIterator;
 pub const RequestOptions = client.RequestOptions;

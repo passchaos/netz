@@ -136,6 +136,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
         release: std.Io.Event = .unset,
         cancel_started: std.Io.Event = .unset,
         cancel_release: std.Io.Event = .unset,
+        server_address: std.Io.net.IpAddress,
         silent_address: std.Io.net.IpAddress,
 
         fn resolve(
@@ -145,7 +146,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
             host: []const u8,
             port: u16,
             deadline: ?std.Io.Clock.Timestamp,
-        ) runtime.Error![]std.Io.net.IpAddress {
+        ) runtime.SharedHandshakeClientPoolAddressResolver.ResolveError![]std.Io.net.IpAddress {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (std.mem.eql(u8, host, "cancel.resolve.test")) {
                 self.cancel_started.set(resolve_io);
@@ -153,13 +154,17 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
                 return error.Unexpected;
             }
             if (!std.mem.eql(u8, host, "slow.resolve.test")) {
-                return runtime.resolveHostPortAddressesBefore(
-                    resolve_allocator,
-                    resolve_io,
-                    host,
-                    port,
-                    deadline,
+                if (!std.mem.eql(u8, host, "localhost") or
+                    self.server_address.ip4.port != port)
+                {
+                    return error.UnknownHostName;
+                }
+                const addresses = try resolve_allocator.alloc(
+                    std.Io.net.IpAddress,
+                    1,
                 );
+                addresses[0] = self.server_address;
+                return addresses;
             }
             if (self.silent_address.ip4.port != port) {
                 return error.Unexpected;
@@ -170,7 +175,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
                     resolve_io,
                     .{ .deadline = absolute },
                 ) catch |err| switch (err) {
-                    error.Timeout => return error.HandshakeTimeout,
+                    error.Timeout => return error.Timeout,
                     error.Canceled => return error.Canceled,
                 };
             } else {
@@ -185,6 +190,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
         }
     };
     var resolve_gate = ResolveGate{
+        .server_address = server.address(),
         .silent_address = silent.address(),
     };
 

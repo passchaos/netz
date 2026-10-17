@@ -15,6 +15,7 @@ const owning_pool = @import("handshake_client_pool.zig");
 const shared_dispatcher = @import("shared_handshake_client_pool/dispatcher.zig");
 const shared_redirect = @import("shared_handshake_client_pool/redirect.zig");
 const shared_request = @import("shared_handshake_client_pool/request.zig");
+const address_resolver = @import("../../internal/address_resolver.zig");
 
 const supported_versions = [_]u32{
     quic.Version.version_1.wireValue(),
@@ -36,23 +37,6 @@ pub const Error = error{
     InvalidLease,
 };
 
-pub fn AddressResolver(comptime Runtime: type) type {
-    return struct {
-        context: *anyopaque,
-        /// Calls may overlap for independent routes. Implementations must be
-        /// thread-safe, honor cancellation/deadline through `io`, and return
-        /// an address slice owned by `allocator`.
-        resolve: *const fn (
-            context: *anyopaque,
-            allocator: std.mem.Allocator,
-            io: std.Io,
-            host: []const u8,
-            port: u16,
-            deadline: ?std.Io.Clock.Timestamp,
-        ) Runtime.Error![]std.Io.net.IpAddress,
-    };
-}
-
 pub fn Options(comptime Runtime: type) type {
     return struct {
         local_address: std.Io.net.IpAddress,
@@ -67,7 +51,7 @@ pub fn Options(comptime Runtime: type) type {
         /// acquisitions. It runs in a cancelable pending-resolution task, so
         /// service discovery or cached/DoH lookup never takes endpoint receive
         /// ownership. Direct pool acquisition retains Runtime's resolver.
-        resolver: ?AddressResolver(Runtime) = null,
+        resolver: ?address_resolver.Resolver = null,
         idle: http3.origin_pool.Config = .{},
         /// Maximum established plus in-progress connections. Zero is
         /// unbounded. Independent pending handshakes may overlap, while one
@@ -552,7 +536,10 @@ pub fn Pool(comptime Runtime: type) type {
                         host,
                         port,
                         self.deadline,
-                    );
+                    ) catch |err| switch (err) {
+                        error.Timeout => return error.HandshakeTimeout,
+                        else => return err,
+                    };
                 }
                 return switch (self.route) {
                     .origin => Runtime.resolveEndpointBefore(

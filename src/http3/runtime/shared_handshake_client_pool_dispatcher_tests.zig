@@ -565,7 +565,7 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
             host: []const u8,
             port: u16,
             _: ?std.Io.Clock.Timestamp,
-        ) runtime.Error![]std.Io.net.IpAddress {
+        ) runtime.SharedHandshakeClientPoolAddressResolver.ResolveError![]std.Io.net.IpAddress {
             const self: *@This() = @ptrCast(@alignCast(context));
             if (!std.mem.eql(u8, host, "early.resolve.test") or
                 self.address.ip4.port != port)

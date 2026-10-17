@@ -20,6 +20,8 @@ pub const BoundConnectError = net.IpAddress.ConnectError || error{
 
 pub const BoundHostConnectError = net.HostName.LookupError ||
     BoundConnectError;
+pub const ResolvedConnectError = net.HostName.LookupError ||
+    net.IpAddress.ConnectError;
 
 pub fn ip(
     io: std.Io,
@@ -108,6 +110,68 @@ pub fn hostWithDeadline(
         connectHost,
         .{ io, host_name, port },
     );
+}
+
+/// Try caller-resolved addresses in order under one optional timeout.
+pub fn resolved(
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    timeout: ?std.Io.Duration,
+) ResolvedConnectError!net.Stream {
+    const deadline = if (timeout) |duration|
+        (try deadline_policy.fromTimeout(io, duration)).?
+    else
+        null;
+    return resolvedBefore(io, addresses, deadline);
+}
+
+pub fn resolvedWithDeadline(
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    deadline: std.Io.Clock.Timestamp,
+) ResolvedConnectError!net.Stream {
+    return resolvedBefore(
+        io,
+        addresses,
+        try deadline_policy.usableAwake(io, deadline),
+    );
+}
+
+fn resolvedBefore(
+    io: std.Io,
+    addresses: []const net.IpAddress,
+    deadline: ?std.Io.Clock.Timestamp,
+) ResolvedConnectError!net.Stream {
+    var last_error: ?net.IpAddress.ConnectError = null;
+    for (addresses) |address| {
+        const stream = if (deadline) |absolute|
+            ipWithDeadline(io, address, absolute)
+        else
+            ip(io, address, null);
+        return stream catch |err| {
+            if (!shouldTryNextResolvedAddress(err)) return err;
+            last_error = err;
+            continue;
+        };
+    }
+    return last_error orelse error.NoAddressReturned;
+}
+
+fn shouldTryNextResolvedAddress(err: anyerror) bool {
+    return switch (err) {
+        error.AddressFamilyUnsupported,
+        error.AddressUnavailable,
+        error.ConnectionRefused,
+        error.ConnectionResetByPeer,
+        error.HostUnreachable,
+        error.NetworkDown,
+        error.NetworkUnreachable,
+        error.ProtocolUnsupportedByAddressFamily,
+        error.ProtocolUnsupportedBySystem,
+        error.SocketUnconnected,
+        => true,
+        else => false,
+    };
 }
 
 pub fn hostBound(

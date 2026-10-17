@@ -99,15 +99,19 @@ pub const Pool = struct {
             options.max_total_connections,
         );
         errdefer shared_budget.deinit();
-        const http3_state = if (options.http3) |http3_options|
-            try h3_support.State.create(
+        const http3_state = if (options.http3) |http3_options| blk: {
+            var effective_http3 = http3_options;
+            if (effective_http3.address_resolver == null) {
+                effective_http3.address_resolver =
+                    options.client.address_resolver;
+            }
+            break :blk try h3_support.State.create(
                 allocator,
                 io,
-                http3_options,
+                effective_http3,
                 shared_budget,
-            )
-        else
-            null;
+            );
+        } else null;
         errdefer if (http3_state) |state| state.deinit();
         return .{
             .allocator = allocator,
