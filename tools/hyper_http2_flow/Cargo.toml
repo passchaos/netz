@@ -39,6 +39,10 @@ path = "src/bin/cancel_client.rs"
 name = "netz-hyper-unified-server"
 path = "src/bin/unified_server.rs"
 
+[[bin]]
+name = "netz-hyper-connect-udp"
+path = "src/bin/connect_udp.rs"
+
 [dependencies]
 bytes = "1.2"
 futures-util = "0.3"

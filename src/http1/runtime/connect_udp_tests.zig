@@ -153,8 +153,19 @@ test "HTTP/1 CONNECT-UDP resumes fragmented capsules after timeout" {
         session.receiveWithTimeout(.fromMilliseconds(30)),
     );
     shared.allow_suffix.set(io);
-    var response = try session.receiveWithTimeout(.fromSeconds(2));
-    defer response.deinit(allocator);
+    var short_response: [512]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        session.receiveIntoWithTimeout(
+            &short_response,
+            .fromSeconds(2),
+        ),
+    );
+    var response_storage: [response_payload.len]u8 = undefined;
+    const response = try session.receiveIntoWithTimeout(
+        &response_storage,
+        .fromSeconds(2),
+    );
     try std.testing.expectEqualSlices(
         u8,
         &response_payload,

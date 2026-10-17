@@ -416,6 +416,11 @@ pub fn Protocol(comptime Http3: type) type {
             }
         };
 
+        pub const ReceivedUdpPayload = struct {
+            stream_id: u62,
+            payload: []u8,
+        };
+
         /// Typed Context ID 0 data plane over a detached CONNECT association.
         /// Unknown extension contexts are dropped as RFC 9298 permits.
         pub fn Session(comptime Transport: type) type {

@@ -1745,6 +1745,29 @@ pub fn build(b: *std.Build) void {
     );
     http2_hyper_interop_step.dependOn(&http2_hyper_interop.step);
 
+    const connect_udp_hyper_peer = b.addExecutable(.{
+        .name = "netz-connect-udp-hyper-peer",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(
+                "tools/interop/connect_udp_hyper_peer.zig",
+            ),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "netz", .module = netz_mod }},
+        }),
+    });
+    const connect_udp_hyper_interop = b.addSystemCommand(
+        &.{"tools/interop/connect_udp_hyper.sh"},
+    );
+    connect_udp_hyper_interop.addArtifactArg(connect_udp_hyper_peer);
+    const connect_udp_hyper_interop_step = b.step(
+        "interop-connect-udp-hyper",
+        "Run HTTP/1 and HTTP/2 CONNECT-UDP interop with Hyper",
+    );
+    connect_udp_hyper_interop_step.dependOn(
+        &connect_udp_hyper_interop.step,
+    );
+
     const http_unified_hyper_client = b.addExecutable(.{
         .name = "netz-http-unified-hyper-client",
         .root_module = b.createModule(.{
@@ -2975,6 +2998,12 @@ pub fn build(b: *std.Build) void {
             .path = "examples/bench_http3_capsule.zig",
             .run_step = "bench-http3-capsule",
             .description = "Benchmark HTTP/3 Capsule Protocol parsing and caller-buffer encoding",
+        },
+        .{
+            .exe_name = "netz-bench-connect-udp-capsule",
+            .path = "examples/bench_connect_udp_capsule.zig",
+            .run_step = "bench-connect-udp-capsule",
+            .description = "Benchmark CONNECT-UDP Capsule Session send and receive paths",
         },
         .{
             .exe_name = "netz-bench-http3-qpack",

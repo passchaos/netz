@@ -646,6 +646,16 @@ test "public modules are reachable" {
         "AcceptedConnectUdp",
     ));
     inline for (&.{
+        "receiveInto",
+        "receiveIntoWithTimeout",
+        "receiveIntoWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http1.runtime.ConnectUdpSession,
+            decl,
+        ));
+    }
+    inline for (&.{
         "openConnectUdp",
         "openConnectUdpWithTimeout",
         "openConnectUdpWithDeadline",
@@ -802,6 +812,16 @@ test "public modules are reachable" {
         netz.http2.runtime,
         "AcceptedConnectUdp",
     ));
+    inline for (&.{
+        "receiveInto",
+        "receiveIntoWithTimeout",
+        "receiveIntoWithDeadline",
+    }) |decl| {
+        try std.testing.expect(@hasDecl(
+            netz.http2.runtime.ConnectUdpSession,
+            decl,
+        ));
+    }
     inline for (&.{
         "openConnectUdp",
         "openConnectUdpWithTimeout",
@@ -3235,6 +3255,10 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(
         netz.http3.connect_udp,
         "ContextDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp,
+        "ReceivedUdpPayload",
     ));
     try std.testing.expect(@hasDecl(
         netz.http3.connect_udp,

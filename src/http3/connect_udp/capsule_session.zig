@@ -176,6 +176,40 @@ pub fn Session(
             return self.receiveUntil(deadline);
         }
 
+        /// Receive one Context ID 0 UDP payload into caller storage. A short
+        /// output returns BufferTooShort without consuming the parsed capsule,
+        /// so the caller can retry with a larger buffer.
+        pub fn receiveInto(
+            self: *Self,
+            out: []u8,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            return self.receiveIntoUntil(out, null);
+        }
+
+        /// Relative-timeout caller-buffer receive. Incomplete Capsule bytes
+        /// and a complete payload rejected for short output remain resumable.
+        pub fn receiveIntoWithTimeout(
+            self: *Self,
+            out: []u8,
+            timeout: std.Io.Duration,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            if (timeout.nanoseconds <= 0) return error.Timeout;
+            return self.receiveIntoWithDeadline(out, .fromNow(self.io, .{
+                .raw = timeout,
+                .clock = .awake,
+            }));
+        }
+
+        /// Absolute awake-clock counterpart to `receiveIntoWithTimeout`.
+        pub fn receiveIntoWithDeadline(
+            self: *Self,
+            out: []u8,
+            deadline: std.Io.Clock.Timestamp,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            _ = try deadline_policy.usableAwake(self.io, deadline);
+            return self.receiveIntoUntil(out, deadline);
+        }
+
         fn prepareSend(self: *Self, payload: []const u8) !void {
             if (self.pending_send) |*pending| {
                 if (!pending.matches(payload)) return error.WriteInProgress;
@@ -211,6 +245,35 @@ pub fn Session(
             self: *Self,
             deadline: ?std.Io.Clock.Timestamp,
         ) !ConnectUdp.OwnedUdpPayload {
+            const buffered = try self.nextDatagramUntil(deadline);
+            const owned = try self.allocator.dupe(u8, buffered.payload);
+            self.receive_offset += buffered.consumed;
+            return .{
+                .stream_id = @intCast(self.tunnel.stream_id),
+                .storage = owned,
+                .payload = owned,
+            };
+        }
+
+        fn receiveIntoUntil(
+            self: *Self,
+            out: []u8,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !ConnectUdp.ReceivedUdpPayload {
+            const buffered = try self.nextDatagramUntil(deadline);
+            if (out.len < buffered.payload.len) return error.BufferTooShort;
+            @memcpy(out[0..buffered.payload.len], buffered.payload);
+            self.receive_offset += buffered.consumed;
+            return .{
+                .stream_id = @intCast(self.tunnel.stream_id),
+                .payload = out[0..buffered.payload.len],
+            };
+        }
+
+        fn nextDatagramUntil(
+            self: *Self,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) !BufferedUdpPayload {
             while (true) {
                 if (try self.pollBuffered()) |payload| return payload;
                 if (self.bufferedLen() >
@@ -251,30 +314,34 @@ pub fn Session(
             }
         }
 
-        fn pollBuffered(self: *Self) !?ConnectUdp.OwnedUdpPayload {
+        const BufferedUdpPayload = struct {
+            payload: []const u8,
+            consumed: usize,
+        };
+
+        fn pollBuffered(self: *Self) !?BufferedUdpPayload {
             while (self.receive_offset < self.receive_buffer.items.len) {
                 const remaining = self.receive_buffer.items[self.receive_offset..];
                 const parsed = Capsule.parse(remaining) catch |err| switch (err) {
                     error.BufferTooShort => return null,
                     else => |other| return self.abortMalformed(other),
                 };
-                self.receive_offset += parsed.consumed;
                 if (parsed.capsule.capsule_type !=
                     Capsule.CapsuleType.datagram)
                 {
+                    self.receive_offset += parsed.consumed;
                     continue;
                 }
                 const datagram = ConnectUdp.ContextDatagram.parse(
                     parsed.capsule.value,
                 ) catch |err| return self.abortMalformed(err);
                 if (datagram.context_id != ConnectUdp.udp_context_id) {
+                    self.receive_offset += parsed.consumed;
                     continue;
                 }
-                const owned = try self.allocator.dupe(u8, datagram.payload);
                 return .{
-                    .stream_id = @intCast(self.tunnel.stream_id),
-                    .storage = owned,
-                    .payload = owned,
+                    .payload = datagram.payload,
+                    .consumed = parsed.consumed,
                 };
             }
             self.receive_buffer.clearRetainingCapacity();

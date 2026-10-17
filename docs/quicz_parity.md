@@ -856,6 +856,11 @@ variables; forbidden Level-2/3 operators and all Level-4 modifiers fail during
 compilation. A second H3 Session in the same real exchange uses a query template
 and application-selected server target, rather than treating custom templates
 as the default path.
+H1/H2 Capsule Sessions additionally expose caller-buffer receive with
+non-consuming BufferTooShort retries. An offline-locked Hyper process matrix
+independently validates both endpoint roles over cleartext and TLS for both
+versions, including H2 Extended CONNECT settings, H1 Upgrade, multi-byte
+Capsule lengths, fragmentation, and unknown extension skipping.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |

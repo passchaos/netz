@@ -1612,6 +1612,15 @@ bidirectional payloads, fragmentation, unknown extensions, timeout resumption,
 and strict Capsule negotiation; the authenticated HTTP/3 exchange additionally
 proves SETTINGS ordering, default and custom-template expansion, and two
 independent Sessions.
+The Capsule Session also has caller-buffer receive variants matching the H3
+DATAGRAM surface. A short output leaves the complete datagram pending for a
+larger retry, while warmed reads avoid the owning API's per-payload allocation.
+An offline-locked process gate uses the audited `~/Work/hyper` checkout as an
+independent HTTP stack and Capsule codec. All eight HTTP/1.1/HTTP/2, client/
+server, cleartext/TLS combinations exchange 513- and 777-byte payloads, cross
+multi-byte QUIC-varint and fragmented-stream boundaries, skip unknown Capsule
+types and Context IDs, validate H2 ENABLE_CONNECT_PROTOCOL, and keep HTTP/1.1's
+legacy-compatible optional ALPN distinct from mandatory H2 ALPN.
 The authenticated H3 client now also provides the execution primitive needed
 by a cloneable request sender: one connection accepts an owned-response batch
 whose members retain independent awake-clock deadlines and optional active

@@ -149,8 +149,19 @@ test "HTTP/2 CONNECT-UDP carries fragmented DATAGRAM capsules" {
     try session.sendWithTimeout(&payload, .fromSeconds(2));
     try std.testing.expect(!session.writeInProgress());
 
-    var response = try session.receiveWithTimeout(.fromSeconds(2));
-    defer response.deinit(allocator);
+    var short_response: [1]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooShort,
+        session.receiveIntoWithTimeout(
+            &short_response,
+            .fromSeconds(2),
+        ),
+    );
+    var response_storage: [32]u8 = undefined;
+    const response = try session.receiveIntoWithTimeout(
+        &response_storage,
+        .fromSeconds(2),
+    );
     try std.testing.expectEqualStrings("h2-server-udp", response.payload);
     try std.testing.expectError(
         error.BufferTooShort,
