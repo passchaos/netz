@@ -13,9 +13,11 @@ const connection_budget = @import("../../internal/connection_budget.zig");
 const deadline_policy = @import("../../internal/deadline.zig");
 const owning_pool = @import("handshake_client_pool.zig");
 const shared_dispatcher = @import("shared_handshake_client_pool/dispatcher.zig");
+const launch_timer = @import("shared_handshake_client_pool/launch_timer.zig");
 const shared_redirect = @import("shared_handshake_client_pool/redirect.zig");
 const shared_request = @import("shared_handshake_client_pool/request.zig");
 const address_resolver = @import("../../internal/address_resolver.zig");
+const happy_eyeballs = @import("../../internal/happy_eyeballs.zig");
 
 const supported_versions = [_]u32{
     quic.Version.version_1.wireValue(),
@@ -174,6 +176,7 @@ pub fn Pool(comptime Runtime: type) type {
 
         const ConnectWorker = struct {
             pool: *Self,
+            endpoint: *quic.runtime.Endpoint,
             source: quic.runtime.DatagramSource,
             peer: std.Io.net.IpAddress,
             uri_endpoint: *const Runtime.UriEndpoint,
@@ -225,7 +228,7 @@ pub fn Pool(comptime Runtime: type) type {
                     options.handshake.resumption_now_ms = early.now_ms;
                     const result = if (attempt_deadline) |absolute|
                         Client.connectFromWithEarlyRequestWithDeadline(
-                            self.pool.endpoint,
+                            self.endpoint,
                             self.source,
                             self.peer,
                             options,
@@ -236,7 +239,7 @@ pub fn Pool(comptime Runtime: type) type {
                         )
                     else
                         Client.connectFromWithEarlyRequest(
-                            self.pool.endpoint,
+                            self.endpoint,
                             self.source,
                             self.peer,
                             options,
@@ -254,7 +257,7 @@ pub fn Pool(comptime Runtime: type) type {
                 }
                 const result = if (attempt_deadline) |absolute|
                     Client.connectFromWithDeadline(
-                        self.pool.endpoint,
+                        self.endpoint,
                         self.source,
                         self.peer,
                         options,
@@ -262,7 +265,7 @@ pub fn Pool(comptime Runtime: type) type {
                     )
                 else
                     Client.connectFrom(
-                        self.pool.endpoint,
+                        self.endpoint,
                         self.source,
                         self.peer,
                         options,
@@ -332,6 +335,8 @@ pub fn Pool(comptime Runtime: type) type {
             }
         };
 
+        const PendingLaunchTimer = launch_timer.Timer(PendingRequestAcquire);
+
         const PendingConnectAttempt = struct {
             owner: *PendingRequestAcquire,
             handle: Handle,
@@ -391,13 +396,14 @@ pub fn Pool(comptime Runtime: type) type {
                 };
                 self.worker = .{
                     .pool = pool,
+                    .endpoint = pool.endpointForPeer(peer).?,
                     .source = inbox.datagramSource(),
                     .peer = peer,
                     .uri_endpoint = &owner.uri_endpoint,
                     .original_dcid = &self.original_dcid,
                     .local_cid = &self.local_cid,
                     .deadline = owner.deadline,
-                    .redirect = null,
+                    .redirect = owner.redirect,
                     .alpn = switch (owner.route) {
                         .origin => null,
                         .alt_svc => |target| target.alpn,
@@ -435,6 +441,17 @@ pub fn Pool(comptime Runtime: type) type {
 
             fn deinit(self: *@This()) void {
                 const pool = self.owner.pool;
+                // Close the routed source before joining the worker. Some
+                // runtimes cannot interrupt an Event-backed receive through
+                // Future.cancel alone; unregistering first wakes it with
+                // SocketUnconnected and keeps loser teardown off the attempt
+                // deadline path.
+                if (self.inbox_registered) {
+                    _ = pool.dispatcher.unregisterPendingHandshake(
+                        self.handle,
+                    ) catch false;
+                    self.inbox_registered = false;
+                }
                 if (self.future_active) {
                     self.future.cancel(pool.io);
                     self.future_active = false;
@@ -443,11 +460,6 @@ pub fn Pool(comptime Runtime: type) type {
                     .client => |*value| value.value.deinit(),
                     .failure => {},
                 };
-                if (self.inbox_registered) {
-                    _ = pool.dispatcher.unregisterPendingHandshake(
-                        self.handle,
-                    ) catch false;
-                }
                 self.inbox.deinit();
                 pool.allocator.destroy(self.inbox);
                 pool.allocator.destroy(self);
@@ -458,6 +470,7 @@ pub fn Pool(comptime Runtime: type) type {
             pool: *Self,
             uri_endpoint: Runtime.UriEndpoint,
             route: ConnectRoute,
+            redirect: ?owning_pool.RedirectConnectContext = null,
             resolution: ?*PendingResolution = null,
             addresses: []std.Io.net.IpAddress = @constCast(&.{}),
             addresses_owned: bool = false,
@@ -465,14 +478,18 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: ?std.Io.Clock.Timestamp,
             completion_event: *std.Io.Event,
             early_request: ?*const Runtime.PreparedEarlyRequest = null,
+            provided_early: ?EarlyConnectContext = null,
             early: ?PendingEarlyConnect = null,
-            early_path_failed: bool = false,
             last_error: ?anyerror = null,
-            attempt: ?*PendingConnectAttempt = null,
+            attempts: std.ArrayList(*PendingConnectAttempt) = .empty,
+            launch_timer: ?*PendingLaunchTimer = null,
+            next_launch_at: ?std.Io.Clock.Timestamp = null,
+            attempt_sequence: usize = 0,
             reservation_active: bool = true,
 
             pub fn usesEarlyRequest(self: *const @This()) bool {
-                return self.early_request != null;
+                return self.early_request != null or
+                    self.provided_early != null;
             }
 
             pub fn poll(self: *@This()) !?Lease {
@@ -488,38 +505,71 @@ pub fn Pool(comptime Runtime: type) type {
                     self.resolution = null;
                     self.addresses = addresses;
                     self.addresses_owned = true;
-                    try self.prepareEarly();
-                    try self.startNextAttempt();
+                    try self.prepareResolvedAddresses();
+                    try self.attempts.ensureTotalCapacity(
+                        self.pool.allocator,
+                        self.addresses.len,
+                    );
+                    if (self.provided_early == null) try self.prepareEarly();
+                    if (!try self.startNextAttempt()) {
+                        return error.AddressFamilyUnsupported;
+                    }
+                    try self.armLaunchTimer();
                     return null;
                 }
-                const attempt = self.attempt orelse
-                    return error.InvalidLease;
-                const completion = attempt.takeCompletion() orelse return null;
-                switch (completion) {
-                    .failure => |err| {
-                        const offered_early = attempt.offered_early;
-                        attempt.deinit();
-                        self.attempt = null;
-                        self.last_error = err;
-                        if (!shouldTryNextAddress(err)) return err;
-                        if (offered_early) self.early_path_failed = true;
-                        try self.startNextAttempt();
-                        return null;
-                    },
-                    .client => |client_value| {
-                        var connected_value = client_value;
-                        if (self.early_path_failed) {
-                            std.debug.assert(
-                                connected_value.disposition == null,
+
+                var index: usize = 0;
+                while (index < self.attempts.items.len) {
+                    const attempt = self.attempts.items[index];
+                    const completion = attempt.takeCompletion() orelse {
+                        index += 1;
+                        continue;
+                    };
+                    switch (completion) {
+                        .failure => |err| {
+                            _ = self.attempts.orderedRemove(index);
+                            attempt.deinit();
+                            self.last_error = err;
+                            if (!shouldTryNextAddress(err)) return err;
+                            if (self.attempts.items.len == 0) {
+                                self.clearLaunchTimer();
+                                if (!try self.startNextAttempt()) {
+                                    return self.last_error.?;
+                                }
+                            }
+                            try self.armLaunchTimer();
+                            index = 0;
+                        },
+                        .client => |client_value| {
+                            var connected_value = client_value;
+                            if (self.hasEarlyOffer() and
+                                !attempt.offered_early)
+                            {
+                                std.debug.assert(
+                                    connected_value.disposition == null,
+                                );
+                                connected_value.disposition = .rejected;
+                            }
+                            self.cancelLosers(attempt);
+                            return try self.promote(
+                                attempt,
+                                connected_value,
                             );
-                            connected_value.disposition = .rejected;
-                        }
-                        return try self.promote(
-                            attempt,
-                            connected_value,
-                        );
-                    },
+                        },
+                    }
                 }
+
+                if (self.launch_timer) |timer| {
+                    if (timer.completed()) {
+                        timer.deinit();
+                        self.launch_timer = null;
+                        if (self.attempts.items.len < self.maxInFlight()) {
+                            _ = try self.startNextAttempt();
+                        }
+                        try self.armLaunchTimer();
+                    }
+                }
+                return null;
             }
 
             fn resolveAddresses(self: *@This()) ResolveCompletion {
@@ -576,29 +626,141 @@ pub fn Pool(comptime Runtime: type) type {
                 };
             }
 
-            fn startNextAttempt(self: *@This()) !void {
+            fn prepareResolvedAddresses(self: *@This()) !void {
+                const pool = self.pool;
+                var eligible_count: usize = 0;
+                for (self.addresses) |peer| {
+                    if (pool.endpointForPeer(peer) != null) {
+                        eligible_count += 1;
+                    }
+                }
+                if (eligible_count == 0) return error.AddressFamilyUnsupported;
+
+                const eligible = try pool.allocator.alloc(
+                    std.Io.net.IpAddress,
+                    eligible_count,
+                );
+                errdefer pool.allocator.free(eligible);
+                var index: usize = 0;
+                for (self.addresses) |peer| {
+                    if (pool.endpointForPeer(peer) == null) continue;
+                    eligible[index] = peer;
+                    index += 1;
+                }
+                const planned = switch (pool.options.client.address_connect_policy) {
+                    .ordered => eligible,
+                    .happy_eyeballs => blk: {
+                        const ordered = try pool.allocator.alloc(
+                            std.Io.net.IpAddress,
+                            eligible_count,
+                        );
+                        happy_eyeballs.interleaveAddressFamilies(
+                            ordered,
+                            eligible,
+                        );
+                        pool.allocator.free(eligible);
+                        break :blk ordered;
+                    },
+                };
+                pool.allocator.free(self.addresses);
+                self.addresses = planned;
+                self.next_address = 0;
+            }
+
+            fn startNextAttempt(self: *@This()) !bool {
                 while (self.next_address < self.addresses.len) {
                     const peer = self.addresses[self.next_address];
                     self.next_address += 1;
-                    if (!sameAddressFamily(
-                        self.pool.options.local_address,
-                        peer,
-                    )) continue;
-                    const early_context: ?EarlyConnectContext =
-                        if (!self.early_path_failed)
+                    if (self.pool.endpointForPeer(peer) == null) continue;
+                    const sequence = self.attempt_sequence;
+                    const early_context: ?EarlyConnectContext = if (sequence == 0)
+                        self.provided_early orelse
                             if (self.early) |*early| early.context() else null
-                        else
-                            null;
-                    self.attempt = try PendingConnectAttempt.init(
+                    else
+                        null;
+                    const attempt = try PendingConnectAttempt.init(
                         self,
                         peer,
                         early_context,
-                        self.early_path_failed,
+                        sequence != 0,
                     );
+                    self.attempts.appendAssumeCapacity(attempt);
+                    self.attempt_sequence += 1;
+                    self.next_launch_at = switch (self.pool.options.client.address_connect_policy) {
+                        .ordered => null,
+                        .happy_eyeballs => |policy| .fromNow(
+                            self.pool.io,
+                            .{
+                                .raw = policy.attempt_delay,
+                                .clock = .awake,
+                            },
+                        ),
+                    };
+                    return true;
+                }
+                return false;
+            }
+
+            fn maxInFlight(self: *const @This()) usize {
+                return switch (self.pool.options.client.address_connect_policy) {
+                    .ordered => 1,
+                    .happy_eyeballs => |policy| policy.max_in_flight,
+                };
+            }
+
+            fn armLaunchTimer(self: *@This()) !void {
+                if (self.launch_timer != null or
+                    self.next_address >= self.addresses.len or
+                    self.attempts.items.len >= self.maxInFlight()) return;
+                switch (self.pool.options.client.address_connect_policy) {
+                    .ordered => return,
+                    .happy_eyeballs => {},
+                }
+                const launch_at = self.next_launch_at orelse unreachable;
+                if (launch_at.durationFromNow(self.pool.io)
+                    .raw.nanoseconds <= 0)
+                {
+                    if (try self.startNextAttempt()) {
+                        return self.armLaunchTimer();
+                    }
                     return;
                 }
-                return self.last_error orelse
-                    error.AddressFamilyUnsupported;
+                self.launch_timer = try PendingLaunchTimer.init(
+                    self,
+                    launch_at,
+                );
+            }
+
+            fn clearLaunchTimer(self: *@This()) void {
+                if (self.launch_timer) |timer| timer.deinit();
+                self.launch_timer = null;
+            }
+
+            fn hasEarlyOffer(self: *const @This()) bool {
+                return self.provided_early != null or self.early != null;
+            }
+
+            fn earlyRequest(
+                self: *const @This(),
+            ) ?*const Runtime.PreparedEarlyRequest {
+                if (self.provided_early) |early| return early.request;
+                if (self.early) |*early| return early.request;
+                return null;
+            }
+
+            fn cancelLosers(
+                self: *@This(),
+                winner: *PendingConnectAttempt,
+            ) void {
+                self.clearLaunchTimer();
+                var index = self.attempts.items.len;
+                while (index != 0) {
+                    index -= 1;
+                    const attempt = self.attempts.items[index];
+                    if (attempt == winner) continue;
+                    _ = self.attempts.orderedRemove(index);
+                    attempt.deinit();
+                }
             }
 
             fn promote(
@@ -653,15 +815,19 @@ pub fn Pool(comptime Runtime: type) type {
                 self.reservation_active = false;
                 promoted = false;
                 const handle = attempt.handle;
+                for (self.attempts.items, 0..) |candidate, index| {
+                    if (candidate != attempt) continue;
+                    _ = self.attempts.orderedRemove(index);
+                    break;
+                }
                 attempt.deinit();
-                self.attempt = null;
                 return .{
                     .pool = pool,
                     .handle = handle,
                     .was_reused = false,
                     .early_disposition = client_value.disposition,
                     .early_stream_id = if (client_value.disposition != null)
-                        self.early.?.request.stream_id
+                        self.earlyRequest().?.stream_id
                     else
                         null,
                 };
@@ -670,7 +836,9 @@ pub fn Pool(comptime Runtime: type) type {
             pub fn deinit(self: *@This()) void {
                 const pool = self.pool;
                 if (self.resolution) |resolution| resolution.deinit();
-                if (self.attempt) |attempt| attempt.deinit();
+                self.clearLaunchTimer();
+                for (self.attempts.items) |attempt| attempt.deinit();
+                self.attempts.deinit(pool.allocator);
                 if (self.early) |*early| early.deinit();
                 if (self.addresses_owned) {
                     pool.allocator.free(self.addresses);
@@ -1037,16 +1205,23 @@ pub fn Pool(comptime Runtime: type) type {
             io: std.Io,
             options: Options(Runtime),
         ) !Self {
-            const ordered_address_connect = switch (options.client.address_connect_policy) {
-                .ordered => true,
-                .happy_eyeballs => false,
-            };
+            switch (options.client.address_connect_policy) {
+                .ordered => {},
+                .happy_eyeballs => |policy| happy_eyeballs.validate(
+                    policy,
+                ) catch return error.InvalidPoolOptions,
+            }
+            if (options.client.alternate_local_address) |alternate| {
+                const migration = options.migration_local_address orelse
+                    return error.InvalidPoolOptions;
+                if (!alternate.eql(&migration)) {
+                    return error.InvalidPoolOptions;
+                }
+            }
             if (options.idle.max_idle_per_origin >
                 options.idle.max_idle_total or
                 options.handshake_inbox_capacity == 0 or
-                options.handshake_poll_interval.nanoseconds <= 0 or
-                !ordered_address_connect or
-                options.client.alternate_local_address != null)
+                options.handshake_poll_interval.nanoseconds <= 0)
             {
                 return error.InvalidPoolOptions;
             }
@@ -1095,7 +1270,11 @@ pub fn Pool(comptime Runtime: type) type {
                 quic.endpoint_dispatcher.Dispatcher,
             );
             errdefer allocator.destroy(dispatcher);
-            dispatcher.* = .init(allocator, endpoint);
+            dispatcher.* = .initWithSecondaryEndpoint(
+                allocator,
+                endpoint,
+                migration_endpoint,
+            );
             return .{
                 .allocator = allocator,
                 .io = io,
@@ -1153,6 +1332,20 @@ pub fn Pool(comptime Runtime: type) type {
         ) ?std.Io.net.IpAddress {
             const candidate = self.migration_endpoint orelse return null;
             return candidate.address();
+        }
+
+        fn endpointForPeer(
+            self: *const Self,
+            peer: std.Io.net.IpAddress,
+        ) ?*quic.runtime.Endpoint {
+            if (sameAddressFamily(self.endpoint.address(), peer)) {
+                return self.endpoint;
+            }
+            const candidate = self.migration_endpoint orelse return null;
+            if (sameAddressFamily(candidate.address(), peer)) {
+                return candidate;
+            }
+            return null;
         }
 
         pub fn acquireUri(
@@ -1532,7 +1725,8 @@ pub fn Pool(comptime Runtime: type) type {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
             var endpoint = try Runtime.uriEndpoint(self.allocator, uri);
-            defer endpoint.deinit();
+            var endpoint_owned = true;
+            defer if (endpoint_owned) endpoint.deinit();
             try validateConnectRoute(endpoint, route);
             const origin = try http3.requestOrigin(
                 uri.scheme,
@@ -1566,7 +1760,8 @@ pub fn Pool(comptime Runtime: type) type {
             }
             _ = self.total_misses.fetchAdd(1, .monotonic);
             if (self.options.max_connections != 0 and
-                self.entries.count() >= self.options.max_connections)
+                self.entries.count() + self.pending_acquisitions >=
+                    self.options.max_connections)
             {
                 const displaced = self.oldestIdleHandle() orelse
                     return error.ConnectionLimitReached;
@@ -1585,6 +1780,55 @@ pub fn Pool(comptime Runtime: type) type {
             // become visible. This prevents an allocation failure after
             // dispatcher promotion from tearing down a live route.
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
+
+            const race_addresses = switch (self.options.client.address_connect_policy) {
+                .ordered => false,
+                .happy_eyeballs => true,
+            };
+            if (race_addresses) {
+                var completion_event: std.Io.Event = .unset;
+                const pending = try self.allocator.create(
+                    PendingRequestAcquire,
+                );
+                pending.* = .{
+                    .pool = self,
+                    .uri_endpoint = endpoint,
+                    .route = route,
+                    .redirect = redirect,
+                    .deadline = deadline,
+                    .completion_event = &completion_event,
+                    .provided_early = early,
+                    .reservation_active = reservation_active,
+                };
+                endpoint_owned = false;
+                reservation_active = false;
+                self.pending_acquisitions += 1;
+                pending.resolution = PendingResolution.init(
+                    pending,
+                ) catch |err| {
+                    pending.deinit();
+                    return err;
+                };
+                defer pending.deinit();
+                while (true) {
+                    if (try pending.poll()) |lease| return lease;
+                    const poll_deadline = deadline_policy.earlier(
+                        deadline,
+                        .fromNow(self.io, .{
+                            .clock = .awake,
+                            .raw = self.options.handshake_poll_interval,
+                        }),
+                    ).?;
+                    var event = self.receiveTransportWithDeadline(
+                        poll_deadline,
+                    ) catch |err| switch (err) {
+                        error.Timeout => continue,
+                        else => |other| return other,
+                    };
+                    defer event.deinit(self.allocator);
+                    try self.applyEndpointProgress(&event);
+                }
+            }
 
             const resolver = self.options.resolver orelse
                 self.options.client.address_resolver;
@@ -1610,9 +1854,7 @@ pub fn Pool(comptime Runtime: type) type {
             var next_early = early;
             var early_path_failed = false;
             for (addresses) |peer| {
-                if (!sameAddressFamily(self.options.local_address, peer)) {
-                    continue;
-                }
+                if (self.endpointForPeer(peer) == null) continue;
                 var connected = self.connectOne(
                     &endpoint,
                     peer,
@@ -1748,6 +1990,8 @@ pub fn Pool(comptime Runtime: type) type {
 
             var worker_context = ConnectWorker{
                 .pool = self,
+                .endpoint = self.endpointForPeer(peer) orelse
+                    return error.AddressFamilyUnsupported,
                 .source = inbox.datagramSource(),
                 .peer = peer,
                 .uri_endpoint = uri_endpoint,
@@ -2126,11 +2370,6 @@ pub fn Pool(comptime Runtime: type) type {
                     else => |other| return other,
                 };
                 const received_on = datagram.received_on orelse self.endpoint;
-                if (received_on == candidate and datagram.bytes.len != 0 and
-                    (datagram.bytes[0] & 0x80) != 0)
-                {
-                    continue;
-                }
                 if (try received_on.sendVersionNegotiationIfUnsupported(
                     datagram.from,
                     datagram.bytes,
@@ -2269,12 +2508,6 @@ pub fn Pool(comptime Runtime: type) type {
                     else => |other| return other,
                 };
                 const received_on = datagram.received_on orelse self.endpoint;
-                if (received_on == candidate and datagram.bytes.len != 0 and
-                    (datagram.bytes[0] & 0x80) != 0)
-                {
-                    datagram.deinit(received_on.allocator);
-                    continue;
-                }
                 if (try received_on.sendVersionNegotiationIfUnsupported(
                     datagram.from,
                     datagram.bytes,

@@ -1588,14 +1588,20 @@ the connector contract declares whether mTLS identity is configured so the
 pool can reject that boundary before second-hop I/O. Local TLS/QUIC tests cover
 same- and cross-origin paths. The repository-pinned quic-go v1/v2 gate requires
 the exclusive pool's two redirect requests to use one connection.
-`SharedHandshakeClientPool` now owns one `std.Io` UDP endpoint and one QUIC
-dispatcher across all pooled origins. Its CID-routed handshake inboxes keep
-TLS workers off the socket, successful clients move into stable heap storage
-before atomic dispatcher promotion, and idle reuse/global LRU eviction retain
-the configured connection cap. Only the pool's `receive*` methods own UDP
-receive; leases send through single-attempt helpers, expose stable connection
-handles for response correlation, and reject client methods that would start a
-competing receive loop. `receiveManyOnce` adds a bounded caller-buffer receive
+`SharedHandshakeClientPool` owns one primary and an optional opposite-family
+`std.Io` UDP endpoint plus one QUIC dispatcher across all pooled origins. Its
+CID-routed handshake inboxes keep TLS workers off both sockets, successful
+clients move into stable heap storage before atomic dispatcher promotion, and
+idle reuse/global LRU eviction retain the configured connection cap. An opt-in
+RFC 8305 policy stable-interleaves resolver results and staggers concurrent
+handshakes from the matching endpoint; both synchronous acquisition and the
+cloneable request driver promote a winner on either socket. Resumption and
+0-RTT remain first-attempt-only, while a later winner reports rejection for one
+safe 1-RTT replay. Loser cleanup unregisters and closes its inbox before
+joining the worker, avoiding a wait for its phase deadline. Only the pool's
+`receive*` methods own UDP receive; leases expose stable connection handles for
+response correlation and reject client methods that would start a competing
+receive loop. `receiveManyOnce` adds a bounded caller-buffer receive
 turn for established pool connections: its dispatcher applies borrowed packet
 views synchronously, while returned response/push events own all header state
 needed after the receive storage is reused. The existing owning

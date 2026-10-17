@@ -943,9 +943,11 @@ attempt owns an independent endpoint and connection IDs; dual-family callers
 provide the opposite-family bind through `alternate_local_address`. WebSocket
 H3 and WebTransport URI clients inherit this behavior. Only the first attempt
 may resume or send 0-RTT, so a later winner reports rejection and the safe
-request is replayed once. The dispatcher-shared HTTP/3 pool currently rejects
-this policy instead of silently degrading it to ordered fallback; completing
-cross-endpoint route promotion remains separate work.
+request is replayed once. The dispatcher-shared HTTP/3 pool uses its primary
+and `migration_local_address` sockets under one receive owner; the unified HTTP
+pool exposes the same secondary bind in `PoolHttp3Options`. CID-routed inboxes
+isolate concurrent handshakes, the winning route is promoted on either socket,
+and loser inboxes are closed before their workers are joined.
 For blackholed UDP routes, `HandshakeClientOptions.address_attempt_timeout`
 can bound each QUIC/TLS address attempt while the total
 `connect_timeout` or caller deadline remains unchanged. This applies to owning

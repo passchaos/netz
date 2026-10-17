@@ -125,6 +125,10 @@ test "HTTP/3 shared pool transaction reuses one redirect connection" {
         .max_connections = 1,
         .client = .{
             .connect_timeout = .fromSeconds(3),
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromMilliseconds(20),
+                .max_in_flight = 2,
+            } },
             .handshake = .{
                 .original_destination_connection_id = &.{},
                 .local_connection_id = &.{},
@@ -339,6 +343,10 @@ test "HTTP/3 shared pool transaction isolates cross-origin replay" {
         .max_connections = 2,
         .client = .{
             .connect_timeout = .fromSeconds(3),
+            .address_connect_policy = .{ .happy_eyeballs = .{
+                .attempt_delay = .fromMilliseconds(20),
+                .max_in_flight = 2,
+            } },
             .handshake = .{
                 .original_destination_connection_id = &.{},
                 .local_connection_id = &.{},

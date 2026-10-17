@@ -833,9 +833,10 @@ test "HTTP/3 shared pool validates migration endpoint options" {
         }),
     );
 
-    try std.testing.expectError(
-        error.InvalidPoolOptions,
-        runtime.SharedHandshakeClientPool.init(allocator, io, .{
+    var happy_pool = try runtime.SharedHandshakeClientPool.init(
+        allocator,
+        io,
+        .{
             .local_address = .{ .ip4 = .loopback(0) },
             .migration_local_address = .{ .ip6 = .loopback(0) },
             .client = .{
@@ -847,6 +848,24 @@ test "HTTP/3 shared pool validates migration endpoint options" {
                     },
                 },
                 .address_connect_policy = .{ .happy_eyeballs = .{} },
+                .alternate_local_address = .{ .ip6 = .loopback(0) },
+            },
+        },
+    );
+    happy_pool.deinit();
+
+    try std.testing.expectError(
+        error.InvalidPoolOptions,
+        runtime.SharedHandshakeClientPool.init(allocator, io, .{
+            .local_address = .{ .ip4 = .loopback(0) },
+            .client = .{
+                .handshake = .{
+                    .original_destination_connection_id = &.{},
+                    .local_connection_id = &.{},
+                },
+                .address_connect_policy = .{ .happy_eyeballs = .{
+                    .attempt_delay = .zero,
+                } },
             },
         }),
     );

@@ -310,6 +310,10 @@ test "public modules are reachable" {
         netz.http,
         "PoolHttp3EarlyDataOptions",
     ));
+    try std.testing.expect(@hasField(
+        netz.http.PoolHttp3Options,
+        "migration_local_address",
+    ));
     try std.testing.expect(@hasDecl(
         netz.http,
         "PoolHttp3RememberedSettingsStats",

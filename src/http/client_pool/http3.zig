@@ -31,6 +31,9 @@ pub const RequestResult = struct {
 
 pub const Options = struct {
     local_address: std.Io.net.IpAddress = .{ .ip4 = .unspecified(0) },
+    /// Optional opposite-family UDP bind shared by QUIC Happy Eyeballs and
+    /// preferred-address migration when `shared_endpoint` is enabled.
+    migration_local_address: ?std.Io.net.IpAddress = null,
     limits: runtime.Limits = .{},
     handshake: runtime.HandshakeClientOptions,
     idle: http3.origin_pool.Config = .{},
@@ -143,6 +146,7 @@ pub const State = struct {
         if (options.shared_endpoint) {
             self.shared_pool = try .init(allocator, io, .{
                 .local_address = options.local_address,
+                .migration_local_address = options.migration_local_address,
                 .limits = options.limits,
                 .client = options.handshake,
                 .resolver = options.address_resolver,

@@ -311,6 +311,73 @@ test "QUIC endpoint dispatcher consumes a short packet from a detached endpoint"
     );
 }
 
+test "QUIC endpoint dispatcher admits its owned secondary endpoint" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    var primary = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer primary.deinit();
+    var secondary = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer secondary.deinit();
+    var foreign = try runtime.Endpoint.bind(
+        allocator,
+        io,
+        .{ .ip4 = .loopback(0) },
+        .{},
+    );
+    defer foreign.deinit();
+    const keys = quic.protection.deriveAes128Keys(
+        [_]u8{0xda} ** quic.protection.secret_len,
+    );
+    var secondary_connection = try one_rtt.Connection.init(&secondary, .{
+        .peer = foreign.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "secondary-local",
+        .peer_connection_id = "secondary-peer",
+        .enable_pacing = false,
+    });
+    defer secondary_connection.deinit();
+    var foreign_connection = try one_rtt.Connection.init(&foreign, .{
+        .peer = secondary.address(),
+        .receive_keys = keys,
+        .send_keys = keys,
+        .local_connection_id = "foreign-local",
+        .peer_connection_id = "foreign-peer",
+        .enable_pacing = false,
+    });
+    defer foreign_connection.deinit();
+
+    var dispatcher = Dispatcher.initWithSecondaryEndpoint(
+        allocator,
+        &primary,
+        &secondary,
+    );
+    defer dispatcher.deinit();
+    try dispatcher.registerConnection(31, &secondary_connection);
+    try std.testing.expectError(
+        error.ConnectionEndpointMismatch,
+        dispatcher.replaceConnection(31, &foreign_connection),
+    );
+    try std.testing.expect(try dispatcher.unregisterConnection(31));
+    try std.testing.expectError(
+        error.ConnectionEndpointMismatch,
+        dispatcher.registerConnection(32, &foreign_connection),
+    );
+}
+
 test "QUIC endpoint dispatcher immediately repairs packet-threshold loss" {
     const allocator = std.testing.allocator;
     var threaded = std.Io.Threaded.init(allocator, .{});

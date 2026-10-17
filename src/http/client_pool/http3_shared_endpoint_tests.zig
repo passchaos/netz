@@ -77,7 +77,7 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
     var silent = try quic.runtime.Endpoint.bind(
         allocator,
         io,
-        .{ .ip4 = .loopback(0) },
+        .{ .ip6 = .loopback(0) },
         .{},
     );
     defer silent.deinit();
@@ -248,6 +248,8 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
             } },
         },
         .http3 = .{
+            .local_address = .{ .ip6 = .loopback(0) },
+            .migration_local_address = .{ .ip4 = .loopback(0) },
             .limits = limits,
             .handshake = .{
                 .handshake = .{
@@ -257,7 +259,12 @@ test "unified HTTP pool shares one UDP endpoint across H3 origins" {
                         .pinned_ecdsa_p256_public_key = public_key,
                     },
                 },
-                .address_attempt_timeout = .fromMilliseconds(30),
+                .address_attempt_timeout = .fromSeconds(2),
+                .address_connect_policy = .{ .happy_eyeballs = .{
+                    .attempt_delay = .fromMilliseconds(20),
+                    .max_in_flight = 2,
+                } },
+                .alternate_local_address = .{ .ip4 = .loopback(0) },
             },
             .idle = .{
                 .max_idle_per_origin = 1,

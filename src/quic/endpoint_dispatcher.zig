@@ -254,6 +254,10 @@ pub const Event = union(enum) {
 pub const Dispatcher = struct {
     allocator: std.mem.Allocator,
     endpoint: *runtime.Endpoint,
+    /// Optional second socket owned by the same receive loop. Dispatcher
+    /// `receive*` APIs continue to read only `endpoint`; multi-endpoint owners
+    /// feed datagrams from either socket through `dispatch*`.
+    secondary_endpoint: ?*runtime.Endpoint = null,
     router: connection_router.Router,
     timers: endpoint_timers.EndpointTimers,
     connections: std.AutoHashMapUnmanaged(
@@ -278,13 +282,40 @@ pub const Dispatcher = struct {
         allocator: std.mem.Allocator,
         endpoint: *runtime.Endpoint,
     ) Dispatcher {
+        return initWithSecondaryEndpoint(allocator, endpoint, null);
+    }
+
+    pub fn initWithSecondaryEndpoint(
+        allocator: std.mem.Allocator,
+        endpoint: *runtime.Endpoint,
+        secondary_endpoint: ?*runtime.Endpoint,
+    ) Dispatcher {
+        std.debug.assert(secondary_endpoint == null or
+            secondary_endpoint.? != endpoint);
+        if (secondary_endpoint) |secondary| {
+            std.debug.assert(std.meta.eql(endpoint.io, secondary.io));
+            std.debug.assert(std.meta.eql(
+                endpoint.allocator,
+                secondary.allocator,
+            ));
+        }
         return .{
             .allocator = allocator,
             .endpoint = endpoint,
+            .secondary_endpoint = secondary_endpoint,
             .router = .init(allocator),
             .timers = .init(allocator),
             .pending_router = .init(allocator),
         };
+    }
+
+    fn ownsEndpoint(
+        self: *const Dispatcher,
+        endpoint: *const runtime.Endpoint,
+    ) bool {
+        return endpoint == self.endpoint or
+            (self.secondary_endpoint != null and
+                endpoint == self.secondary_endpoint.?);
     }
 
     /// Release dispatcher metadata without deinitializing caller-owned QUIC
@@ -398,7 +429,7 @@ pub const Dispatcher = struct {
     ) Error!void {
         const pending = self.pending_handshakes.getPtr(pending_handle) orelse
             return error.UnknownConnectionHandle;
-        if (connection.endpoint != self.endpoint) {
+        if (!self.ownsEndpoint(connection.endpoint)) {
             return error.ConnectionEndpointMismatch;
         }
         for (pending.connection_ids.items) |*key| {
@@ -517,7 +548,7 @@ pub const Dispatcher = struct {
         handle: ConnectionHandle,
         connection: *one_rtt.Connection,
     ) Error!void {
-        if (connection.endpoint != self.endpoint) {
+        if (!self.ownsEndpoint(connection.endpoint)) {
             return error.ConnectionEndpointMismatch;
         }
         var active_storage: [quic.connection_id.max_pool_size]quic.connection_id.LocalPool.ActiveId = undefined;
@@ -585,11 +616,14 @@ pub const Dispatcher = struct {
         handle: ConnectionHandle,
         connection: *one_rtt.Connection,
     ) Error!void {
-        if (connection.endpoint != self.endpoint) {
+        if (!self.ownsEndpoint(connection.endpoint)) {
             return error.ConnectionEndpointMismatch;
         }
         const entry = self.connections.getPtr(handle) orelse
             return error.UnknownConnectionHandle;
+        if (connection.endpoint != entry.connection.endpoint) {
+            return error.ConnectionEndpointMismatch;
+        }
         const pending_ready = self.pending_ready orelse
             return error.PendingDatagramObserverBound;
         if (!connection.canBindPendingDatagramObserver(

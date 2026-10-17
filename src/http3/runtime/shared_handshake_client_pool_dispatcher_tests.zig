@@ -440,7 +440,7 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
     var silent = try quic.runtime.Endpoint.bind(
         allocator,
         io,
-        .{ .ip4 = .loopback(0) },
+        .{ .ip6 = .loopback(0) },
         .{},
     );
     defer silent.deinit();
@@ -613,7 +613,14 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
     };
 
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
-        .local_address = .{ .ip4 = .unspecified(0) },
+        .local_address = if (scenario.silent_first)
+            .{ .ip6 = .loopback(0) }
+        else
+            .{ .ip4 = .unspecified(0) },
+        .migration_local_address = if (scenario.silent_first)
+            .{ .ip4 = .loopback(0) }
+        else
+            null,
         .limits = limits,
         .max_connections = 1,
         .client = .{
@@ -634,9 +641,16 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
             },
             .connect_timeout = .fromSeconds(3),
             .address_attempt_timeout = if (scenario.silent_first)
-                .fromMilliseconds(30)
+                .fromSeconds(2)
             else
                 null,
+            .address_connect_policy = if (scenario.silent_first)
+                .{ .happy_eyeballs = .{
+                    .attempt_delay = .fromMilliseconds(20),
+                    .max_in_flight = 2,
+                } }
+            else
+                .ordered,
             .address_resolver = .{
                 .context = &resolver,
                 .resolve = EarlyResolver.resolve,
@@ -677,6 +691,7 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
         }
     };
     var reclaimer_context: u8 = 0;
+    const started = std.Io.Clock.awake.now(io);
     var result = try sender.requestAltSvcEarlyReclaiming(
         "https://localhost:9443/shared-early",
         target,
@@ -692,6 +707,12 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
         .{ .context = &reclaimer_context, .reclaim = NoReclaim.reclaim },
     );
     defer result.response.deinit();
+    if (scenario.silent_first) {
+        try std.testing.expect(
+            started.durationTo(std.Io.Clock.awake.now(io)).nanoseconds <
+                std.time.ns_per_s,
+        );
+    }
     try std.testing.expect(
         resolver.observed_unleased_ticket.load(.acquire),
     );
@@ -781,7 +802,13 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
             scenario.initial_status == 425) 3 else 2),
         worker.requests,
     );
-    try std.testing.expectEqual(pool.address().ip4.port, worker.client_port.?);
+    try std.testing.expectEqual(
+        if (scenario.silent_first)
+            pool.migrationAddress().?.getPort()
+        else
+            pool.address().getPort(),
+        worker.client_port.?,
+    );
     try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     try std.testing.expectEqual(@as(usize, 1), pool.idleCount());
 }
