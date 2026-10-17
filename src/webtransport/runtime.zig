@@ -24,6 +24,7 @@ pub const EndpointClientError = endpoint_client.Error;
 pub const EndpointClientTimeoutError = endpoint_client.TimeoutError;
 pub const EndpointClientSession = endpoint_client.Session;
 pub const EndpointClientOptions = endpoint_client.Options;
+pub const AddressResolver = http3.runtime.AddressResolver;
 pub const EndpointClientSessionOptions = endpoint_client.SessionOptions;
 pub const EndpointClientOpenResult = endpoint_client.OpenResult;
 pub const EndpointClientEvent = endpoint_client.Event;
@@ -46,16 +47,16 @@ test "WebTransport sessions keep inbound and outbound close storage compact" {
         const expected: Layout = switch (builtin.mode) {
             .Debug, .ReleaseSafe => .{
                 .accepted = 1_064,
-                .accepted_handshake = 17_352,
+                .accepted_handshake = 17_360,
                 .client = 7_352,
-                .handshake_client = 17_896,
+                .handshake_client = 18_064,
                 .protected_client = 8_960,
             },
             .ReleaseFast, .ReleaseSmall => .{
                 .accepted = 1_056,
-                .accepted_handshake = 17_184,
+                .accepted_handshake = 17_192,
                 .client = 7_240,
-                .handshake_client = 17_696,
+                .handshake_client = 17_864,
                 .protected_client = 8_824,
             },
         };
@@ -12759,6 +12760,9 @@ pub const HandshakeUriConnectOptions = struct {
     origin: []const u8 = "/",
     headers: []const http3.Qpack.HeaderField = &.{},
     limits: Limits = .{},
+    /// HTTP/3 transport policy, including the optional WebTransport URI
+    /// resolver. Literal IP hosts bypass it; returned addresses do not replace
+    /// URI authority or TLS identity.
     h3: http3.runtime.HandshakeClientOptions,
 };
 

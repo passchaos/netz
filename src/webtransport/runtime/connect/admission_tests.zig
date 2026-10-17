@@ -140,7 +140,7 @@ test "WebTransport server admission exposes request and response metadata" {
             try std.testing.expect(std.mem.startsWith(
                 u8,
                 pending.authority().?,
-                "127.0.0.1:",
+                "webtransport.resolver.test:",
             ));
             try std.testing.expectEqualStrings(
                 "/authorized?room=7",
@@ -201,9 +201,37 @@ test "WebTransport server admission exposes request and response metadata" {
     var joined = false;
     defer if (!joined) thread.join();
 
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "webtransport.resolver.test") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
     const uri = try std.fmt.allocPrint(
         allocator,
-        "https://127.0.0.1:{d}/authorized?room=7",
+        "https://webtransport.resolver.test:{d}/authorized?room=7",
         .{server.address().ip4.port},
     );
     defer allocator.free(uri);
@@ -218,12 +246,18 @@ test "WebTransport server admission exposes request and response metadata" {
             .limits = .{ .http3 = .{ .quic = .{
                 .max_datagram_size = 1200,
             } } },
-            .h3 = .{ .handshake = .{
-                .original_destination_connection_id = &original_dcid,
-                .local_connection_id = &client_cid,
-                .random = [_]u8{0xa1} ** 32,
-                .x25519_secret_key = [_]u8{0xa2} ** 32,
-            } },
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .random = [_]u8{0xa1} ** 32,
+                    .x25519_secret_key = [_]u8{0xa2} ** 32,
+                },
+                .address_resolver = .{
+                    .context = &resolver,
+                    .resolve = Resolver.resolve,
+                },
+            },
         },
         operation_timeout,
     );
@@ -270,6 +304,7 @@ test "WebTransport server admission exposes request and response metadata" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls.load(.acquire));
 }
 
 test "WebTransport server admission sends explicit rejection response" {

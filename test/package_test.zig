@@ -10150,6 +10150,10 @@ test "public modules are reachable" {
         "SessionEvent",
     ));
     try std.testing.expect(@hasDecl(
+        netz.webtransport.runtime,
+        "AddressResolver",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.webtransport,
         "applicationErrorCodeToHttp3",
     ));

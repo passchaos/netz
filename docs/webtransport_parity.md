@@ -506,9 +506,18 @@ also gives dispatcher owners a finite point at which they may stop routing and
 tear down a failed handshake instead of relying on an unbounded worker join.
 URI clients inherit HTTP/3's total `connect_timeout`: DNS resolution and each
 address-specific QUIC/TLS attempt share one absolute deadline across Initial,
-Retry, Version Negotiation, and passive Handshake flights. A real silent-UDP
-test verifies the WebTransport adapter reaches that deadline instead of
-waiting for the lower-level multi-PTO default. `connectUriWithDeadline` also
+Retry, Version Negotiation, and passive Handshake flights. WebTransport now
+exports the same public `AddressResolver` contract as HTTP, WebSocket, and
+MQTT. Resolver results remain transport routes only: URI authority and TLS
+identity stay bound to the original hostname, literal IPs bypass the callback,
+and endpoint/URI option normalization retains the resolver. Unlike
+wtransport's current resolver trait, which returns only the first address,
+the contract preserves an allocator-owned ordered address set for fallback.
+A real URI handshake regression uses an otherwise unresolvable hostname,
+requires the caller deadline in the resolver callback, and completes through
+the returned loopback address. A real silent-UDP test verifies the WebTransport
+adapter reaches its deadline instead of waiting for the lower-level multi-PTO
+default. `connectUriWithDeadline` also
 accepts an existing absolute awake-clock budget from an application workflow
 and preserves it through the final Extended CONNECT response rather than
 ending the budget after QUIC/TLS establishment. Direct-address handshake

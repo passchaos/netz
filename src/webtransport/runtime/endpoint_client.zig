@@ -1067,6 +1067,39 @@ fn resolvedH3Options(
     return resolved;
 }
 
+test "WebTransport endpoint option normalization preserves resolver" {
+    const Resolver = struct {
+        fn resolve(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: std.Io,
+            _: []const u8,
+            _: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) http3.runtime.AddressResolver.ResolveError![]net.IpAddress {
+            return error.UnknownHostName;
+        }
+    };
+    var context: u8 = 0;
+    const resolved = resolvedH3Options(.{
+        .handshake = .{
+            .original_destination_connection_id = "origin",
+            .local_connection_id = "local",
+        },
+        .address_resolver = .{
+            .context = &context,
+            .resolve = Resolver.resolve,
+        },
+    });
+    try std.testing.expectEqual(
+        @intFromPtr(&context),
+        @intFromPtr(resolved.address_resolver.?.context),
+    );
+    try std.testing.expect(
+        resolved.session.local_settings.enable_connect_protocol,
+    );
+}
+
 fn sessionCapacity(local: usize, peer: u64) usize {
     const peer_capacity = std.math.cast(usize, peer) orelse
         std.math.maxInt(usize);
