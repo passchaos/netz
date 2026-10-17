@@ -10,6 +10,7 @@ const header_fields = @import("codec/header_storage.zig");
 
 pub const runtime = @import("runtime.zig");
 pub const capsule = @import("capsule.zig");
+pub const connect_udp = @import("connect_udp.zig").Protocol(@This());
 pub const origin_pool = @import("origin_pool.zig");
 
 pub const Error = wire.Error || error{

@@ -3173,6 +3173,27 @@ test "public modules are reachable" {
     try std.testing.expect(@hasDecl(netz.http3.origin_pool.Pool(usize), "releaseKey"));
     try std.testing.expect(@hasDecl(netz.http3.origin_pool.Pool(usize), "hitRate"));
     try std.testing.expect(@hasDecl(netz.http3, "capsule"));
+    try std.testing.expect(@hasDecl(netz.http3, "connect_udp"));
+    try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp,
+        "ContextDatagram",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ConnectUdpClientSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime,
+        "ConnectUdpServerSession",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "startConnectUdp",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "acceptConnectUdp",
+    ));
     try std.testing.expect(@hasDecl(netz.http3, "Datagram"));
     try std.testing.expect(@hasDecl(
         netz.http3.runtime,

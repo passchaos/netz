@@ -1583,6 +1583,19 @@ applies 421 before release, discarding the connection if that exclusion cannot
 be recorded. A real shared-endpoint matrix verifies origin-keyed ticket capture,
 same-handle coalescing, certificate-mismatch isolation, original-origin reuse
 after 421, and a fresh connection for the excluded origin.
+RFC 9298 CONNECT-UDP now has a typed HTTP/3 surface above the existing generic
+Extended CONNECT and RFC 9297 DATAGRAM APIs. `http3.connect_udp` validates and
+expands the standards-defined default MASQUE URI Template, including DNS/IPv4
+targets, percent-encoded IPv6 colons and ports 1-65535; custom deployment URI
+Templates remain explicit application policy. Request and response helpers
+require `:protocol = connect-udp`, `Capsule-Protocol: ?1`, empty message
+content and a successful 2xx response. Context Datagram framing exposes generic
+62-bit extension IDs while the typed Session sends and receives Context ID 0,
+enforces the 65,527-byte UDP limit, drops unknown contexts, and aborts the
+request stream with H3_MESSAGE_ERROR on malformed or oversized input. A real
+QUIC/TLS regression sends SETTINGS before CONNECT, preserves one caller
+deadline, skips an unknown extension context, and exchanges UDP payloads in
+both directions.
 The authenticated H3 client now also provides the execution primitive needed
 by a cloneable request sender: one connection accepts an owned-response batch
 whose members retain independent awake-clock deadlines and optional active

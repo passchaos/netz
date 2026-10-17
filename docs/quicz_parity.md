@@ -838,6 +838,17 @@ is claimed. A 1,000-connection profile now places X25519 variable/fixed loops
 at 19.44%/4.26%, ahead of public scalar inversion at 2.98%; the latter is no
 longer an independent implementation gap.
 
+The generic RFC 9297 HTTP Datagram association now also has a typed RFC 9298
+CONNECT-UDP layer. It implements the default MASQUE URI Template with strict
+target validation and IPv6 percent encoding, Extended CONNECT plus
+Capsule-Protocol validation, generic Context ID framing, Context ID 0 UDP
+payloads, and the 65,527-byte UDP ceiling. Its reusable typed session preserves
+absolute deadlines across skipped unknown contexts and aborts malformed input
+with H3_MESSAGE_ERROR. A real authenticated HTTP/3 exchange proves negotiated
+SETTINGS ordering and bidirectional payload routing. Arbitrary configured
+Level-3 URI Templates remain future work rather than being treated as the
+default template.
+
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
 | QUIC 1-RTT STREAM echo (`quic_echo_*`, `udp_one_rtt_loopback`) | Covered with local and cross-process latency evidence plus an equal-CPU-layout quic-go throughput harness | `examples/quic_echo.zig`, `examples/bench_quic_handshake_stream.zig`, `bench-quic-quic-go`, and `bench-quic-persistent-external`; CPU-0-pinned local netz P50/P99/P99.9 echo ranges were 10.44-10.57 / 15.22-15.53 / 31.89-47.02 us versus quicz 10.5-10.7 / 16.0-19.5 / 206.3-211.2 us. The certificate-verified two-process persistent 1-KiB echo keeps one request outstanding: five historical pre-zio runs gave netz-client median P50 24.172 us versus quic-go-client 25.851 us against a fixed quic-go server (1.069x), and 23.729 versus 24.361 us against a fixed netz server (1.027x). The fresh-connection throughput harness pins client/server separately, runs both sender roles, and requires exact FIN/bytes/checksum for 1 and 4 unidirectional streams. Its netz endpoints and persistent netz endpoints now run on zio behind `std.Io`; strict result, completion, socket, and memory validation rejects legacy or mismatched backend identities. Complete-connection userspace socket accounting is also available. All external comparisons remain `same-application-shape`, and historical Threaded ratios are not zio results. | Re-run the cross-library matrices on zio, then add kernel/interface capture on a permitted host and equalize GRO, ACK/pacing, packetization, and application scheduling before a general STREAM ratio. |

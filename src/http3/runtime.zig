@@ -7622,6 +7622,39 @@ pub const HandshakeServerSession = struct {
             self.established.connection.datagramsEnabled();
     }
 
+    pub fn acceptConnectUdp(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        target_host_storage: []u8,
+    ) Error!http3.connect_udp.Target {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const target = try http3.connect_udp.validateDecodedDefaultRequest(
+            request,
+            target_host_storage,
+        );
+        try self.acceptConnectResponse(
+            stream_id,
+            http3.connect_udp.successResponse(),
+        );
+        return target;
+    }
+
+    pub fn connectUdpSession(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+    ) Error!ConnectUdpServerSession {
+        if (!self.connect_datagrams.contains(stream_id)) {
+            return error.UnexpectedStream;
+        }
+        return ConnectUdpServerSession.init(
+            self.established.connection.endpoint.allocator,
+            self.connectionIo(),
+            self,
+            stream_id,
+        );
+    }
+
     pub fn maxConnectDatagramPayloadSize(
         self: HandshakeServerSession,
         stream_id: u62,
@@ -16479,6 +16512,45 @@ pub const HandshakeClient = struct {
             self.established.connection.datagramsEnabled();
     }
 
+    pub fn startConnectUdp(
+        self: *HandshakeClient,
+        target: http3.connect_udp.Target,
+        authority: []const u8,
+        path_storage: []u8,
+    ) Error!u62 {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const stream_id = try self.startRequest(
+            try http3.connect_udp.requestInto(
+                path_storage,
+                target,
+                authority,
+            ),
+            null,
+        );
+        errdefer self.cancelPendingConnectDatagramAssociation(stream_id);
+        try self.registerPendingConnectDatagramAssociation(stream_id);
+        return stream_id;
+    }
+
+    pub fn acceptConnectUdpResponse(
+        self: *HandshakeClient,
+        stream_id: u62,
+        response: http3.DecodedResponseHead,
+    ) Error!ConnectUdpClientSession {
+        try http3.connect_udp.validateResponseHead(
+            response.status,
+            response.headers,
+        );
+        if (response.content_length != null) return error.InvalidHeader;
+        try self.detachResponseStream(stream_id);
+        return ConnectUdpClientSession.init(
+            self.allocator,
+            self.connectionIo(),
+            self,
+            stream_id,
+        );
+    }
+
     pub fn maxConnectDatagramPayloadSize(
         self: HandshakeClient,
         stream_id: u62,
@@ -19420,6 +19492,10 @@ pub const HandshakeClientPoolSharedRequestError =
     HandshakeClientPoolSharedDispatcher.RequestError;
 pub const SharedHandshakeClientPool =
     @import("runtime/shared_handshake_client_pool.zig").Pool(@This());
+pub const ConnectUdpClientSession = http3.connect_udp.Session(HandshakeClient);
+pub const ConnectUdpServerSession = http3.connect_udp.Session(
+    HandshakeServerSession,
+);
 pub const SharedHandshakeClientPoolOptions =
     @import("runtime/shared_handshake_client_pool.zig").Options(@This());
 pub const SharedHandshakeClientPoolAddressResolver =
@@ -35124,6 +35200,7 @@ test {
     _ = @import("runtime/client/tests/deadline.zig");
     _ = @import("runtime/client/resolver_tests.zig");
     _ = @import("runtime/client/happy_eyeballs_tests.zig");
+    _ = @import("runtime/connect_udp_tests.zig");
     _ = @import("runtime/client/batch_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");

@@ -24,6 +24,9 @@ pub const Error = http3.Error || quic.runtime.Error ||
     ConcurrentRead,
     UnsafeEarlyDataMethod,
     InvalidAddressConnectPolicy,
+    InvalidTarget,
+    PayloadTooLarge,
+    UnexpectedContextId,
 };
 
 /// Failures produced by a handshake worker after admission has transferred
