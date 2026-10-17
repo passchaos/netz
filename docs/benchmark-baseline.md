@@ -121,6 +121,34 @@ the real park/wakeup path rather than claiming a universal ready-I/O win.
 "Linked" here means the runtime completion and its timer share one rendezvous
 and timer-heap lifecycle; it is not Linux `IORING_OP_LINK_TIMEOUT`.
 
+### CONNECT-UDP Capsule Session
+
+`bench-connect-udp-capsule` isolates the shared RFC 9297 Capsule data plane
+used by HTTP/1.1 and HTTP/2 CONNECT-UDP. Each receive traverses an unknown
+Capsule, an unknown Context ID, a valid 513-byte Context ID 0 payload, and
+17-byte stream fragments; send measures the borrowed scatter/gather Capsule
+header plus payload path. The owning and caller-buffer receive arms use the
+same parser and tunnel source. One warmup grows retained parser storage before
+allocation counters and time begin.
+
+Seven ReleaseFast samples from clean commit `06e33d26`, pinned to CPU 0 on
+2026-10-18, used 1,000,000 sends and 200,000 receives per arm. The fixed
+binary SHA-256 was
+`f4e4c1b77d6a7ecf847fae6ac8907936ad058674f8e228b96be0128195276341`.
+
+| Session operation | CPU-0 range | Median | Measured allocations |
+| --- | ---: | ---: | ---: |
+| Borrowed send | 7-9 ns/datagram | 7 ns/datagram | 0 |
+| Caller-buffer fragmented receive | 239-281 ns/datagram | 242 ns/datagram | 0 / 200,000 |
+| Owning fragmented receive | 313-318 ns/datagram | 315 ns/datagram | 200,000 / 200,000 |
+
+The caller-buffer API removed the owning arm's one allocation per UDP payload
+and reduced this isolated median by 23.2%. `receiveInto` also retains a complete
+datagram after `BufferTooShort`, so allocation avoidance does not weaken retry
+semantics. This benchmark excludes TCP/TLS, HTTP/2 framing and scheduling,
+socket I/O, and peer implementations; it is a Session hot-path result, not a
+whole-network or cross-library throughput claim.
+
 ### Shared HTTP Content-Encoding decode
 
 ```text
