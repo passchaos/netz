@@ -10,6 +10,7 @@
 const std = @import("std");
 const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
+const authority = @import("shared/authority.zig");
 const route_key = @import("shared/route.zig");
 
 pub const Error = error{
@@ -50,6 +51,8 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
 
         const RouteTurn = struct {
             key: route_key.Key = undefined,
+            authority: authority.Snapshot = .{},
+            authority_generation: u64 = 0,
             activity: std.Io.Event = .unset,
             next: ?*RouteTurn = null,
         };
@@ -401,8 +404,11 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 if (active == route) {
                     link.* = active.next;
                     route.next = null;
+                    var published = route.authority;
+                    route.authority = .{};
                     state.ready.broadcast(state.io);
                     state.mutex.unlock(state.io);
+                    published.deinit();
                     return;
                 }
                 link = &active.next;
@@ -411,13 +417,21 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             unreachable;
         }
 
+        fn routeAccepts(
+            route: *const RouteTurn,
+            command: *const Command,
+        ) bool {
+            return route.key.eql(&command.route_key) or
+                route.authority.allows(&command.route_key);
+        }
+
         fn findActiveRoute(
             state: *State,
             command: *const Command,
         ) ?*RouteTurn {
             var route = state.active_routes;
             while (route) |active| : (route = active.next) {
-                if (active.key.eql(&command.route_key)) return active;
+                if (routeAccepts(active, command)) return active;
             }
             return null;
         }
@@ -452,6 +466,8 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 };
                 route.* = .{
                     .key = first.route_key,
+                    .authority = .{},
+                    .authority_generation = 0,
                     .activity = .unset,
                     .next = state.active_routes,
                 };
@@ -466,7 +482,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 while (current) |candidate| {
                     const next = candidate.next;
                     if (count < state.options.max_batch_requests and
-                        route.key.eql(&candidate.route_key))
+                        routeAccepts(route, candidate))
                     {
                         detach(state, candidate);
                         candidate.state = .in_flight;
@@ -624,6 +640,51 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             };
         }
 
+        fn refreshAuthority(
+            state: *State,
+            route: *RouteTurn,
+            lease: *PoolType.Lease,
+        ) void {
+            const generation = lease.client().peerOriginGeneration();
+            state.mutex.lockUncancelable(state.io);
+            const current = route.authority_generation;
+            state.mutex.unlock(state.io);
+            if (current == generation) return;
+
+            var built_ok = true;
+            var next = authority.Snapshot.build(
+                state.pool.allocator,
+                lease.client(),
+                lease.connectionOrigin(),
+            ) catch blk: {
+                built_ok = false;
+                break :blk authority.Snapshot{};
+            };
+            var next_owned = true;
+            defer if (next_owned) next.deinit();
+
+            state.mutex.lockUncancelable(state.io);
+            var previous = route.authority;
+            route.authority = if (state.closed) .{} else next;
+            if (!state.closed) {
+                next_owned = false;
+                if (built_ok) route.authority_generation = generation;
+                var command = state.head;
+                while (command) |candidate| : (command = candidate.next) {
+                    if (routeAccepts(route, candidate)) {
+                        route.activity.set(state.io);
+                        break;
+                    }
+                }
+                // A generation change can also revoke a previously published
+                // origin (notably after 421). Re-evaluate queued commands on
+                // idle workers so they may acquire an independent connection.
+                state.ready.broadcast(state.io);
+            }
+            state.mutex.unlock(state.io);
+            previous.deinit();
+        }
+
         fn driveConnection(
             state: *State,
             route: *RouteTurn,
@@ -664,6 +725,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                         lease.discard();
                 };
                 errdefer reusable = false;
+                refreshAuthority(state, route, &lease);
 
                 while (active_count.* != 0) {
                     try processControl(
@@ -677,12 +739,15 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                     if (active_count.* == 0) break;
                     try sendUnsent(state, active, active_count, &lease);
                     if (active_count.* == 0) break;
+                    refreshAuthority(state, route, &lease);
 
-                    const maybe_event = lease.client()
+                    const receive_result = lease.client()
                         .receiveNextResponseBeforeOrWake(
                         earliestDeadline(active, active_count.*),
                         &route.activity,
-                    ) catch |err| switch (err) {
+                    );
+                    refreshAuthority(state, route, &lease);
+                    const maybe_event = receive_result catch |err| switch (err) {
                         error.Timeout => continue,
                         else => return err,
                     };
@@ -708,11 +773,12 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                             event_owned = false;
                             if (response.response.status == 421) {
                                 lease.client().removePeerOriginAfterMisdirected(
-                                    lease.requestOrigin(),
+                                    command.route_key.origin(),
                                 ) catch |err| {
                                     response.deinit(state.pool.allocator);
                                     return err;
                                 };
+                                refreshAuthority(state, route, &lease);
                             }
                             complete(state, command, response, null);
                         },
@@ -789,7 +855,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 while (current) |candidate| {
                     const next = candidate.next;
                     if (active_count.* < state.options.max_batch_requests and
-                        route.key.eql(&candidate.route_key))
+                        routeAccepts(route, candidate))
                     {
                         detach(state, candidate);
                         candidate.state = .in_flight;

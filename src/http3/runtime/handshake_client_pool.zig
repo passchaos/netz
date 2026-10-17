@@ -485,6 +485,14 @@ pub fn Pool(comptime Runtime: type) type {
                 return self.origin_key.origin();
             }
 
+            /// Origin that authenticated and created this connection. It is
+            /// stable even when the current lease was acquired through RFC
+            /// 9412 cross-origin coalescing.
+            pub fn connectionOrigin(self: *const Lease) http3.Origin {
+                std.debug.assert(self.active);
+                return self.origin_key.origin();
+            }
+
             fn deinitRequestOrigin(self: *Lease) void {
                 if (self.request_origin_key) |*key| key.deinit();
                 self.request_origin_key = null;

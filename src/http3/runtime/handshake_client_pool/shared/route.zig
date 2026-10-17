@@ -169,6 +169,14 @@ pub const Key = struct {
         }
         return self.alt_svc.?.eql(&other.alt_svc.?);
     }
+
+    pub fn origin(self: *const Key) http3.Origin {
+        return .{
+            .scheme = "https",
+            .host = self.origin_host[0..self.origin_host_len],
+            .port = self.origin_port,
+        };
+    }
 };
 
 fn sameReclaimer(

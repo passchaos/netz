@@ -17797,6 +17797,10 @@ pub const HandshakeClient = struct {
         return self.control.peerOriginSetInitialized();
     }
 
+    pub fn peerOriginGeneration(self: HandshakeClient) u64 {
+        return self.control.peerOriginGeneration();
+    }
+
     pub fn peerOriginKnown(
         self: HandshakeClient,
         origin: http3.Origin,
@@ -34631,6 +34635,7 @@ test {
     _ = @import("runtime/handshake_client_pool/batch_tests.zig");
     _ = @import("runtime/handshake_client_pool/shared_tests.zig");
     _ = @import("runtime/handshake_client_pool/shared_route_tests.zig");
+    _ = @import("runtime/handshake_client_pool/shared_authority_tests.zig");
     _ = @import("runtime/handshake_client_pool_redirect_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool_tests.zig");
     _ = @import("runtime/shared_handshake_client_pool/alt_svc_tests.zig");

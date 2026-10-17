@@ -1533,6 +1533,13 @@ pub const ControlState = struct {
         return self.peer_origin_set_initialized;
     }
 
+    /// Monotonic authority-policy generation. ORIGIN updates and effective
+    /// RFC 8336 removals both advance it so connection owners can publish an
+    /// immutable authorization snapshot without rescanning on every response.
+    pub fn peerOriginGeneration(self: ControlState) u64 {
+        return self.peer_origin_generation;
+    }
+
     pub fn peerOriginKnown(self: ControlState, origin: Origin) bool {
         return originListContains(self.peer_origins.items, origin);
     }
@@ -1634,7 +1641,24 @@ pub const ControlState = struct {
         allocator: std.mem.Allocator,
         origin: Origin,
     ) Error!void {
-        if (!originListContains(self.peer_origin_exclusions.items, origin)) {
+        const already_excluded = originListContains(
+            self.peer_origin_exclusions.items,
+            origin,
+        );
+        var peer_index: ?usize = null;
+        for (self.peer_origins.items, 0..) |candidate, index| {
+            if (sameOrigin(candidate.origin(), origin)) {
+                peer_index = index;
+                break;
+            }
+        }
+        if (already_excluded and peer_index == null) return;
+        const next_generation = std.math.add(
+            u64,
+            self.peer_origin_generation,
+            1,
+        ) catch return error.IntegerOverflow;
+        if (!already_excluded) {
             if (self.peer_origin_exclusions.items.len >= max_peer_origins) {
                 return error.ExcessiveLoad;
             }
@@ -1642,12 +1666,11 @@ pub const ControlState = struct {
             errdefer owned.deinit();
             try self.peer_origin_exclusions.append(allocator, owned);
         }
-        for (self.peer_origins.items, 0..) |candidate, index| {
-            if (!sameOrigin(candidate.origin(), origin)) continue;
+        if (peer_index) |index| {
             var removed = self.peer_origins.orderedRemove(index);
             removed.deinit();
-            return;
         }
+        self.peer_origin_generation = next_generation;
     }
 
     pub fn acceptsLocalRequestStream(self: ControlState, stream_id: u64) bool {
@@ -5648,8 +5671,10 @@ test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
 
     var control = ControlState{};
     defer control.deinit(allocator);
+    try std.testing.expectEqual(@as(u64, 0), control.peerOriginGeneration());
     control.settings.received = true;
     try control.applyFrame(allocator, frame);
+    try std.testing.expectEqual(@as(u64, 1), control.peerOriginGeneration());
     try std.testing.expect(control.peerOriginSetInitialized());
     // The explicit default port canonicalizes to the first origin rather than
     // consuming another bounded Origin Set entry.
@@ -5678,6 +5703,12 @@ test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
         allocator,
         try requestOrigin("https", "cdn.example.com:8443"),
     );
+    try std.testing.expectEqual(@as(u64, 2), control.peerOriginGeneration());
+    try control.removePeerOrigin(
+        allocator,
+        try requestOrigin("https", "cdn.example.com:8443"),
+    );
+    try std.testing.expectEqual(@as(u64, 2), control.peerOriginGeneration());
     try std.testing.expect(!control.peerOriginKnown(
         try requestOrigin("https", "cdn.example.com:8443"),
     ));
@@ -5686,6 +5717,7 @@ test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
         allocator,
         try requestOrigin("https", "initial.example"),
     );
+    try std.testing.expectEqual(@as(u64, 3), control.peerOriginGeneration());
     try std.testing.expectEqual(
         false,
         control.peerOriginSetAllows(
@@ -5701,6 +5733,7 @@ test "HTTP/3 RFC 9412 ORIGIN frames accumulate canonical origins" {
         &.{"https://initial.example"},
     );
     try control.applyFrame(allocator, try Frame.parse(readded.items));
+    try std.testing.expectEqual(@as(u64, 4), control.peerOriginGeneration());
     try std.testing.expectEqual(
         true,
         control.peerOriginSetAllows(
