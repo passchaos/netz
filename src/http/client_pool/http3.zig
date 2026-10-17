@@ -46,8 +46,7 @@ pub const Options = struct {
         .max_connection_drivers = 4,
     },
     /// Use one UDP endpoint for ordinary non-0-RTT requests. The unified pool
-    /// currently falls back to owning endpoints when a cross-transport global
-    /// connection budget or 0-RTT is configured.
+    /// currently falls back to owning endpoints when 0-RTT is configured.
     shared_endpoint: bool = true,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
@@ -300,19 +299,13 @@ pub const State = struct {
                 const sender = dispatcher.sender();
                 var may_retry = http_method.isIdempotent(options.method);
                 while (true) {
-                    var response = (if (deadline) |absolute|
-                        sender.requestAltSvcWithDeadline(
-                            uri_text,
-                            alternative.target(),
-                            options,
-                            absolute,
-                        )
-                    else
-                        sender.requestAltSvc(
-                            uri_text,
-                            alternative.target(),
-                            options,
-                        )) catch |err| {
+                    var response = sender.requestAltSvcReclaiming(
+                        uri_text,
+                        alternative.target(),
+                        options,
+                        deadline,
+                        reclaimer,
+                    ) catch |err| {
                         if (may_retry and retryableSharedRequestError(err)) {
                             may_retry = false;
                             continue;

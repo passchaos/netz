@@ -462,6 +462,8 @@ pub fn Pool(comptime Runtime: type) type {
                     absolute,
                     redirect,
                     .origin,
+                    null,
+                    null,
                 ) catch |err| return @errorCast(err);
             }
         };
@@ -648,7 +650,14 @@ pub fn Pool(comptime Runtime: type) type {
                 self.io,
                 self.options.client.connect_timeout,
             ) catch return error.HandshakeTimeout;
-            return self.acquireUriBefore(uri_text, deadline, null, .origin);
+            return self.acquireUriBefore(
+                uri_text,
+                deadline,
+                null,
+                .origin,
+                null,
+                null,
+            );
         }
 
         pub fn acquireUriWithTimeout(
@@ -675,7 +684,14 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 self.options.client.connect_timeout,
             );
-            return self.acquireUriBefore(uri_text, absolute, null, .origin);
+            return self.acquireUriBefore(
+                uri_text,
+                absolute,
+                null,
+                .origin,
+                null,
+                null,
+            );
         }
 
         /// Acquire a connection for the original URI authority while dialing
@@ -696,6 +712,8 @@ pub fn Pool(comptime Runtime: type) type {
                 deadline,
                 null,
                 .{ .alt_svc = target },
+                null,
+                null,
             );
         }
 
@@ -730,7 +748,47 @@ pub fn Pool(comptime Runtime: type) type {
                 absolute,
                 null,
                 .{ .alt_svc = target },
+                null,
+                null,
             );
+        }
+
+        pub fn acquireUriAltSvcReclaiming(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            deadline: ?std.Io.Clock.Timestamp,
+            waiter: *connection_budget.Waiter,
+            reclaimer: connection_budget.Reclaimer,
+        ) !Lease {
+            if (self.closed) return error.PoolClosed;
+            const absolute = if (deadline) |caller_deadline|
+                try deadline_policy.capTimeout(
+                    self.io,
+                    caller_deadline,
+                    self.options.client.connect_timeout,
+                )
+            else
+                deadline_policy.fromTimeout(
+                    self.io,
+                    self.options.client.connect_timeout,
+                ) catch return error.HandshakeTimeout;
+            return self.acquireUriBefore(
+                uri_text,
+                absolute,
+                null,
+                .{ .alt_svc = target },
+                waiter,
+                reclaimer,
+            );
+        }
+
+        pub fn cancelConnectionBudgetWaiter(
+            self: *Self,
+            waiter: *connection_budget.Waiter,
+        ) void {
+            const budget = self.options.shared_connection_budget orelse return;
+            budget.cancel(waiter);
         }
 
         fn acquireUriBefore(
@@ -739,6 +797,8 @@ pub fn Pool(comptime Runtime: type) type {
             deadline: ?std.Io.Clock.Timestamp,
             redirect: ?owning_pool.RedirectConnectContext,
             route: ConnectRoute,
+            shared_waiter: ?*connection_budget.Waiter,
+            reclaimer: ?connection_budget.Reclaimer,
         ) !Lease {
             if (self.closed) return error.PoolClosed;
             const uri = std.Uri.parse(uri_text) catch return error.InvalidUri;
@@ -785,7 +845,10 @@ pub fn Pool(comptime Runtime: type) type {
             }
             var reservation_active = false;
             if (self.options.shared_connection_budget) |budget| {
-                try budget.tryReserve(null);
+                if (reclaimer) |value|
+                    try budget.tryReserveReclaiming(shared_waiter, value)
+                else
+                    try budget.tryReserve(shared_waiter);
                 reservation_active = true;
             }
             errdefer if (reservation_active) self.releaseShared(1);

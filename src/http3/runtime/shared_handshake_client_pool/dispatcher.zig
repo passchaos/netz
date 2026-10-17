@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const http3 = @import("../../mod.zig");
+const connection_budget = @import("../../../internal/connection_budget.zig");
 const authority = @import("../handshake_client_pool/shared/authority.zig");
 const route_key = @import("../handshake_client_pool/shared/route.zig");
 const receive_race = @import("dispatcher/receive.zig");
@@ -26,6 +27,7 @@ pub const Options = struct {
     max_queued_requests: usize = 256,
     max_active_connections: usize = 16,
     max_requests_per_connection: usize = 64,
+    capacity_poll_interval: std.Io.Duration = .fromMilliseconds(5),
 };
 
 pub const Stats = struct {
@@ -48,6 +50,8 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             request: Runtime.UriRequestOptions,
             alt_svc: ?http3.AltSvcTarget,
             deadline: ?std.Io.Clock.Timestamp,
+            reclaimer: ?connection_budget.Reclaimer = null,
+            budget_waiter: connection_budget.Waiter = .{},
             route: route_key.Key,
             previous: ?*Command = null,
             next: ?*Command = null,
@@ -117,7 +121,13 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 uri: []const u8,
                 request_options: Runtime.UriRequestOptions,
             ) RequestError!Pool.OwnedResponse {
-                return self.requestBefore(uri, request_options, null, null);
+                return self.requestBefore(
+                    uri,
+                    request_options,
+                    null,
+                    null,
+                    null,
+                );
             }
 
             pub fn requestWithTimeout(
@@ -135,6 +145,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         .clock = .awake,
                         .raw = timeout,
                     }),
+                    null,
                 );
             }
 
@@ -149,7 +160,13 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 {
                     return error.Timeout;
                 }
-                return self.requestBefore(uri, request_options, null, deadline);
+                return self.requestBefore(
+                    uri,
+                    request_options,
+                    null,
+                    deadline,
+                    null,
+                );
             }
 
             pub fn requestAltSvcWithTimeout(
@@ -168,6 +185,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                         .clock = .awake,
                         .raw = timeout,
                     }),
+                    null,
                 );
             }
 
@@ -181,6 +199,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     uri,
                     request_options,
                     target,
+                    null,
                     null,
                 );
             }
@@ -202,6 +221,29 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     request_options,
                     target,
                     deadline,
+                    null,
+                );
+            }
+
+            pub fn requestAltSvcReclaiming(
+                self: Sender,
+                uri: []const u8,
+                target: http3.AltSvcTarget,
+                request_options: Runtime.UriRequestOptions,
+                deadline: ?std.Io.Clock.Timestamp,
+                reclaimer: connection_budget.Reclaimer,
+            ) RequestError!Pool.OwnedResponse {
+                if (deadline) |absolute| {
+                    if (absolute.clock != .awake or absolute.durationFromNow(
+                        self.state.io,
+                    ).raw.nanoseconds <= 0) return error.Timeout;
+                }
+                return self.requestBefore(
+                    uri,
+                    request_options,
+                    target,
+                    deadline,
+                    reclaimer,
                 );
             }
 
@@ -211,12 +253,14 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 request_options: Runtime.UriRequestOptions,
                 alt_svc: ?http3.AltSvcTarget,
                 deadline: ?std.Io.Clock.Timestamp,
+                reclaimer: ?connection_budget.Reclaimer,
             ) RequestError!Pool.OwnedResponse {
                 var command: Command = .{
                     .uri = uri,
                     .request = request_options,
                     .alt_svc = alt_svc,
                     .deadline = deadline,
+                    .reclaimer = reclaimer,
                     .route = try route_key.Key.init(uri, alt_svc, null),
                 };
                 try enqueue(self.state, &command);
@@ -244,7 +288,8 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
         ) (std.mem.Allocator.Error || Error)!Self {
             if (options.max_queued_requests == 0 or
                 options.max_active_connections == 0 or
-                options.max_requests_per_connection == 0)
+                options.max_requests_per_connection == 0 or
+                options.capacity_poll_interval.nanoseconds <= 0)
             {
                 return error.InvalidSharedEndpointOptions;
             }
@@ -317,6 +362,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 const next = current.next;
                 current.previous = null;
                 current.next = null;
+                cancelBudgetWaiter(state, current);
                 current.state = .completed;
                 current.err = error.SharedEndpointDriverClosed;
                 current.done.set(state.io);
@@ -347,9 +393,24 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 if (activeRequestCount(state) == 0) {
                     state.mutex.lockUncancelable(state.io);
                     state.activity.reset();
-                    const should_wait = !state.closed and state.head == null;
+                    const closed = state.closed;
+                    const capacity_blocked = state.head != null;
                     state.mutex.unlock(state.io);
-                    if (should_wait) try state.activity.wait(state.io);
+                    if (!closed) {
+                        if (capacity_blocked) {
+                            state.activity.waitTimeout(state.io, .{
+                                .duration = .{
+                                    .clock = .awake,
+                                    .raw = state.options.capacity_poll_interval,
+                                },
+                            }) catch |err| switch (err) {
+                                error.Timeout => {},
+                                error.Canceled => return error.Canceled,
+                            };
+                        } else {
+                            try state.activity.wait(state.io);
+                        }
+                    }
                     continue;
                 }
                 const maybe_event = try receive_race.beforeActivity(
@@ -420,6 +481,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             defer state.mutex.unlock(state.io);
             if (command.state != .queued) return false;
             detach(state, command);
+            cancelBudgetWaiter(state, command);
             command.state = .completed;
             return true;
         }
@@ -547,6 +609,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                 }
                 const index = connection_index.?;
                 const connection = &state.connections[index];
+                cancelBudgetWaiter(state, command);
                 state.mutex.lockUncancelable(state.io);
                 const canceled = command.cancel_requested or command.abandoned or
                     state.closed;
@@ -594,6 +657,15 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             command: *Command,
         ) RequestError!Pool.Lease {
             if (command.alt_svc) |target| {
+                if (command.reclaimer) |reclaimer| {
+                    return state.pool.acquireUriAltSvcReclaiming(
+                        command.uri,
+                        target,
+                        command.deadline,
+                        &command.budget_waiter,
+                        reclaimer,
+                    ) catch |err| return @errorCast(err);
+                }
                 return if (command.deadline) |deadline|
                     state.pool.acquireUriAltSvcWithDeadline(
                         command.uri,
@@ -876,6 +948,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             err: ?RequestError,
         ) void {
             var response = response_value;
+            cancelBudgetWaiter(state, command);
             state.mutex.lockUncancelable(state.io);
             if (command.abandoned) {
                 command.state = .completed;
@@ -913,6 +986,10 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             command.response = null;
         }
 
+        fn cancelBudgetWaiter(state: *State, command: *Command) void {
+            state.pool.cancelConnectionBudgetWaiter(&command.budget_waiter);
+        }
+
         fn isClosed(state: *State) bool {
             state.mutex.lockUncancelable(state.io);
             defer state.mutex.unlock(state.io);
@@ -938,6 +1015,26 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     else
                         deadline;
                 }
+            }
+            state.mutex.lockUncancelable(state.io);
+            const capacity_blocked = state.head != null;
+            state.mutex.unlock(state.io);
+            if (capacity_blocked) {
+                const poll_deadline = std.Io.Clock.Timestamp.fromNow(
+                    state.io,
+                    .{
+                        .clock = .awake,
+                        .raw = state.options.capacity_poll_interval,
+                    },
+                );
+                earliest = if (earliest) |current|
+                    if (std.Io.Clock.Timestamp.compare(
+                        poll_deadline,
+                        .lt,
+                        current,
+                    )) poll_deadline else current
+                else
+                    poll_deadline;
             }
             return earliest;
         }

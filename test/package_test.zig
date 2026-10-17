@@ -3591,6 +3591,7 @@ test "public modules are reachable" {
         "acquireUriAltSvc",
         "acquireUriAltSvcWithTimeout",
         "acquireUriAltSvcWithDeadline",
+        "acquireUriAltSvcReclaiming",
     }) |decl| try std.testing.expect(@hasDecl(
         netz.http3.runtime.SharedHandshakeClientPool,
         decl,
@@ -3625,6 +3626,7 @@ test "public modules are reachable" {
         "requestAltSvc",
         "requestAltSvcWithTimeout",
         "requestAltSvcWithDeadline",
+        "requestAltSvcReclaiming",
     }) |decl| try std.testing.expect(@hasDecl(
         netz.http3.runtime.SharedHandshakeClientPoolRequestSender,
         decl,

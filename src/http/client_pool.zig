@@ -102,7 +102,6 @@ pub const Pool = struct {
         const http3_state = if (options.http3) |http3_options| blk: {
             var effective = http3_options;
             effective.shared_endpoint = effective.shared_endpoint and
-                options.max_total_connections == 0 and
                 effective.early_data == null;
             break :blk try h3_support.State.create(
                 allocator,
