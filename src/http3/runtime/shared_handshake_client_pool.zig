@@ -36,6 +36,23 @@ pub const Error = error{
     InvalidLease,
 };
 
+pub fn AddressResolver(comptime Runtime: type) type {
+    return struct {
+        context: *anyopaque,
+        /// Calls may overlap for independent routes. Implementations must be
+        /// thread-safe, honor cancellation/deadline through `io`, and return
+        /// an address slice owned by `allocator`.
+        resolve: *const fn (
+            context: *anyopaque,
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) Runtime.Error![]std.Io.net.IpAddress,
+    };
+}
+
 pub fn Options(comptime Runtime: type) type {
     return struct {
         local_address: std.Io.net.IpAddress,
@@ -46,10 +63,15 @@ pub fn Options(comptime Runtime: type) type {
         migration_local_address: ?std.Io.net.IpAddress = null,
         limits: Runtime.Limits = .{},
         client: Runtime.HandshakeClientOptions,
+        /// Optional application resolver used by request-dispatcher
+        /// acquisitions. It runs in a cancelable pending-resolution task, so
+        /// service discovery or cached/DoH lookup never takes endpoint receive
+        /// ownership. Direct pool acquisition retains Runtime's resolver.
+        resolver: ?AddressResolver(Runtime) = null,
         idle: http3.origin_pool.Config = .{},
         /// Maximum established plus in-progress connections. Zero is
-        /// unbounded. The current implementation performs one acquisition at
-        /// a time on the endpoint owner.
+        /// unbounded. Independent pending handshakes may overlap, while one
+        /// request dispatcher retains endpoint receive ownership.
         max_connections: usize = 32,
         shared_connection_budget: ?*connection_budget.Budget = null,
         peer_settings_observer: ?owning_pool.PeerSettingsObserver = null,
@@ -263,6 +285,64 @@ pub fn Pool(comptime Runtime: type) type {
             }
         };
 
+        const ResolveCompletion = anyerror![]std.Io.net.IpAddress;
+
+        const PendingResolution = struct {
+            owner: *PendingRequestAcquire,
+            future: std.Io.Future(void) = undefined,
+            future_active: bool = false,
+            completion: ResolveCompletion = undefined,
+            completion_owned: bool = false,
+            done: std.Io.Event = .unset,
+
+            fn init(owner: *PendingRequestAcquire) !*@This() {
+                const pool = owner.pool;
+                const self = try pool.allocator.create(@This());
+                errdefer pool.allocator.destroy(self);
+                self.* = .{ .owner = owner };
+                self.future = try std.Io.concurrent(
+                    pool.io,
+                    PendingResolution.run,
+                    .{self},
+                );
+                self.future_active = true;
+                return self;
+            }
+
+            fn run(self: *@This()) void {
+                self.completion = self.owner.resolveAddresses();
+                self.completion_owned = true;
+                self.done.set(self.owner.pool.io);
+                self.owner.completion_event.set(self.owner.pool.io);
+            }
+
+            fn takeCompletion(self: *@This()) ?ResolveCompletion {
+                if (!self.done.isSet()) return null;
+                if (self.future_active) {
+                    self.future.await(self.owner.pool.io);
+                    self.future_active = false;
+                }
+                std.debug.assert(self.completion_owned);
+                const completion = self.completion;
+                self.completion_owned = false;
+                return completion;
+            }
+
+            fn deinit(self: *@This()) void {
+                const pool = self.owner.pool;
+                if (self.future_active) {
+                    self.future.cancel(pool.io);
+                    self.future_active = false;
+                }
+                if (self.completion_owned) {
+                    if (self.completion) |addresses| {
+                        pool.allocator.free(addresses);
+                    } else |_| {}
+                }
+                pool.allocator.destroy(self);
+            }
+        };
+
         const PendingConnectAttempt = struct {
             owner: *PendingRequestAcquire,
             handle: Handle,
@@ -389,10 +469,13 @@ pub fn Pool(comptime Runtime: type) type {
             pool: *Self,
             uri_endpoint: Runtime.UriEndpoint,
             route: ConnectRoute,
-            addresses: []std.Io.net.IpAddress,
+            resolution: ?*PendingResolution = null,
+            addresses: []std.Io.net.IpAddress = @constCast(&.{}),
+            addresses_owned: bool = false,
             next_address: usize = 0,
             deadline: ?std.Io.Clock.Timestamp,
             completion_event: *std.Io.Event,
+            early_request: ?*const Runtime.PreparedEarlyRequest = null,
             early: ?PendingEarlyConnect = null,
             early_path_failed: bool = false,
             last_error: ?anyerror = null,
@@ -400,10 +483,26 @@ pub fn Pool(comptime Runtime: type) type {
             reservation_active: bool = true,
 
             pub fn usesEarlyRequest(self: *const @This()) bool {
-                return self.early != null;
+                return self.early_request != null;
             }
 
             pub fn poll(self: *@This()) !?Lease {
+                if (self.resolution) |resolution| {
+                    const completion = resolution.takeCompletion() orelse
+                        return null;
+                    const addresses = completion catch |err| {
+                        resolution.deinit();
+                        self.resolution = null;
+                        return err;
+                    };
+                    resolution.deinit();
+                    self.resolution = null;
+                    self.addresses = addresses;
+                    self.addresses_owned = true;
+                    try self.prepareEarly();
+                    try self.startNextAttempt();
+                    return null;
+                }
                 const attempt = self.attempt orelse
                     return error.InvalidLease;
                 const completion = attempt.takeCompletion() orelse return null;
@@ -432,6 +531,77 @@ pub fn Pool(comptime Runtime: type) type {
                         );
                     },
                 }
+            }
+
+            fn resolveAddresses(self: *@This()) ResolveCompletion {
+                if (self.pool.options.resolver) |resolver| {
+                    const host, const port = switch (self.route) {
+                        .origin => .{
+                            self.uri_endpoint.tls_host,
+                            self.uri_endpoint.port,
+                        },
+                        .alt_svc => |target| .{
+                            target.connect_host,
+                            target.port,
+                        },
+                    };
+                    return resolver.resolve(
+                        resolver.context,
+                        self.pool.allocator,
+                        self.pool.io,
+                        host,
+                        port,
+                        self.deadline,
+                    );
+                }
+                return switch (self.route) {
+                    .origin => Runtime.resolveEndpointBefore(
+                        self.uri_endpoint,
+                        self.pool.allocator,
+                        self.pool.io,
+                        self.deadline,
+                    ),
+                    .alt_svc => |target| Runtime
+                        .resolveHostPortAddressesBefore(
+                        self.pool.allocator,
+                        self.pool.io,
+                        target.connect_host,
+                        target.port,
+                        self.deadline,
+                    ),
+                };
+            }
+
+            fn prepareEarly(self: *@This()) !void {
+                const request = self.early_request orelse return;
+                const target = switch (self.route) {
+                    .alt_svc => |value| value,
+                    .origin => return error.InvalidHeader,
+                };
+                var options = self.pool.options.client;
+                scopeAutoResumption(
+                    &options,
+                    self.uri_endpoint.authority,
+                );
+                const automatic = options.handshake.auto_resumption orelse {
+                    self.early_request = null;
+                    return;
+                };
+                const lease = (try automatic.cache.beginEarlyData(
+                    automatic.server_id,
+                    target.alpn,
+                    automatic.now_ms,
+                )) orelse {
+                    self.early_request = null;
+                    return;
+                };
+                self.early = .{
+                    .request = request,
+                    .cache = automatic.cache,
+                    .lease = lease,
+                    .server_id = automatic.server_id,
+                    .now_ms = automatic.now_ms,
+                };
             }
 
             fn startNextAttempt(self: *@This()) !void {
@@ -527,9 +697,12 @@ pub fn Pool(comptime Runtime: type) type {
 
             pub fn deinit(self: *@This()) void {
                 const pool = self.pool;
+                if (self.resolution) |resolution| resolution.deinit();
                 if (self.attempt) |attempt| attempt.deinit();
                 if (self.early) |*early| early.deinit();
-                pool.allocator.free(self.addresses);
+                if (self.addresses_owned) {
+                    pool.allocator.free(self.addresses);
+                }
                 self.uri_endpoint.deinit();
                 if (self.reservation_active) pool.releaseShared(1);
                 std.debug.assert(pool.pending_acquisitions != 0);
@@ -1275,6 +1448,9 @@ pub fn Pool(comptime Runtime: type) type {
                 .{ .alt_svc = value }
             else
                 .origin;
+            if (early_request != null and target == null) {
+                return error.InvalidHeader;
+            }
             try validateConnectRoute(endpoint, route);
             const origin = try http3.requestOrigin(
                 uri.scheme,
@@ -1337,65 +1513,20 @@ pub fn Pool(comptime Runtime: type) type {
                 std.math.cast(u32, reserved_slots) orelse
                     return error.OutOfMemory,
             );
-            const addresses = switch (route) {
-                .origin => try Runtime.resolveEndpointBefore(
-                    endpoint,
-                    self.allocator,
-                    self.io,
-                    absolute,
-                ),
-                .alt_svc => |value| try Runtime
-                    .resolveHostPortAddressesBefore(
-                    self.allocator,
-                    self.io,
-                    value.connect_host,
-                    value.port,
-                    absolute,
-                ),
-            };
-            var addresses_owned = true;
-            defer if (addresses_owned) self.allocator.free(addresses);
-
-            var early: ?PendingEarlyConnect = null;
-            defer if (early) |*value| value.deinit();
-            if (early_request) |prepared| {
-                const alt_svc = target orelse return error.InvalidHeader;
-                var options = self.options.client;
-                scopeAutoResumption(&options, endpoint.authority);
-                if (options.handshake.auto_resumption) |automatic| {
-                    if (try automatic.cache.beginEarlyData(
-                        automatic.server_id,
-                        alt_svc.alpn,
-                        automatic.now_ms,
-                    )) |lease| {
-                        early = .{
-                            .request = prepared,
-                            .cache = automatic.cache,
-                            .lease = lease,
-                            .server_id = automatic.server_id,
-                            .now_ms = automatic.now_ms,
-                        };
-                    }
-                }
-            }
-
             const pending = try self.allocator.create(PendingRequestAcquire);
             pending.* = .{
                 .pool = self,
                 .uri_endpoint = endpoint,
                 .route = route,
-                .addresses = addresses,
                 .deadline = absolute,
                 .completion_event = completion_event,
-                .early = early,
+                .early_request = early_request,
                 .reservation_active = reservation_active,
             };
             endpoint_owned = false;
-            addresses_owned = false;
-            early = null;
             reservation_active = false;
             self.pending_acquisitions += 1;
-            pending.startNextAttempt() catch |err| {
+            pending.resolution = PendingResolution.init(pending) catch |err| {
                 pending.deinit();
                 return err;
             };

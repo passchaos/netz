@@ -48,6 +48,9 @@ pub const Options = struct {
     /// Use one UDP endpoint for ordinary and 0-RTT requests. The endpoint's
     /// sole dispatcher owner handles handshake promotion and request replay.
     shared_endpoint: bool = true,
+    /// Optional resolver for shared-endpoint acquisitions. Resolution runs as
+    /// a cancelable pending phase and inherits the request/connect deadline.
+    address_resolver: ?runtime.SharedHandshakeClientPoolAddressResolver = null,
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
@@ -142,6 +145,7 @@ pub const State = struct {
                 .local_address = options.local_address,
                 .limits = options.limits,
                 .client = options.handshake,
+                .resolver = options.address_resolver,
                 .idle = options.idle,
                 .max_connections = options.max_connections,
                 .shared_connection_budget = shared_connection_budget,

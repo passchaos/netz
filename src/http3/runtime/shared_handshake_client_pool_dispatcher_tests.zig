@@ -553,10 +553,53 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
     var server_joined = false;
     defer if (!server_joined) server_thread.join();
 
+    const EarlyResolver = struct {
+        cache: *quic.resumption.Cache,
+        address: std.Io.net.IpAddress,
+        observed_unleased_ticket: std.atomic.Value(bool) = .init(false),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            _: ?std.Io.Clock.Timestamp,
+        ) runtime.Error![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "early.resolve.test") or
+                self.address.ip4.port != port)
+            {
+                return error.Unexpected;
+            }
+            const stats = self.cache.stats();
+            if (stats.active_early_data_leases != 0 or
+                stats.reusable_early_data_tickets != 1)
+            {
+                return error.Unexpected;
+            }
+            self.observed_unleased_ticket.store(true, .release);
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            return addresses;
+        }
+    };
+    var resolver = EarlyResolver{
+        .cache = &cache,
+        .address = server.address(),
+    };
+
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
         .local_address = .{ .ip4 = .unspecified(0) },
         .limits = limits,
         .max_connections = 1,
+        .resolver = .{
+            .context = &resolver,
+            .resolve = EarlyResolver.resolve,
+        },
         .client = .{
             .handshake = .{
                 .original_destination_connection_id = &.{},
@@ -600,7 +643,7 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
 
     const target: http3.AltSvcTarget = .{
         .alpn = "h3",
-        .connect_host = "127.0.0.1",
+        .connect_host = "early.resolve.test",
         .origin_host = "localhost",
         .port = server.address().ip4.port,
     };
@@ -625,6 +668,9 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
         .{ .context = &reclaimer_context, .reclaim = NoReclaim.reclaim },
     );
     defer result.response.deinit();
+    try std.testing.expect(
+        resolver.observed_unleased_ticket.load(.acquire),
+    );
     try std.testing.expect(result.early_data != null);
     try std.testing.expectEqual(
         if (scenario.reject_early_data)

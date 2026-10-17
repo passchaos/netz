@@ -19067,6 +19067,8 @@ pub const SharedHandshakeClientPool =
     @import("runtime/shared_handshake_client_pool.zig").Pool(@This());
 pub const SharedHandshakeClientPoolOptions =
     @import("runtime/shared_handshake_client_pool.zig").Options(@This());
+pub const SharedHandshakeClientPoolAddressResolver =
+    @import("runtime/shared_handshake_client_pool.zig").AddressResolver(@This());
 pub const SharedHandshakeClientPoolError =
     @import("runtime/shared_handshake_client_pool.zig").Error;
 pub const SharedHandshakeClientPoolRequestDispatcher =

@@ -131,11 +131,72 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
         server_thread.join();
     };
 
+    const ResolveGate = struct {
+        started: std.Io.Event = .unset,
+        release: std.Io.Event = .unset,
+        cancel_started: std.Io.Event = .unset,
+        cancel_release: std.Io.Event = .unset,
+        silent_address: std.Io.net.IpAddress,
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            resolve_io: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.Error![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (std.mem.eql(u8, host, "cancel.resolve.test")) {
+                self.cancel_started.set(resolve_io);
+                try self.cancel_release.wait(resolve_io);
+                return error.Unexpected;
+            }
+            if (!std.mem.eql(u8, host, "slow.resolve.test")) {
+                return runtime.resolveHostPortAddressesBefore(
+                    resolve_allocator,
+                    resolve_io,
+                    host,
+                    port,
+                    deadline,
+                );
+            }
+            if (self.silent_address.ip4.port != port) {
+                return error.Unexpected;
+            }
+            self.started.set(resolve_io);
+            if (deadline) |absolute| {
+                self.release.waitTimeout(
+                    resolve_io,
+                    .{ .deadline = absolute },
+                ) catch |err| switch (err) {
+                    error.Timeout => return error.HandshakeTimeout,
+                    error.Canceled => return error.Canceled,
+                };
+            } else {
+                try self.release.wait(resolve_io);
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.silent_address;
+            return addresses;
+        }
+    };
+    var resolve_gate = ResolveGate{
+        .silent_address = silent.address(),
+    };
+
     var pool = try runtime.SharedHandshakeClientPool.init(allocator, io, .{
         .local_address = .{ .ip4 = .unspecified(0) },
         .limits = limits,
         .max_connections = 2,
         .handshake_poll_interval = .fromMilliseconds(500),
+        .resolver = .{
+            .context = &resolve_gate,
+            .resolve = ResolveGate.resolve,
+        },
         .client = .{
             .handshake = .{
                 .original_destination_connection_id = &.{},
@@ -257,6 +318,31 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
             return error.TestUnexpectedResult;
         }
 
+        fn resolutionTimed(
+            io_value: std.Io,
+            request_sender: runtime.SharedHandshakeClientPoolRequestSender,
+            target: http3.AltSvcTarget,
+        ) !void {
+            const started = std.Io.Clock.awake.now(io_value);
+            var response = request_sender.requestAltSvcWithTimeout(
+                "https://cancelled.example:9443/cancel-resolve",
+                target,
+                .{},
+                .fromMilliseconds(100),
+            ) catch |err| {
+                try std.testing.expectEqual(error.Timeout, err);
+                const elapsed = started.durationTo(
+                    std.Io.Clock.awake.now(io_value),
+                );
+                try std.testing.expect(
+                    elapsed.nanoseconds < 300 * std.time.ns_per_ms,
+                );
+                return;
+            };
+            response.deinit();
+            return error.TestUnexpectedResult;
+        }
+
         fn observeSilent(endpoint: *quic.runtime.Endpoint) !void {
             var datagram = try endpoint.receiveBytesWithTimeout(
                 .fromSeconds(2),
@@ -285,7 +371,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
     defer if (silent_active) silent_observer.cancel(io) catch {};
     const stalled_target: http3.AltSvcTarget = .{
         .alpn = "h3",
-        .connect_host = "127.0.0.1",
+        .connect_host = "slow.resolve.test",
         .origin_host = "stalled.example",
         .port = silent.address().ip4.port,
     };
@@ -300,8 +386,10 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
     );
     var stalled_active = true;
     defer if (stalled_active) stalled.cancel(io) catch {};
-    try silent_observer.await(io);
-    silent_active = false;
+    try resolve_gate.started.waitTimeout(io, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromSeconds(2),
+    } });
     var sibling = try std.Io.concurrent(
         io,
         Producer.expectResponse,
@@ -324,15 +412,43 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
     sibling_active = false;
     try timed.await(io);
     timed_active = false;
+    resolve_gate.release.set(io);
+    try silent_observer.await(io);
+    silent_active = false;
     try stalled.await(io);
     stalled_active = false;
+    const cancel_target: http3.AltSvcTarget = .{
+        .alpn = "h3",
+        .connect_host = "cancel.resolve.test",
+        .origin_host = "cancelled.example",
+        .port = silent.address().ip4.port,
+    };
+    var resolution_timed = try std.Io.concurrent(
+        io,
+        Producer.resolutionTimed,
+        .{ io, sender.clone(), cancel_target },
+    );
+    var resolution_timed_active = true;
+    defer if (resolution_timed_active) {
+        resolve_gate.cancel_release.set(io);
+        resolution_timed.cancel(io) catch {};
+    };
+    try resolve_gate.cancel_started.waitTimeout(io, .{ .duration = .{
+        .clock = .awake,
+        .raw = .fromSeconds(2),
+    } });
+    try resolution_timed.await(io);
+    resolution_timed_active = false;
     const stats = dispatcher.stats();
     try std.testing.expectEqual(@as(usize, 0), stats.queued);
     try std.testing.expectEqual(@as(usize, 0), stats.active_connections);
     try std.testing.expectEqual(@as(usize, 0), stats.active_requests);
-    // Producer-abandoned timeout commands are intentionally excluded from the
-    // successful/observable completion counter.
-    try std.testing.expectEqual(@as(u64, 3), stats.completed_requests);
+    // A deadline completion racing the producer's abandoned flag may be
+    // counted or omitted; both paths publish the same Timeout and reclaim the
+    // pending resolver before waking the producer.
+    try std.testing.expect(
+        stats.completed_requests == 3 or stats.completed_requests == 4,
+    );
     try std.testing.expectEqual(@as(usize, 1), pool.connectionCount());
     try std.testing.expectEqual(@as(usize, 1), pool.routeCount());
     try std.testing.expectEqual(@as(usize, 0), pool.leasedCount());

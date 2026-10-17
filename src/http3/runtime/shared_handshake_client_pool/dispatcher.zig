@@ -976,7 +976,12 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
                     releasePendingConnection(state, connection_index);
                     continue;
                 };
-                const lease = maybe_lease orelse continue;
+                const lease = maybe_lease orelse {
+                    if (!pending.usesEarlyRequest()) {
+                        clearPreparedEarly(command);
+                    }
+                    continue;
+                };
                 pending.deinit();
                 command.pending_acquire = null;
                 clearPreparedEarly(command);
