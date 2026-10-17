@@ -41,17 +41,36 @@ pub const Options = struct {
     /// Enable safe-method 0-RTT on new H3 connections when both a ticket and
     /// remembered peer SETTINGS exist. Idle connection reuse remains 1-RTT.
     early_data: ?EarlyDataOptions = null,
+    /// Bounded multi-producer queue driven by one H3 pool/connection owner.
+    shared_requests: runtime.HandshakeClientPoolSharedOptions = .{},
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
 
 pub const State = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     options: Options,
     connector: runtime.HandshakeClientPoolDefaultConnector,
     pool: runtime.HandshakeClientPool,
+    dispatcher: runtime.HandshakeClientPoolSharedDispatcher,
+    driver: DriverState,
     cache: alt_svc_cache.Cache,
+    settings_mutex: std.Io.Mutex = .init,
     settings: remembered_settings.Cache,
+    closed: bool = false,
+
+    const DriverState = struct {
+        future: std.Io.Future(void) = undefined,
+    };
+
+    const Driver = struct {
+        fn run(self: *State) void {
+            self.dispatcher.run() catch {
+                self.dispatcher.close();
+            };
+        }
+    };
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -62,7 +81,10 @@ pub const State = struct {
         const self = try allocator.create(State);
         errdefer allocator.destroy(self);
         self.allocator = allocator;
+        self.io = io;
         self.options = options;
+        self.settings_mutex = .init;
+        self.closed = false;
         self.connector = .{ .options = options.handshake };
         self.cache = try .init(allocator, io, options.alt_svc);
         errdefer self.cache.deinit();
@@ -83,11 +105,23 @@ pub const State = struct {
                 .observe = observePeerSettings,
             },
         });
+        errdefer self.pool.deinit();
+        self.dispatcher = try .init(
+            allocator,
+            io,
+            &self.pool,
+            options.shared_requests,
+        );
+        errdefer self.dispatcher.deinit();
+        self.driver = .{};
+        self.driver.future = io.async(Driver.run, .{self});
         return self;
     }
 
     pub fn deinit(self: *State) void {
         const allocator = self.allocator;
+        self.close();
+        self.dispatcher.deinit();
         self.pool.deinit();
         self.cache.deinit();
         self.settings.deinit();
@@ -96,9 +130,14 @@ pub const State = struct {
     }
 
     pub fn close(self: *State) void {
+        self.dispatcher.close();
         self.pool.close();
+        self.driver.future.await(self.io);
         self.cache.clear();
+        self.settings_mutex.lockUncancelable(self.io);
+        self.closed = true;
         self.settings.clear();
+        self.settings_mutex.unlock(self.io);
     }
 
     pub fn evictOldestIdle(self: *State) bool {
@@ -109,12 +148,17 @@ pub const State = struct {
         self: *State,
         origin: http3.Origin,
     ) ?http3.Settings {
+        self.settings_mutex.lockUncancelable(self.io);
+        defer self.settings_mutex.unlock(self.io);
+        if (self.closed) return null;
         return self.settings.lookup(origin);
     }
 
     pub fn rememberedSettingsStats(
-        self: *const State,
+        self: *State,
     ) remembered_settings.Stats {
+        self.settings_mutex.lockUncancelable(self.io);
+        defer self.settings_mutex.unlock(self.io);
         return self.settings.stats();
     }
 
@@ -124,6 +168,9 @@ pub const State = struct {
         settings: http3.Settings,
     ) void {
         const self: *State = @ptrCast(@alignCast(context));
+        self.settings_mutex.lockUncancelable(self.io);
+        defer self.settings_mutex.unlock(self.io);
+        if (self.closed) return;
         self.settings.remember(origin, settings) catch {};
     }
 
@@ -171,6 +218,26 @@ pub const State = struct {
                 } else null,
             };
         }
+        if (!crossed_origin) {
+            const sender = self.dispatcher.sender();
+            var may_retry = http_method.isIdempotent(options.method);
+            while (true) {
+                const response = sender.requestAltSvcReclaiming(
+                    uri_text,
+                    alternative.target(),
+                    options,
+                    deadline,
+                    reclaimer,
+                ) catch |err| {
+                    if (may_retry and retryableSharedRequestError(err)) {
+                        may_retry = false;
+                        continue;
+                    }
+                    return err;
+                };
+                return .{ .response = response };
+            }
+        }
         return .{ .response = try self.pool.requestUriAltSvcReclaiming(
             uri_text,
             alternative.target(),
@@ -181,3 +248,17 @@ pub const State = struct {
         ) };
     }
 };
+
+fn retryableSharedRequestError(err: anyerror) bool {
+    return switch (err) {
+        error.ConnectionAborted,
+        error.ConnectionClosed,
+        error.ConnectionResetByPeer,
+        error.EndOfStream,
+        error.SocketUnconnected,
+        error.GoAwayReceived,
+        error.RequestRejected,
+        => true,
+        else => false,
+    };
+}

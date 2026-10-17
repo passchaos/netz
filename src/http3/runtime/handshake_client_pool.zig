@@ -597,6 +597,69 @@ pub fn Pool(comptime Runtime: type) type {
             );
         }
 
+        /// Unified-pool acquisition that may reclaim one idle connection from
+        /// another transport before waiting on the shared global budget.
+        pub fn acquireUriAltSvcReclaiming(
+            self: *Self,
+            uri_text: []const u8,
+            target: http3.AltSvcTarget,
+            deadline: ?std.Io.Clock.Timestamp,
+            reclaimer: connection_budget.Reclaimer,
+        ) (Runtime.Error || Error || std.Io.Timeout.Error ||
+            std.Io.Cancelable)!Lease {
+            const absolute = if (deadline) |value|
+                try deadline_policy.usableAwake(self.io, value)
+            else
+                null;
+            if (absolute == null) {
+                return self.acquireUriForWaiter(
+                    uri_text,
+                    null,
+                    null,
+                    .{ .alt_svc = target },
+                    reclaimer,
+                    null,
+                );
+            }
+            var waiter: fifo_admission.Queue.Waiter = .{};
+            var shared_waiter: connection_budget.Waiter = .{};
+            defer self.cancelCapacityWaiter(&waiter);
+            defer self.cancelSharedWaiter(&shared_waiter);
+            while (true) {
+                var blocked_on_shared = false;
+                return self.acquireUriForWaiterBefore(
+                    uri_text,
+                    &waiter,
+                    &shared_waiter,
+                    &blocked_on_shared,
+                    absolute,
+                    null,
+                    .{ .alt_svc = target },
+                    reclaimer,
+                    null,
+                ) catch |err| switch (err) {
+                    error.ConnectionLimitReached => {
+                        const blocked_waiter = if (blocked_on_shared)
+                            &shared_waiter
+                        else
+                            &waiter;
+                        blocked_waiter.waitUntil(
+                            self.io,
+                            absolute.?,
+                        ) catch |wait_err| switch (wait_err) {
+                            error.Timeout => return error.Timeout,
+                            error.Canceled => return error.Canceled,
+                        };
+                        if (absolute.?.durationFromNow(
+                            self.io,
+                        ).raw.nanoseconds <= 0) return error.Timeout;
+                        continue;
+                    },
+                    else => |other| return other,
+                };
+            }
+        }
+
         fn acquireUriForWaiter(
             self: *Self,
             uri_text: []const u8,

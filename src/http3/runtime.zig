@@ -13558,9 +13558,33 @@ pub const HandshakeClient = struct {
         else
             try self.receiveNextResponse();
 
+        return self.receiveNextResponseBeforeOrWake(
+            deadline,
+            cancel.event,
+        );
+    }
+
+    /// Wait for the next aggregate response or for a driver-control event.
+    ///
+    /// A response which races the wake is consumed first, so admitting a new
+    /// request or canceling a sibling cannot drop an already-received packet.
+    /// `null` means only `wake` completed. The caller remains the sole owner
+    /// of every send, receive, timeout, and cancellation on this connection.
+    pub fn receiveNextResponseBeforeOrWake(
+        self: *HandshakeClient,
+        deadline: ?std.Io.Clock.Timestamp,
+        wake: *std.Io.Event,
+    ) ReceiveTimeoutError!?OwnedHandshakeResponseEvent {
+        if (deadline) |absolute| {
+            _ = try deadline_policy.usableAwake(
+                self.connectionIo(),
+                absolute,
+            );
+        }
+
         const Wake = union(enum) {
             response: ReceiveTimeoutError!OwnedHandshakeResponseEvent,
-            canceled: std.Io.Cancelable!void,
+            control: std.Io.Cancelable!void,
         };
         const Task = struct {
             fn receive(
@@ -13587,7 +13611,7 @@ pub const HandshakeClient = struct {
                 var dropped = response;
                 dropped.deinit(self.allocator);
             } else |_| {},
-            .canceled => {},
+            .control => {},
         };
         try select.concurrent(
             .response,
@@ -13595,9 +13619,9 @@ pub const HandshakeClient = struct {
             .{ self, deadline },
         );
         try select.concurrent(
-            .canceled,
+            .control,
             Task.wait,
-            .{ cancel.event, self.connectionIo() },
+            .{ wake, self.connectionIo() },
         );
 
         var response: ?OwnedHandshakeResponseEvent = null;
@@ -13610,7 +13634,7 @@ pub const HandshakeClient = struct {
             } else |err| {
                 response_err = err;
             },
-            .canceled => |result| {
+            .control => |result| {
                 try result;
                 woke = true;
             },
@@ -13626,7 +13650,7 @@ pub const HandshakeClient = struct {
             } else |err| {
                 if (err != error.Canceled) response_err = err;
             },
-            .canceled => |result| result catch |err| {
+            .control => |result| result catch |err| {
                 if (err != error.Canceled) return err;
             },
         };
@@ -13693,6 +13717,30 @@ pub const HandshakeClient = struct {
             error.Timeout, error.ConcurrencyUnavailable => unreachable,
             else => |other| return @errorCast(other),
         };
+    }
+
+    pub fn sendRequestWithTimeout(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        timeout: std.Io.Duration,
+    ) ReceiveTimeoutError!u62 {
+        if (timeout.nanoseconds <= 0) return error.Timeout;
+        return self.sendRequestWithDeadline(request_options, .fromNow(
+            self.connectionIo(),
+            .{ .raw = timeout, .clock = .awake },
+        ));
+    }
+
+    /// Send one complete request under an absolute deadline without waiting
+    /// for its response. A sole connection driver can use this to admit new
+    /// streams while older requests are still awaiting responses.
+    pub fn sendRequestWithDeadline(
+        self: *HandshakeClient,
+        request_options: http3.Request,
+        deadline: std.Io.Clock.Timestamp,
+    ) ReceiveTimeoutError!u62 {
+        _ = try deadline_policy.usableAwake(self.connectionIo(), deadline);
+        return self.sendRequestUntil(request_options, deadline);
     }
 
     fn sendRequestUntil(
@@ -18884,6 +18932,8 @@ pub const HandshakeClientPoolSharedStats =
     @import("runtime/handshake_client_pool/shared.zig").Stats;
 pub const HandshakeClientPoolSharedError =
     @import("runtime/handshake_client_pool/shared.zig").Error;
+pub const HandshakeClientPoolSharedRequestError =
+    HandshakeClientPoolSharedDispatcher.RequestError;
 pub const SharedHandshakeClientPool =
     @import("runtime/shared_handshake_client_pool.zig").Pool(@This());
 pub const SharedHandshakeClientPoolOptions =

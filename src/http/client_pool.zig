@@ -21,7 +21,8 @@ const alt_svc_cache = @import("alt_svc_cache.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 
 pub const Error = client.Error || http3_runtime.Error ||
-    http3_runtime.HandshakeClientPoolError || alt_svc_cache.Error || error{
+    http3_runtime.HandshakeClientPoolError ||
+    http3_runtime.HandshakeClientPoolSharedError || alt_svc_cache.Error || error{
     PoolClosed,
     ConnectionLimitReached,
     InvalidPoolOptions,

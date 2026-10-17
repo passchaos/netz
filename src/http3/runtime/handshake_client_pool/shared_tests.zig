@@ -185,24 +185,11 @@ test "HTTP/3 cloneable senders coalesce requests through one pool driver" {
     );
     var producers: [4]@TypeOf(first_producer) = undefined;
     producers[0] = first_producer;
-    for (producers[1..], 1..) |*future, index| {
-        const expected = switch (index) {
-            1 => "/1",
-            2 => "/2",
-            3 => "/3",
-            else => unreachable,
-        };
-        future.* = try std.Io.concurrent(
-            io,
-            Producer.run,
-            .{ sender.clone(), uris[index], expected },
-        );
-    }
     const queued_deadline = std.Io.Clock.Timestamp.fromNow(io, .{
         .raw = .fromSeconds(2),
         .clock = .awake,
     });
-    while (dispatcher.queuedCount() != producers.len) {
+    while (dispatcher.queuedCount() != 1) {
         if (queued_deadline.durationFromNow(io).raw.nanoseconds <= 0) {
             return error.Timeout;
         }
@@ -219,6 +206,29 @@ test "HTTP/3 cloneable senders coalesce requests through one pool driver" {
         driver.cancel(io) catch {};
         driver.await(io) catch {};
     };
+    while (dispatcher.queuedCount() != 0) {
+        if (queued_deadline.durationFromNow(io).raw.nanoseconds <= 0) {
+            return error.Timeout;
+        }
+        std.Thread.yield() catch {};
+    }
+    // The first request is already owned by the running driver. These later
+    // producers must interrupt its response wait and become independent
+    // streams on that same connection; pre-start batch collection is not
+    // sufficient to pass this gate.
+    for (producers[1..], 1..) |*future, index| {
+        const expected = switch (index) {
+            1 => "/1",
+            2 => "/2",
+            3 => "/3",
+            else => unreachable,
+        };
+        future.* = try std.Io.concurrent(
+            io,
+            Producer.run,
+            .{ sender.clone(), uris[index], expected },
+        );
+    }
     for (&producers) |*future| try future.await(io);
 
     var alt_response = try sender.requestAltSvcWithTimeout(
