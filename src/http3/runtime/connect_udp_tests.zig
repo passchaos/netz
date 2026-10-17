@@ -49,28 +49,54 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
             var session = try self.server.acceptWithTimeout(.fromSeconds(5));
             defer session.deinit();
             try session.ensureSettingsSent();
-            var event = try session.receiveRequestEventWithTimeout(
-                .fromSeconds(5),
-            );
-            defer event.deinit(self.server.allocator);
-            try std.testing.expect(event == .message);
-            try std.testing.expect(event.message.value == .head);
-            var host_storage: [128]u8 = undefined;
-            const target = try session.acceptConnectUdp(
-                event.message.stream_id,
-                event.message.value.head.request,
-                &host_storage,
-            );
-            try std.testing.expectEqualStrings("dns.example", target.host);
-            try std.testing.expectEqual(@as(u16, 53), target.port);
-            self.accepted.set(self.server.quic_server.endpoint.io);
+            for (0..2) |index| {
+                var event = try session.receiveRequestEventWithTimeout(
+                    .fromSeconds(5),
+                );
+                defer event.deinit(self.server.allocator);
+                try std.testing.expect(event == .message);
+                try std.testing.expect(event.message.value == .head);
+                const request = event.message.value.head.request;
+                if (index == 0) {
+                    var host_storage: [128]u8 = undefined;
+                    const target = try session.acceptConnectUdp(
+                        event.message.stream_id,
+                        request,
+                        &host_storage,
+                    );
+                    try std.testing.expectEqualStrings(
+                        "dns.example",
+                        target.host,
+                    );
+                    try std.testing.expectEqual(@as(u16, 53), target.port);
+                } else {
+                    try std.testing.expectEqualStrings(
+                        "/masque?target_host=dns.example&target_port=5353&token=a%2Fb",
+                        request.path,
+                    );
+                    try session.acceptConnectUdpForTarget(
+                        event.message.stream_id,
+                        request,
+                        .{ .host = "dns.example", .port = 5353 },
+                    );
+                }
+                self.accepted.set(self.server.quic_server.endpoint.io);
 
-            var udp = try session.connectUdpSession(event.message.stream_id);
-            defer udp.deinit();
-            var incoming = try udp.receiveWithTimeout(.fromSeconds(2));
-            defer incoming.deinit(self.server.allocator);
-            try std.testing.expectEqualStrings("client-udp", incoming.payload);
-            try udp.sendWithTimeout("server-udp", .fromSeconds(2));
+                var udp = try session.connectUdpSession(
+                    event.message.stream_id,
+                );
+                defer udp.deinit();
+                var incoming = try udp.receiveWithTimeout(.fromSeconds(2));
+                defer incoming.deinit(self.server.allocator);
+                try std.testing.expectEqualStrings(
+                    if (index == 0) "client-udp" else "client-custom",
+                    incoming.payload,
+                );
+                try udp.sendWithTimeout(
+                    if (index == 0) "server-udp" else "server-custom",
+                    .fromSeconds(2),
+                );
+            }
         }
     };
     var accepted: std.Io.Event = .unset;
@@ -103,6 +129,30 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
     });
     try client.ensureSettingsSentOnce();
     _ = try client.receivePeerSettingsWithDeadline(deadline);
+    const ClientFlow = struct {
+        fn accept(
+            client_value: *runtime.HandshakeClient,
+            stream_id_value: u62,
+            flow_deadline: std.Io.Clock.Timestamp,
+        ) !runtime.ConnectUdpClientSession {
+            var response_head: ?http3.DecodedResponseHead = null;
+            while (response_head == null) {
+                response_head = try client_value.pollDetachedResponseHead(
+                    stream_id_value,
+                );
+                if (response_head == null) {
+                    try client_value.established.connection
+                        .servicePacketServicingTimersDeadline(flow_deadline);
+                }
+            }
+            var head_value = response_head.?;
+            defer head_value.deinit(client_value.allocator);
+            return client_value.acceptConnectUdpResponse(
+                stream_id_value,
+                head_value,
+            );
+        }
+    };
     var path_storage: [160]u8 = undefined;
     const next_stream_id = client.next_stream_id;
     try std.testing.expectError(
@@ -128,22 +178,12 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
         if (worker.err) |server_err| return server_err;
         return err;
     };
-    var response_head: ?http3.DecodedResponseHead = null;
-    while (response_head == null) {
-        response_head = try client.pollDetachedResponseHead(stream_id);
-        if (response_head == null) {
-            client.established.connection
-                .servicePacketServicingTimersDeadline(deadline) catch |err| {
-                thread.join();
-                joined = true;
-                if (worker.err) |server_err| return server_err;
-                return err;
-            };
-        }
-    }
-    var head = response_head.?;
-    defer head.deinit(allocator);
-    var udp = try client.acceptConnectUdpResponse(stream_id, head);
+    var udp = ClientFlow.accept(&client, stream_id, deadline) catch |err| {
+        thread.join();
+        joined = true;
+        if (worker.err) |server_err| return server_err;
+        return err;
+    };
     defer udp.deinit();
     try std.testing.expectEqual(
         client.maxConnectDatagramPayloadSize(stream_id).? - 1,
@@ -169,6 +209,34 @@ test "HTTP/3 typed CONNECT-UDP exchanges Context ID zero payloads" {
     var incoming = try udp.receiveWithDeadline(deadline);
     defer incoming.deinit(allocator);
     try std.testing.expectEqualStrings("server-udp", incoming.payload);
+
+    accepted.reset();
+    const template = try http3.connect_udp.UriTemplate.compile(
+        "https://localhost/masque{?target_host,target_port,token}",
+    );
+    const custom_stream_id = try client.startConnectUdpWithTemplate(
+        template,
+        .{ .host = "dns.example", .port = 5353 },
+        &.{.{ .name = "token", .value = "a/b" }},
+        &path_storage,
+    );
+    try accepted.waitTimeout(io, .{ .duration = .{
+        .raw = .fromSeconds(2),
+        .clock = .awake,
+    } });
+    var custom = try ClientFlow.accept(
+        &client,
+        custom_stream_id,
+        deadline,
+    );
+    defer custom.deinit();
+    try custom.sendWithDeadline("client-custom", deadline);
+    var custom_incoming = try custom.receiveWithDeadline(deadline);
+    defer custom_incoming.deinit(allocator);
+    try std.testing.expectEqualStrings(
+        "server-custom",
+        custom_incoming.payload,
+    );
 
     thread.join();
     joined = true;

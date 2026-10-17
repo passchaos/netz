@@ -10,6 +10,7 @@ const wire = @import("../internal/wire.zig");
 const quic = @import("../quic/mod.zig");
 const capsule = @import("capsule.zig");
 const session_module = @import("connect_udp/session.zig");
+const template_module = @import("connect_udp/template.zig");
 
 const net = std.Io.net;
 
@@ -20,11 +21,14 @@ pub fn Protocol(comptime Http3: type) type {
         pub const udp_context_id: u62 = 0;
         pub const max_udp_payload_size: usize = 65_527;
 
-        pub const Error = Http3.Error || wire.Error || error{
+        pub const Error = Http3.Error || wire.Error || template_module.Error || error{
             InvalidTarget,
             PayloadTooLarge,
             UnexpectedContextId,
         };
+
+        pub const UriTemplate = template_module.Template;
+        pub const Variable = template_module.Variable;
 
         pub const Target = struct {
             host: []const u8,
@@ -183,6 +187,33 @@ pub fn Protocol(comptime Http3: type) type {
             return request;
         }
 
+        pub fn requestWithTemplateInto(
+            path_out: []u8,
+            template: UriTemplate,
+            target: Target,
+            variables: []const Variable,
+        ) Error!Http3.Request {
+            try target.validate();
+            if (!std.mem.eql(u8, template.scheme, "https")) {
+                return error.InvalidUriTemplate;
+            }
+            const path = try template.expandRequestTargetInto(
+                path_out,
+                target.host,
+                target.port,
+                variables,
+            );
+            const request = Http3.Request{
+                .method = "CONNECT",
+                .path = path,
+                .scheme = template.scheme,
+                .authority = template.authority,
+                .headers = &request_headers,
+            };
+            try request.validateForContext(.direct);
+            return request;
+        }
+
         pub fn validateDefaultRequest(
             request: Http3.Request,
             host_out: []u8,
@@ -191,14 +222,14 @@ pub fn Protocol(comptime Http3: type) type {
             if (request.body.len != 0 or request.trailers.len != 0) {
                 return error.InvalidHeader;
             }
-            return validateRequestMetadata(
+            try validateRequestMetadata(
                 request.method,
                 request.path,
                 request.scheme,
                 request.authority,
                 request.headers,
-                host_out,
             );
+            return parseDefaultPath(request.path, host_out);
         }
 
         pub fn validateDecodedDefaultRequest(
@@ -206,13 +237,20 @@ pub fn Protocol(comptime Http3: type) type {
             host_out: []u8,
         ) Error!Target {
             if (request.content_length != null) return error.InvalidHeader;
+            try validateDecodedRequest(request);
+            return parseDefaultPath(request.path, host_out);
+        }
+
+        pub fn validateDecodedRequest(
+            request: Http3.DecodedRequestHead,
+        ) Error!void {
+            if (request.content_length != null) return error.InvalidHeader;
             return validateRequestMetadata(
                 request.method,
                 request.path,
                 request.scheme,
                 request.authority,
                 request.headers,
-                host_out,
             );
         }
 
@@ -222,10 +260,10 @@ pub fn Protocol(comptime Http3: type) type {
             scheme: []const u8,
             authority: ?[]const u8,
             headers: []const Http3.Qpack.HeaderField,
-            host_out: []u8,
-        ) Error!Target {
+        ) Error!void {
             if (!std.mem.eql(u8, method, "CONNECT") or
                 !std.mem.eql(u8, scheme, "https") or
+                path.len == 0 or path[0] != '/' or
                 authority == null or authority.?.len == 0)
             {
                 return error.InvalidHeader;
@@ -248,7 +286,6 @@ pub fn Protocol(comptime Http3: type) type {
             {
                 return error.InvalidHeader;
             }
-            return parseDefaultPath(path, host_out);
         }
 
         pub fn successResponse() Http3.Response {

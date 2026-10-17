@@ -25,6 +25,10 @@ pub const Error = http3.Error || quic.runtime.Error ||
     UnsafeEarlyDataMethod,
     InvalidAddressConnectPolicy,
     InvalidTarget,
+    InvalidUriTemplate,
+    MissingTemplateVariable,
+    DuplicateTemplateVariable,
+    InvalidTemplateExpansion,
     PayloadTooLarge,
     UnexpectedContextId,
 };

@@ -1587,15 +1587,21 @@ RFC 9298 CONNECT-UDP now has a typed HTTP/3 surface above the existing generic
 Extended CONNECT and RFC 9297 DATAGRAM APIs. `http3.connect_udp` validates and
 expands the standards-defined default MASQUE URI Template, including DNS/IPv4
 targets, percent-encoded IPv6 colons and ports 1-65535; custom deployment URI
-Templates remain explicit application policy. Request and response helpers
-require `:protocol = connect-udp`, `Capsule-Protocol: ?1`, empty message
-content and a successful 2xx response. Context Datagram framing exposes generic
+Templates compile through the RFC 9298-permitted Level-3 subset: simple,
+form-query and query-continuation expansion with additional scalar variables.
+Reserved, fragment, label, path-segment, path-parameter, prefix and explode
+forms fail at configuration time. Client expansion is caller-buffered and
+zero-write on insufficient capacity; server applications retain reverse route
+matching and pass the selected target to the typed accept API. Request and
+response helpers require `:protocol = connect-udp`, `Capsule-Protocol: ?1`,
+empty message content and a successful 2xx response. Context Datagram framing exposes generic
 62-bit extension IDs while the typed Session sends and receives Context ID 0,
 enforces the 65,527-byte UDP limit, drops unknown contexts, and aborts the
 request stream with H3_MESSAGE_ERROR on malformed or oversized input. A real
 QUIC/TLS regression sends SETTINGS before CONNECT, preserves one caller
-deadline, skips an unknown extension context, and exchanges UDP payloads in
-both directions.
+deadline, skips an unknown extension context, expands both the default path
+and a query template with an extra variable, and exchanges UDP payloads in
+both directions on two Sessions.
 The authenticated H3 client now also provides the execution primitive needed
 by a cloneable request sender: one connection accepts an owned-response batch
 whose members retain independent awake-clock deadlines and optional active

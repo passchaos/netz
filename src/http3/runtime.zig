@@ -7640,6 +7640,24 @@ pub const HandshakeServerSession = struct {
         return target;
     }
 
+    /// Accept a CONNECT-UDP request routed through an application-configured
+    /// RFC 9298 URI Template. The application owns reverse template matching
+    /// and supplies the already validated target selected by that route.
+    pub fn acceptConnectUdpForTarget(
+        self: *HandshakeServerSession,
+        stream_id: u62,
+        request: http3.DecodedRequestHead,
+        target: http3.connect_udp.Target,
+    ) Error!void {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        try http3.connect_udp.validateDecodedRequest(request);
+        try target.validate();
+        try self.acceptConnectResponse(
+            stream_id,
+            http3.connect_udp.successResponse(),
+        );
+    }
+
     pub fn connectUdpSession(
         self: *HandshakeServerSession,
         stream_id: u62,
@@ -16524,6 +16542,28 @@ pub const HandshakeClient = struct {
                 path_storage,
                 target,
                 authority,
+            ),
+            null,
+        );
+        errdefer self.cancelPendingConnectDatagramAssociation(stream_id);
+        try self.registerPendingConnectDatagramAssociation(stream_id);
+        return stream_id;
+    }
+
+    pub fn startConnectUdpWithTemplate(
+        self: *HandshakeClient,
+        template: http3.connect_udp.UriTemplate,
+        target: http3.connect_udp.Target,
+        variables: []const http3.connect_udp.Variable,
+        path_storage: []u8,
+    ) Error!u62 {
+        if (!self.connectDatagramsNegotiated()) return error.InvalidSetting;
+        const stream_id = try self.startRequest(
+            try http3.connect_udp.requestWithTemplateInto(
+                path_storage,
+                template,
+                target,
+                variables,
             ),
             null,
         );

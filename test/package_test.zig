@@ -3179,6 +3179,10 @@ test "public modules are reachable" {
         "ContextDatagram",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.connect_udp,
+        "UriTemplate",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime,
         "ConnectUdpClientSession",
     ));
@@ -3191,8 +3195,16 @@ test "public modules are reachable" {
         "startConnectUdp",
     ));
     try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeClient,
+        "startConnectUdpWithTemplate",
+    ));
+    try std.testing.expect(@hasDecl(
         netz.http3.runtime.HandshakeServerSession,
         "acceptConnectUdp",
+    ));
+    try std.testing.expect(@hasDecl(
+        netz.http3.runtime.HandshakeServerSession,
+        "acceptConnectUdpForTarget",
     ));
     try std.testing.expect(@hasDecl(netz.http3, "Datagram"));
     try std.testing.expect(@hasDecl(

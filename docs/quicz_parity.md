@@ -845,9 +845,12 @@ Capsule-Protocol validation, generic Context ID framing, Context ID 0 UDP
 payloads, and the 65,527-byte UDP ceiling. Its reusable typed session preserves
 absolute deadlines across skipped unknown contexts and aborts malformed input
 with H3_MESSAGE_ERROR. A real authenticated HTTP/3 exchange proves negotiated
-SETTINGS ordering and bidirectional payload routing. Arbitrary configured
-Level-3 URI Templates remain future work rather than being treated as the
-default template.
+SETTINGS ordering and bidirectional payload routing. Configured Level-3 URI
+Templates support the RFC 9298-legal simple, form-query and continuation
+operators plus extra scalar variables; forbidden Level-2/3 operators and all
+Level-4 modifiers fail during compilation. A second Session in the same real
+exchange uses a query template and application-selected server target, rather
+than treating custom templates as the default path.
 
 | Area from `~/Work/quicz` examples | netz status | Evidence | Remaining work |
 | --- | --- | --- | --- |
