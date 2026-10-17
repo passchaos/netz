@@ -875,6 +875,7 @@ pub fn Dispatcher(comptime Pool: type, comptime Runtime: type) type {
             return .{
                 .context = state,
                 .drive = driveEstablishedDuringConnect,
+                .activity = &state.activity,
             };
         }
 

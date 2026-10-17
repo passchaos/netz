@@ -135,6 +135,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
         .local_address = .{ .ip4 = .unspecified(0) },
         .limits = limits,
         .max_connections = 2,
+        .handshake_poll_interval = .fromMilliseconds(500),
         .client = .{
             .handshake = .{
                 .original_destination_connection_id = &.{},
@@ -233,15 +234,23 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
         }
 
         fn timed(
+            io_value: std.Io,
             request_sender: runtime.SharedHandshakeClientPoolRequestSender,
             uri: []const u8,
         ) !void {
+            const started = std.Io.Clock.awake.now(io_value);
             var response = request_sender.requestWithTimeout(
                 uri,
                 .{},
                 .fromMilliseconds(100),
             ) catch |err| {
                 try std.testing.expectEqual(error.Timeout, err);
+                const elapsed = started.durationTo(
+                    std.Io.Clock.awake.now(io_value),
+                );
+                try std.testing.expect(
+                    elapsed.nanoseconds < 300 * std.time.ns_per_ms,
+                );
                 return;
             };
             response.deinit();
@@ -303,7 +312,7 @@ test "HTTP/3 shared endpoint pending handshake does not block established respon
     var timed = try std.Io.concurrent(
         io,
         Producer.timed,
-        .{ sender.clone(), timed_uri },
+        .{ io, sender.clone(), timed_uri },
     );
     var timed_active = true;
     defer if (timed_active) timed.cancel(io) catch {};

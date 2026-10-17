@@ -104,10 +104,16 @@ pub fn Pool(comptime Runtime: type) type {
         pub const ConnectProgress = struct {
             context: *anyopaque,
             drive: *const fn (context: *anyopaque) anyerror!void,
+            activity: *std.Io.Event,
 
             fn run(self: ConnectProgress) !void {
                 try self.drive(self.context);
             }
+        };
+
+        const ConnectOwnerTurn = union(enum) {
+            endpoint: quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event,
+            activity: std.Io.Cancelable!void,
         };
 
         const Entry = struct {
@@ -1200,6 +1206,128 @@ pub fn Pool(comptime Runtime: type) type {
             }
         }
 
+        fn waitForConnectOwnerTurn(
+            self: *Self,
+            deadline: std.Io.Clock.Timestamp,
+            progress: ?ConnectProgress,
+        ) ConnectOwnerTurn {
+            const observer = progress orelse return .{ .endpoint = self.receiveTransportWithDeadline(deadline) };
+            const Wake = union(enum) {
+                endpoint: quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event,
+                activity: std.Io.Cancelable!void,
+            };
+            var storage: [2]Wake = undefined;
+            var select: std.Io.Select(Wake) = .init(self.io, &storage);
+            select.async(
+                .endpoint,
+                Self.receiveTransportWithDeadline,
+                .{ self, deadline },
+            );
+            select.async(
+                .activity,
+                std.Io.Event.wait,
+                .{ observer.activity, self.io },
+            );
+
+            var endpoint_event: ?quic.endpoint_dispatcher.Event = null;
+            var endpoint_error: ?quic.endpoint_dispatcher.ReceiveError = null;
+            var activity_completed = false;
+            var activity_error: ?std.Io.Cancelable = null;
+            if (select.await()) |first| {
+                consumeConnectOwnerWake(
+                    self,
+                    first,
+                    &endpoint_event,
+                    &endpoint_error,
+                    &activity_completed,
+                    &activity_error,
+                );
+            } else |err| {
+                activity_error = err;
+            }
+            while (select.cancel()) |wake| {
+                consumeConnectOwnerWake(
+                    self,
+                    wake,
+                    &endpoint_event,
+                    &endpoint_error,
+                    &activity_completed,
+                    &activity_error,
+                );
+            }
+            if (endpoint_event) |event| {
+                return .{ .endpoint = event };
+            }
+            if (endpoint_error) |err| {
+                return .{ .endpoint = err };
+            }
+            if (activity_error) |err| {
+                return .{ .activity = err };
+            }
+            if (activity_completed) return .{ .activity = {} };
+            return .{ .activity = error.Canceled };
+        }
+
+        fn consumeConnectOwnerWake(
+            self: *Self,
+            wake: anytype,
+            endpoint_event: *?quic.endpoint_dispatcher.Event,
+            endpoint_error: *?quic.endpoint_dispatcher.ReceiveError,
+            activity_completed: *bool,
+            activity_error: *?std.Io.Cancelable,
+        ) void {
+            switch (wake) {
+                .endpoint => |result| if (result) |event_value| {
+                    if (endpoint_event.* == null) {
+                        endpoint_event.* = event_value;
+                    } else {
+                        var duplicate = event_value;
+                        duplicate.deinit(self.allocator);
+                    }
+                } else |err| {
+                    if (err != error.Canceled) endpoint_error.* = err;
+                },
+                .activity => |result| if (result) {
+                    activity_completed.* = true;
+                } else |err| {
+                    if (err != error.Canceled) activity_error.* = err;
+                },
+            }
+        }
+
+        fn deinitConnectOwnerTurn(
+            self: *Self,
+            turn: *ConnectOwnerTurn,
+        ) void {
+            switch (turn.*) {
+                .endpoint => |*result| if (result.*) |*event| {
+                    event.deinit(self.allocator);
+                } else |_| {},
+                .activity => {},
+            }
+        }
+
+        fn drainConnectOwnerWakes(
+            self: *Self,
+            select: anytype,
+            progress: ?ConnectProgress,
+        ) !void {
+            while (select.cancel()) |wake_value| {
+                var wake = wake_value;
+                switch (wake) {
+                    .owner => |*turn| switch (turn.*) {
+                        .endpoint => |*result| if (result.*) |*event| {
+                            defer event.deinit(self.allocator);
+                            try self.applyEndpointProgress(event);
+                        } else |_| {},
+                        .activity => {},
+                    },
+                    .connected => unreachable,
+                }
+            }
+            if (progress) |observer| try observer.run();
+        }
+
         fn connectOne(
             self: *Self,
             uri_endpoint: *const Runtime.UriEndpoint,
@@ -1257,7 +1385,7 @@ pub fn Pool(comptime Runtime: type) type {
             };
             const Wake = union(enum) {
                 connected: ConnectCompletion,
-                endpoint: quic.endpoint_dispatcher.ReceiveError!quic.endpoint_dispatcher.Event,
+                owner: ConnectOwnerTurn,
             };
             var wake_storage: [2]Wake = undefined;
             var select: std.Io.Select(Wake) = .init(
@@ -1271,9 +1399,7 @@ pub fn Pool(comptime Runtime: type) type {
                         .client => |*value| value.value.deinit(),
                         .failure => {},
                     },
-                    .endpoint => |*result| if (result.*) |*event| {
-                        event.deinit(self.allocator);
-                    } else |_| {},
+                    .owner => |*turn| self.deinitConnectOwnerTurn(turn),
                 }
             };
             try select.concurrent(
@@ -1292,26 +1418,28 @@ pub fn Pool(comptime Runtime: type) type {
                     }),
                 ).?;
                 select.async(
-                    .endpoint,
-                    Self.receiveTransportWithDeadline,
-                    .{ self, poll_deadline },
+                    .owner,
+                    Self.waitForConnectOwnerTurn,
+                    .{ self, poll_deadline, progress },
                 );
                 switch (try select.await()) {
                     .connected => |completion| switch (completion) {
-                        .failure => |err| return err,
+                        .failure => |err| {
+                            try self.drainConnectOwnerWakes(
+                                &select,
+                                progress,
+                            );
+                            return err;
+                        },
                         .client => |client_value| {
                             // Stop the competing endpoint wait before changing
                             // dispatcher routes during promotion. A completed
-                            // receive may still carry owned diagnostic bytes.
-                            while (select.cancel()) |wake_value| {
-                                var wake = wake_value;
-                                switch (wake) {
-                                    .endpoint => |*result| if (result.*) |*event| {
-                                        event.deinit(self.allocator);
-                                    } else |_| {},
-                                    .connected => unreachable,
-                                }
-                            }
+                            // receive may carry an authenticated packet for an
+                            // established sibling and must be applied first.
+                            try self.drainConnectOwnerWakes(
+                                &select,
+                                progress,
+                            );
                             const connected = try self.allocator.create(Client);
                             errdefer self.allocator.destroy(connected);
                             connected.* = client_value.value;
@@ -1331,13 +1459,19 @@ pub fn Pool(comptime Runtime: type) type {
                             };
                         },
                     },
-                    .endpoint => |result| {
-                        var event = result catch |err| switch (err) {
-                            error.Timeout => continue,
-                            else => return err,
-                        };
-                        defer event.deinit(self.allocator);
-                        try self.applyEndpointProgress(&event);
+                    .owner => |turn| switch (turn) {
+                        .activity => |result| {
+                            try result;
+                            continue;
+                        },
+                        .endpoint => |result| {
+                            var event = result catch |err| switch (err) {
+                                error.Timeout => continue,
+                                else => return err,
+                            };
+                            defer event.deinit(self.allocator);
+                            try self.applyEndpointProgress(&event);
+                        },
                     },
                 }
             }
