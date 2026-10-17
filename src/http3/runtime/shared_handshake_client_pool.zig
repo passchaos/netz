@@ -47,10 +47,10 @@ pub fn Options(comptime Runtime: type) type {
         migration_local_address: ?std.Io.net.IpAddress = null,
         limits: Runtime.Limits = .{},
         client: Runtime.HandshakeClientOptions,
-        /// Optional application resolver used by request-dispatcher
-        /// acquisitions. It runs in a cancelable pending-resolution task, so
-        /// service discovery or cached/DoH lookup never takes endpoint receive
-        /// ownership. Direct pool acquisition retains Runtime's resolver.
+        /// Optional resolver override for all pool acquisitions. Otherwise the
+        /// resolver in `client` is inherited. Dispatcher resolution runs in a
+        /// cancelable pending task, so service discovery or cached/DoH lookup
+        /// never takes endpoint receive ownership.
         resolver: ?address_resolver.Resolver = null,
         idle: http3.origin_pool.Config = .{},
         /// Maximum established plus in-progress connections. Zero is
@@ -518,42 +518,22 @@ pub fn Pool(comptime Runtime: type) type {
             }
 
             fn resolveAddresses(self: *@This()) ResolveCompletion {
-                if (self.pool.options.resolver) |resolver| {
-                    const host, const port = switch (self.route) {
-                        .origin => .{
-                            self.uri_endpoint.tls_host,
-                            self.uri_endpoint.port,
-                        },
-                        .alt_svc => |target| .{
-                            target.connect_host,
-                            target.port,
-                        },
-                    };
-                    return resolver.resolve(
-                        resolver.context,
-                        self.pool.allocator,
-                        self.pool.io,
-                        host,
-                        port,
-                        self.deadline,
-                    ) catch |err| switch (err) {
-                        error.Timeout => return error.HandshakeTimeout,
-                        else => return err,
-                    };
-                }
+                const resolver = self.pool.options.resolver orelse
+                    self.pool.options.client.address_resolver;
                 return switch (self.route) {
-                    .origin => Runtime.resolveEndpointBefore(
+                    .origin => Runtime.resolveEndpointWithResolverBefore(
                         self.uri_endpoint,
                         self.pool.allocator,
                         self.pool.io,
+                        resolver,
                         self.deadline,
                     ),
-                    .alt_svc => |target| Runtime
-                        .resolveHostPortAddressesBefore(
+                    .alt_svc => |target| Runtime.resolveHostPortWithResolverBefore(
                         self.pool.allocator,
                         self.pool.io,
                         target.connect_host,
                         target.port,
+                        resolver,
                         self.deadline,
                     ),
                 };
@@ -1595,19 +1575,22 @@ pub fn Pool(comptime Runtime: type) type {
             // dispatcher promotion from tearing down a live route.
             try self.entries.ensureUnusedCapacity(self.allocator, 1);
 
+            const resolver = self.options.resolver orelse
+                self.options.client.address_resolver;
             const addresses = switch (route) {
-                .origin => try Runtime.resolveEndpointBefore(
+                .origin => try Runtime.resolveEndpointWithResolverBefore(
                     endpoint,
                     self.allocator,
                     self.io,
+                    resolver,
                     deadline,
                 ),
-                .alt_svc => |target| try Runtime
-                    .resolveHostPortAddressesBefore(
+                .alt_svc => |target| try Runtime.resolveHostPortWithResolverBefore(
                     self.allocator,
                     self.io,
                     target.connect_host,
                     target.port,
+                    resolver,
                     deadline,
                 ),
             };

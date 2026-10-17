@@ -105,6 +105,34 @@ test "WSS server completes verified WebSocket echo" {
 
     var ca_bundle, var ca_lock = try localCaBundle(allocator, io);
     defer ca_bundle.deinit(allocator);
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "localhost") or
+                port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
     const uri = try std.fmt.allocPrint(
         allocator,
         "wss://localhost:{d}/echo",
@@ -125,6 +153,11 @@ test "WSS server completes verified WebSocket echo" {
                 .max_head_bytes = 4096,
                 .max_frame_bytes = 4096,
                 .max_message_bytes = 4096,
+            },
+            .connect_timeout = .fromSeconds(3),
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
             },
         },
         .{ .ca_bundle = .{
@@ -153,6 +186,7 @@ test "WSS server completes verified WebSocket echo" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls.load(.acquire));
 }
 
 test "WSS negotiates TLS 1.2 and completes an echo" {

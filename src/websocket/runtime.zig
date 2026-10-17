@@ -28,6 +28,7 @@ const stream_io = @import("../internal/stream_io.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const deadline_policy = @import("../internal/deadline.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const address_resolver = @import("../internal/address_resolver.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const wire = @import("../internal/wire.zig");
 const vail = @import("vail");
@@ -2013,6 +2014,7 @@ pub const StapledOcspPolicy = tls_client_identity.StapledOcspPolicy;
 pub const CookieHandshakeOptions = cookie_handshake.Options;
 pub const HttpProxyOptions = http1_runtime.ProxyOptions;
 pub const RedirectPolicy = redirect.Policy;
+pub const AddressResolver = address_resolver.Resolver;
 
 pub const RedirectProxy = struct {
     uri: []const u8,
@@ -3877,39 +3879,13 @@ pub const Client = struct {
         connect_options.target = target;
         if (connect_options.host.len == 0) connect_options.host = endpoint.authority;
 
-        const stream = if (deadline) |absolute| switch (endpoint.target) {
-            .host => |host| try tcp_connect.hostWithDeadline(
-                io,
-                host,
-                endpoint.port,
-                try deadline_policy.capTimeout(
-                    io,
-                    absolute,
-                    options.connect_timeout,
-                ),
-            ),
-            .ip => |address| try tcp_connect.ipWithDeadline(
-                io,
-                address,
-                try deadline_policy.capTimeout(
-                    io,
-                    absolute,
-                    options.connect_timeout,
-                ),
-            ),
-        } else switch (endpoint.target) {
-            .host => |host| try tcp_connect.host(
-                io,
-                host,
-                endpoint.port,
-                options.connect_timeout,
-            ),
-            .ip => |address| try tcp_connect.ip(
-                io,
-                address,
-                options.connect_timeout,
-            ),
-        };
+        const stream = try connectUriEndpointBefore(
+            allocator,
+            io,
+            endpoint,
+            options,
+            deadline,
+        );
         var stream_owned = true;
         errdefer if (stream_owned) stream.close(io);
         try socket_options.applyTcp(stream, .{
@@ -4032,13 +4008,17 @@ pub const Client = struct {
             .connect_timeout = options.connect_timeout,
             .tcp_nodelay = options.tcp_nodelay,
         };
+        var effective_proxy_options = proxy_options;
+        if (effective_proxy_options.address_resolver == null) {
+            effective_proxy_options.address_resolver = options.address_resolver;
+        }
         const stream = if (deadline) |absolute|
             try http1_runtime.Client.connectTunnelViaProxyUriWithDeadline(
                 allocator,
                 io,
                 proxy_uri,
                 connect_target,
-                proxy_options,
+                effective_proxy_options,
                 http_limits,
                 absolute,
             )
@@ -4048,7 +4028,7 @@ pub const Client = struct {
                 io,
                 proxy_uri,
                 connect_target,
-                proxy_options,
+                effective_proxy_options,
                 http_limits,
             );
         var stream_owned = true;
@@ -4378,6 +4358,47 @@ fn uriComponentBytes(component: std.Uri.Component) []const u8 {
     };
 }
 
+fn connectUriEndpointBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    endpoint: http1_runtime.UriEndpoint,
+    options: ConnectOptions,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error!net.Stream {
+    const connect_deadline = if (deadline) |absolute|
+        try deadline_policy.capTimeout(
+            io,
+            absolute,
+            options.connect_timeout,
+        )
+    else
+        try deadline_policy.fromTimeout(io, options.connect_timeout);
+    return switch (endpoint.target) {
+        .ip => |address| if (connect_deadline) |absolute|
+            tcp_connect.ipWithDeadline(io, address, absolute)
+        else
+            tcp_connect.ip(io, address, null),
+        .host => |host| if (options.address_resolver) |resolver| blk: {
+            const addresses = try resolver.resolve(
+                resolver.context,
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                connect_deadline,
+            );
+            defer allocator.free(addresses);
+            break :blk if (connect_deadline) |absolute|
+                tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+            else
+                tcp_connect.resolved(io, addresses, null);
+        } else if (connect_deadline) |absolute|
+            tcp_connect.hostWithDeadline(io, host, endpoint.port, absolute)
+        else
+            tcp_connect.host(io, host, endpoint.port, null),
+    };
+}
+
 pub const ConnectOptions = struct {
     /// HTTP Host authority for the WebSocket opening handshake.  `connectHost`
     /// defaults this to its resolved host name when left empty.
@@ -4413,6 +4434,11 @@ pub const ConnectOptions = struct {
     /// Absolute budget for DNS resolution plus all TCP connection attempts.
     /// TLS and HTTP Upgrade retain their separate handshake policies.
     connect_timeout: ?std.Io.Duration = null,
+    /// Optional resolver shared by WS/WSS URI connects and every redirect hop.
+    /// Literal IP URI hosts bypass it. Returned addresses share one connect
+    /// deadline while HTTP authority, TLS SNI, and certificate identity remain
+    /// bound to the URI host.
+    address_resolver: ?AddressResolver = null,
     limits: Limits = .{},
     /// Backward-compatible mTLS shorthand. `vail_tls` takes precedence when
     /// both are supplied.
@@ -17232,6 +17258,7 @@ test {
     _ = @import("runtime/compression_scratch.zig");
     _ = @import("runtime/compression_threshold_tests.zig");
     _ = @import("runtime/wss_tests.zig");
+    _ = @import("runtime/resolver_tests.zig");
     _ = @import("runtime/proxy_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/server_lifecycle_tests.zig");

@@ -12,6 +12,7 @@ const deadline_policy = @import("../internal/deadline.zig");
 const accept_deadline = @import("../internal/accept.zig");
 const http_date = @import("../internal/http_date.zig");
 const tcp_connect = @import("../internal/tcp_connect.zig");
+const address_resolver = @import("../internal/address_resolver.zig");
 const socket_options = @import("../internal/socket_options.zig");
 const tls_stream = @import("../tls/mod.zig").stream;
 const vail = @import("vail");
@@ -160,6 +161,7 @@ fn requestUriViaProxyBefore(
         allocator,
         io,
         proxy_uri,
+        proxy_options,
         limits,
         deadline,
     );
@@ -216,6 +218,7 @@ fn connectProxyUriBefore(
     allocator: std.mem.Allocator,
     io: std.Io,
     proxy_uri: []const u8,
+    proxy_options: ProxyOptions,
     limits: Limits,
     deadline: ?std.Io.Clock.Timestamp,
 ) Error!Client {
@@ -230,42 +233,41 @@ fn connectProxyUriBefore(
     }
     var endpoint = try uriEndpoint(allocator, uri, 80);
     defer endpoint.deinit();
-    var client = if (deadline) |absolute| switch (endpoint.target) {
-        .host => try Client.connectHostWithDeadline(
-            allocator,
-            io,
-            endpoint.tls_host,
-            endpoint.port,
-            limits,
-            absolute,
-        ),
-        .ip => |address| try Client.connectWithDeadline(
-            allocator,
-            io,
-            address,
-            limits,
-            absolute,
-        ),
-    } else switch (endpoint.target) {
-        .host => try Client.connectHost(
-            allocator,
-            io,
-            endpoint.tls_host,
-            endpoint.port,
-            limits,
-        ),
-        .ip => |address| try Client.connect(
-            allocator,
-            io,
-            address,
-            limits,
-        ),
+    const connect_deadline = if (deadline) |absolute|
+        try deadline_policy.capTimeout(io, absolute, limits.connect_timeout)
+    else
+        try deadline_policy.fromTimeout(io, limits.connect_timeout);
+    const stream = switch (endpoint.target) {
+        .ip => |address| if (connect_deadline) |absolute|
+            try tcp_connect.ipWithDeadline(io, address, absolute)
+        else
+            try tcp_connect.ip(io, address, null),
+        .host => |host| if (proxy_options.address_resolver) |resolver| blk: {
+            const addresses = try resolver.resolve(
+                resolver.context,
+                allocator,
+                io,
+                endpoint.tls_host,
+                endpoint.port,
+                connect_deadline,
+            );
+            defer allocator.free(addresses);
+            break :blk if (connect_deadline) |absolute|
+                try tcp_connect.resolvedWithDeadline(io, addresses, absolute)
+            else
+                try tcp_connect.resolved(io, addresses, null);
+        } else if (connect_deadline) |absolute|
+            try tcp_connect.hostWithDeadline(io, host, endpoint.port, absolute)
+        else
+            try tcp_connect.host(io, host, endpoint.port, null),
     };
-    errdefer client.close();
-    const authority = try allocator.dupe(u8, endpoint.authority);
-    if (client.default_host) |old| allocator.free(old);
-    client.default_host = authority;
-    return client;
+    return Client.adoptStream(
+        allocator,
+        io,
+        stream,
+        endpoint.authority,
+        limits,
+    );
 }
 
 fn connectTunnelViaProxyBefore(
@@ -282,6 +284,7 @@ fn connectTunnelViaProxyBefore(
         allocator,
         io,
         proxy_uri,
+        proxy_options,
         limits,
         deadline,
     );
@@ -403,11 +406,17 @@ pub const VailTlsClientOptions = struct {
     handshake_timeout: ?std.Io.Duration = null,
 };
 
+pub const AddressResolver = address_resolver.Resolver;
+
 /// HTTP forward-proxy policy shared by one-shot cleartext and CONNECT-tunneled
 /// URI requests. These fields are sent only to the proxy: for HTTPS they are
 /// carried by CONNECT and never appear inside the authenticated origin tunnel.
 pub const ProxyOptions = struct {
     headers: []const http1.Header = &.{},
+    /// Optional resolver for the proxy transport endpoint. Literal IP proxy
+    /// hosts bypass it; CONNECT continues to carry the origin authority text so
+    /// proxy-side origin resolution and TLS identity remain unchanged.
+    address_resolver: ?AddressResolver = null,
 };
 
 pub const RedirectPolicy = uri_redirect.Policy;

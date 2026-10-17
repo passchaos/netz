@@ -2,6 +2,7 @@ const std = @import("std");
 const RuntimeModule = @This();
 const round_robin = @import("../internal/round_robin.zig");
 const deadline_policy = @import("../internal/deadline.zig");
+const address_resolver = @import("../internal/address_resolver.zig");
 const http_method = @import("../internal/http_method.zig");
 const http3 = @import("mod.zig");
 const quic = @import("../quic/mod.zig");
@@ -647,6 +648,76 @@ const cappedConnectDeadline = client_uri.cappedConnectDeadline;
 pub const resolveEndpointBefore = client_uri.resolveEndpointBefore;
 pub const resolveHostPortAddressesBefore =
     client_uri.resolveHostPortAddressesBefore;
+pub const AddressResolver = address_resolver.Resolver;
+
+/// Resolve one URI endpoint through the application resolver when configured.
+/// Literal IPs deliberately retain the parser-owned bypass so URI authority
+/// and TLS identity never become coupled to the returned transport address.
+pub fn resolveEndpointWithResolverBefore(
+    endpoint: client_uri.Endpoint,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    resolver: ?AddressResolver,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]net.IpAddress {
+    switch (endpoint.target) {
+        .ip => return resolveEndpointBefore(endpoint, allocator, io, deadline),
+        .host => {},
+    }
+    const configured = resolver orelse
+        return resolveEndpointBefore(endpoint, allocator, io, deadline);
+    return configured.resolve(
+        configured.context,
+        allocator,
+        io,
+        endpoint.tls_host,
+        endpoint.port,
+        deadline,
+    ) catch |err| switch (err) {
+        error.Timeout => error.HandshakeTimeout,
+        else => |other| other,
+    };
+}
+
+/// Resolve an alternative-service transport route without changing the
+/// authenticated origin. Literal route addresses bypass the resolver.
+pub fn resolveHostPortWithResolverBefore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    host: []const u8,
+    port: u16,
+    resolver: ?AddressResolver,
+    deadline: ?std.Io.Clock.Timestamp,
+) Error![]net.IpAddress {
+    if (net.IpAddress.parse(host, port)) |_| {
+        return resolveHostPortAddressesBefore(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
+    } else |_| {}
+    const configured = resolver orelse
+        return resolveHostPortAddressesBefore(
+            allocator,
+            io,
+            host,
+            port,
+            deadline,
+        );
+    return configured.resolve(
+        configured.context,
+        allocator,
+        io,
+        host,
+        port,
+        deadline,
+    ) catch |err| switch (err) {
+        error.Timeout => error.HandshakeTimeout,
+        else => |other| other,
+    };
+}
 const handshakeRecoveryBefore = client_uri.handshakeRecoveryBefore;
 
 const ProtectedSendState = protected_send_module.State;
@@ -5742,6 +5813,10 @@ pub const HandshakeClientOptions = struct {
     /// budget; direct-address and caller-owned-endpoint entry points begin it
     /// immediately before the handshake.
     connect_timeout: ?std.Io.Duration = null,
+    /// Optional application resolver shared by direct URI connections,
+    /// redirects, Alt-Svc routes, and pools. Literal IP route hosts bypass it;
+    /// QUIC/TLS authentication remains bound to the URI origin.
+    address_resolver: ?AddressResolver = null,
 };
 
 pub const HandshakeServer = struct {
@@ -12414,10 +12489,11 @@ pub const HandshakeClient = struct {
     ) Error!HandshakeClient {
         var endpoint = try uriEndpoint(allocator, uri);
         defer endpoint.deinit();
-        const servers = try resolveEndpointBefore(
+        const servers = try resolveEndpointWithResolverBefore(
             endpoint,
             allocator,
             io,
+            options.address_resolver,
             deadline,
         );
         defer allocator.free(servers);
@@ -12753,10 +12829,11 @@ pub const HandshakeClient = struct {
         defer endpoint.deinit();
         const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
-        const servers = try resolveEndpointBefore(
+        const servers = try resolveEndpointWithResolverBefore(
             endpoint,
             allocator,
             io,
+            options.address_resolver,
             deadline,
         );
         defer allocator.free(servers);
@@ -12810,10 +12887,11 @@ pub const HandshakeClient = struct {
         defer endpoint.deinit();
         const path = try uriRequestTargetAlloc(allocator, uri);
         defer allocator.free(path);
-        const servers = try resolveEndpointBefore(
+        const servers = try resolveEndpointWithResolverBefore(
             endpoint,
             allocator,
             io,
+            options.address_resolver,
             absolute,
         );
         defer allocator.free(servers);
@@ -13043,11 +13121,12 @@ pub const HandshakeClient = struct {
             target.origin_host,
             origin.tls_host,
         )) return error.InvalidHeader;
-        const servers = try resolveHostPortAddressesBefore(
+        const servers = try resolveHostPortWithResolverBefore(
             allocator,
             io,
             target.connect_host,
             target.port,
+            options.address_resolver,
             deadline,
         );
         defer allocator.free(servers);
@@ -13087,11 +13166,12 @@ pub const HandshakeClient = struct {
             target.origin_host,
             origin.tls_host,
         )) return error.InvalidHeader;
-        const servers = try resolveHostPortAddressesBefore(
+        const servers = try resolveHostPortWithResolverBefore(
             allocator,
             io,
             target.connect_host,
             target.port,
+            options.address_resolver,
             deadline,
         );
         defer allocator.free(servers);
@@ -19068,7 +19148,7 @@ pub const SharedHandshakeClientPool =
 pub const SharedHandshakeClientPoolOptions =
     @import("runtime/shared_handshake_client_pool.zig").Options(@This());
 pub const SharedHandshakeClientPoolAddressResolver =
-    @import("../internal/address_resolver.zig").Resolver;
+    AddressResolver;
 pub const SharedHandshakeClientPoolError =
     @import("runtime/shared_handshake_client_pool.zig").Error;
 pub const SharedHandshakeClientPoolRequestDispatcher =
@@ -34767,6 +34847,7 @@ test {
     _ = @import("runtime/server/tests/receive.zig");
     _ = @import("runtime/client/tests/protected.zig");
     _ = @import("runtime/client/tests/deadline.zig");
+    _ = @import("runtime/client/resolver_tests.zig");
     _ = @import("runtime/client/batch_tests.zig");
     _ = @import("runtime/redirect_tests.zig");
     _ = @import("runtime/client/tests/streaming.zig");

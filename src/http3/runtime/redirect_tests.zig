@@ -46,7 +46,7 @@ test "HTTP3 URI redirect establishes fresh authenticated connection" {
     defer second_server.deinit();
     const second_uri = try std.fmt.allocPrint(
         allocator,
-        "https://127.0.0.1:{d}/final",
+        "https://redirect-b.h3.resolver.test:{d}/final",
         .{second_server.address().getPort()},
     );
     defer allocator.free(second_uri);
@@ -115,13 +115,57 @@ test "HTTP3 URI redirect establishes fresh authenticated connection" {
 
     const initial_uri_text = try std.fmt.allocPrint(
         allocator,
-        "https://127.0.0.1:{d}/start",
+        "https://redirect-a.h3.resolver.test:{d}/start",
         .{first_server.address().getPort()},
     );
     defer allocator.free(initial_uri_text);
     const initial_uri = try std.Uri.parse(initial_uri_text);
     const original_dcid = [_]u8{ 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58 };
     const client_cid = [_]u8{ 0x61, 0x62, 0x63, 0x64 };
+    const Resolver = struct {
+        first: std.Io.net.IpAddress,
+        second: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) runtime.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            const address = if (std.mem.eql(
+                u8,
+                host,
+                "redirect-a.h3.resolver.test",
+            ))
+                self.first
+            else if (std.mem.eql(
+                u8,
+                host,
+                "redirect-b.h3.resolver.test",
+            ))
+                self.second
+            else
+                return error.UnknownHostName;
+            if (address.getPort() != port or deadline == null) {
+                return error.Timeout;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{
+        .first = first_server.address(),
+        .second = second_server.address(),
+    };
     var result = try runtime.HandshakeClient
         .requestUriFollowingRedirectsDetailedWithTimeout(
         allocator,
@@ -137,12 +181,18 @@ test "HTTP3 URI redirect establishes fresh authenticated connection" {
             .body = "payload",
         },
         .{ .quic = .{ .max_datagram_size = 4096, .max_frames_per_datagram = 8 } },
-        .{ .handshake = .{
-            .original_destination_connection_id = &original_dcid,
-            .local_connection_id = &client_cid,
-            .random = [_]u8{0x65} ** 32,
-            .x25519_secret_key = [_]u8{0x66} ** 32,
-        } },
+        .{
+            .handshake = .{
+                .original_destination_connection_id = &original_dcid,
+                .local_connection_id = &client_cid,
+                .random = [_]u8{0x65} ** 32,
+                .x25519_secret_key = [_]u8{0x66} ** 32,
+            },
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = Resolver.resolve,
+            },
+        },
         .{},
         .fromSeconds(5),
     );
@@ -150,6 +200,7 @@ test "HTTP3 URI redirect establishes fresh authenticated connection" {
     try std.testing.expectEqual(@as(usize, 1), result.redirect_count);
     try std.testing.expectEqualStrings("accepted", result.response.response.body);
     try std.testing.expectEqualStrings(second_uri, result.final_uri);
+    try std.testing.expectEqual(@as(u8, 2), resolver.calls.load(.acquire));
 
     thread.join();
     joined = true;

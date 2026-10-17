@@ -704,9 +704,37 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
     };
 
     const port = server.address().getPort();
+    const Resolver = struct {
+        address: std.Io.net.IpAddress,
+        calls: std.atomic.Value(u8) = .init(0),
+
+        fn resolve(
+            context: *anyopaque,
+            resolve_allocator: std.mem.Allocator,
+            _: std.Io,
+            host: []const u8,
+            expected_port: u16,
+            deadline: ?std.Io.Clock.Timestamp,
+        ) h3.AddressResolver.ResolveError![]std.Io.net.IpAddress {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (!std.mem.eql(u8, host, "ws-h3.resolver.test") or
+                expected_port != self.address.getPort() or deadline == null)
+            {
+                return error.UnknownHostName;
+            }
+            const addresses = try resolve_allocator.alloc(
+                std.Io.net.IpAddress,
+                1,
+            );
+            addresses[0] = self.address;
+            _ = self.calls.fetchAdd(1, .acq_rel);
+            return addresses;
+        }
+    };
+    var resolver = Resolver{ .address = server.address() };
     const authority = try std.fmt.allocPrint(
         allocator,
-        "127.0.0.1:{d}",
+        "ws-h3.resolver.test:{d}",
         .{port},
     );
     defer allocator.free(authority);
@@ -733,12 +761,18 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
             .enable_permessage_deflate = true,
             .allow_context_takeover = true,
             .h3_limits = limits,
-            .h3 = .{ .handshake = .{
-                .original_destination_connection_id = &original_dcid,
-                .local_connection_id = &client_cid,
-                .random = [_]u8{0x37} ** 32,
-                .x25519_secret_key = [_]u8{0x38} ** 32,
-            } },
+            .h3 = .{
+                .handshake = .{
+                    .original_destination_connection_id = &original_dcid,
+                    .local_connection_id = &client_cid,
+                    .random = [_]u8{0x37} ** 32,
+                    .x25519_secret_key = [_]u8{0x38} ** 32,
+                },
+                .address_resolver = .{
+                    .context = &resolver,
+                    .resolve = Resolver.resolve,
+                },
+            },
         },
         .fromSeconds(2),
     );
@@ -747,6 +781,7 @@ test "WebSocket HTTP3 URI derives authority path query and SNI" {
     thread.join();
     joined = true;
     if (shared.err) |err| return err;
+    try std.testing.expectEqual(@as(u8, 1), resolver.calls.load(.acquire));
 }
 
 test "WebSocket HTTP3 URI rejects non-HTTPS and userinfo before I/O" {

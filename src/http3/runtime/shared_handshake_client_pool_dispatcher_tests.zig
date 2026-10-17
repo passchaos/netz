@@ -596,10 +596,6 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
         .local_address = .{ .ip4 = .unspecified(0) },
         .limits = limits,
         .max_connections = 1,
-        .resolver = .{
-            .context = &resolver,
-            .resolve = EarlyResolver.resolve,
-        },
         .client = .{
             .handshake = .{
                 .original_destination_connection_id = &.{},
@@ -617,6 +613,10 @@ fn runSharedEarlyScenario(scenario: SharedEarlyScenario) !void {
                 },
             },
             .connect_timeout = .fromSeconds(3),
+            .address_resolver = .{
+                .context = &resolver,
+                .resolve = EarlyResolver.resolve,
+            },
         },
     });
     defer pool.deinit();
