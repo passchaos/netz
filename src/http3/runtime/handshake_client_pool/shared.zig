@@ -1,13 +1,16 @@
-//! Cloneable HTTP/3 request sender backed by one exclusive-pool driver.
+//! Cloneable HTTP/3 request sender backed by bounded route drivers.
 //!
 //! Producers enqueue stack-owned commands and wait on per-command events. The
-//! sole driver groups compatible origins/routes, invokes the H3 per-stream
-//! deadline/cancellation batch core, and remains the only pool/connection
-//! reader. Borrowed request storage therefore remains valid until completion.
+//! dispatcher assigns each active origin/Alt-Svc route to exactly one driver,
+//! while unrelated routes may acquire and drive independent connections in
+//! parallel. Each connection therefore retains one send/receive owner without
+//! imposing cross-origin head-of-line blocking. Borrowed request storage
+//! remains valid until completion.
 
 const std = @import("std");
 const http3 = @import("../../mod.zig");
 const connection_budget = @import("../../../internal/connection_budget.zig");
+const route_key = @import("shared/route.zig");
 
 pub const Error = error{
     SharedDriverClosed,
@@ -21,6 +24,10 @@ pub const Options = struct {
     /// Maximum requests concurrently owned by one connection turn. Later
     /// compatible producers are admitted as active streams complete.
     max_batch_requests: usize = 16,
+    /// Maximum independently driven origin/Alt-Svc routes. Each route retains
+    /// exactly one connection owner while unrelated routes can progress in
+    /// parallel.
+    max_connection_drivers: usize = 1,
 };
 
 pub const Stats = struct {
@@ -30,6 +37,7 @@ pub const Stats = struct {
 };
 
 const max_batch_limit: usize = 64;
+const max_driver_limit: usize = 64;
 
 pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
     return struct {
@@ -40,17 +48,25 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             Runtime.HandshakeClientPoolError || Error;
         const CommandState = enum { idle, queued, in_flight, completed };
 
+        const RouteTurn = struct {
+            key: route_key.Key = undefined,
+            activity: std.Io.Event = .unset,
+            next: ?*RouteTurn = null,
+        };
+
         const Command = struct {
             uri: []const u8,
             request: Runtime.UriRequestOptions,
             alt_svc: ?http3.AltSvcTarget,
             deadline: ?std.Io.Clock.Timestamp,
             reclaimer: ?connection_budget.Reclaimer = null,
+            route_key: route_key.Key,
             previous: ?*Command = null,
             next: ?*Command = null,
             state: CommandState = .idle,
             abandoned: bool = false,
             cancel_requested: bool = false,
+            active_route: ?*RouteTurn = null,
             response: ?Runtime.OwnedHandshakeResponse = null,
             err: ?RequestError = null,
             done: std.Io.Event = .unset,
@@ -63,11 +79,9 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             options: Options,
             mutex: std.Io.Mutex = .init,
             ready: std.Io.Condition = .init,
-            /// Wakes an active connection turn for newly queued work,
-            /// producer cancellation, or dispatcher shutdown.
-            activity: std.Io.Event = .unset,
             head: ?*Command = null,
             tail: ?*Command = null,
+            active_routes: ?*RouteTurn = null,
             queued: usize = 0,
             closed: bool = false,
             running: std.atomic.Value(bool) = .init(false),
@@ -225,12 +239,18 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 deadline: ?std.Io.Clock.Timestamp,
                 reclaimer: ?connection_budget.Reclaimer,
             ) RequestError!Runtime.OwnedHandshakeResponse {
+                const identity = try route_key.Key.init(
+                    uri,
+                    alt_svc,
+                    reclaimer,
+                );
                 var command: Command = .{
                     .uri = uri,
                     .request = request_options,
                     .alt_svc = alt_svc,
                     .deadline = deadline,
                     .reclaimer = reclaimer,
+                    .route_key = identity,
                 };
                 try enqueue(self.state, &command);
                 const wait_err = waitForCompletion(
@@ -257,7 +277,9 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
         ) (std.mem.Allocator.Error || Error)!Self {
             if (options.max_queued_requests == 0 or
                 options.max_batch_requests == 0 or
-                options.max_batch_requests > max_batch_limit)
+                options.max_batch_requests > max_batch_limit or
+                options.max_connection_drivers == 0 or
+                options.max_connection_drivers > max_driver_limit)
             {
                 return error.InvalidSharedOptions;
             }
@@ -276,6 +298,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             std.debug.assert(!self.state.running.load(.acquire));
             std.debug.assert(self.state.head == null);
             std.debug.assert(self.state.queued == 0);
+            std.debug.assert(self.state.active_routes == null);
             const allocator = self.state.allocator;
             allocator.destroy(self.state);
             self.* = undefined;
@@ -286,7 +309,10 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
         }
 
         pub fn close(self: *Self) void {
-            const state = self.state;
+            closeState(self.state);
+        }
+
+        fn closeState(state: *State) void {
             state.mutex.lockUncancelable(state.io);
             if (state.closed) {
                 state.mutex.unlock(state.io);
@@ -307,8 +333,11 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 command.done.set(state.io);
                 current = next;
             }
+            var route = state.active_routes;
+            while (route) |active| : (route = active.next) {
+                active.activity.set(state.io);
+            }
             state.mutex.unlock(state.io);
-            state.activity.set(state.io);
         }
 
         pub fn run(self: *Self) (Error || std.Io.Cancelable)!void {
@@ -317,16 +346,137 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 return error.SharedDriverAlreadyRunning;
             }
             defer state.running.store(false, .release);
-            while (true) {
-                var commands: [max_batch_limit]*Command = undefined;
-                const count = takeBatch(state, &commands) catch |err| switch (err) {
-                    error.Canceled => {
-                        self.close();
-                        return error.Canceled;
-                    },
+            var workers: std.Io.Group = .init;
+            var start: std.Io.Event = .unset;
+            // Prevent an already-closed dispatcher from letting the first
+            // worker finish the group before the remaining members are
+            // registered. The stack event remains valid until group await.
+            for (0..state.options.max_connection_drivers) |_| {
+                workers.async(state.io, Worker.run, .{ state, &start });
+            }
+            start.set(state.io);
+            workers.await(state.io) catch |err| {
+                closeState(state);
+                return err;
+            };
+        }
+
+        const Worker = struct {
+            fn run(state: *State, start: *std.Io.Event) void {
+                start.wait(state.io) catch {
+                    closeState(state);
+                    return;
                 };
-                if (count == 0) return;
-                executeBatch(state, commands[0..count]);
+                runFallible(state) catch {
+                    closeState(state);
+                };
+            }
+
+            fn runFallible(state: *State) RequestError!void {
+                while (true) {
+                    var commands: [max_batch_limit]*Command = undefined;
+                    var route: RouteTurn = .{};
+                    switch (try takeBatch(state, &route, &commands)) {
+                        .closed => return,
+                        .batch => |count| {
+                            const result = executeBatch(
+                                state,
+                                &route,
+                                commands[0..count],
+                            );
+                            finishRoute(state, &route);
+                            result catch |err| {
+                                if (err == error.Canceled) return err;
+                            };
+                        },
+                    }
+                }
+            }
+        };
+
+        fn finishRoute(state: *State, route: *RouteTurn) void {
+            state.mutex.lockUncancelable(state.io);
+            var link = &state.active_routes;
+            while (link.*) |active| {
+                if (active == route) {
+                    link.* = active.next;
+                    route.next = null;
+                    state.ready.broadcast(state.io);
+                    state.mutex.unlock(state.io);
+                    return;
+                }
+                link = &active.next;
+            }
+            state.mutex.unlock(state.io);
+            unreachable;
+        }
+
+        fn findActiveRoute(
+            state: *State,
+            command: *const Command,
+        ) ?*RouteTurn {
+            var route = state.active_routes;
+            while (route) |active| : (route = active.next) {
+                if (active.key.eql(&command.route_key)) return active;
+            }
+            return null;
+        }
+
+        fn firstRunnableCommand(state: *State) ?*Command {
+            var command = state.head;
+            while (command) |candidate| : (command = candidate.next) {
+                if (findActiveRoute(state, candidate) == null) {
+                    return candidate;
+                }
+            }
+            return null;
+        }
+
+        const TakeResult = union(enum) {
+            closed,
+            batch: usize,
+        };
+
+        fn takeBatch(
+            state: *State,
+            route: *RouteTurn,
+            out: *[max_batch_limit]*Command,
+        ) RequestError!TakeResult {
+            state.mutex.lockUncancelable(state.io);
+            defer state.mutex.unlock(state.io);
+            while (true) {
+                if (state.closed) return .closed;
+                const first = firstRunnableCommand(state) orelse {
+                    try state.ready.wait(state.io, &state.mutex);
+                    continue;
+                };
+                route.* = .{
+                    .key = first.route_key,
+                    .activity = .unset,
+                    .next = state.active_routes,
+                };
+                state.active_routes = route;
+
+                detach(state, first);
+                first.state = .in_flight;
+                first.active_route = route;
+                out[0] = first;
+                var count: usize = 1;
+                var current = state.head;
+                while (current) |candidate| {
+                    const next = candidate.next;
+                    if (count < state.options.max_batch_requests and
+                        route.key.eql(&candidate.route_key))
+                    {
+                        detach(state, candidate);
+                        candidate.state = .in_flight;
+                        candidate.active_route = route;
+                        out[count] = candidate;
+                        count += 1;
+                    }
+                    current = next;
+                }
+                return .{ .batch = count };
             }
         }
 
@@ -367,9 +517,12 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             }
             state.tail = command;
             state.queued += 1;
-            state.ready.signal(state.io);
+            if (findActiveRoute(state, command)) |route| {
+                route.activity.set(state.io);
+            } else {
+                state.ready.signal(state.io);
+            }
             state.mutex.unlock(state.io);
-            state.activity.set(state.io);
         }
 
         fn cancelQueued(state: *State, command: *Command) bool {
@@ -382,17 +535,15 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
         }
 
         fn abandonInFlight(state: *State, command: *Command) void {
-            var wake_driver = false;
             state.mutex.lockUncancelable(state.io);
             command.abandoned = true;
             if (command.state == .in_flight and
                 !command.cancel_requested)
             {
                 command.cancel_requested = true;
-                wake_driver = true;
+                if (command.active_route) |route| route.activity.set(state.io);
             }
             state.mutex.unlock(state.io);
-            if (wake_driver) state.activity.set(state.io);
         }
 
         fn waitForCompletion(
@@ -436,37 +587,16 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             state.queued -= 1;
         }
 
-        fn takeBatch(
-            state: *State,
-            out: *[max_batch_limit]*Command,
-        ) std.Io.Cancelable!usize {
-            state.mutex.lockUncancelable(state.io);
-            defer state.mutex.unlock(state.io);
-            while (state.head == null and !state.closed) {
-                try state.ready.wait(state.io, &state.mutex);
-            }
-            const first = state.head orelse return 0;
-            detach(state, first);
-            first.state = .in_flight;
-            out[0] = first;
-            var count: usize = 1;
-            while (count < state.options.max_batch_requests) {
-                const next = state.head orelse break;
-                if (!compatible(first, next)) break;
-                detach(state, next);
-                next.state = .in_flight;
-                out[count] = next;
-                count += 1;
-            }
-            return count;
-        }
-
         const Active = struct {
             command: *Command,
             stream_id: ?u62 = null,
         };
 
-        fn executeBatch(state: *State, commands: []*Command) void {
+        fn executeBatch(
+            state: *State,
+            route: *RouteTurn,
+            commands: []*Command,
+        ) RequestError!void {
             state.mutex.lockUncancelable(state.io);
             state.batches +|= 1;
             if (commands.len > 1) {
@@ -482,6 +612,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             var total_owned = commands.len;
             driveConnection(
                 state,
+                route,
                 &active_storage,
                 &active_count,
                 &total_owned,
@@ -489,12 +620,13 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 for (active_storage[0..active_count]) |active| {
                     complete(state, active.command, null, err);
                 }
-                active_count = 0;
+                return err;
             };
         }
 
         fn driveConnection(
             state: *State,
+            route: *RouteTurn,
             active: *[max_batch_limit]Active,
             active_count: *usize,
             total_owned: *usize,
@@ -502,6 +634,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             while (active_count.* != 0) {
                 try processControl(
                     state,
+                    route,
                     active,
                     active_count,
                     total_owned,
@@ -535,6 +668,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 while (active_count.* != 0) {
                     try processControl(
                         state,
+                        route,
                         active,
                         active_count,
                         total_owned,
@@ -547,7 +681,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                     const maybe_event = lease.client()
                         .receiveNextResponseBeforeOrWake(
                         earliestDeadline(active, active_count.*),
-                        &state.activity,
+                        &route.activity,
                     ) catch |err| switch (err) {
                         error.Timeout => continue,
                         else => return err,
@@ -640,25 +774,31 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
 
         fn processControl(
             state: *State,
+            route: *RouteTurn,
             active: *[max_batch_limit]Active,
             active_count: *usize,
             total_owned: *usize,
             lease: ?*PoolType.Lease,
         ) RequestError!void {
             state.mutex.lockUncancelable(state.io);
-            state.activity.reset();
+            route.activity.reset();
             const closed = state.closed;
             if (!closed and active_count.* != 0) {
-                const representative = active[0].command;
                 const previously_owned = total_owned.*;
-                while (active_count.* < state.options.max_batch_requests) {
-                    const next = state.head orelse break;
-                    if (!compatible(representative, next)) break;
-                    detach(state, next);
-                    next.state = .in_flight;
-                    active[active_count.*] = .{ .command = next };
-                    active_count.* += 1;
-                    total_owned.* += 1;
+                var current = state.head;
+                while (current) |candidate| {
+                    const next = candidate.next;
+                    if (active_count.* < state.options.max_batch_requests and
+                        route.key.eql(&candidate.route_key))
+                    {
+                        detach(state, candidate);
+                        candidate.state = .in_flight;
+                        candidate.active_route = route;
+                        active[active_count.*] = .{ .command = candidate };
+                        active_count.* += 1;
+                        total_owned.* += 1;
+                    }
+                    current = next;
                 }
                 const added = total_owned.* - previously_owned;
                 if (added != 0) {
@@ -861,6 +1001,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             state.mutex.lockUncancelable(state.io);
             if (command.abandoned) {
                 command.state = .completed;
+                command.active_route = null;
                 state.mutex.unlock(state.io);
                 if (response) |*owned| owned.deinit(state.pool.allocator);
                 command.done.set(state.io);
@@ -870,6 +1011,7 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
             response = null;
             command.err = err;
             command.state = .completed;
+            command.active_route = null;
             state.mutex.unlock(state.io);
             command.done.set(state.io);
         }
@@ -894,61 +1036,6 @@ pub fn Dispatcher(comptime PoolType: type, comptime Runtime: type) type {
                 response.deinit(state.pool.allocator);
             }
             command.response = null;
-        }
-
-        fn compatible(a: *const Command, b: *const Command) bool {
-            if (!sameOrigin(a.uri, b.uri)) return false;
-            return sameAltSvc(a.alt_svc, b.alt_svc) and
-                sameReclaimer(a.reclaimer, b.reclaimer);
-        }
-
-        fn sameReclaimer(
-            a: ?connection_budget.Reclaimer,
-            b: ?connection_budget.Reclaimer,
-        ) bool {
-            if (a == null or b == null) return a == null and b == null;
-            return a.?.context == b.?.context and a.?.reclaim == b.?.reclaim;
-        }
-
-        fn sameAltSvc(
-            a: ?http3.AltSvcTarget,
-            b: ?http3.AltSvcTarget,
-        ) bool {
-            if (a == null or b == null) return a == null and b == null;
-            const lhs = a.?;
-            const rhs = b.?;
-            return lhs.port == rhs.port and
-                std.mem.eql(u8, lhs.alpn, rhs.alpn) and
-                std.ascii.eqlIgnoreCase(lhs.connect_host, rhs.connect_host) and
-                std.ascii.eqlIgnoreCase(lhs.origin_host, rhs.origin_host);
-        }
-
-        fn sameOrigin(lhs_text: []const u8, rhs_text: []const u8) bool {
-            const lhs = std.Uri.parse(lhs_text) catch return false;
-            const rhs = std.Uri.parse(rhs_text) catch return false;
-            if (!std.ascii.eqlIgnoreCase(lhs.scheme, rhs.scheme)) return false;
-            const lhs_port = lhs.port orelse defaultPort(lhs.scheme) orelse
-                return false;
-            const rhs_port = rhs.port orelse defaultPort(rhs.scheme) orelse
-                return false;
-            if (lhs_port != rhs_port) return false;
-            const lhs_host = lhs.host orelse return false;
-            const rhs_host = rhs.host orelse return false;
-            return std.ascii.eqlIgnoreCase(
-                componentBytes(lhs_host),
-                componentBytes(rhs_host),
-            );
-        }
-
-        fn componentBytes(component: std.Uri.Component) []const u8 {
-            return switch (component) {
-                .raw, .percent_encoded => |value| value,
-            };
-        }
-
-        fn defaultPort(scheme: []const u8) ?u16 {
-            if (std.ascii.eqlIgnoreCase(scheme, "https")) return 443;
-            return null;
         }
     };
 }

@@ -130,7 +130,7 @@ test "HTTP/3 cloneable senders coalesce requests through one pool driver" {
         allocator,
         io,
         &pool,
-        .{},
+        .{ .max_connection_drivers = 2 },
     );
     var dispatcher_active = true;
     defer if (dispatcher_active) dispatcher.deinit();
@@ -259,7 +259,7 @@ test "HTTP/3 cloneable senders coalesce requests through one pool driver" {
         allocator,
         io,
         &pool,
-        .{},
+        .{ .max_connection_drivers = 2 },
     );
     defer cancel_dispatcher.deinit();
     const cancel_sender = cancel_dispatcher.sender();

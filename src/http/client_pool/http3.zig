@@ -41,8 +41,10 @@ pub const Options = struct {
     /// Enable safe-method 0-RTT on new H3 connections when both a ticket and
     /// remembered peer SETTINGS exist. Idle connection reuse remains 1-RTT.
     early_data: ?EarlyDataOptions = null,
-    /// Bounded multi-producer queue driven by one H3 pool/connection owner.
-    shared_requests: runtime.HandshakeClientPoolSharedOptions = .{},
+    /// Bounded multi-producer queue with one owner per active H3 route.
+    shared_requests: runtime.HandshakeClientPoolSharedOptions = .{
+        .max_connection_drivers = 4,
+    },
     alt_svc: alt_svc_cache.Config = .{},
     fallback: FallbackPolicy = .idempotent_methods,
 };
